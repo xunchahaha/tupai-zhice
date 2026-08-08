@@ -9,6 +9,7 @@ frontend/node_modules/
 frontend/dist/
 frontend/playwright-report/
 frontend/test-results/
+frontend/*runtime*.log
 data/*.db
 data/exports/*.xlsx
 !data/imports/sample.xlsx
