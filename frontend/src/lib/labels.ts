@@ -28,7 +28,6 @@ const labels: Record<string, string> = {
   import: "导入",
   INFEASIBLE: "无解",
   live: "真实连接",
-  mock: "模拟连接",
   unconfigured: "未配置",
   moved: "已移动",
   pending: "待处理",

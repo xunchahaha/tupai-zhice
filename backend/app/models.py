@@ -237,7 +237,7 @@ class IntegrationSync(TimestampMixin, Base):
     direction: Mapped[str] = mapped_column(String(20))
     resource: Mapped[str] = mapped_column(String(40))
     status: Mapped[str] = mapped_column(String(30), default="queued")
-    mode: Mapped[str] = mapped_column(String(20), default="mock")
+    mode: Mapped[str] = mapped_column(String(20), default="live")
     records_read: Mapped[int] = mapped_column(Integer, default=0)
     records_written: Mapped[int] = mapped_column(Integer, default=0)
     detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
