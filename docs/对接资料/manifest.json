@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-08T03:21:12.828572+00:00",
+  "generated_at": "2026-08-09T19:47:10.203327+00:00",
   "root": "docs/对接资料",
   "files": [
     {
@@ -64,8 +64,18 @@
     },
     {
       "path": "02_飞书官方/03_开放平台服务端API.md",
-      "size": 1486,
-      "sha256": "e253a7c954cdbd62281e32f4886bcf17ba43ec88bed5225ea5f383fc5a1978ae"
+      "size": 4817,
+      "sha256": "6a5a12732c820ecae6e9a42d05465cecdd8b19fc6bd1a0276ecebf612e3bc391"
+    },
+    {
+      "path": "02_飞书官方/04_生产接入操作手册.md",
+      "size": 5528,
+      "sha256": "bedb79b2a1c1da36a4f7872cd26e8bdd0baeab742f3a8ebfbaf86db2b6b7580c"
+    },
+    {
+      "path": "02_飞书官方/05_官方契约核对记录_2026-08-10.md",
+      "size": 4290,
+      "sha256": "4a73a0cd484910f5f81e9d4eb32b21eb2355888b23c267233ea6d1ae466d87f3"
     },
     {
       "path": "03_算法与标准/CP-SAT与治理资料.md",
@@ -84,13 +94,13 @@
     },
     {
       "path": "04_接口与数据字典/数据字典与飞书映射.md",
-      "size": 1556,
-      "sha256": "1b258ef20833d34e7c3a8d7723e7a5154f71b7c3a08c5cb8411b60b82c07980b"
+      "size": 1783,
+      "sha256": "d5b80f927924f5c93b0a9713c3a67ca64dcbdc2e7a5c7e8f7d5b43a39c4a2864"
     },
     {
       "path": "README.md",
-      "size": 854,
-      "sha256": "c7f9d70062886cbb1a94ac3db85c269f485e1bb3baccf1e4ea02137342169d0b"
+      "size": 1133,
+      "sha256": "b8ade180320fbee26a2d60d5d6985d45af93ee710c46c000f7cb29616a7a8be4"
     }
   ]
 }
