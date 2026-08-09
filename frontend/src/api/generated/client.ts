@@ -35,10 +35,14 @@ import type {
   CampusResponse,
   ClassGroupPayload,
   ClassGroupResponse,
+  CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams,
   CourseSessionPayload,
   CourseSessionResponse,
   FeishuConnectionResponse,
+  FeishuOAuthStartResponse,
   FeishuSyncRequest,
+  FeishuWorkspaceCreate,
+  FeishuWorkspaceResponse,
   HTTPValidationError,
   HealthLiveApiV1HealthLiveGet200,
   HealthReadyApiV1HealthReadyGet200,
@@ -75,7 +79,7 @@ export const loginApiV1AuthTokenPost = (
     bodyLoginApiV1AuthTokenPost: BodyLoginApiV1AuthTokenPost,
  signal?: AbortSignal
 ) => {
-      
+
       const formUrlEncoded = new URLSearchParams();
 if(bodyLoginApiV1AuthTokenPost.grant_type !== undefined && bodyLoginApiV1AuthTokenPost.grant_type !== null) {
  formUrlEncoded.append(`grant_type`, bodyLoginApiV1AuthTokenPost.grant_type)
@@ -99,7 +103,7 @@ if(bodyLoginApiV1AuthTokenPost.client_secret !== undefined && bodyLoginApiV1Auth
     },
       );
     }
-  
+
 
 
 export const getLoginApiV1AuthTokenPostMutationOptions = <TError = HTTPValidationError,
@@ -113,7 +117,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof loginApiV1AuthTokenPost>>, {data: BodyLoginApiV1AuthTokenPost}> = (props) => {
@@ -122,7 +126,7 @@ const {mutation: mutationOptions} = options ?
           return  loginApiV1AuthTokenPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -147,22 +151,22 @@ export const useLoginApiV1AuthTokenPost = <TError = HTTPValidationError,
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Current User
  */
 export const currentUserApiV1AuthMeGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<UserResponse>(
       {url: `/api/v1/auth/me`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -172,7 +176,7 @@ export const getCurrentUserApiV1AuthMeGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getCurrentUserApiV1AuthMeGetQueryOptions = <TData = Awaited<ReturnType<typeof currentUserApiV1AuthMeGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof currentUserApiV1AuthMeGet>>, TError, TData>>, }
 ) => {
 
@@ -180,13 +184,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getCurrentUserApiV1AuthMeGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof currentUserApiV1AuthMeGet>>> = ({ signal }) => currentUserApiV1AuthMeGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof currentUserApiV1AuthMeGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -225,7 +229,7 @@ export function useCurrentUserApiV1AuthMeGet<TData = Awaited<ReturnType<typeof c
 
 export function useCurrentUserApiV1AuthMeGet<TData = Awaited<ReturnType<typeof currentUserApiV1AuthMeGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof currentUserApiV1AuthMeGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getCurrentUserApiV1AuthMeGetQueryOptions(options)
@@ -245,17 +249,17 @@ export function useCurrentUserApiV1AuthMeGet<TData = Awaited<ReturnType<typeof c
  * @summary Health Live
  */
 export const healthLiveApiV1HealthLiveGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<HealthLiveApiV1HealthLiveGet200>(
       {url: `/api/v1/health/live`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -265,7 +269,7 @@ export const getHealthLiveApiV1HealthLiveGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getHealthLiveApiV1HealthLiveGetQueryOptions = <TData = Awaited<ReturnType<typeof healthLiveApiV1HealthLiveGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof healthLiveApiV1HealthLiveGet>>, TError, TData>>, }
 ) => {
 
@@ -273,13 +277,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getHealthLiveApiV1HealthLiveGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof healthLiveApiV1HealthLiveGet>>> = ({ signal }) => healthLiveApiV1HealthLiveGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof healthLiveApiV1HealthLiveGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -318,7 +322,7 @@ export function useHealthLiveApiV1HealthLiveGet<TData = Awaited<ReturnType<typeo
 
 export function useHealthLiveApiV1HealthLiveGet<TData = Awaited<ReturnType<typeof healthLiveApiV1HealthLiveGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof healthLiveApiV1HealthLiveGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getHealthLiveApiV1HealthLiveGetQueryOptions(options)
@@ -338,17 +342,17 @@ export function useHealthLiveApiV1HealthLiveGet<TData = Awaited<ReturnType<typeo
  * @summary Health Ready
  */
 export const healthReadyApiV1HealthReadyGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<HealthReadyApiV1HealthReadyGet200>(
       {url: `/api/v1/health/ready`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -358,7 +362,7 @@ export const getHealthReadyApiV1HealthReadyGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getHealthReadyApiV1HealthReadyGetQueryOptions = <TData = Awaited<ReturnType<typeof healthReadyApiV1HealthReadyGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof healthReadyApiV1HealthReadyGet>>, TError, TData>>, }
 ) => {
 
@@ -366,13 +370,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getHealthReadyApiV1HealthReadyGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof healthReadyApiV1HealthReadyGet>>> = ({ signal }) => healthReadyApiV1HealthReadyGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof healthReadyApiV1HealthReadyGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -411,7 +415,7 @@ export function useHealthReadyApiV1HealthReadyGet<TData = Awaited<ReturnType<typ
 
 export function useHealthReadyApiV1HealthReadyGet<TData = Awaited<ReturnType<typeof healthReadyApiV1HealthReadyGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof healthReadyApiV1HealthReadyGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getHealthReadyApiV1HealthReadyGetQueryOptions(options)
@@ -431,17 +435,17 @@ export function useHealthReadyApiV1HealthReadyGet<TData = Awaited<ReturnType<typ
  * @summary Overview
  */
 export const overviewApiV1OverviewGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<OverviewResponse>(
       {url: `/api/v1/overview`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -451,7 +455,7 @@ export const getOverviewApiV1OverviewGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getOverviewApiV1OverviewGetQueryOptions = <TData = Awaited<ReturnType<typeof overviewApiV1OverviewGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof overviewApiV1OverviewGet>>, TError, TData>>, }
 ) => {
 
@@ -459,13 +463,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getOverviewApiV1OverviewGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof overviewApiV1OverviewGet>>> = ({ signal }) => overviewApiV1OverviewGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof overviewApiV1OverviewGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -504,7 +508,7 @@ export function useOverviewApiV1OverviewGet<TData = Awaited<ReturnType<typeof ov
 
 export function useOverviewApiV1OverviewGet<TData = Awaited<ReturnType<typeof overviewApiV1OverviewGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof overviewApiV1OverviewGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getOverviewApiV1OverviewGetQueryOptions(options)
@@ -524,17 +528,17 @@ export function useOverviewApiV1OverviewGet<TData = Awaited<ReturnType<typeof ov
  * @summary Import Sample
  */
 export const importSampleApiV1ImportsSamplePost = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<ImportResult>(
       {url: `/api/v1/imports/sample`, method: 'POST', signal
     },
       );
     }
-  
+
 
 
 export const getImportSampleApiV1ImportsSamplePostMutationOptions = <TError = unknown,
@@ -548,22 +552,22 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof importSampleApiV1ImportsSamplePost>>, void> = () => {
-          
+
 
           return  importSampleApiV1ImportsSamplePost()
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
 
     export type ImportSampleApiV1ImportsSamplePostMutationResult = NonNullable<Awaited<ReturnType<typeof importSampleApiV1ImportsSamplePost>>>
-    
+
     export type ImportSampleApiV1ImportsSamplePostMutationError = unknown
 
     /**
@@ -582,22 +586,22 @@ export const useImportSampleApiV1ImportsSamplePost = <TError = unknown,
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Download Sample Workbook
  */
 export const downloadSampleWorkbookApiV1ImportsSampleXlsxGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<unknown>(
       {url: `/api/v1/imports/sample.xlsx`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -607,7 +611,7 @@ export const getDownloadSampleWorkbookApiV1ImportsSampleXlsxGetQueryKey = () => 
     ] as const;
     }
 
-    
+
 export const getDownloadSampleWorkbookApiV1ImportsSampleXlsxGetQueryOptions = <TData = Awaited<ReturnType<typeof downloadSampleWorkbookApiV1ImportsSampleXlsxGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof downloadSampleWorkbookApiV1ImportsSampleXlsxGet>>, TError, TData>>, }
 ) => {
 
@@ -615,13 +619,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getDownloadSampleWorkbookApiV1ImportsSampleXlsxGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof downloadSampleWorkbookApiV1ImportsSampleXlsxGet>>> = ({ signal }) => downloadSampleWorkbookApiV1ImportsSampleXlsxGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof downloadSampleWorkbookApiV1ImportsSampleXlsxGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -660,7 +664,7 @@ export function useDownloadSampleWorkbookApiV1ImportsSampleXlsxGet<TData = Await
 
 export function useDownloadSampleWorkbookApiV1ImportsSampleXlsxGet<TData = Awaited<ReturnType<typeof downloadSampleWorkbookApiV1ImportsSampleXlsxGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof downloadSampleWorkbookApiV1ImportsSampleXlsxGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getDownloadSampleWorkbookApiV1ImportsSampleXlsxGetQueryOptions(options)
@@ -683,7 +687,7 @@ export const importXlsxApiV1ImportsXlsxPost = (
     bodyImportXlsxApiV1ImportsXlsxPost: BodyImportXlsxApiV1ImportsXlsxPost,
  signal?: AbortSignal
 ) => {
-      
+
       const formData = new FormData();
 formData.append(`file`, bodyImportXlsxApiV1ImportsXlsxPost.file)
 
@@ -694,7 +698,7 @@ formData.append(`file`, bodyImportXlsxApiV1ImportsXlsxPost.file)
     },
       );
     }
-  
+
 
 
 export const getImportXlsxApiV1ImportsXlsxPostMutationOptions = <TError = HTTPValidationError,
@@ -708,7 +712,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof importXlsxApiV1ImportsXlsxPost>>, {data: BodyImportXlsxApiV1ImportsXlsxPost}> = (props) => {
@@ -717,7 +721,7 @@ const {mutation: mutationOptions} = options ?
           return  importXlsxApiV1ImportsXlsxPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -742,22 +746,22 @@ export const useImportXlsxApiV1ImportsXlsxPost = <TError = HTTPValidationError,
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary List Campuses
  */
 export const listCampusesApiV1CampusesGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<CampusResponse[]>(
       {url: `/api/v1/campuses`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -767,7 +771,7 @@ export const getListCampusesApiV1CampusesGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getListCampusesApiV1CampusesGetQueryOptions = <TData = Awaited<ReturnType<typeof listCampusesApiV1CampusesGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listCampusesApiV1CampusesGet>>, TError, TData>>, }
 ) => {
 
@@ -775,13 +779,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListCampusesApiV1CampusesGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listCampusesApiV1CampusesGet>>> = ({ signal }) => listCampusesApiV1CampusesGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listCampusesApiV1CampusesGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -820,7 +824,7 @@ export function useListCampusesApiV1CampusesGet<TData = Awaited<ReturnType<typeo
 
 export function useListCampusesApiV1CampusesGet<TData = Awaited<ReturnType<typeof listCampusesApiV1CampusesGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listCampusesApiV1CampusesGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListCampusesApiV1CampusesGetQueryOptions(options)
@@ -843,8 +847,8 @@ export const createCampusApiV1CampusesPost = (
     campusCreate: CampusCreate,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<CampusResponse>(
       {url: `/api/v1/campuses`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -852,7 +856,7 @@ export const createCampusApiV1CampusesPost = (
     },
       );
     }
-  
+
 
 
 export const getCreateCampusApiV1CampusesPostMutationOptions = <TError = HTTPValidationError,
@@ -866,7 +870,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof createCampusApiV1CampusesPost>>, {data: CampusCreate}> = (props) => {
@@ -875,7 +879,7 @@ const {mutation: mutationOptions} = options ?
           return  createCampusApiV1CampusesPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -900,22 +904,22 @@ export const useCreateCampusApiV1CampusesPost = <TError = HTTPValidationError,
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary List Teachers
  */
 export const listTeachersApiV1TeachersGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<TeacherResponse[]>(
       {url: `/api/v1/teachers`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -925,7 +929,7 @@ export const getListTeachersApiV1TeachersGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getListTeachersApiV1TeachersGetQueryOptions = <TData = Awaited<ReturnType<typeof listTeachersApiV1TeachersGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listTeachersApiV1TeachersGet>>, TError, TData>>, }
 ) => {
 
@@ -933,13 +937,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListTeachersApiV1TeachersGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listTeachersApiV1TeachersGet>>> = ({ signal }) => listTeachersApiV1TeachersGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listTeachersApiV1TeachersGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -978,7 +982,7 @@ export function useListTeachersApiV1TeachersGet<TData = Awaited<ReturnType<typeo
 
 export function useListTeachersApiV1TeachersGet<TData = Awaited<ReturnType<typeof listTeachersApiV1TeachersGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listTeachersApiV1TeachersGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListTeachersApiV1TeachersGetQueryOptions(options)
@@ -1001,8 +1005,8 @@ export const createTeacherApiV1TeachersPost = (
     teacherPayload: TeacherPayload,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<TeacherResponse>(
       {url: `/api/v1/teachers`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -1010,7 +1014,7 @@ export const createTeacherApiV1TeachersPost = (
     },
       );
     }
-  
+
 
 
 export const getCreateTeacherApiV1TeachersPostMutationOptions = <TError = HTTPValidationError,
@@ -1024,7 +1028,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof createTeacherApiV1TeachersPost>>, {data: TeacherPayload}> = (props) => {
@@ -1033,7 +1037,7 @@ const {mutation: mutationOptions} = options ?
           return  createTeacherApiV1TeachersPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -1058,7 +1062,7 @@ export const useCreateTeacherApiV1TeachersPost = <TError = HTTPValidationError,
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Update Teacher
  */
@@ -1066,8 +1070,8 @@ export const updateTeacherApiV1TeachersObjectIdPut = (
     objectId: string,
     teacherPayload: TeacherPayload,
  ) => {
-      
-      
+
+
       return customInstance<TeacherResponse>(
       {url: `/api/v1/teachers/${objectId}`, method: 'PUT',
       headers: {'Content-Type': 'application/json', },
@@ -1075,7 +1079,7 @@ export const updateTeacherApiV1TeachersObjectIdPut = (
     },
       );
     }
-  
+
 
 
 export const getUpdateTeacherApiV1TeachersObjectIdPutMutationOptions = <TError = HTTPValidationError,
@@ -1089,7 +1093,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateTeacherApiV1TeachersObjectIdPut>>, {objectId: string;data: TeacherPayload}> = (props) => {
@@ -1098,7 +1102,7 @@ const {mutation: mutationOptions} = options ?
           return  updateTeacherApiV1TeachersObjectIdPut(objectId,data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -1123,22 +1127,22 @@ export const useUpdateTeacherApiV1TeachersObjectIdPut = <TError = HTTPValidation
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary List Class Groups
  */
 export const listClassGroupsApiV1ClassGroupsGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<ClassGroupResponse[]>(
       {url: `/api/v1/class-groups`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -1148,7 +1152,7 @@ export const getListClassGroupsApiV1ClassGroupsGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getListClassGroupsApiV1ClassGroupsGetQueryOptions = <TData = Awaited<ReturnType<typeof listClassGroupsApiV1ClassGroupsGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listClassGroupsApiV1ClassGroupsGet>>, TError, TData>>, }
 ) => {
 
@@ -1156,13 +1160,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListClassGroupsApiV1ClassGroupsGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listClassGroupsApiV1ClassGroupsGet>>> = ({ signal }) => listClassGroupsApiV1ClassGroupsGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listClassGroupsApiV1ClassGroupsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -1201,7 +1205,7 @@ export function useListClassGroupsApiV1ClassGroupsGet<TData = Awaited<ReturnType
 
 export function useListClassGroupsApiV1ClassGroupsGet<TData = Awaited<ReturnType<typeof listClassGroupsApiV1ClassGroupsGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listClassGroupsApiV1ClassGroupsGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListClassGroupsApiV1ClassGroupsGetQueryOptions(options)
@@ -1224,8 +1228,8 @@ export const createClassGroupApiV1ClassGroupsPost = (
     classGroupPayload: ClassGroupPayload,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<ClassGroupResponse>(
       {url: `/api/v1/class-groups`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -1233,7 +1237,7 @@ export const createClassGroupApiV1ClassGroupsPost = (
     },
       );
     }
-  
+
 
 
 export const getCreateClassGroupApiV1ClassGroupsPostMutationOptions = <TError = HTTPValidationError,
@@ -1247,7 +1251,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof createClassGroupApiV1ClassGroupsPost>>, {data: ClassGroupPayload}> = (props) => {
@@ -1256,7 +1260,7 @@ const {mutation: mutationOptions} = options ?
           return  createClassGroupApiV1ClassGroupsPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -1281,7 +1285,7 @@ export const useCreateClassGroupApiV1ClassGroupsPost = <TError = HTTPValidationE
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Update Class Group
  */
@@ -1289,8 +1293,8 @@ export const updateClassGroupApiV1ClassGroupsObjectIdPut = (
     objectId: string,
     classGroupPayload: ClassGroupPayload,
  ) => {
-      
-      
+
+
       return customInstance<ClassGroupResponse>(
       {url: `/api/v1/class-groups/${objectId}`, method: 'PUT',
       headers: {'Content-Type': 'application/json', },
@@ -1298,7 +1302,7 @@ export const updateClassGroupApiV1ClassGroupsObjectIdPut = (
     },
       );
     }
-  
+
 
 
 export const getUpdateClassGroupApiV1ClassGroupsObjectIdPutMutationOptions = <TError = HTTPValidationError,
@@ -1312,7 +1316,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateClassGroupApiV1ClassGroupsObjectIdPut>>, {objectId: string;data: ClassGroupPayload}> = (props) => {
@@ -1321,7 +1325,7 @@ const {mutation: mutationOptions} = options ?
           return  updateClassGroupApiV1ClassGroupsObjectIdPut(objectId,data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -1346,22 +1350,22 @@ export const useUpdateClassGroupApiV1ClassGroupsObjectIdPut = <TError = HTTPVali
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary List Rooms
  */
 export const listRoomsApiV1RoomsGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<RoomResponse[]>(
       {url: `/api/v1/rooms`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -1371,7 +1375,7 @@ export const getListRoomsApiV1RoomsGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getListRoomsApiV1RoomsGetQueryOptions = <TData = Awaited<ReturnType<typeof listRoomsApiV1RoomsGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRoomsApiV1RoomsGet>>, TError, TData>>, }
 ) => {
 
@@ -1379,13 +1383,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListRoomsApiV1RoomsGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listRoomsApiV1RoomsGet>>> = ({ signal }) => listRoomsApiV1RoomsGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listRoomsApiV1RoomsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -1424,7 +1428,7 @@ export function useListRoomsApiV1RoomsGet<TData = Awaited<ReturnType<typeof list
 
 export function useListRoomsApiV1RoomsGet<TData = Awaited<ReturnType<typeof listRoomsApiV1RoomsGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRoomsApiV1RoomsGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListRoomsApiV1RoomsGetQueryOptions(options)
@@ -1447,8 +1451,8 @@ export const createRoomApiV1RoomsPost = (
     roomPayload: RoomPayload,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<RoomResponse>(
       {url: `/api/v1/rooms`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -1456,7 +1460,7 @@ export const createRoomApiV1RoomsPost = (
     },
       );
     }
-  
+
 
 
 export const getCreateRoomApiV1RoomsPostMutationOptions = <TError = HTTPValidationError,
@@ -1470,7 +1474,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof createRoomApiV1RoomsPost>>, {data: RoomPayload}> = (props) => {
@@ -1479,7 +1483,7 @@ const {mutation: mutationOptions} = options ?
           return  createRoomApiV1RoomsPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -1504,7 +1508,7 @@ export const useCreateRoomApiV1RoomsPost = <TError = HTTPValidationError,
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Update Room
  */
@@ -1512,8 +1516,8 @@ export const updateRoomApiV1RoomsObjectIdPut = (
     objectId: string,
     roomPayload: RoomPayload,
  ) => {
-      
-      
+
+
       return customInstance<RoomResponse>(
       {url: `/api/v1/rooms/${objectId}`, method: 'PUT',
       headers: {'Content-Type': 'application/json', },
@@ -1521,7 +1525,7 @@ export const updateRoomApiV1RoomsObjectIdPut = (
     },
       );
     }
-  
+
 
 
 export const getUpdateRoomApiV1RoomsObjectIdPutMutationOptions = <TError = HTTPValidationError,
@@ -1535,7 +1539,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateRoomApiV1RoomsObjectIdPut>>, {objectId: string;data: RoomPayload}> = (props) => {
@@ -1544,7 +1548,7 @@ const {mutation: mutationOptions} = options ?
           return  updateRoomApiV1RoomsObjectIdPut(objectId,data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -1569,22 +1573,22 @@ export const useUpdateRoomApiV1RoomsObjectIdPut = <TError = HTTPValidationError,
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary List Time Slots
  */
 export const listTimeSlotsApiV1TimeSlotsGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<TimeSlotResponse[]>(
       {url: `/api/v1/time-slots`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -1594,7 +1598,7 @@ export const getListTimeSlotsApiV1TimeSlotsGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getListTimeSlotsApiV1TimeSlotsGetQueryOptions = <TData = Awaited<ReturnType<typeof listTimeSlotsApiV1TimeSlotsGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listTimeSlotsApiV1TimeSlotsGet>>, TError, TData>>, }
 ) => {
 
@@ -1602,13 +1606,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListTimeSlotsApiV1TimeSlotsGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listTimeSlotsApiV1TimeSlotsGet>>> = ({ signal }) => listTimeSlotsApiV1TimeSlotsGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listTimeSlotsApiV1TimeSlotsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -1647,7 +1651,7 @@ export function useListTimeSlotsApiV1TimeSlotsGet<TData = Awaited<ReturnType<typ
 
 export function useListTimeSlotsApiV1TimeSlotsGet<TData = Awaited<ReturnType<typeof listTimeSlotsApiV1TimeSlotsGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listTimeSlotsApiV1TimeSlotsGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListTimeSlotsApiV1TimeSlotsGetQueryOptions(options)
@@ -1670,8 +1674,8 @@ export const createTimeSlotApiV1TimeSlotsPost = (
     timeSlotPayload: TimeSlotPayload,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<TimeSlotResponse>(
       {url: `/api/v1/time-slots`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -1679,7 +1683,7 @@ export const createTimeSlotApiV1TimeSlotsPost = (
     },
       );
     }
-  
+
 
 
 export const getCreateTimeSlotApiV1TimeSlotsPostMutationOptions = <TError = HTTPValidationError,
@@ -1693,7 +1697,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof createTimeSlotApiV1TimeSlotsPost>>, {data: TimeSlotPayload}> = (props) => {
@@ -1702,7 +1706,7 @@ const {mutation: mutationOptions} = options ?
           return  createTimeSlotApiV1TimeSlotsPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -1727,7 +1731,7 @@ export const useCreateTimeSlotApiV1TimeSlotsPost = <TError = HTTPValidationError
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Update Time Slot
  */
@@ -1735,8 +1739,8 @@ export const updateTimeSlotApiV1TimeSlotsObjectIdPut = (
     objectId: string,
     timeSlotPayload: TimeSlotPayload,
  ) => {
-      
-      
+
+
       return customInstance<TimeSlotResponse>(
       {url: `/api/v1/time-slots/${objectId}`, method: 'PUT',
       headers: {'Content-Type': 'application/json', },
@@ -1744,7 +1748,7 @@ export const updateTimeSlotApiV1TimeSlotsObjectIdPut = (
     },
       );
     }
-  
+
 
 
 export const getUpdateTimeSlotApiV1TimeSlotsObjectIdPutMutationOptions = <TError = HTTPValidationError,
@@ -1758,7 +1762,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateTimeSlotApiV1TimeSlotsObjectIdPut>>, {objectId: string;data: TimeSlotPayload}> = (props) => {
@@ -1767,7 +1771,7 @@ const {mutation: mutationOptions} = options ?
           return  updateTimeSlotApiV1TimeSlotsObjectIdPut(objectId,data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -1792,22 +1796,22 @@ export const useUpdateTimeSlotApiV1TimeSlotsObjectIdPut = <TError = HTTPValidati
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary List Course Sessions
  */
 export const listCourseSessionsApiV1CourseSessionsGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<CourseSessionResponse[]>(
       {url: `/api/v1/course-sessions`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -1817,7 +1821,7 @@ export const getListCourseSessionsApiV1CourseSessionsGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getListCourseSessionsApiV1CourseSessionsGetQueryOptions = <TData = Awaited<ReturnType<typeof listCourseSessionsApiV1CourseSessionsGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listCourseSessionsApiV1CourseSessionsGet>>, TError, TData>>, }
 ) => {
 
@@ -1825,13 +1829,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListCourseSessionsApiV1CourseSessionsGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listCourseSessionsApiV1CourseSessionsGet>>> = ({ signal }) => listCourseSessionsApiV1CourseSessionsGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listCourseSessionsApiV1CourseSessionsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -1870,7 +1874,7 @@ export function useListCourseSessionsApiV1CourseSessionsGet<TData = Awaited<Retu
 
 export function useListCourseSessionsApiV1CourseSessionsGet<TData = Awaited<ReturnType<typeof listCourseSessionsApiV1CourseSessionsGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listCourseSessionsApiV1CourseSessionsGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListCourseSessionsApiV1CourseSessionsGetQueryOptions(options)
@@ -1893,8 +1897,8 @@ export const createCourseSessionApiV1CourseSessionsPost = (
     courseSessionPayload: CourseSessionPayload,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<CourseSessionResponse>(
       {url: `/api/v1/course-sessions`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -1902,7 +1906,7 @@ export const createCourseSessionApiV1CourseSessionsPost = (
     },
       );
     }
-  
+
 
 
 export const getCreateCourseSessionApiV1CourseSessionsPostMutationOptions = <TError = HTTPValidationError,
@@ -1916,7 +1920,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof createCourseSessionApiV1CourseSessionsPost>>, {data: CourseSessionPayload}> = (props) => {
@@ -1925,7 +1929,7 @@ const {mutation: mutationOptions} = options ?
           return  createCourseSessionApiV1CourseSessionsPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -1950,7 +1954,7 @@ export const useCreateCourseSessionApiV1CourseSessionsPost = <TError = HTTPValid
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Update Course Session
  */
@@ -1958,8 +1962,8 @@ export const updateCourseSessionApiV1CourseSessionsObjectIdPut = (
     objectId: string,
     courseSessionPayload: CourseSessionPayload,
  ) => {
-      
-      
+
+
       return customInstance<CourseSessionResponse>(
       {url: `/api/v1/course-sessions/${objectId}`, method: 'PUT',
       headers: {'Content-Type': 'application/json', },
@@ -1967,7 +1971,7 @@ export const updateCourseSessionApiV1CourseSessionsObjectIdPut = (
     },
       );
     }
-  
+
 
 
 export const getUpdateCourseSessionApiV1CourseSessionsObjectIdPutMutationOptions = <TError = HTTPValidationError,
@@ -1981,7 +1985,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateCourseSessionApiV1CourseSessionsObjectIdPut>>, {objectId: string;data: CourseSessionPayload}> = (props) => {
@@ -1990,7 +1994,7 @@ const {mutation: mutationOptions} = options ?
           return  updateCourseSessionApiV1CourseSessionsObjectIdPut(objectId,data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -2015,7 +2019,7 @@ export const useUpdateCourseSessionApiV1CourseSessionsObjectIdPut = <TError = HT
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Delete Master Data
  */
@@ -2023,14 +2027,14 @@ export const deleteMasterDataApiV1MasterDataResourceObjectIdDelete = (
     resource: string,
     objectId: string,
  ) => {
-      
-      
+
+
       return customInstance<void>(
       {url: `/api/v1/master-data/${resource}/${objectId}`, method: 'DELETE'
     },
       );
     }
-  
+
 
 
 export const getDeleteMasterDataApiV1MasterDataResourceObjectIdDeleteMutationOptions = <TError = HTTPValidationError,
@@ -2044,7 +2048,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteMasterDataApiV1MasterDataResourceObjectIdDelete>>, {resource: string;objectId: string}> = (props) => {
@@ -2053,13 +2057,13 @@ const {mutation: mutationOptions} = options ?
           return  deleteMasterDataApiV1MasterDataResourceObjectIdDelete(resource,objectId,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
 
     export type DeleteMasterDataApiV1MasterDataResourceObjectIdDeleteMutationResult = NonNullable<Awaited<ReturnType<typeof deleteMasterDataApiV1MasterDataResourceObjectIdDelete>>>
-    
+
     export type DeleteMasterDataApiV1MasterDataResourceObjectIdDeleteMutationError = HTTPValidationError
 
     /**
@@ -2078,7 +2082,7 @@ export const useDeleteMasterDataApiV1MasterDataResourceObjectIdDelete = <TError 
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary List Rules
  */
@@ -2086,15 +2090,15 @@ export const listRulesApiV1RulesGet = (
     params?: ListRulesApiV1RulesGetParams,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<RuleResponse[]>(
       {url: `/api/v1/rules`, method: 'GET',
         params, signal
     },
       );
     }
-  
+
 
 
 
@@ -2104,7 +2108,7 @@ export const getListRulesApiV1RulesGetQueryKey = (params?: ListRulesApiV1RulesGe
     ] as const;
     }
 
-    
+
 export const getListRulesApiV1RulesGetQueryOptions = <TData = Awaited<ReturnType<typeof listRulesApiV1RulesGet>>, TError = HTTPValidationError>(params?: ListRulesApiV1RulesGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRulesApiV1RulesGet>>, TError, TData>>, }
 ) => {
 
@@ -2112,13 +2116,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListRulesApiV1RulesGetQueryKey(params);
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listRulesApiV1RulesGet>>> = ({ signal }) => listRulesApiV1RulesGet(params, signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listRulesApiV1RulesGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -2157,7 +2161,7 @@ export function useListRulesApiV1RulesGet<TData = Awaited<ReturnType<typeof list
 
 export function useListRulesApiV1RulesGet<TData = Awaited<ReturnType<typeof listRulesApiV1RulesGet>>, TError = HTTPValidationError>(
  params?: ListRulesApiV1RulesGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRulesApiV1RulesGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListRulesApiV1RulesGetQueryOptions(params,options)
@@ -2180,8 +2184,8 @@ export const createRuleApiV1RulesPost = (
     ruleCreate: RuleCreate,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<RuleResponse>(
       {url: `/api/v1/rules`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -2189,7 +2193,7 @@ export const createRuleApiV1RulesPost = (
     },
       );
     }
-  
+
 
 
 export const getCreateRuleApiV1RulesPostMutationOptions = <TError = HTTPValidationError,
@@ -2203,7 +2207,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof createRuleApiV1RulesPost>>, {data: RuleCreate}> = (props) => {
@@ -2212,7 +2216,7 @@ const {mutation: mutationOptions} = options ?
           return  createRuleApiV1RulesPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -2237,7 +2241,7 @@ export const useCreateRuleApiV1RulesPost = <TError = HTTPValidationError,
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Update Rule
  */
@@ -2245,8 +2249,8 @@ export const updateRuleApiV1RulesRuleIdPut = (
     ruleId: string,
     ruleUpdate: RuleUpdate,
  ) => {
-      
-      
+
+
       return customInstance<RuleResponse>(
       {url: `/api/v1/rules/${ruleId}`, method: 'PUT',
       headers: {'Content-Type': 'application/json', },
@@ -2254,7 +2258,7 @@ export const updateRuleApiV1RulesRuleIdPut = (
     },
       );
     }
-  
+
 
 
 export const getUpdateRuleApiV1RulesRuleIdPutMutationOptions = <TError = HTTPValidationError,
@@ -2268,7 +2272,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateRuleApiV1RulesRuleIdPut>>, {ruleId: string;data: RuleUpdate}> = (props) => {
@@ -2277,7 +2281,7 @@ const {mutation: mutationOptions} = options ?
           return  updateRuleApiV1RulesRuleIdPut(ruleId,data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -2302,7 +2306,7 @@ export const useUpdateRuleApiV1RulesRuleIdPut = <TError = HTTPValidationError,
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Transition Rule
  */
@@ -2311,8 +2315,8 @@ export const transitionRuleApiV1RulesRuleIdTransitionPost = (
     ruleTransition: RuleTransition,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<RuleResponse>(
       {url: `/api/v1/rules/${ruleId}/transition`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -2320,7 +2324,7 @@ export const transitionRuleApiV1RulesRuleIdTransitionPost = (
     },
       );
     }
-  
+
 
 
 export const getTransitionRuleApiV1RulesRuleIdTransitionPostMutationOptions = <TError = HTTPValidationError,
@@ -2334,7 +2338,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof transitionRuleApiV1RulesRuleIdTransitionPost>>, {ruleId: string;data: RuleTransition}> = (props) => {
@@ -2343,7 +2347,7 @@ const {mutation: mutationOptions} = options ?
           return  transitionRuleApiV1RulesRuleIdTransitionPost(ruleId,data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -2368,22 +2372,22 @@ export const useTransitionRuleApiV1RulesRuleIdTransitionPost = <TError = HTTPVal
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary List Solver Runs
  */
 export const listSolverRunsApiV1SolverRunsGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<SolverRunResponse[]>(
       {url: `/api/v1/solver-runs`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -2393,7 +2397,7 @@ export const getListSolverRunsApiV1SolverRunsGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getListSolverRunsApiV1SolverRunsGetQueryOptions = <TData = Awaited<ReturnType<typeof listSolverRunsApiV1SolverRunsGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listSolverRunsApiV1SolverRunsGet>>, TError, TData>>, }
 ) => {
 
@@ -2401,13 +2405,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListSolverRunsApiV1SolverRunsGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listSolverRunsApiV1SolverRunsGet>>> = ({ signal }) => listSolverRunsApiV1SolverRunsGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listSolverRunsApiV1SolverRunsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -2446,7 +2450,7 @@ export function useListSolverRunsApiV1SolverRunsGet<TData = Awaited<ReturnType<t
 
 export function useListSolverRunsApiV1SolverRunsGet<TData = Awaited<ReturnType<typeof listSolverRunsApiV1SolverRunsGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listSolverRunsApiV1SolverRunsGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListSolverRunsApiV1SolverRunsGetQueryOptions(options)
@@ -2469,8 +2473,8 @@ export const submitSolverRunApiV1SolverRunsPost = (
     solveRequest: SolveRequest,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<SolverRunResponse>(
       {url: `/api/v1/solver-runs`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -2478,7 +2482,7 @@ export const submitSolverRunApiV1SolverRunsPost = (
     },
       );
     }
-  
+
 
 
 export const getSubmitSolverRunApiV1SolverRunsPostMutationOptions = <TError = HTTPValidationError,
@@ -2492,7 +2496,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof submitSolverRunApiV1SolverRunsPost>>, {data: SolveRequest}> = (props) => {
@@ -2501,7 +2505,7 @@ const {mutation: mutationOptions} = options ?
           return  submitSolverRunApiV1SolverRunsPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -2526,7 +2530,7 @@ export const useSubmitSolverRunApiV1SolverRunsPost = <TError = HTTPValidationErr
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Get Solver Run
  */
@@ -2534,14 +2538,14 @@ export const getSolverRunApiV1SolverRunsRunIdGet = (
     runId: string,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<SolverRunResponse>(
       {url: `/api/v1/solver-runs/${runId}`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -2551,7 +2555,7 @@ export const getGetSolverRunApiV1SolverRunsRunIdGetQueryKey = (runId?: string,) 
     ] as const;
     }
 
-    
+
 export const getGetSolverRunApiV1SolverRunsRunIdGetQueryOptions = <TData = Awaited<ReturnType<typeof getSolverRunApiV1SolverRunsRunIdGet>>, TError = HTTPValidationError>(runId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSolverRunApiV1SolverRunsRunIdGet>>, TError, TData>>, }
 ) => {
 
@@ -2559,13 +2563,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getGetSolverRunApiV1SolverRunsRunIdGetQueryKey(runId);
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof getSolverRunApiV1SolverRunsRunIdGet>>> = ({ signal }) => getSolverRunApiV1SolverRunsRunIdGet(runId, signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, enabled: !!(runId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getSolverRunApiV1SolverRunsRunIdGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -2604,7 +2608,7 @@ export function useGetSolverRunApiV1SolverRunsRunIdGet<TData = Awaited<ReturnTyp
 
 export function useGetSolverRunApiV1SolverRunsRunIdGet<TData = Awaited<ReturnType<typeof getSolverRunApiV1SolverRunsRunIdGet>>, TError = HTTPValidationError>(
  runId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getSolverRunApiV1SolverRunsRunIdGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getGetSolverRunApiV1SolverRunsRunIdGetQueryOptions(runId,options)
@@ -2627,14 +2631,14 @@ export const solverRunEventsApiV1SolverRunsRunIdEventsGet = (
     runId: string,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<unknown>(
       {url: `/api/v1/solver-runs/${runId}/events`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -2644,7 +2648,7 @@ export const getSolverRunEventsApiV1SolverRunsRunIdEventsGetQueryKey = (runId?: 
     ] as const;
     }
 
-    
+
 export const getSolverRunEventsApiV1SolverRunsRunIdEventsGetQueryOptions = <TData = Awaited<ReturnType<typeof solverRunEventsApiV1SolverRunsRunIdEventsGet>>, TError = HTTPValidationError>(runId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof solverRunEventsApiV1SolverRunsRunIdEventsGet>>, TError, TData>>, }
 ) => {
 
@@ -2652,13 +2656,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getSolverRunEventsApiV1SolverRunsRunIdEventsGetQueryKey(runId);
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof solverRunEventsApiV1SolverRunsRunIdEventsGet>>> = ({ signal }) => solverRunEventsApiV1SolverRunsRunIdEventsGet(runId, signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, enabled: !!(runId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof solverRunEventsApiV1SolverRunsRunIdEventsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -2697,7 +2701,7 @@ export function useSolverRunEventsApiV1SolverRunsRunIdEventsGet<TData = Awaited<
 
 export function useSolverRunEventsApiV1SolverRunsRunIdEventsGet<TData = Awaited<ReturnType<typeof solverRunEventsApiV1SolverRunsRunIdEventsGet>>, TError = HTTPValidationError>(
  runId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof solverRunEventsApiV1SolverRunsRunIdEventsGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getSolverRunEventsApiV1SolverRunsRunIdEventsGetQueryOptions(runId,options)
@@ -2717,17 +2721,17 @@ export function useSolverRunEventsApiV1SolverRunsRunIdEventsGet<TData = Awaited<
  * @summary List Schedules
  */
 export const listSchedulesApiV1SchedulesGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<ScheduleResponse[]>(
       {url: `/api/v1/schedules`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -2737,7 +2741,7 @@ export const getListSchedulesApiV1SchedulesGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getListSchedulesApiV1SchedulesGetQueryOptions = <TData = Awaited<ReturnType<typeof listSchedulesApiV1SchedulesGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listSchedulesApiV1SchedulesGet>>, TError, TData>>, }
 ) => {
 
@@ -2745,13 +2749,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListSchedulesApiV1SchedulesGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listSchedulesApiV1SchedulesGet>>> = ({ signal }) => listSchedulesApiV1SchedulesGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listSchedulesApiV1SchedulesGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -2790,7 +2794,7 @@ export function useListSchedulesApiV1SchedulesGet<TData = Awaited<ReturnType<typ
 
 export function useListSchedulesApiV1SchedulesGet<TData = Awaited<ReturnType<typeof listSchedulesApiV1SchedulesGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listSchedulesApiV1SchedulesGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListSchedulesApiV1SchedulesGetQueryOptions(options)
@@ -2813,14 +2817,14 @@ export const getScheduleApiV1SchedulesScheduleIdGet = (
     scheduleId: string,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<ScheduleResponse>(
       {url: `/api/v1/schedules/${scheduleId}`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -2830,7 +2834,7 @@ export const getGetScheduleApiV1SchedulesScheduleIdGetQueryKey = (scheduleId?: s
     ] as const;
     }
 
-    
+
 export const getGetScheduleApiV1SchedulesScheduleIdGetQueryOptions = <TData = Awaited<ReturnType<typeof getScheduleApiV1SchedulesScheduleIdGet>>, TError = HTTPValidationError>(scheduleId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getScheduleApiV1SchedulesScheduleIdGet>>, TError, TData>>, }
 ) => {
 
@@ -2838,13 +2842,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getGetScheduleApiV1SchedulesScheduleIdGetQueryKey(scheduleId);
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof getScheduleApiV1SchedulesScheduleIdGet>>> = ({ signal }) => getScheduleApiV1SchedulesScheduleIdGet(scheduleId, signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, enabled: !!(scheduleId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getScheduleApiV1SchedulesScheduleIdGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -2883,7 +2887,7 @@ export function useGetScheduleApiV1SchedulesScheduleIdGet<TData = Awaited<Return
 
 export function useGetScheduleApiV1SchedulesScheduleIdGet<TData = Awaited<ReturnType<typeof getScheduleApiV1SchedulesScheduleIdGet>>, TError = HTTPValidationError>(
  scheduleId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getScheduleApiV1SchedulesScheduleIdGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getGetScheduleApiV1SchedulesScheduleIdGetQueryOptions(scheduleId,options)
@@ -2907,14 +2911,14 @@ export const diffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet = (
     targetScheduleId: string,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<ScheduleDiffResponse>(
       {url: `/api/v1/schedules/${scheduleId}/diff/${targetScheduleId}`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -2925,7 +2929,7 @@ export const getDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGetQuer
     ] as const;
     }
 
-    
+
 export const getDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGetQueryOptions = <TData = Awaited<ReturnType<typeof diffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet>>, TError = HTTPValidationError>(scheduleId: string,
     targetScheduleId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof diffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet>>, TError, TData>>, }
 ) => {
@@ -2934,13 +2938,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGetQueryKey(scheduleId,targetScheduleId);
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof diffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet>>> = ({ signal }) => diffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet(scheduleId,targetScheduleId, signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, enabled: !!(scheduleId && targetScheduleId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof diffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -2983,7 +2987,7 @@ export function useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet<
 export function useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet<TData = Awaited<ReturnType<typeof diffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet>>, TError = HTTPValidationError>(
  scheduleId: string,
     targetScheduleId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof diffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGetQueryOptions(scheduleId,targetScheduleId,options)
@@ -3006,14 +3010,14 @@ export const publishScheduleApiV1SchedulesScheduleIdPublishPost = (
     scheduleId: string,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<ScheduleResponse>(
       {url: `/api/v1/schedules/${scheduleId}/publish`, method: 'POST', signal
     },
       );
     }
-  
+
 
 
 export const getPublishScheduleApiV1SchedulesScheduleIdPublishPostMutationOptions = <TError = HTTPValidationError,
@@ -3027,7 +3031,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof publishScheduleApiV1SchedulesScheduleIdPublishPost>>, {scheduleId: string}> = (props) => {
@@ -3036,13 +3040,13 @@ const {mutation: mutationOptions} = options ?
           return  publishScheduleApiV1SchedulesScheduleIdPublishPost(scheduleId,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
 
     export type PublishScheduleApiV1SchedulesScheduleIdPublishPostMutationResult = NonNullable<Awaited<ReturnType<typeof publishScheduleApiV1SchedulesScheduleIdPublishPost>>>
-    
+
     export type PublishScheduleApiV1SchedulesScheduleIdPublishPostMutationError = HTTPValidationError
 
     /**
@@ -3061,7 +3065,7 @@ export const usePublishScheduleApiV1SchedulesScheduleIdPublishPost = <TError = H
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Rollback Schedule
  */
@@ -3069,14 +3073,14 @@ export const rollbackScheduleApiV1SchedulesScheduleIdRollbackPost = (
     scheduleId: string,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<ScheduleResponse>(
       {url: `/api/v1/schedules/${scheduleId}/rollback`, method: 'POST', signal
     },
       );
     }
-  
+
 
 
 export const getRollbackScheduleApiV1SchedulesScheduleIdRollbackPostMutationOptions = <TError = HTTPValidationError,
@@ -3090,7 +3094,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof rollbackScheduleApiV1SchedulesScheduleIdRollbackPost>>, {scheduleId: string}> = (props) => {
@@ -3099,13 +3103,13 @@ const {mutation: mutationOptions} = options ?
           return  rollbackScheduleApiV1SchedulesScheduleIdRollbackPost(scheduleId,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
 
     export type RollbackScheduleApiV1SchedulesScheduleIdRollbackPostMutationResult = NonNullable<Awaited<ReturnType<typeof rollbackScheduleApiV1SchedulesScheduleIdRollbackPost>>>
-    
+
     export type RollbackScheduleApiV1SchedulesScheduleIdRollbackPostMutationError = HTTPValidationError
 
     /**
@@ -3124,7 +3128,7 @@ export const useRollbackScheduleApiV1SchedulesScheduleIdRollbackPost = <TError =
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Export Schedule
  */
@@ -3132,14 +3136,14 @@ export const exportScheduleApiV1SchedulesScheduleIdExportXlsxGet = (
     scheduleId: string,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<unknown>(
       {url: `/api/v1/schedules/${scheduleId}/export.xlsx`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -3149,7 +3153,7 @@ export const getExportScheduleApiV1SchedulesScheduleIdExportXlsxGetQueryKey = (s
     ] as const;
     }
 
-    
+
 export const getExportScheduleApiV1SchedulesScheduleIdExportXlsxGetQueryOptions = <TData = Awaited<ReturnType<typeof exportScheduleApiV1SchedulesScheduleIdExportXlsxGet>>, TError = HTTPValidationError>(scheduleId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof exportScheduleApiV1SchedulesScheduleIdExportXlsxGet>>, TError, TData>>, }
 ) => {
 
@@ -3157,13 +3161,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getExportScheduleApiV1SchedulesScheduleIdExportXlsxGetQueryKey(scheduleId);
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof exportScheduleApiV1SchedulesScheduleIdExportXlsxGet>>> = ({ signal }) => exportScheduleApiV1SchedulesScheduleIdExportXlsxGet(scheduleId, signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, enabled: !!(scheduleId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof exportScheduleApiV1SchedulesScheduleIdExportXlsxGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -3202,7 +3206,7 @@ export function useExportScheduleApiV1SchedulesScheduleIdExportXlsxGet<TData = A
 
 export function useExportScheduleApiV1SchedulesScheduleIdExportXlsxGet<TData = Awaited<ReturnType<typeof exportScheduleApiV1SchedulesScheduleIdExportXlsxGet>>, TError = HTTPValidationError>(
  scheduleId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof exportScheduleApiV1SchedulesScheduleIdExportXlsxGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getExportScheduleApiV1SchedulesScheduleIdExportXlsxGetQueryOptions(scheduleId,options)
@@ -3222,17 +3226,17 @@ export function useExportScheduleApiV1SchedulesScheduleIdExportXlsxGet<TData = A
  * @summary List Reschedule Events
  */
 export const listRescheduleEventsApiV1RescheduleEventsGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<RescheduleResponse[]>(
       {url: `/api/v1/reschedule-events`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -3242,7 +3246,7 @@ export const getListRescheduleEventsApiV1RescheduleEventsGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getListRescheduleEventsApiV1RescheduleEventsGetQueryOptions = <TData = Awaited<ReturnType<typeof listRescheduleEventsApiV1RescheduleEventsGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRescheduleEventsApiV1RescheduleEventsGet>>, TError, TData>>, }
 ) => {
 
@@ -3250,13 +3254,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListRescheduleEventsApiV1RescheduleEventsGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listRescheduleEventsApiV1RescheduleEventsGet>>> = ({ signal }) => listRescheduleEventsApiV1RescheduleEventsGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listRescheduleEventsApiV1RescheduleEventsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -3295,7 +3299,7 @@ export function useListRescheduleEventsApiV1RescheduleEventsGet<TData = Awaited<
 
 export function useListRescheduleEventsApiV1RescheduleEventsGet<TData = Awaited<ReturnType<typeof listRescheduleEventsApiV1RescheduleEventsGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listRescheduleEventsApiV1RescheduleEventsGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListRescheduleEventsApiV1RescheduleEventsGetQueryOptions(options)
@@ -3318,8 +3322,8 @@ export const createRescheduleEventApiV1RescheduleEventsPost = (
     rescheduleCreate: RescheduleCreate,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<RescheduleResponse>(
       {url: `/api/v1/reschedule-events`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -3327,7 +3331,7 @@ export const createRescheduleEventApiV1RescheduleEventsPost = (
     },
       );
     }
-  
+
 
 
 export const getCreateRescheduleEventApiV1RescheduleEventsPostMutationOptions = <TError = HTTPValidationError,
@@ -3341,7 +3345,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof createRescheduleEventApiV1RescheduleEventsPost>>, {data: RescheduleCreate}> = (props) => {
@@ -3350,7 +3354,7 @@ const {mutation: mutationOptions} = options ?
           return  createRescheduleEventApiV1RescheduleEventsPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -3375,7 +3379,7 @@ export const useCreateRescheduleEventApiV1RescheduleEventsPost = <TError = HTTPV
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary List Audit Logs
  */
@@ -3383,15 +3387,15 @@ export const listAuditLogsApiV1AuditLogsGet = (
     params?: ListAuditLogsApiV1AuditLogsGetParams,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<AuditLogResponse[]>(
       {url: `/api/v1/audit-logs`, method: 'GET',
         params, signal
     },
       );
     }
-  
+
 
 
 
@@ -3401,7 +3405,7 @@ export const getListAuditLogsApiV1AuditLogsGetQueryKey = (params?: ListAuditLogs
     ] as const;
     }
 
-    
+
 export const getListAuditLogsApiV1AuditLogsGetQueryOptions = <TData = Awaited<ReturnType<typeof listAuditLogsApiV1AuditLogsGet>>, TError = HTTPValidationError>(params?: ListAuditLogsApiV1AuditLogsGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listAuditLogsApiV1AuditLogsGet>>, TError, TData>>, }
 ) => {
 
@@ -3409,13 +3413,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListAuditLogsApiV1AuditLogsGetQueryKey(params);
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listAuditLogsApiV1AuditLogsGet>>> = ({ signal }) => listAuditLogsApiV1AuditLogsGet(params, signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listAuditLogsApiV1AuditLogsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -3454,7 +3458,7 @@ export function useListAuditLogsApiV1AuditLogsGet<TData = Awaited<ReturnType<typ
 
 export function useListAuditLogsApiV1AuditLogsGet<TData = Awaited<ReturnType<typeof listAuditLogsApiV1AuditLogsGet>>, TError = HTTPValidationError>(
  params?: ListAuditLogsApiV1AuditLogsGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listAuditLogsApiV1AuditLogsGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListAuditLogsApiV1AuditLogsGetQueryOptions(params,options)
@@ -3474,17 +3478,17 @@ export function useListAuditLogsApiV1AuditLogsGet<TData = Awaited<ReturnType<typ
  * @summary Feishu Connection
  */
 export const feishuConnectionApiV1IntegrationsFeishuConnectionGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<FeishuConnectionResponse>(
       {url: `/api/v1/integrations/feishu/connection`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -3494,7 +3498,7 @@ export const getFeishuConnectionApiV1IntegrationsFeishuConnectionGetQueryKey = (
     ] as const;
     }
 
-    
+
 export const getFeishuConnectionApiV1IntegrationsFeishuConnectionGetQueryOptions = <TData = Awaited<ReturnType<typeof feishuConnectionApiV1IntegrationsFeishuConnectionGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof feishuConnectionApiV1IntegrationsFeishuConnectionGet>>, TError, TData>>, }
 ) => {
 
@@ -3502,13 +3506,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getFeishuConnectionApiV1IntegrationsFeishuConnectionGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof feishuConnectionApiV1IntegrationsFeishuConnectionGet>>> = ({ signal }) => feishuConnectionApiV1IntegrationsFeishuConnectionGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof feishuConnectionApiV1IntegrationsFeishuConnectionGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -3547,7 +3551,7 @@ export function useFeishuConnectionApiV1IntegrationsFeishuConnectionGet<TData = 
 
 export function useFeishuConnectionApiV1IntegrationsFeishuConnectionGet<TData = Awaited<ReturnType<typeof feishuConnectionApiV1IntegrationsFeishuConnectionGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof feishuConnectionApiV1IntegrationsFeishuConnectionGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getFeishuConnectionApiV1IntegrationsFeishuConnectionGetQueryOptions(options)
@@ -3564,14 +3568,298 @@ export function useFeishuConnectionApiV1IntegrationsFeishuConnectionGet<TData = 
 
 
 /**
+ * @summary Disconnect Feishu
+ */
+export const disconnectFeishuApiV1IntegrationsFeishuConnectionDelete = (
+
+ ) => {
+
+
+      return customInstance<void>(
+      {url: `/api/v1/integrations/feishu/connection`, method: 'DELETE'
+    },
+      );
+    }
+
+
+
+export const getDisconnectFeishuApiV1IntegrationsFeishuConnectionDeleteMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof disconnectFeishuApiV1IntegrationsFeishuConnectionDelete>>, TError,void, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof disconnectFeishuApiV1IntegrationsFeishuConnectionDelete>>, TError,void, TContext> => {
+
+const mutationKey = ['disconnectFeishuApiV1IntegrationsFeishuConnectionDelete'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof disconnectFeishuApiV1IntegrationsFeishuConnectionDelete>>, void> = () => {
+
+
+          return  disconnectFeishuApiV1IntegrationsFeishuConnectionDelete()
+        }
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DisconnectFeishuApiV1IntegrationsFeishuConnectionDeleteMutationResult = NonNullable<Awaited<ReturnType<typeof disconnectFeishuApiV1IntegrationsFeishuConnectionDelete>>>
+
+    export type DisconnectFeishuApiV1IntegrationsFeishuConnectionDeleteMutationError = unknown
+
+    /**
+ * @summary Disconnect Feishu
+ */
+export const useDisconnectFeishuApiV1IntegrationsFeishuConnectionDelete = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof disconnectFeishuApiV1IntegrationsFeishuConnectionDelete>>, TError,void, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof disconnectFeishuApiV1IntegrationsFeishuConnectionDelete>>,
+        TError,
+        void,
+        TContext
+      > => {
+
+      const mutationOptions = getDisconnectFeishuApiV1IntegrationsFeishuConnectionDeleteMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+
+/**
+ * @summary Start Feishu Oauth
+ */
+export const startFeishuOauthApiV1IntegrationsFeishuOauthStartPost = (
+
+ signal?: AbortSignal
+) => {
+
+
+      return customInstance<FeishuOAuthStartResponse>(
+      {url: `/api/v1/integrations/feishu/oauth/start`, method: 'POST', signal
+    },
+      );
+    }
+
+
+
+export const getStartFeishuOauthApiV1IntegrationsFeishuOauthStartPostMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof startFeishuOauthApiV1IntegrationsFeishuOauthStartPost>>, TError,void, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof startFeishuOauthApiV1IntegrationsFeishuOauthStartPost>>, TError,void, TContext> => {
+
+const mutationKey = ['startFeishuOauthApiV1IntegrationsFeishuOauthStartPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof startFeishuOauthApiV1IntegrationsFeishuOauthStartPost>>, void> = () => {
+
+
+          return  startFeishuOauthApiV1IntegrationsFeishuOauthStartPost()
+        }
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type StartFeishuOauthApiV1IntegrationsFeishuOauthStartPostMutationResult = NonNullable<Awaited<ReturnType<typeof startFeishuOauthApiV1IntegrationsFeishuOauthStartPost>>>
+
+    export type StartFeishuOauthApiV1IntegrationsFeishuOauthStartPostMutationError = unknown
+
+    /**
+ * @summary Start Feishu Oauth
+ */
+export const useStartFeishuOauthApiV1IntegrationsFeishuOauthStartPost = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof startFeishuOauthApiV1IntegrationsFeishuOauthStartPost>>, TError,void, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof startFeishuOauthApiV1IntegrationsFeishuOauthStartPost>>,
+        TError,
+        void,
+        TContext
+      > => {
+
+      const mutationOptions = getStartFeishuOauthApiV1IntegrationsFeishuOauthStartPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+
+/**
+ * @summary Complete Feishu Oauth
+ */
+export const completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet = (
+    params: CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams,
+ signal?: AbortSignal
+) => {
+
+
+      return customInstance<unknown>(
+      {url: `/api/v1/integrations/feishu/oauth/callback`, method: 'GET',
+        params, signal
+    },
+      );
+    }
+
+
+
+
+export const getCompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetQueryKey = (params?: CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams,) => {
+    return [
+    `/api/v1/integrations/feishu/oauth/callback`, ...(params ? [params]: [])
+    ] as const;
+    }
+
+
+export const getCompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetQueryOptions = <TData = Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>, TError = HTTPValidationError>(params: CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getCompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>> = ({ signal }) => completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet(params, signal);
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetQueryResult = NonNullable<Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>>
+export type CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetQueryError = HTTPValidationError
+
+
+export function useCompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet<TData = Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>, TError = HTTPValidationError>(
+ params: CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>,
+          TError,
+          Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useCompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet<TData = Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>, TError = HTTPValidationError>(
+ params: CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>,
+          TError,
+          Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useCompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet<TData = Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>, TError = HTTPValidationError>(
+ params: CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Complete Feishu Oauth
+ */
+
+export function useCompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet<TData = Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>, TError = HTTPValidationError>(
+ params: CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof completeFeishuOauthApiV1IntegrationsFeishuOauthCallbackGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getCompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * @summary Create Feishu Workspace
+ */
+export const createFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost = (
+    feishuWorkspaceCreate: FeishuWorkspaceCreate,
+ signal?: AbortSignal
+) => {
+
+
+      return customInstance<FeishuWorkspaceResponse>(
+      {url: `/api/v1/integrations/feishu/workspaces`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: feishuWorkspaceCreate, signal
+    },
+      );
+    }
+
+
+
+export const getCreateFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost>>, TError,{data: FeishuWorkspaceCreate}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof createFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost>>, TError,{data: FeishuWorkspaceCreate}, TContext> => {
+
+const mutationKey = ['createFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost>>, {data: FeishuWorkspaceCreate}> = (props) => {
+          const {data} = props ?? {};
+
+          return  createFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost(data,)
+        }
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPostMutationResult = NonNullable<Awaited<ReturnType<typeof createFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost>>>
+    export type CreateFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPostMutationBody = FeishuWorkspaceCreate
+    export type CreateFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Create Feishu Workspace
+ */
+export const useCreateFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost>>, TError,{data: FeishuWorkspaceCreate}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof createFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost>>,
+        TError,
+        {data: FeishuWorkspaceCreate},
+        TContext
+      > => {
+
+      const mutationOptions = getCreateFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+
+/**
  * @summary Feishu Sync
  */
 export const feishuSyncApiV1IntegrationsFeishuSyncPost = (
     feishuSyncRequest: FeishuSyncRequest,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<IntegrationSyncResponse>(
       {url: `/api/v1/integrations/feishu/sync`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -3579,7 +3867,7 @@ export const feishuSyncApiV1IntegrationsFeishuSyncPost = (
     },
       );
     }
-  
+
 
 
 export const getFeishuSyncApiV1IntegrationsFeishuSyncPostMutationOptions = <TError = HTTPValidationError,
@@ -3593,7 +3881,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof feishuSyncApiV1IntegrationsFeishuSyncPost>>, {data: FeishuSyncRequest}> = (props) => {
@@ -3602,7 +3890,7 @@ const {mutation: mutationOptions} = options ?
           return  feishuSyncApiV1IntegrationsFeishuSyncPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -3627,22 +3915,22 @@ export const useFeishuSyncApiV1IntegrationsFeishuSyncPost = <TError = HTTPValida
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary List Feishu Syncs
  */
 export const listFeishuSyncsApiV1IntegrationsFeishuSyncsGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<IntegrationSyncResponse[]>(
       {url: `/api/v1/integrations/feishu/syncs`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -3652,7 +3940,7 @@ export const getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryOptions = <TData = Awaited<ReturnType<typeof listFeishuSyncsApiV1IntegrationsFeishuSyncsGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listFeishuSyncsApiV1IntegrationsFeishuSyncsGet>>, TError, TData>>, }
 ) => {
 
@@ -3660,13 +3948,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listFeishuSyncsApiV1IntegrationsFeishuSyncsGet>>> = ({ signal }) => listFeishuSyncsApiV1IntegrationsFeishuSyncsGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listFeishuSyncsApiV1IntegrationsFeishuSyncsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -3705,7 +3993,7 @@ export function useListFeishuSyncsApiV1IntegrationsFeishuSyncsGet<TData = Awaite
 
 export function useListFeishuSyncsApiV1IntegrationsFeishuSyncsGet<TData = Awaited<ReturnType<typeof listFeishuSyncsApiV1IntegrationsFeishuSyncsGet>>, TError = unknown>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listFeishuSyncsApiV1IntegrationsFeishuSyncsGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryOptions(options)
@@ -3725,17 +4013,17 @@ export function useListFeishuSyncsApiV1IntegrationsFeishuSyncsGet<TData = Awaite
  * @summary Aily Context
  */
 export const ailyContextApiV1AilyContextGet = (
-    
+
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<AilyContextResponse>(
       {url: `/api/v1/aily/context`, method: 'GET', signal
     },
       );
     }
-  
+
 
 
 
@@ -3745,7 +4033,7 @@ export const getAilyContextApiV1AilyContextGetQueryKey = () => {
     ] as const;
     }
 
-    
+
 export const getAilyContextApiV1AilyContextGetQueryOptions = <TData = Awaited<ReturnType<typeof ailyContextApiV1AilyContextGet>>, TError = HTTPValidationError>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof ailyContextApiV1AilyContextGet>>, TError, TData>>, }
 ) => {
 
@@ -3753,13 +4041,13 @@ const {query: queryOptions} = options ?? {};
 
   const queryKey =  queryOptions?.queryKey ?? getAilyContextApiV1AilyContextGetQueryKey();
 
-  
+
 
     const queryFn: QueryFunction<Awaited<ReturnType<typeof ailyContextApiV1AilyContextGet>>> = ({ signal }) => ailyContextApiV1AilyContextGet(signal);
 
-      
 
-      
+
+
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof ailyContextApiV1AilyContextGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
 }
@@ -3798,7 +4086,7 @@ export function useAilyContextApiV1AilyContextGet<TData = Awaited<ReturnType<typ
 
 export function useAilyContextApiV1AilyContextGet<TData = Awaited<ReturnType<typeof ailyContextApiV1AilyContextGet>>, TError = HTTPValidationError>(
   options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof ailyContextApiV1AilyContextGet>>, TError, TData>>, }
- , queryClient?: QueryClient 
+ , queryClient?: QueryClient
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getAilyContextApiV1AilyContextGetQueryOptions(options)
@@ -3821,8 +4109,8 @@ export const ailyRuleProposalsApiV1AilyRuleProposalsPost = (
     ailyRuleBatch: AilyRuleBatch,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<RuleResponse[]>(
       {url: `/api/v1/aily/rule-proposals`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -3830,7 +4118,7 @@ export const ailyRuleProposalsApiV1AilyRuleProposalsPost = (
     },
       );
     }
-  
+
 
 
 export const getAilyRuleProposalsApiV1AilyRuleProposalsPostMutationOptions = <TError = HTTPValidationError,
@@ -3844,7 +4132,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof ailyRuleProposalsApiV1AilyRuleProposalsPost>>, {data: AilyRuleBatch}> = (props) => {
@@ -3853,7 +4141,7 @@ const {mutation: mutationOptions} = options ?
           return  ailyRuleProposalsApiV1AilyRuleProposalsPost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -3878,7 +4166,7 @@ export const useAilyRuleProposalsApiV1AilyRuleProposalsPost = <TError = HTTPVali
 
       return useMutation(mutationOptions, queryClient);
     }
-    
+
 /**
  * @summary Aily Solve
  */
@@ -3886,8 +4174,8 @@ export const ailySolveApiV1AilySolvePost = (
     ailySolveRequest: AilySolveRequest,
  signal?: AbortSignal
 ) => {
-      
-      
+
+
       return customInstance<SolverRunResponse>(
       {url: `/api/v1/aily/solve`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
@@ -3895,7 +4183,7 @@ export const ailySolveApiV1AilySolvePost = (
     },
       );
     }
-  
+
 
 
 export const getAilySolveApiV1AilySolvePostMutationOptions = <TError = HTTPValidationError,
@@ -3909,7 +4197,7 @@ const {mutation: mutationOptions} = options ?
       : {...options, mutation: {...options.mutation, mutationKey}}
       : {mutation: { mutationKey, }};
 
-      
+
 
 
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof ailySolveApiV1AilySolvePost>>, {data: AilySolveRequest}> = (props) => {
@@ -3918,7 +4206,7 @@ const {mutation: mutationOptions} = options ?
           return  ailySolveApiV1AilySolvePost(data,)
         }
 
-        
+
 
 
   return  { mutationFn, ...mutationOptions }}

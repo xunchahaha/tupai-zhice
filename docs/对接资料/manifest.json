@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-09T19:47:10.203327+00:00",
+  "generated_at": "2026-08-09T20:22:47.854358+00:00",
   "root": "docs/对接资料",
   "files": [
     {
@@ -69,13 +69,18 @@
     },
     {
       "path": "02_飞书官方/04_生产接入操作手册.md",
-      "size": 5528,
-      "sha256": "bedb79b2a1c1da36a4f7872cd26e8bdd0baeab742f3a8ebfbaf86db2b6b7580c"
+      "size": 5807,
+      "sha256": "171d9a0d9f9e7a815ab4708e1c05cbe35c6a5dfdb7b5affd84bc018cbc0e769a"
     },
     {
       "path": "02_飞书官方/05_官方契约核对记录_2026-08-10.md",
-      "size": 4290,
-      "sha256": "4a73a0cd484910f5f81e9d4eb32b21eb2355888b23c267233ea6d1ae466d87f3"
+      "size": 4447,
+      "sha256": "1d60c19cc03225320bb5a7f4be48f14037d7ebcceda67dd36f1a01c831032165"
+    },
+    {
+      "path": "02_飞书官方/06_生产接入实现与运维.md",
+      "size": 4815,
+      "sha256": "8758745bc6c503919533fd5b85b648fd80eb86d1112709f41e47d723ff552816"
     },
     {
       "path": "03_算法与标准/CP-SAT与治理资料.md",
@@ -94,13 +99,13 @@
     },
     {
       "path": "04_接口与数据字典/数据字典与飞书映射.md",
-      "size": 1783,
-      "sha256": "d5b80f927924f5c93b0a9713c3a67ca64dcbdc2e7a5c7e8f7d5b43a39c4a2864"
+      "size": 2151,
+      "sha256": "4de554190d317d1012201881532243503b7d0991482c104d4e8dbee24b1d74cc"
     },
     {
       "path": "README.md",
-      "size": 1133,
-      "sha256": "b8ade180320fbee26a2d60d5d6985d45af93ee710c46c000f7cb29616a7a8be4"
+      "size": 1261,
+      "sha256": "af6d5f40a39daf17d29774378c8d9cc6ce1ea21e7caeab2b5d842b591524282e"
     }
   ]
 }

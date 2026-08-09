@@ -263,22 +263,50 @@ class OverviewResponse(BaseModel):
 
 
 class FeishuConnectionResponse(BaseModel):
-    mode: Literal["unconfigured", "live"]
-    configured: bool
-    connected: bool
-    table_mapping_configured: bool
+    status: Literal["unconfigured", "not_authorized", "connected", "reauthorization_required"]
+    app_configured: bool
+    authorized: bool
     missing_fields: list[str]
-    missing_resources: list[str]
+    granted_scopes: list[str]
+    missing_scopes: list[str]
+    access_expires_at: datetime | None
     message: str
     console_url: str
     docs_url: str
+    workspace: FeishuWorkspaceResponse | None
+
+
+class FeishuOAuthStartResponse(BaseModel):
+    authorization_url: str
+    expires_at: datetime
+
+
+class FeishuWorkspaceCreate(BaseModel):
+    name: str = Field(default="途排智策排课空间", min_length=2, max_length=160)
+
+
+class FeishuTableBindingResponse(ORMModel):
+    resource: str
+    table_name: str
+    table_id: str
+
+
+class FeishuWorkspaceResponse(ORMModel):
+    id: str
+    name: str
+    url: str
+    status: str
+    last_error: str | None
+    tables: list[FeishuTableBindingResponse] = Field(default_factory=list)
+    created_at: datetime
 
 
 class FeishuSyncRequest(BaseModel):
-    direction: Literal["import", "export"]
+    direction: Literal["export"] = "export"
     resource: Literal[
         "teachers", "class_groups", "rooms", "time_slots", "course_sessions", "rules", "schedule"
     ]
+    workspace_id: str | None = None
 
 
 class IntegrationSyncResponse(ORMModel):

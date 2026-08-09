@@ -29,7 +29,7 @@ export default defineConfig({
     ? undefined
     : [
         {
-          command: "uv run python scripts/reset_e2e_db.py && uv run python -m uvicorn app.main:app --host 127.0.0.1 --port 8001",
+          command: "uv run --no-sync python scripts/reset_e2e_db.py && uv run --no-sync python -m uvicorn app.main:app --host 127.0.0.1 --port 8001",
           cwd: backendDir,
           url: `${apiBaseURL}/api/v1/health/ready`,
           reuseExistingServer: false,

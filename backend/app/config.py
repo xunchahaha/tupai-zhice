@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -18,6 +17,18 @@ FEISHU_RESOURCES = (
     "course_sessions",
     "rules",
     "schedule",
+)
+
+FEISHU_REQUIRED_SCOPES = (
+    "offline_access",
+    "base:app:create",
+    "base:app:read",
+    "base:table:create",
+    "base:table:read",
+    "base:table:update",
+    "base:record:create",
+    "base:record:retrieve",
+    "base:record:update",
 )
 
 
@@ -43,8 +54,11 @@ class Settings(BaseSettings):
 
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
-    feishu_bitable_app_token: str = ""
-    feishu_table_map: dict[str, str] = Field(default_factory=dict)
+    feishu_token_encryption_key: str = ""
+    feishu_oauth_redirect_uri: str = (
+        "http://127.0.0.1:8000/api/v1/integrations/feishu/oauth/callback"
+    )
+    frontend_url: str = "http://127.0.0.1:5173"
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -53,18 +67,9 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
-    @field_validator("feishu_table_map", mode="before")
-    @classmethod
-    def parse_table_map(cls, value: object) -> object:
-        if isinstance(value, str):
-            if not value.strip():
-                return {}
-            return json.loads(value)
-        return value
-
     @property
-    def feishu_credentials_configured(self) -> bool:
-        return bool(self.feishu_app_id and self.feishu_app_secret and self.feishu_bitable_app_token)
+    def feishu_app_configured(self) -> bool:
+        return not self.feishu_missing_fields
 
     @property
     def feishu_missing_fields(self) -> list[str]:
@@ -73,23 +78,11 @@ class Settings(BaseSettings):
             fields.append("FEISHU_APP_ID")
         if not self.feishu_app_secret:
             fields.append("FEISHU_APP_SECRET")
-        if not self.feishu_bitable_app_token:
-            fields.append("FEISHU_BITABLE_APP_TOKEN")
+        if not self.feishu_token_encryption_key:
+            fields.append("FEISHU_TOKEN_ENCRYPTION_KEY")
+        if not self.feishu_oauth_redirect_uri:
+            fields.append("FEISHU_OAUTH_REDIRECT_URI")
         return fields
-
-    @property
-    def feishu_missing_resources(self) -> list[str]:
-        return [
-            resource for resource in FEISHU_RESOURCES if not self.feishu_table_map.get(resource)
-        ]
-
-    @property
-    def feishu_table_mapping_configured(self) -> bool:
-        return not self.feishu_missing_resources
-
-    @property
-    def feishu_configured(self) -> bool:
-        return self.feishu_credentials_configured and self.feishu_table_mapping_configured
 
 
 @lru_cache

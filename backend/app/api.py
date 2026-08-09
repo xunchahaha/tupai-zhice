@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Annotated, Any
+from urllib.parse import urlencode
 
+import httpx
 from fastapi import (
     APIRouter,
     Depends,
@@ -14,7 +16,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -52,7 +54,10 @@ from .schemas import (
     CourseSessionPayload,
     CourseSessionResponse,
     FeishuConnectionResponse,
+    FeishuOAuthStartResponse,
     FeishuSyncRequest,
+    FeishuWorkspaceCreate,
+    FeishuWorkspaceResponse,
     ImportResult,
     IntegrationSyncResponse,
     OverviewResponse,
@@ -77,7 +82,7 @@ from .schemas import (
     UserResponse,
 )
 from .security import create_access_token, get_current_user, require_roles, verify_password
-from .services.feishu import FeishuClient
+from .services.feishu import FeishuService, FeishuServiceError, json_text
 from .services.seed import import_sample_workbook
 from .services.snapshot import create_snapshot
 from .services.tasks import enqueue_solver_run, execute_solver_run
@@ -89,6 +94,7 @@ Db = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminOrScheduler = Annotated[User, Depends(require_roles("admin", "scheduler"))]
 Approver = Annotated[User, Depends(require_roles("admin", "approver"))]
+Admin = Annotated[User, Depends(require_roles("admin"))]
 
 
 def audit(
@@ -845,85 +851,225 @@ def list_audit_logs(
     response_model=FeishuConnectionResponse,
     tags=["integrations"],
 )
-def feishu_connection(user: CurrentUser) -> dict[str, Any]:
-    return FeishuClient(settings).test_connection()
+def feishu_connection(db: Db, user: CurrentUser) -> dict[str, Any]:
+    return FeishuService(settings, db).connection_view(user.id)
+
+
+@router.post(
+    "/integrations/feishu/oauth/start",
+    response_model=FeishuOAuthStartResponse,
+    tags=["integrations"],
+)
+def start_feishu_oauth(db: Db, user: Admin) -> dict[str, Any]:
+    service = FeishuService(settings, db)
+    try:
+        result = service.create_oauth_start(user.id)
+    except FeishuServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    audit(db, user, "start_oauth", "feishu", None)
+    db.commit()
+    return result
+
+
+@router.get("/integrations/feishu/oauth/callback", tags=["integrations"])
+def complete_feishu_oauth(
+    db: Db,
+    state: str = Query(min_length=16),
+    code: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+) -> RedirectResponse:
+    frontend = settings.frontend_url.rstrip("/")
+    if error or not code:
+        query = urlencode({"feishu": "cancelled"})
+        return RedirectResponse(f"{frontend}/integrations?{query}")
+    try:
+        connection = FeishuService(settings, db).complete_oauth(code, state)
+    except (FeishuServiceError, httpx.HTTPError):
+        query = urlencode({"feishu": "error"})
+        return RedirectResponse(f"{frontend}/integrations?{query}")
+    actor = db.get(User, connection.user_id)
+    audit(db, actor, "connect", "feishu", connection.id)
+    db.commit()
+    query = urlencode({"feishu": "connected"})
+    return RedirectResponse(f"{frontend}/integrations?{query}")
+
+
+@router.post(
+    "/integrations/feishu/workspaces",
+    response_model=FeishuWorkspaceResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["integrations"],
+)
+def create_feishu_workspace(request: FeishuWorkspaceCreate, db: Db, user: Admin) -> dict[str, Any]:
+    service = FeishuService(settings, db)
+    try:
+        workspace = service.create_workspace(user.id, request.name)
+    except FeishuServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    audit(db, user, "create", "feishu_workspace", workspace.id, {"name": workspace.name})
+    db.commit()
+    return service.workspace_view(workspace)
+
+
+@router.delete(
+    "/integrations/feishu/connection",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["integrations"],
+)
+def disconnect_feishu(db: Db, user: Admin) -> Response:
+    service = FeishuService(settings, db)
+    service.disconnect(user.id)
+    audit(db, user, "disconnect", "feishu", None)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
     if resource == "teachers":
         return [
             {
-                "教师ID": item.business_id,
-                "匿名名称": item.name,
+                "业务标识": item.business_id,
+                "教师名称": item.name,
                 "学科": item.subject,
                 "周最大课时": item.max_hours,
                 "不可用时段": "|".join(item.unavailable_slot_ids),
                 "偏好时段": "|".join(item.preferred_slot_ids),
+                "数据级别": item.data_level,
             }
             for item in db.scalars(select(Teacher).order_by(Teacher.business_id))
         ]
     if resource == "class_groups":
         return [
             {
-                "班级ID": item.business_id,
+                "业务标识": item.business_id,
                 "班级名称": item.name,
                 "年级": item.grade,
+                "学科": item.subject,
                 "学生数": item.student_count,
-                "教师ID": item.teacher_business_id,
+                "优先级": item.priority,
+                "设备需求": "|".join(item.required_devices),
+                "教师标识": item.teacher_business_id,
             }
             for item in db.scalars(select(ClassGroup).order_by(ClassGroup.business_id))
         ]
     if resource == "rooms":
         return [
             {
-                "教室ID": item.business_id,
+                "业务标识": item.business_id,
                 "教室名称": item.name,
                 "容量": item.capacity,
                 "设备": "|".join(item.devices),
                 "可用时段": "|".join(item.available_slot_ids),
+                "是否启用": "是" if item.is_active else "否",
             }
             for item in db.scalars(select(Room).order_by(Room.business_id))
         ]
     if resource == "time_slots":
         return [
             {
-                "时段ID": item.business_id,
+                "业务标识": item.business_id,
                 "星期": item.weekday,
-                "开始": item.start_time,
-                "结束": item.end_time,
-                "是否开放": item.is_open,
+                "开始时间": item.start_time,
+                "结束时间": item.end_time,
+                "类型": item.kind,
+                "顺序": item.sequence,
+                "是否开放": "是" if item.is_open else "否",
             }
             for item in db.scalars(select(TimeSlot).order_by(TimeSlot.sequence))
         ]
     if resource == "course_sessions":
         return [
             {
-                "场次ID": item.business_id,
-                "班级ID": item.class_business_id,
-                "教师ID": item.teacher_business_id,
+                "业务标识": item.business_id,
+                "班级标识": item.class_business_id,
+                "教师标识": item.teacher_business_id,
+                "学科": item.subject,
                 "学生数": item.student_count,
                 "设备需求": "|".join(item.required_devices),
+                "时长分钟": item.duration_minutes,
+                "建议时段": item.suggested_slot_id or "",
+                "是否锁定": "是" if item.is_locked else "否",
             }
             for item in db.scalars(select(CourseSession).order_by(CourseSession.business_id))
         ]
     if resource == "rules":
+        hardness_labels = {"hard": "硬约束", "soft": "软约束"}
+        status_labels = {
+            "draft": "草稿",
+            "awaiting_confirmation": "待确认",
+            "active": "已生效",
+            "rejected": "已拒绝",
+            "retired": "已停用",
+        }
         return [
             {
-                "规则ID": item.business_id,
-                "原文": item.source_text,
-                "类型": item.constraint_type,
-                "硬软": item.hardness,
-                "状态": item.status,
+                "业务标识": item.business_id,
+                "规则原文": item.source_text,
+                "作用对象类型": item.actor_type,
+                "作用对象标识": "|".join(item.actor_ids),
+                "约束类型": item.constraint_type,
+                "约束范围": json_text(item.scope),
+                "硬软类型": hardness_labels.get(item.hardness, item.hardness),
+                "权重": item.weight,
+                "状态": status_labels.get(item.status, item.status),
+                "版本": item.version,
+                "来源文档": item.source_doc or "",
             }
             for item in db.scalars(select(Rule).order_by(Rule.business_id))
         ]
     if resource == "schedule":
-        latest = db.scalar(select(ScheduleVersion).order_by(ScheduleVersion.version_no.desc()))
-        return (
-            [item.model_dump() for item in schedule_response(db, latest).assignments]
-            if latest
-            else []
+        versions = list(
+            db.scalars(
+                select(ScheduleVersion)
+                .where(ScheduleVersion.published_at.is_not(None))
+                .order_by(ScheduleVersion.version_no)
+            )
         )
+        sessions = {item.id: item for item in db.scalars(select(CourseSession))}
+        slots = {item.business_id: item for item in db.scalars(select(TimeSlot))}
+        rooms = {item.business_id: item for item in db.scalars(select(Room))}
+        status_labels = {
+            "published": "当前发布",
+            "archived": "历史发布",
+            "rolled_back": "已回滚",
+        }
+        change_labels = {
+            "assigned": "初次分配",
+            "moved": "已调整",
+            "unchanged": "未变化",
+        }
+        rows: list[dict[str, Any]] = []
+        for version in versions:
+            for assignment in version.assignments:
+                session = sessions.get(assignment.course_session_id)
+                if session is None:
+                    continue
+                slot = slots.get(assignment.slot_business_id)
+                room = rooms.get(assignment.room_business_id)
+                rows.append(
+                    {
+                        "业务标识": f"{version.id}:{session.business_id}",
+                        "版本标识": version.id,
+                        "版本号": version.version_no,
+                        "版本名称": version.name,
+                        "是否当前版本": "是" if version.status == "published" else "否",
+                        "发布状态": status_labels.get(version.status, version.status),
+                        "场次标识": session.business_id,
+                        "班级标识": session.class_business_id,
+                        "教师标识": session.teacher_business_id,
+                        "学科": session.subject,
+                        "时段标识": assignment.slot_business_id,
+                        "星期": slot.weekday if slot else "",
+                        "开始时间": slot.start_time if slot else "",
+                        "结束时间": slot.end_time if slot else "",
+                        "教室标识": assignment.room_business_id,
+                        "教室名称": room.name if room else "",
+                        "变更类型": change_labels.get(
+                            assignment.change_kind, assignment.change_kind
+                        ),
+                    }
+                )
+        return rows
     return []
 
 
@@ -933,33 +1079,37 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
     tags=["integrations"],
 )
 def feishu_sync(request: FeishuSyncRequest, db: Db, user: AdminOrScheduler) -> IntegrationSync:
-    client = FeishuClient(settings)
-    try:
-        client.require_sync_ready()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     sync = IntegrationSync(
         direction=request.direction,
         resource=request.resource,
         status="running",
-        mode=client.mode,
+        mode="live",
     )
     db.add(sync)
     db.flush()
     try:
-        table_id = settings.feishu_table_map.get(request.resource, "")
-        if request.direction == "export":
-            rows = export_resource_rows(db, request.resource)
-            sync.records_written = client.batch_create(table_id, rows)
-            sync.detail = {"table_id": table_id, "record_count": len(rows)}
-        else:
-            rows = client.list_records(table_id)
-            sync.records_read = len(rows)
-            sync.detail = {"table_id": table_id, "preview": rows[:3]}
+        rows = export_resource_rows(db, request.resource)
+        result = FeishuService(settings, db).sync_rows(
+            user.id,
+            request.resource,
+            rows,
+            request.workspace_id,
+        )
+        sync.records_read = int(result["records_read"])
+        sync.records_written = int(result["records_written"])
+        sync.detail = result
         sync.status = "completed"
-    except Exception as exc:
+    except (FeishuServiceError, httpx.HTTPError) as exc:
         sync.status = "failed"
         sync.detail = {"error": str(exc)}
+        audit(db, user, "sync", "feishu", sync.id, sync.detail)
+        db.commit()
+        code = (
+            status.HTTP_409_CONFLICT
+            if isinstance(exc, FeishuServiceError)
+            else status.HTTP_502_BAD_GATEWAY
+        )
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
     audit(db, user, "sync", "feishu", sync.id, sync.detail)
     db.commit()
     db.refresh(sync)
@@ -1029,9 +1179,7 @@ def aily_context(db: Db) -> AilyContextResponse:
                 for item in db.scalars(select(TimeSlot).order_by(TimeSlot.sequence))
             ],
         },
-        constraint_catalog=[
-            {"type": key, **value} for key, value in RULE_CONSTRAINTS.items()
-        ],
+        constraint_catalog=[{"type": key, **value} for key, value in RULE_CONSTRAINTS.items()],
         output_contract={
             "status": "awaiting_confirmation",
             "hard_rule_policy": "硬约束必须由教务人工确认后生效",
@@ -1052,9 +1200,7 @@ def aily_rule_proposals(batch: AilyRuleBatch, db: Db) -> list[Rule]:
     base_number = int(db.scalar(select(func.count(Rule.id))) or 0)
     for index, proposal in enumerate(batch.proposals, start=1):
         validate_rule_entities(db, proposal)
-        business_id = (
-            proposal.business_id or f"AILY-{base_number + index:04d}"
-        )
+        business_id = proposal.business_id or f"AILY-{base_number + index:04d}"
         data = proposal.model_dump(exclude={"business_id"})
         data["source_text"] = proposal.source_text or batch.source_text
         data["source_doc"] = proposal.source_doc or batch.source_doc

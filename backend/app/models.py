@@ -45,6 +45,76 @@ class User(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class FeishuOAuthState(TimestampMixin, Base):
+    __tablename__ = "feishu_oauth_states"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    pkce_verifier_encrypted: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class FeishuConnection(TimestampMixin, Base):
+    __tablename__ = "feishu_connections"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    access_token_encrypted: Mapped[str] = mapped_column(Text)
+    refresh_token_encrypted: Mapped[str] = mapped_column(Text)
+    access_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    refresh_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FeishuWorkspace(TimestampMixin, Base):
+    __tablename__ = "feishu_workspaces"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    connection_id: Mapped[str] = mapped_column(ForeignKey("feishu_connections.id"), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    app_token: Mapped[str] = mapped_column(String(100), unique=True)
+    default_table_id: Mapped[str] = mapped_column(String(100))
+    folder_token: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    url: Mapped[str] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FeishuTableBinding(TimestampMixin, Base):
+    __tablename__ = "feishu_table_bindings"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "resource"),
+        UniqueConstraint("workspace_id", "table_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("feishu_workspaces.id"), index=True)
+    resource: Mapped[str] = mapped_column(String(40))
+    table_name: Mapped[str] = mapped_column(String(80))
+    table_id: Mapped[str] = mapped_column(String(100))
+
+
+class FeishuRecordBinding(TimestampMixin, Base):
+    __tablename__ = "feishu_record_bindings"
+    __table_args__ = (
+        UniqueConstraint("table_binding_id", "business_key"),
+        UniqueConstraint("table_binding_id", "record_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    table_binding_id: Mapped[str] = mapped_column(
+        ForeignKey("feishu_table_bindings.id"), index=True
+    )
+    business_key: Mapped[str] = mapped_column(String(180))
+    record_id: Mapped[str] = mapped_column(String(100))
+
+
 class Campus(TimestampMixin, Base):
     __tablename__ = "campuses"
 

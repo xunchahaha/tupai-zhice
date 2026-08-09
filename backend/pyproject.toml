@@ -5,6 +5,7 @@ description = "Backend for the TuPai ZhiCe scheduling MVP"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "alembic>=1.16,<2",
+  "cryptography>=45,<47",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "openpyxl>=3.1,<4",
@@ -55,4 +56,3 @@ exclude = ["alembic/versions"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-

@@ -113,9 +113,8 @@ def test_feishu_requires_production_configuration(
     connection = client.get("/api/v1/integrations/feishu/connection", headers=auth_headers)
     assert connection.status_code == 200
     payload = connection.json()
-    assert payload["mode"] == "unconfigured"
-    assert payload["configured"] is False
-    assert payload["connected"] is False
+    assert payload["status"] == "unconfigured"
+    assert payload["app_configured"] is False
     assert "FEISHU_APP_ID" in payload["missing_fields"]
     assert payload["console_url"].startswith("https://open.feishu.cn/")
     sync = client.post(
@@ -124,7 +123,7 @@ def test_feishu_requires_production_configuration(
         json={"direction": "export", "resource": "teachers"},
     )
     assert sync.status_code == 409
-    assert "请先配置飞书环境变量" in sync.json()["detail"]
+    assert "请先配置飞书服务端参数" in sync.json()["detail"]
 
 
 def test_aily_context_proposal_confirmation_and_solve(

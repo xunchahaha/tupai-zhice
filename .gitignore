@@ -10,6 +10,7 @@ frontend/dist/
 frontend/playwright-report/
 frontend/test-results/
 frontend/*runtime*.log
+frontend/vite-*.log
 data/*.db
 data/exports/*.xlsx
 !data/imports/sample.xlsx

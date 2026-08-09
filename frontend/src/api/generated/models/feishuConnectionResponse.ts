@@ -5,16 +5,20 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
-import type { FeishuConnectionResponseMode } from './feishuConnectionResponseMode';
+import type { FeishuConnectionResponseStatus } from './feishuConnectionResponseStatus';
+import type { FeishuConnectionResponseAccessExpiresAt } from './feishuConnectionResponseAccessExpiresAt';
+import type { FeishuConnectionResponseWorkspace } from './feishuConnectionResponseWorkspace';
 
 export interface FeishuConnectionResponse {
-  mode: FeishuConnectionResponseMode;
-  configured: boolean;
-  connected: boolean;
-  table_mapping_configured: boolean;
+  status: FeishuConnectionResponseStatus;
+  app_configured: boolean;
+  authorized: boolean;
   missing_fields: string[];
-  missing_resources: string[];
+  granted_scopes: string[];
+  missing_scopes: string[];
+  access_expires_at: FeishuConnectionResponseAccessExpiresAt;
   message: string;
   console_url: string;
   docs_url: string;
+  workspace: FeishuConnectionResponseWorkspace;
 }

@@ -57,13 +57,13 @@ test("管理员完成排课、调课、回滚和飞书生产接入引导流程",
   }).toBeTruthy();
 
   await page.getByRole("link", { name: "飞书集成" }).click();
-  await expect(page.getByRole("dialog", { name: "欢迎使用飞书生产接入向导" })).toBeVisible();
-  await expect(page.getByText("这不是演示入口，而是生产接入流程。")).toBeVisible();
-  await page.getByRole("button", { name: "稍后再看" }).click();
+  await expect(page.getByRole("dialog", { name: "飞书生产接入向导" })).toBeVisible();
+  await expect(page.getByText("管理员不需要手工创建任何飞书数据表。")).toBeVisible();
+  await page.getByRole("button", { name: "稍后继续" }).click();
   await expect(page.getByRole("heading", { name: "飞书生产连接" })).toBeVisible();
-  await expect(page.getByText("应用凭据", { exact: true })).toBeVisible();
-  await expect(page.getByText("生产连接引导", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "完成配置后启用" })).toBeDisabled();
+  await expect(page.getByText("应用配置", { exact: true })).toBeVisible();
+  await expect(page.getByText("生产接入步骤", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "同步到飞书" })).toBeDisabled();
 
   await page.getByRole("link", { name: "排课求解" }).click();
   const solverResponse = page.waitForResponse((response) =>

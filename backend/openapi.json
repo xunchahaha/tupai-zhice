@@ -1829,6 +1829,168 @@
             "OAuth2PasswordBearer": []
           }
         ]
+      },
+      "delete": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Disconnect Feishu",
+        "operationId": "disconnect_feishu_api_v1_integrations_feishu_connection_delete",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/integrations/feishu/oauth/start": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Start Feishu Oauth",
+        "operationId": "start_feishu_oauth_api_v1_integrations_feishu_oauth_start_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuOAuthStartResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/integrations/feishu/oauth/callback": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Complete Feishu Oauth",
+        "operationId": "complete_feishu_oauth_api_v1_integrations_feishu_oauth_callback_get",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "title": "State"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/integrations/feishu/workspaces": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Create Feishu Workspace",
+        "operationId": "create_feishu_workspace_api_v1_integrations_feishu_workspaces_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeishuWorkspaceCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuWorkspaceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
       }
     },
     "/api/v1/integrations/feishu/sync": {
@@ -2620,25 +2782,23 @@
       },
       "FeishuConnectionResponse": {
         "properties": {
-          "mode": {
+          "status": {
             "type": "string",
             "enum": [
               "unconfigured",
-              "live"
+              "not_authorized",
+              "connected",
+              "reauthorization_required"
             ],
-            "title": "Mode"
+            "title": "Status"
           },
-          "configured": {
+          "app_configured": {
             "type": "boolean",
-            "title": "Configured"
+            "title": "App Configured"
           },
-          "connected": {
+          "authorized": {
             "type": "boolean",
-            "title": "Connected"
-          },
-          "table_mapping_configured": {
-            "type": "boolean",
-            "title": "Table Mapping Configured"
+            "title": "Authorized"
           },
           "missing_fields": {
             "items": {
@@ -2647,12 +2807,31 @@
             "type": "array",
             "title": "Missing Fields"
           },
-          "missing_resources": {
+          "granted_scopes": {
             "items": {
               "type": "string"
             },
             "type": "array",
-            "title": "Missing Resources"
+            "title": "Granted Scopes"
+          },
+          "missing_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Scopes"
+          },
+          "access_expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Expires At"
           },
           "message": {
             "type": "string",
@@ -2665,31 +2844,60 @@
           "docs_url": {
             "type": "string",
             "title": "Docs Url"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FeishuWorkspaceResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
         "required": [
-          "mode",
-          "configured",
-          "connected",
-          "table_mapping_configured",
+          "status",
+          "app_configured",
+          "authorized",
           "missing_fields",
-          "missing_resources",
+          "granted_scopes",
+          "missing_scopes",
+          "access_expires_at",
           "message",
           "console_url",
-          "docs_url"
+          "docs_url",
+          "workspace"
         ],
         "title": "FeishuConnectionResponse"
+      },
+      "FeishuOAuthStartResponse": {
+        "properties": {
+          "authorization_url": {
+            "type": "string",
+            "title": "Authorization Url"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "authorization_url",
+          "expires_at"
+        ],
+        "title": "FeishuOAuthStartResponse"
       },
       "FeishuSyncRequest": {
         "properties": {
           "direction": {
             "type": "string",
-            "enum": [
-              "import",
-              "export"
-            ],
-            "title": "Direction"
+            "const": "export",
+            "title": "Direction",
+            "default": "export"
           },
           "resource": {
             "type": "string",
@@ -2703,14 +2911,113 @@
               "schedule"
             ],
             "title": "Resource"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
           }
         },
         "type": "object",
         "required": [
-          "direction",
           "resource"
         ],
         "title": "FeishuSyncRequest"
+      },
+      "FeishuTableBindingResponse": {
+        "properties": {
+          "resource": {
+            "type": "string",
+            "title": "Resource"
+          },
+          "table_name": {
+            "type": "string",
+            "title": "Table Name"
+          },
+          "table_id": {
+            "type": "string",
+            "title": "Table Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "resource",
+          "table_name",
+          "table_id"
+        ],
+        "title": "FeishuTableBindingResponse"
+      },
+      "FeishuWorkspaceCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 2,
+            "title": "Name",
+            "default": "途排智策排课空间"
+          }
+        },
+        "type": "object",
+        "title": "FeishuWorkspaceCreate"
+      },
+      "FeishuWorkspaceResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "tables": {
+            "items": {
+              "$ref": "#/components/schemas/FeishuTableBindingResponse"
+            },
+            "type": "array",
+            "title": "Tables"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "url",
+          "status",
+          "last_error",
+          "created_at"
+        ],
+        "title": "FeishuWorkspaceResponse"
       },
       "HTTPValidationError": {
         "properties": {

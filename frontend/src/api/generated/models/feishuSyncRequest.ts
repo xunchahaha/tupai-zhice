@@ -5,10 +5,11 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
-import type { FeishuSyncRequestDirection } from './feishuSyncRequestDirection';
 import type { FeishuSyncRequestResource } from './feishuSyncRequestResource';
+import type { FeishuSyncRequestWorkspaceId } from './feishuSyncRequestWorkspaceId';
 
 export interface FeishuSyncRequest {
-  direction: FeishuSyncRequestDirection;
+  direction?: 'export';
   resource: FeishuSyncRequestResource;
+  workspace_id?: FeishuSyncRequestWorkspaceId;
 }
