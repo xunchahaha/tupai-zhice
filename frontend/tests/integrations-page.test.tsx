@@ -127,6 +127,26 @@ describe("飞书生产接入页", () => {
     });
   });
 
+  it("后端滚动升级期间收到旧版连接字段仍可正常显示", () => {
+    mocks.connection.current = {
+      mode: "live",
+      configured: true,
+      connected: true,
+      table_mapping_configured: true,
+      missing_fields: [],
+      missing_resources: [],
+      message: "飞书生产连接已验证。",
+      console_url: "https://open.feishu.cn/app/",
+      docs_url: "https://open.feishu.cn/document/",
+    };
+
+    renderPage();
+
+    expect(screen.getByText("飞书生产连接已验证。")).toBeVisible();
+    expect(screen.getByText("管理员账号已授权")).toBeVisible();
+    expect(screen.getByRole("button", { name: "自动创建排课表格" })).toBeEnabled();
+  });
+
   it("建表完成后按中文资源执行真实幂等同步", async () => {
     const tables = [
       ["teachers", "教师"],

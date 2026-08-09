@@ -69,6 +69,35 @@ FEISHU_TOKEN_ENCRYPTION_KEY=请填写服务端生成的加密密钥
 FEISHU_OAUTH_REDIRECT_URI=https://你的后端域名/api/v1/integrations/feishu/oauth/callback
 FRONTEND_URL=https://你的前端域名`;
 
+type LegacyFeishuConnection = Partial<FeishuConnectionResponse> & {
+  configured?: boolean;
+  connected?: boolean;
+  table_mapping_configured?: boolean;
+};
+
+function normalizeConnection(raw: LegacyFeishuConnection | undefined): FeishuConnectionResponse {
+  const appConfigured = raw?.app_configured ?? raw?.configured ?? false;
+  const authorized = raw?.authorized ?? raw?.connected ?? false;
+  const status: FeishuConnectionResponse["status"] =
+    raw?.status ?? (!appConfigured ? "unconfigured" : authorized ? "connected" : "not_authorized");
+
+  return {
+    status,
+    app_configured: appConfigured,
+    authorized,
+    missing_fields: Array.isArray(raw?.missing_fields) ? raw.missing_fields : [],
+    granted_scopes: Array.isArray(raw?.granted_scopes) ? raw.granted_scopes : [],
+    missing_scopes: Array.isArray(raw?.missing_scopes) ? raw.missing_scopes : [],
+    access_expires_at: raw?.access_expires_at ?? null,
+    message: raw?.message ?? "尚未返回飞书连接信息。",
+    console_url: raw?.console_url ?? "https://open.feishu.cn/app/",
+    docs_url:
+      raw?.docs_url ??
+      "https://open.feishu.cn/document/authentication-management/access-token/obtain-oauth-code",
+    workspace: raw?.workspace ?? null,
+  };
+}
+
 export function IntegrationsPage() {
   const queryClient = useQueryClient();
   const connection = useFeishuConnectionApiV1IntegrationsFeishuConnectionGet();
@@ -151,7 +180,7 @@ export function IntegrationsPage() {
   if (connection.isPending || syncs.isPending) return <LoadingState />;
   if (connection.isError || syncs.isError) return <ErrorState retry={() => void refresh()} />;
 
-  const status = connection.data;
+  const status = normalizeConnection(connection.data);
   const workspaceReady = Boolean(
     status.workspace?.status === "active" && status.workspace.tables?.length === resources.length,
   );
