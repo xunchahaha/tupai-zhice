@@ -38,6 +38,8 @@ import type {
   CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams,
   CourseSessionPayload,
   CourseSessionResponse,
+  FeishuAppConfigurationInput,
+  FeishuAppConfigurationResponse,
   FeishuConnectionResponse,
   FeishuOAuthStartResponse,
   FeishuSyncRequest,
@@ -3625,6 +3627,71 @@ export const useDisconnectFeishuApiV1IntegrationsFeishuConnectionDelete = <TErro
       > => {
 
       const mutationOptions = getDisconnectFeishuApiV1IntegrationsFeishuConnectionDeleteMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+
+/**
+ * @summary Configure Feishu App
+ */
+export const configureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost = (
+    feishuAppConfigurationInput: FeishuAppConfigurationInput,
+ signal?: AbortSignal
+) => {
+
+
+      return customInstance<FeishuAppConfigurationResponse>(
+      {url: `/api/v1/integrations/feishu/app-configuration`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: feishuAppConfigurationInput, signal
+    },
+      );
+    }
+
+
+
+export const getConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof configureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost>>, TError,{data: FeishuAppConfigurationInput}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof configureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost>>, TError,{data: FeishuAppConfigurationInput}, TContext> => {
+
+const mutationKey = ['configureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof configureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost>>, {data: FeishuAppConfigurationInput}> = (props) => {
+          const {data} = props ?? {};
+
+          return  configureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost(data,)
+        }
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPostMutationResult = NonNullable<Awaited<ReturnType<typeof configureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost>>>
+    export type ConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPostMutationBody = FeishuAppConfigurationInput
+    export type ConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Configure Feishu App
+ */
+export const useConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof configureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost>>, TError,{data: FeishuAppConfigurationInput}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof configureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost>>,
+        TError,
+        {data: FeishuAppConfigurationInput},
+        TContext
+      > => {
+
+      const mutationOptions = getConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPostMutationOptions(options);
 
       return useMutation(mutationOptions, queryClient);
     }

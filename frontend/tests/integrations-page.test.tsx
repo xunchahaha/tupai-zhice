@@ -8,6 +8,7 @@ import { IntegrationsPage } from "@/pages/integrations-page";
 const mocks = vi.hoisted(() => ({
   connection: { current: {} as Record<string, unknown> },
   createWorkspace: vi.fn(),
+  configureApp: vi.fn(),
   disconnect: vi.fn(),
   startAuthorization: vi.fn(),
   sync: vi.fn(),
@@ -18,6 +19,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/api/generated/client", () => ({
   getFeishuConnectionApiV1IntegrationsFeishuConnectionGetQueryKey: () => ["飞书连接"],
   getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey: () => ["飞书同步"],
+  useConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost: () => ({
+    mutate: mocks.configureApp,
+    isPending: false,
+  }),
   useFeishuConnectionApiV1IntegrationsFeishuConnectionGet: () => ({
     data: mocks.connection.current,
     isPending: false,
@@ -59,6 +64,14 @@ const baseConnection = {
   message: "应用配置已就绪，请授权飞书管理员账号。",
   console_url: "https://open.feishu.cn/app/",
   docs_url: "https://open.feishu.cn/document/authentication-management/access-token/obtain-oauth-code",
+  app_configuration: {
+    configured: true,
+    source: "frontend",
+    app_id: "cli_test",
+    secret_configured: true,
+    oauth_redirect_uri: "http://127.0.0.1:8002/api/v1/integrations/feishu/oauth/callback",
+    frontend_url: "http://127.0.0.1:5175",
+  },
   workspace: null,
 };
 
@@ -78,6 +91,7 @@ describe("飞书生产接入页", () => {
     window.localStorage.setItem("tupai:feishu-guide-completed", "1");
     for (const mock of [
       mocks.createWorkspace,
+      mocks.configureApp,
       mocks.disconnect,
       mocks.startAuthorization,
       mocks.sync,
@@ -89,18 +103,39 @@ describe("飞书生产接入页", () => {
     mocks.connection.current = { ...baseConnection };
   });
 
-  it("只要求部署应用配置，不再要求手工填写表格标识", () => {
+  it("可在前端一次保存应用凭据，不再要求手工填写环境变量", async () => {
     mocks.connection.current = {
       ...baseConnection,
       status: "unconfigured",
       app_configured: false,
-      missing_fields: ["FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_TOKEN_ENCRYPTION_KEY"],
-      message: "服务端尚未完成飞书应用配置。",
+      missing_fields: ["应用编号", "应用密钥"],
+      message: "请在当前页面填写飞书应用编号和应用密钥。",
+      app_configuration: {
+        ...baseConnection.app_configuration,
+        configured: false,
+        source: "none",
+        app_id: null,
+        secret_configured: false,
+        oauth_redirect_uri: "http://stale.invalid/api/v1/integrations/feishu/oauth/callback",
+      },
     };
+    const user = userEvent.setup();
     renderPage();
 
     expect(screen.getByText("需要申请的用户身份权限")).toBeVisible();
-    expect(screen.getByText("FEISHU_TOKEN_ENCRYPTION_KEY", { exact: false })).toBeVisible();
+    await user.clear(screen.getByLabelText("飞书应用编号"));
+    await user.type(screen.getByLabelText("飞书应用编号"), "cli_frontend_test");
+    await user.clear(screen.getByLabelText("飞书应用密钥"));
+    await user.type(screen.getByLabelText("飞书应用密钥"), "frontend-secret");
+    await user.click(screen.getByRole("button", { name: "保存应用配置" }));
+    expect(mocks.configureApp).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        app_id: "cli_frontend_test",
+        app_secret: "frontend-secret",
+        oauth_redirect_uri:
+          "http://127.0.0.1:8000/api/v1/integrations/feishu/oauth/callback",
+      }),
+    });
     expect(screen.queryByText("FEISHU_BITABLE_APP_TOKEN", { exact: false })).not.toBeInTheDocument();
     expect(screen.queryByText("FEISHU_TABLE_MAP", { exact: false })).not.toBeInTheDocument();
   });
@@ -113,6 +148,11 @@ describe("飞书生产接入页", () => {
       granted_scopes: ["offline_access"],
       access_expires_at: "2026-08-10T12:00:00Z",
       message: "飞书管理员账号已授权。",
+      app_configuration: {
+        ...baseConnection.app_configuration,
+        configured: true,
+        app_id: "cli_test",
+      },
     };
     const user = userEvent.setup();
     renderPage();

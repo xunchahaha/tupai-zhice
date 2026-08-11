@@ -7,11 +7,17 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from app.api import settings
 from app.db import SessionLocal
-from app.models import FeishuConnection, FeishuOAuthState, FeishuRecordBinding, User
+from app.models import (
+    FeishuAppConfiguration,
+    FeishuConnection,
+    FeishuOAuthState,
+    FeishuRecordBinding,
+    User,
+)
 from app.services.feishu import FeishuService, TokenCipher
 
 
@@ -97,6 +103,57 @@ def complete_authorization(
     assert callback.status_code in {302, 307}
     assert callback.headers["location"] == "http://frontend.test/integrations?feishu=connected"
     return state
+
+
+def test_admin_configures_app_from_frontend_and_secret_is_encrypted(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.setattr(settings, "feishu_app_id", "")
+    monkeypatch.setattr(settings, "feishu_app_secret", "")
+    monkeypatch.setattr(settings, "feishu_token_encryption_key", "")
+    key_file = tmp_path / "feishu.key"
+    monkeypatch.setattr(settings, "feishu_token_key_file", key_file)
+    configured = client.post(
+        "/api/v1/integrations/feishu/app-configuration",
+        headers=auth_headers,
+        json={
+            "app_id": "cli_frontend_test",
+            "app_secret": "frontend-secret-value",
+            "oauth_redirect_uri": ("http://testserver/api/v1/integrations/feishu/oauth/callback"),
+            "frontend_url": "http://frontend.test",
+        },
+    )
+    assert configured.status_code == 200, configured.text
+    assert configured.json() == {
+        "configured": True,
+        "source": "frontend",
+        "app_id": "cli_frontend_test",
+        "secret_configured": True,
+        "oauth_redirect_uri": "http://testserver/api/v1/integrations/feishu/oauth/callback",
+        "frontend_url": "http://frontend.test",
+    }
+    assert "frontend-secret-value" not in configured.text
+    assert key_file.exists()
+
+    started = client.post(
+        "/api/v1/integrations/feishu/oauth/start",
+        headers=auth_headers,
+    )
+    assert started.status_code == 200
+    query = parse_qs(urlparse(started.json()["authorization_url"]).query)
+    assert query["app_id"] == ["cli_frontend_test"]
+    with SessionLocal() as db:
+        stored = db.get(FeishuAppConfiguration, "default")
+        assert stored is not None
+        assert stored.app_secret_encrypted != "frontend-secret-value"
+        cipher = TokenCipher(key_file.read_text(encoding="ascii").strip())
+        assert cipher.decrypt(stored.app_secret_encrypted) == "frontend-secret-value"
+        db.execute(delete(FeishuOAuthState))
+        db.delete(stored)
+        db.commit()
 
 
 def test_oauth_pkce_encrypts_tokens_and_rejects_replay(

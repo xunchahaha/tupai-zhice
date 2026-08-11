@@ -262,6 +262,22 @@ class OverviewResponse(BaseModel):
     latest_sync_status: str | None
 
 
+class FeishuAppConfigurationInput(BaseModel):
+    app_id: str = Field(min_length=4, max_length=100)
+    app_secret: str = Field(min_length=8, max_length=200)
+    oauth_redirect_uri: str = Field(min_length=10, max_length=500)
+    frontend_url: str = Field(min_length=8, max_length=500)
+
+
+class FeishuAppConfigurationResponse(BaseModel):
+    configured: bool
+    source: Literal["environment", "frontend", "none"]
+    app_id: str | None
+    secret_configured: bool
+    oauth_redirect_uri: str
+    frontend_url: str
+
+
 class FeishuConnectionResponse(BaseModel):
     status: Literal["unconfigured", "not_authorized", "connected", "reauthorization_required"]
     app_configured: bool
@@ -273,6 +289,7 @@ class FeishuConnectionResponse(BaseModel):
     message: str
     console_url: str
     docs_url: str
+    app_configuration: FeishuAppConfigurationResponse
     workspace: FeishuWorkspaceResponse | None
 
 

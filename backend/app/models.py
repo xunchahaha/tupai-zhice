@@ -45,6 +45,17 @@ class User(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class FeishuAppConfiguration(TimestampMixin, Base):
+    __tablename__ = "feishu_app_configurations"
+
+    id: Mapped[str] = mapped_column(String(30), primary_key=True, default="default")
+    app_id: Mapped[str] = mapped_column(String(100))
+    app_secret_encrypted: Mapped[str] = mapped_column(Text)
+    oauth_redirect_uri: Mapped[str] = mapped_column(String(500))
+    frontend_url: Mapped[str] = mapped_column(String(500))
+    configured_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
 class FeishuOAuthState(TimestampMixin, Base):
     __tablename__ = "feishu_oauth_states"
 

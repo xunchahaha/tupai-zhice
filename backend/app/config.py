@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
     feishu_token_encryption_key: str = ""
+    feishu_token_key_file: Path = PROJECT_ROOT / "data" / "secrets" / "feishu.key"
     feishu_oauth_redirect_uri: str = (
         "http://127.0.0.1:8000/api/v1/integrations/feishu/oauth/callback"
     )
@@ -68,18 +69,16 @@ class Settings(BaseSettings):
         return value
 
     @property
-    def feishu_app_configured(self) -> bool:
-        return not self.feishu_missing_fields
+    def feishu_environment_configured(self) -> bool:
+        return bool(self.feishu_app_id and self.feishu_app_secret)
 
     @property
-    def feishu_missing_fields(self) -> list[str]:
+    def feishu_environment_missing_fields(self) -> list[str]:
         fields: list[str] = []
         if not self.feishu_app_id:
             fields.append("FEISHU_APP_ID")
         if not self.feishu_app_secret:
             fields.append("FEISHU_APP_SECRET")
-        if not self.feishu_token_encryption_key:
-            fields.append("FEISHU_TOKEN_ENCRYPTION_KEY")
         if not self.feishu_oauth_redirect_uri:
             fields.append("FEISHU_OAUTH_REDIRECT_URI")
         return fields

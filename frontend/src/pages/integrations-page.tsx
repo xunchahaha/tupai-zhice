@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import {
   getFeishuConnectionApiV1IntegrationsFeishuConnectionGetQueryKey,
   getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey,
+  useConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost,
   useCreateFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost,
   useDisconnectFeishuApiV1IntegrationsFeishuConnectionDelete,
   useFeishuConnectionApiV1IntegrationsFeishuConnectionGet,
@@ -28,6 +29,7 @@ import {
   useStartFeishuOauthApiV1IntegrationsFeishuOauthStartPost,
 } from "@/api/generated/client";
 import type { FeishuConnectionResponse } from "@/api/generated/models";
+import { API_BASE_URL } from "@/api/http";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -63,12 +65,6 @@ const permissionLabels: Record<string, string> = {
   "base:record:update": "更新记录",
 };
 
-const environmentTemplate = `FEISHU_APP_ID=cli_xxx
-FEISHU_APP_SECRET=请填写应用密钥
-FEISHU_TOKEN_ENCRYPTION_KEY=请填写服务端生成的加密密钥
-FEISHU_OAUTH_REDIRECT_URI=https://你的后端域名/api/v1/integrations/feishu/oauth/callback
-FRONTEND_URL=https://你的前端域名`;
-
 type LegacyFeishuConnection = Partial<FeishuConnectionResponse> & {
   configured?: boolean;
   connected?: boolean;
@@ -94,6 +90,14 @@ function normalizeConnection(raw: LegacyFeishuConnection | undefined): FeishuCon
     docs_url:
       raw?.docs_url ??
       "https://open.feishu.cn/document/authentication-management/access-token/obtain-oauth-code",
+    app_configuration: raw?.app_configuration ?? {
+      configured: appConfigured,
+      source: appConfigured ? "environment" : "none",
+      app_id: null,
+      secret_configured: appConfigured,
+      oauth_redirect_uri: `${API_BASE_URL.replace(/\/$/, "")}/api/v1/integrations/feishu/oauth/callback`,
+      frontend_url: window.location.origin,
+    },
     workspace: raw?.workspace ?? null,
   };
 }
@@ -106,7 +110,14 @@ export function IntegrationsPage() {
   const [workspaceName, setWorkspaceName] = useState("途排智策 - 排课空间");
   const [guideOpen, setGuideOpen] = useState(false);
   const [guideStep, setGuideStep] = useState(0);
-  const [copied, setCopied] = useState(false);
+  const [appId, setAppId] = useState("");
+  const [appSecret, setAppSecret] = useState("");
+  const [redirectUri, setRedirectUri] = useState(
+    `${API_BASE_URL.replace(/\/$/, "")}/api/v1/integrations/feishu/oauth/callback`,
+  );
+  const [frontendUrl, setFrontendUrl] = useState(window.location.origin);
+  const [editingApp, setEditingApp] = useState(false);
+  const [copiedCallback, setCopiedCallback] = useState(false);
 
   const refresh = async () => {
     await Promise.all([connection.refetch(), syncs.refetch()]);
@@ -120,6 +131,18 @@ export function IntegrationsPage() {
   const authorize = useStartFeishuOauthApiV1IntegrationsFeishuOauthStartPost({
     mutation: {
       onSuccess: (data) => window.location.assign(data.authorization_url),
+      onError: (error) => toast.error(errorMessage(error)),
+    },
+  });
+  const configureApp = useConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost({
+    mutation: {
+      onSuccess: async () => {
+        setAppSecret("");
+        setEditingApp(false);
+        toast.success("飞书应用配置已加密保存");
+        await refreshConnection();
+        setGuideStep(2);
+      },
       onError: (error) => toast.error(errorMessage(error)),
     },
   });
@@ -177,6 +200,21 @@ export function IntegrationsPage() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!connection.data) return;
+    const configured = normalizeConnection(connection.data).app_configuration;
+    if (configured.configured) {
+      if (configured.app_id) setAppId(configured.app_id);
+      setRedirectUri(configured.oauth_redirect_uri);
+      setFrontendUrl(configured.frontend_url);
+      return;
+    }
+    setRedirectUri(
+      `${API_BASE_URL.replace(/\/$/, "")}/api/v1/integrations/feishu/oauth/callback`,
+    );
+    setFrontendUrl(window.location.origin);
+  }, [connection.data]);
+
   if (connection.isPending || syncs.isPending) return <LoadingState />;
   if (connection.isError || syncs.isError) return <ErrorState retry={() => void refresh()} />;
 
@@ -198,11 +236,11 @@ export function IntegrationsPage() {
         ? 2
         : 3;
 
-  const copyEnvironment = async () => {
-    await navigator.clipboard.writeText(environmentTemplate);
-    setCopied(true);
-    toast.success("服务端配置模板已复制");
-    window.setTimeout(() => setCopied(false), 1600);
+  const copyCallback = async () => {
+    await navigator.clipboard.writeText(redirectUri);
+    setCopiedCallback(true);
+    toast.success("授权回调地址已复制");
+    window.setTimeout(() => setCopiedCallback(false), 1600);
   };
   const closeGuide = () => {
     setGuideOpen(false);
@@ -247,19 +285,33 @@ export function IntegrationsPage() {
           <FlowStep
             number={1}
             title="配置企业自建应用"
-            description="部署人员一次性配置应用凭据、回调地址和用户身份权限。"
+            description="管理员在这里一次填写应用编号和应用密钥，后端自动加密保存。"
             state={status.app_configured ? "completed" : "current"}
             icon={Settings2}
           >
-            {!status.app_configured ? (
-              <DeploymentConfiguration
-                status={status}
-                copied={copied}
-                copyEnvironment={() => void copyEnvironment()}
-              />
-            ) : (
-              <p className="text-sm text-emerald-700">服务端应用配置已就绪。</p>
-            )}
+            <ApplicationConfiguration
+              status={status}
+              appId={appId}
+              setAppId={setAppId}
+              appSecret={appSecret}
+              setAppSecret={setAppSecret}
+              redirectUri={redirectUri}
+              editing={editingApp}
+              setEditing={setEditingApp}
+              saving={configureApp.isPending}
+              save={() =>
+                configureApp.mutate({
+                  data: {
+                    app_id: appId.trim(),
+                    app_secret: appSecret,
+                    oauth_redirect_uri: redirectUri.trim(),
+                    frontend_url: frontendUrl.trim(),
+                  },
+                })
+              }
+              copiedCallback={copiedCallback}
+              copyCallback={() => void copyCallback()}
+            />
           </FlowStep>
 
           <FlowStep
@@ -388,8 +440,26 @@ export function IntegrationsPage() {
         authorizing={authorize.isPending}
         createWorkspace={() => createWorkspace.mutate({ data: { name: workspaceName.trim() } })}
         creatingWorkspace={createWorkspace.isPending}
-        copyEnvironment={() => void copyEnvironment()}
-        copied={copied}
+        appId={appId}
+        setAppId={setAppId}
+        appSecret={appSecret}
+        setAppSecret={setAppSecret}
+        redirectUri={redirectUri}
+        editingApp={editingApp}
+        setEditingApp={setEditingApp}
+        savingApp={configureApp.isPending}
+        saveApp={() =>
+          configureApp.mutate({
+            data: {
+              app_id: appId.trim(),
+              app_secret: appSecret,
+              oauth_redirect_uri: redirectUri.trim(),
+              frontend_url: frontendUrl.trim(),
+            },
+          })
+        }
+        copiedCallback={copiedCallback}
+        copyCallback={() => void copyCallback()}
         close={closeGuide}
         previous={() => setGuideStep((value) => Math.max(0, value - 1))}
         next={() => {
@@ -413,7 +483,7 @@ function ConnectionSummary({
   const label = ready
     ? "生产连接已就绪"
     : status.status === "unconfigured"
-      ? "等待部署配置"
+      ? "等待应用配置"
       : status.status === "not_authorized"
         ? "等待管理员授权"
         : status.status === "reauthorization_required"
@@ -483,15 +553,58 @@ function FlowStep({
   );
 }
 
-function DeploymentConfiguration({
+function ApplicationConfiguration({
   status,
-  copied,
-  copyEnvironment,
+  appId,
+  setAppId,
+  appSecret,
+  setAppSecret,
+  redirectUri,
+  editing,
+  setEditing,
+  saving,
+  save,
+  copiedCallback,
+  copyCallback,
 }: {
   status: FeishuConnectionResponse;
-  copied: boolean;
-  copyEnvironment: () => void;
+  appId: string;
+  setAppId: (value: string) => void;
+  appSecret: string;
+  setAppSecret: (value: string) => void;
+  redirectUri: string;
+  editing: boolean;
+  setEditing: (value: boolean) => void;
+  saving: boolean;
+  save: () => void;
+  copiedCallback: boolean;
+  copyCallback: () => void;
 }) {
+  const configured = status.app_configuration.configured;
+  const environmentManaged = status.app_configuration.source === "environment";
+  if (configured && !editing) {
+    return (
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-sm font-medium text-emerald-700">飞书应用已配置</span>
+          <Badge tone="green">应用密钥已加密</Badge>
+          <span className="font-mono text-xs text-zinc-500">
+            {status.app_configuration.app_id}
+          </span>
+        </div>
+        <div className="text-xs leading-5 text-zinc-500">
+          授权回调地址：{status.app_configuration.oauth_redirect_uri}
+        </div>
+        {environmentManaged ? (
+          <p className="text-xs text-zinc-500">当前配置由部署环境统一管理。</p>
+        ) : (
+          <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+            <Settings2 className="size-3.5" />更新应用配置
+          </Button>
+        )}
+      </div>
+    );
+  }
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2">
@@ -504,25 +617,74 @@ function DeploymentConfiguration({
       </div>
       <ol className="grid gap-2 text-xs leading-5 text-zinc-700 md:grid-cols-3">
         <li className="border border-zinc-200 p-3"><strong>一、创建应用</strong><p className="mt-1 text-zinc-500">创建企业自建应用并记录应用编号与应用密钥。</p></li>
-        <li className="border border-zinc-200 p-3"><strong>二、设置回调</strong><p className="mt-1 text-zinc-500">在安全设置中添加服务端授权回调地址。</p></li>
-        <li className="border border-zinc-200 p-3"><strong>三、申请并发布</strong><p className="mt-1 text-zinc-500">申请下列用户身份权限，发布应用版本并覆盖管理员。</p></li>
+        <li className="border border-zinc-200 p-3"><strong>二、设置回调</strong><p className="mt-1 text-zinc-500">复制下方回调地址，添加到飞书应用安全设置。</p></li>
+        <li className="border border-zinc-200 p-3"><strong>三、申请并发布</strong><p className="mt-1 text-zinc-500">申请下列用户身份权限，发布版本并覆盖管理员。</p></li>
       </ol>
-      <PermissionList />
-      <div className="rounded-md bg-zinc-950 p-4 text-xs text-zinc-100">
-        <div className="mb-2 flex items-center justify-between gap-3">
-          <span className="text-zinc-400">服务端配置文件</span>
-          <Button size="sm" variant="secondary" onClick={copyEnvironment}>
-            <Clipboard className="size-3.5" />{copied ? "已复制" : "复制配置"}
+      <p className="text-sm text-zinc-700">
+        在途排智策只需填写下面两项。回调地址由系统生成，不需要修改后端配置文件。
+      </p>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="text-sm text-zinc-700">
+          应用编号
+          <input
+            aria-label="飞书应用编号"
+            value={appId}
+            onChange={(event) => setAppId(event.target.value)}
+            placeholder="cli_xxxxxxxxxx"
+            autoComplete="off"
+            className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500"
+          />
+        </label>
+        <label className="text-sm text-zinc-700">
+          应用密钥
+          <input
+            aria-label="飞书应用密钥"
+            type="password"
+            value={appSecret}
+            onChange={(event) => setAppSecret(event.target.value)}
+            placeholder={configured ? "重新输入应用密钥" : "从飞书开放平台复制"}
+            autoComplete="new-password"
+            className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-blue-500"
+          />
+        </label>
+      </div>
+      <label className="block text-sm text-zinc-700">
+        授权回调地址
+        <div className="mt-1.5 flex gap-2">
+          <input
+            aria-label="飞书授权回调地址"
+            value={redirectUri}
+            readOnly
+            className="h-9 min-w-0 flex-1 rounded-md border border-zinc-300 bg-zinc-50 px-3 font-mono text-xs text-zinc-600"
+          />
+          <Button size="sm" variant="outline" onClick={copyCallback}>
+            <Clipboard className="size-3.5" />{copiedCallback ? "已复制" : "复制"}
           </Button>
         </div>
-        <pre className="overflow-x-auto whitespace-pre-wrap leading-5">{environmentTemplate}</pre>
+      </label>
+      <PermissionList />
+      <div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-4">
+        <Button
+          onClick={save}
+          disabled={
+            saving ||
+            !appId.trim().startsWith("cli_") ||
+            appSecret.length < 8 ||
+            !redirectUri.trim()
+          }
+        >
+          <ShieldCheck className="size-4" />
+          {saving ? "正在加密保存" : "保存应用配置"}
+        </Button>
+        {configured ? (
+          <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+            取消
+          </Button>
+        ) : null}
+        <span className="text-xs text-zinc-500">
+          应用密钥与用户令牌由后端自动加密，保存后页面不再显示明文。
+        </span>
       </div>
-      <p className="text-xs text-zinc-500">
-        加密密钥生成命令：<code>uv run python -c &quot;from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())&quot;</code>
-      </p>
-      {status.missing_fields.length > 0 ? (
-        <p className="text-xs text-amber-700">保存配置并重启后端，然后点击页面右上角“刷新状态”。</p>
-      ) : null}
     </div>
   );
 }
@@ -608,8 +770,17 @@ function OnboardingDialog({
   authorizing,
   createWorkspace,
   creatingWorkspace,
-  copyEnvironment,
-  copied,
+  appId,
+  setAppId,
+  appSecret,
+  setAppSecret,
+  redirectUri,
+  editingApp,
+  setEditingApp,
+  savingApp,
+  saveApp,
+  copiedCallback,
+  copyCallback,
   close,
   previous,
   next,
@@ -624,8 +795,17 @@ function OnboardingDialog({
   authorizing: boolean;
   createWorkspace: () => void;
   creatingWorkspace: boolean;
-  copyEnvironment: () => void;
-  copied: boolean;
+  appId: string;
+  setAppId: (value: string) => void;
+  appSecret: string;
+  setAppSecret: (value: string) => void;
+  redirectUri: string;
+  editingApp: boolean;
+  setEditingApp: (value: boolean) => void;
+  savingApp: boolean;
+  saveApp: () => void;
+  copiedCallback: boolean;
+  copyCallback: () => void;
   close: () => void;
   previous: () => void;
   next: () => void;
@@ -634,7 +814,7 @@ function OnboardingDialog({
   const steps = useMemo(
     () => [
       { title: "飞书生产接入向导", description: "完成应用配置、管理员授权、自动建表和首次同步。" },
-      { title: "配置企业自建应用", description: "这一步由部署人员完成一次，管理员无需接触应用密钥。" },
+      { title: "配置企业自建应用", description: "管理员在这里一次填写应用编号和应用密钥。" },
       { title: "授权飞书管理员账号", description: "多维表格将创建在授权管理员的飞书云空间。" },
       { title: "自动创建排课多维表格", description: "途排智策会直接创建接入说明和 7 张中文业务表。" },
       { title: "开始发布和同步", description: "发布课表后按业务标识同步，重复同步只更新原记录。" },
@@ -654,7 +834,22 @@ function OnboardingDialog({
         </div>
         <div className="min-h-64 px-6 py-5">
           {step === 0 ? <GuideWelcome /> : null}
-          {step === 1 ? <DeploymentConfiguration status={status} copied={copied} copyEnvironment={copyEnvironment} /> : null}
+          {step === 1 ? (
+            <ApplicationConfiguration
+              status={status}
+              appId={appId}
+              setAppId={setAppId}
+              appSecret={appSecret}
+              setAppSecret={setAppSecret}
+              redirectUri={redirectUri}
+              editing={editingApp}
+              setEditing={setEditingApp}
+              saving={savingApp}
+              save={saveApp}
+              copiedCallback={copiedCallback}
+              copyCallback={copyCallback}
+            />
+          ) : null}
           {step === 2 ? (
             <GuideAuthorize status={status} authorize={authorize} authorizing={authorizing} />
           ) : null}
@@ -686,10 +881,10 @@ function GuideWelcome() {
     <div className="space-y-5">
       <div className="bg-blue-50 p-5 text-blue-950">
         <div className="font-semibold">管理员不需要手工创建任何飞书数据表。</div>
-        <p className="mt-2 text-sm leading-6">部署人员配置应用后，管理员在途排智策授权账号并点击创建，系统会完成建表、字段配置和绑定保存。</p>
+        <p className="mt-2 text-sm leading-6">管理员先在途排智策填写一次飞书应用编号和应用密钥，再授权账号并点击创建，系统会完成建表、字段配置和绑定保存。</p>
       </div>
       <div className="grid gap-3 sm:grid-cols-3">
-        <GuideFact icon={Settings2} title="部署人员" text="配置应用与回调" />
+        <GuideFact icon={Settings2} title="应用配置" text="前端一次填写凭据" />
         <GuideFact icon={ShieldCheck} title="教务管理员" text="授权飞书账号" />
         <GuideFact icon={Database} title="途排智策" text="自动建表并同步" />
       </div>

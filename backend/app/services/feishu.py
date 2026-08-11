@@ -3,11 +3,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import secrets
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -16,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..config import FEISHU_REQUIRED_SCOPES, FEISHU_RESOURCES, Settings
 from ..models import (
+    FeishuAppConfiguration,
     FeishuConnection,
     FeishuOAuthState,
     FeishuRecordBinding,
@@ -138,6 +141,15 @@ class FeishuServiceError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class FeishuAppCredentials:
+    app_id: str
+    app_secret: str
+    oauth_redirect_uri: str
+    frontend_url: str
+    source: str
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -164,9 +176,7 @@ class TokenCipher:
         try:
             self.fernet = Fernet(key.encode("ascii"))
         except (ValueError, UnicodeEncodeError) as exc:
-            raise FeishuServiceError(
-                "FEISHU_TOKEN_ENCRYPTION_KEY 必须是 Fernet 32 字节 URL-safe Base64 密钥"
-            ) from exc
+            raise FeishuServiceError("飞书加密主密钥格式不正确") from exc
 
     def encrypt(self, value: str) -> str:
         return self.fernet.encrypt(value.encode("utf-8")).decode("ascii")
@@ -183,14 +193,144 @@ class FeishuService:
         self.settings = settings
         self.db = db
 
-    def _require_app_configuration(self) -> None:
-        if self.settings.feishu_missing_fields:
-            missing = "、".join(self.settings.feishu_missing_fields)
-            raise FeishuServiceError(f"请先配置飞书服务端参数：{missing}")
-
     def _cipher(self) -> TokenCipher:
-        self._require_app_configuration()
-        return TokenCipher(self.settings.feishu_token_encryption_key)
+        key = self.settings.feishu_token_encryption_key.strip()
+        if not key:
+            path = self.settings.feishu_token_key_file
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                key = path.read_text(encoding="ascii").strip()
+            else:
+                generated = Fernet.generate_key()
+                try:
+                    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except FileExistsError:
+                    key = path.read_text(encoding="ascii").strip()
+                else:
+                    try:
+                        os.write(descriptor, generated + b"\n")
+                    finally:
+                        os.close(descriptor)
+                    key = generated.decode("ascii")
+        return TokenCipher(key)
+
+    def _environment_configuration(self) -> FeishuAppCredentials | None:
+        if not self.settings.feishu_environment_configured:
+            return None
+        return FeishuAppCredentials(
+            app_id=self.settings.feishu_app_id,
+            app_secret=self.settings.feishu_app_secret,
+            oauth_redirect_uri=self.settings.feishu_oauth_redirect_uri,
+            frontend_url=self.settings.frontend_url,
+            source="environment",
+        )
+
+    def _stored_configuration(self) -> FeishuAppConfiguration | None:
+        return self.db.get(FeishuAppConfiguration, "default")
+
+    def _app_configuration(self) -> FeishuAppCredentials:
+        environment = self._environment_configuration()
+        if environment is not None:
+            return environment
+        stored = self._stored_configuration()
+        if stored is None:
+            raise FeishuServiceError("请先在当前页面填写飞书应用编号和应用密钥")
+        return FeishuAppCredentials(
+            app_id=stored.app_id,
+            app_secret=self._cipher().decrypt(stored.app_secret_encrypted),
+            oauth_redirect_uri=stored.oauth_redirect_uri,
+            frontend_url=stored.frontend_url,
+            source="frontend",
+        )
+
+    def configuration_view(self) -> dict[str, Any]:
+        environment = self._environment_configuration()
+        if environment is not None:
+            return {
+                "configured": True,
+                "source": "environment",
+                "app_id": environment.app_id,
+                "secret_configured": True,
+                "oauth_redirect_uri": environment.oauth_redirect_uri,
+                "frontend_url": environment.frontend_url,
+            }
+        stored = self._stored_configuration()
+        if stored is not None:
+            return {
+                "configured": True,
+                "source": "frontend",
+                "app_id": stored.app_id,
+                "secret_configured": True,
+                "oauth_redirect_uri": stored.oauth_redirect_uri,
+                "frontend_url": stored.frontend_url,
+            }
+        return {
+            "configured": False,
+            "source": "none",
+            "app_id": None,
+            "secret_configured": False,
+            "oauth_redirect_uri": self.settings.feishu_oauth_redirect_uri,
+            "frontend_url": self.settings.frontend_url,
+        }
+
+    @staticmethod
+    def _validate_url(value: str, label: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise FeishuServiceError(f"{label}必须是完整的 HTTP 或 HTTPS 地址")
+        return normalized
+
+    def save_app_configuration(
+        self,
+        user_id: str,
+        app_id: str,
+        app_secret: str,
+        oauth_redirect_uri: str,
+        frontend_url: str,
+    ) -> FeishuAppConfiguration:
+        if self._environment_configuration() is not None:
+            raise FeishuServiceError("当前飞书应用由部署环境统一管理")
+        normalized_app_id = app_id.strip()
+        if not normalized_app_id.startswith("cli_"):
+            raise FeishuServiceError("飞书应用编号应以 cli_ 开头")
+        normalized_secret = app_secret.strip()
+        if len(normalized_secret) < 8:
+            raise FeishuServiceError("飞书应用密钥长度不正确")
+        redirect_uri = self._validate_url(oauth_redirect_uri, "授权回调地址")
+        if not redirect_uri.endswith("/api/v1/integrations/feishu/oauth/callback"):
+            raise FeishuServiceError("授权回调地址必须指向途排智策飞书回调接口")
+        normalized_frontend_url = self._validate_url(frontend_url, "前端地址")
+
+        stored = self._stored_configuration()
+        if stored is not None and stored.app_id != normalized_app_id:
+            connected = self.db.scalar(select(FeishuConnection.id).limit(1))
+            if connected is not None:
+                raise FeishuServiceError("更换飞书应用前请先解除现有飞书账号连接")
+        if stored is None:
+            stored = FeishuAppConfiguration(
+                id="default",
+                app_id=normalized_app_id,
+                app_secret_encrypted="",
+                oauth_redirect_uri=redirect_uri,
+                frontend_url=normalized_frontend_url,
+                configured_by=user_id,
+            )
+            self.db.add(stored)
+        stored.app_id = normalized_app_id
+        stored.app_secret_encrypted = self._cipher().encrypt(normalized_secret)
+        stored.oauth_redirect_uri = redirect_uri
+        stored.frontend_url = normalized_frontend_url
+        stored.configured_by = user_id
+        self.db.commit()
+        self.db.refresh(stored)
+        return stored
+
+    def frontend_url(self) -> str:
+        try:
+            return self._app_configuration().frontend_url.rstrip("/")
+        except FeishuServiceError:
+            return self.settings.frontend_url.rstrip("/")
 
     @staticmethod
     def _state_hash(state: str) -> str:
@@ -232,7 +372,7 @@ class FeishuService:
         return data, self._request_log_id(response)
 
     def create_oauth_start(self, user_id: str) -> dict[str, Any]:
-        self._require_app_configuration()
+        app = self._app_configuration()
         cipher = self._cipher()
         state = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(64)
@@ -253,8 +393,8 @@ class FeishuService:
         self.db.commit()
         query = urlencode(
             {
-                "app_id": self.settings.feishu_app_id,
-                "redirect_uri": self.settings.feishu_oauth_redirect_uri,
+                "app_id": app.app_id,
+                "redirect_uri": app.oauth_redirect_uri,
                 "scope": " ".join(FEISHU_REQUIRED_SCOPES),
                 "state": state,
                 "code_challenge": challenge,
@@ -264,7 +404,7 @@ class FeishuService:
         return {"authorization_url": f"{AUTHORIZATION_URL}?{query}", "expires_at": expires_at}
 
     def complete_oauth(self, code: str, state: str) -> FeishuConnection:
-        self._require_app_configuration()
+        app = self._app_configuration()
         oauth_state = self.db.scalar(
             select(FeishuOAuthState).where(FeishuOAuthState.state_hash == self._state_hash(state))
         )
@@ -282,10 +422,10 @@ class FeishuService:
             TOKEN_URL,
             json_body={
                 "grant_type": "authorization_code",
-                "client_id": self.settings.feishu_app_id,
-                "client_secret": self.settings.feishu_app_secret,
+                "client_id": app.app_id,
+                "client_secret": app.app_secret,
                 "code": code,
-                "redirect_uri": self.settings.feishu_oauth_redirect_uri,
+                "redirect_uri": app.oauth_redirect_uri,
                 "code_verifier": verifier,
             },
             timeout=15,
@@ -335,7 +475,7 @@ class FeishuService:
         return connection
 
     def access_token(self, user_id: str) -> tuple[FeishuConnection, str]:
-        self._require_app_configuration()
+        app = self._app_configuration()
         with _refresh_lock(user_id):
             connection = self._connection(user_id)
             now = _utcnow()
@@ -360,8 +500,8 @@ class FeishuService:
                     TOKEN_URL,
                     json_body={
                         "grant_type": "refresh_token",
-                        "client_id": self.settings.feishu_app_id,
-                        "client_secret": self.settings.feishu_app_secret,
+                        "client_id": app.app_id,
+                        "client_secret": app.app_secret,
                         "refresh_token": refresh_token,
                     },
                     timeout=15,
@@ -419,7 +559,8 @@ class FeishuService:
         }
 
     def connection_view(self, user_id: str) -> dict[str, Any]:
-        missing_fields = self.settings.feishu_missing_fields
+        app_configuration = self.configuration_view()
+        missing_fields = [] if app_configuration["configured"] else ["应用编号", "应用密钥"]
         connection = self.db.scalar(
             select(FeishuConnection).where(FeishuConnection.user_id == user_id)
         )
@@ -432,9 +573,9 @@ class FeishuService:
             )
         granted = connection.scopes if connection else []
         missing_scopes = sorted(set(FEISHU_REQUIRED_SCOPES) - set(granted))
-        if missing_fields:
+        if not app_configuration["configured"]:
             status = "unconfigured"
-            message = "服务端尚未完成飞书应用配置。"
+            message = "请在当前页面填写飞书应用编号和应用密钥。"
         elif connection is None:
             status = "not_authorized"
             message = "应用配置已就绪，请授权飞书管理员账号。"
@@ -448,7 +589,7 @@ class FeishuService:
                 message += f" 仍缺少 {len(missing_scopes)} 项权限。"
         return {
             "status": status,
-            "app_configured": not missing_fields,
+            "app_configured": bool(app_configuration["configured"]),
             "authorized": bool(connection and connection.status == "active"),
             "missing_fields": missing_fields,
             "granted_scopes": granted,
@@ -460,6 +601,7 @@ class FeishuService:
                 "https://open.feishu.cn/document/authentication-management/"
                 "access-token/obtain-oauth-code"
             ),
+            "app_configuration": app_configuration,
             "workspace": self.workspace_view(workspace) if workspace else None,
         }
 

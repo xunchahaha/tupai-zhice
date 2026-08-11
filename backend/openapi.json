@@ -1848,6 +1848,52 @@
         ]
       }
     },
+    "/api/v1/integrations/feishu/app-configuration": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Configure Feishu App",
+        "operationId": "configure_feishu_app_api_v1_integrations_feishu_app_configuration_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeishuAppConfigurationInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuAppConfigurationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/integrations/feishu/oauth/start": {
       "post": {
         "tags": [
@@ -2780,6 +2826,92 @@
         ],
         "title": "CourseSessionResponse"
       },
+      "FeishuAppConfigurationInput": {
+        "properties": {
+          "app_id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 4,
+            "title": "App Id"
+          },
+          "app_secret": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "App Secret"
+          },
+          "oauth_redirect_uri": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 10,
+            "title": "Oauth Redirect Uri"
+          },
+          "frontend_url": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 8,
+            "title": "Frontend Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "app_id",
+          "app_secret",
+          "oauth_redirect_uri",
+          "frontend_url"
+        ],
+        "title": "FeishuAppConfigurationInput"
+      },
+      "FeishuAppConfigurationResponse": {
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "title": "Configured"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "environment",
+              "frontend",
+              "none"
+            ],
+            "title": "Source"
+          },
+          "app_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "App Id"
+          },
+          "secret_configured": {
+            "type": "boolean",
+            "title": "Secret Configured"
+          },
+          "oauth_redirect_uri": {
+            "type": "string",
+            "title": "Oauth Redirect Uri"
+          },
+          "frontend_url": {
+            "type": "string",
+            "title": "Frontend Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "configured",
+          "source",
+          "app_id",
+          "secret_configured",
+          "oauth_redirect_uri",
+          "frontend_url"
+        ],
+        "title": "FeishuAppConfigurationResponse"
+      },
       "FeishuConnectionResponse": {
         "properties": {
           "status": {
@@ -2845,6 +2977,9 @@
             "type": "string",
             "title": "Docs Url"
           },
+          "app_configuration": {
+            "$ref": "#/components/schemas/FeishuAppConfigurationResponse"
+          },
           "workspace": {
             "anyOf": [
               {
@@ -2868,6 +3003,7 @@
           "message",
           "console_url",
           "docs_url",
+          "app_configuration",
           "workspace"
         ],
         "title": "FeishuConnectionResponse"

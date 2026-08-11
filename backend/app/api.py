@@ -53,6 +53,8 @@ from .schemas import (
     ClassGroupResponse,
     CourseSessionPayload,
     CourseSessionResponse,
+    FeishuAppConfigurationInput,
+    FeishuAppConfigurationResponse,
     FeishuConnectionResponse,
     FeishuOAuthStartResponse,
     FeishuSyncRequest,
@@ -856,6 +858,37 @@ def feishu_connection(db: Db, user: CurrentUser) -> dict[str, Any]:
 
 
 @router.post(
+    "/integrations/feishu/app-configuration",
+    response_model=FeishuAppConfigurationResponse,
+    tags=["integrations"],
+)
+def configure_feishu_app(
+    request: FeishuAppConfigurationInput, db: Db, user: Admin
+) -> dict[str, Any]:
+    service = FeishuService(settings, db)
+    try:
+        service.save_app_configuration(
+            user.id,
+            request.app_id,
+            request.app_secret,
+            request.oauth_redirect_uri,
+            request.frontend_url,
+        )
+    except FeishuServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    audit(
+        db,
+        user,
+        "configure",
+        "feishu_app",
+        None,
+        {"app_id": request.app_id, "oauth_redirect_uri": request.oauth_redirect_uri},
+    )
+    db.commit()
+    return service.configuration_view()
+
+
+@router.post(
     "/integrations/feishu/oauth/start",
     response_model=FeishuOAuthStartResponse,
     tags=["integrations"],
@@ -878,12 +911,13 @@ def complete_feishu_oauth(
     code: str | None = Query(default=None),
     error: str | None = Query(default=None),
 ) -> RedirectResponse:
-    frontend = settings.frontend_url.rstrip("/")
+    service = FeishuService(settings, db)
+    frontend = service.frontend_url()
     if error or not code:
         query = urlencode({"feishu": "cancelled"})
         return RedirectResponse(f"{frontend}/integrations?{query}")
     try:
-        connection = FeishuService(settings, db).complete_oauth(code, state)
+        connection = service.complete_oauth(code, state)
     except (FeishuServiceError, httpx.HTTPError):
         query = urlencode({"feishu": "error"})
         return RedirectResponse(f"{frontend}/integrations?{query}")

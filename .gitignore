@@ -12,5 +12,6 @@ frontend/test-results/
 frontend/*runtime*.log
 frontend/vite-*.log
 data/*.db
+data/secrets/
 data/exports/*.xlsx
 !data/imports/sample.xlsx

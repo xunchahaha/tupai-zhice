@@ -7,6 +7,7 @@
  */
 import type { FeishuConnectionResponseStatus } from './feishuConnectionResponseStatus';
 import type { FeishuConnectionResponseAccessExpiresAt } from './feishuConnectionResponseAccessExpiresAt';
+import type { FeishuAppConfigurationResponse } from './feishuAppConfigurationResponse';
 import type { FeishuConnectionResponseWorkspace } from './feishuConnectionResponseWorkspace';
 
 export interface FeishuConnectionResponse {
@@ -20,5 +21,6 @@ export interface FeishuConnectionResponse {
   message: string;
   console_url: string;
   docs_url: string;
+  app_configuration: FeishuAppConfigurationResponse;
   workspace: FeishuConnectionResponseWorkspace;
 }
