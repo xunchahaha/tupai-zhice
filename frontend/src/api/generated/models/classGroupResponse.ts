@@ -12,10 +12,6 @@ export interface ClassGroupResponse {
   name: string;
   grade?: string;
   subject?: string;
-  /** */
-  student_count: number;
-  priority?: string;
-  required_devices?: string[];
   teacher_business_id: string;
   id: string;
 }

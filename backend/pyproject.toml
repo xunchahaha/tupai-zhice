@@ -29,7 +29,7 @@ dev = [
 
 [project.scripts]
 tupai-api = "app.main:run"
-tupai-seed = "app.cli:main"
+tupai-zhengzhou = "app.services.converter_zhengzhou:main"
 
 [build-system]
 requires = ["hatchling"]

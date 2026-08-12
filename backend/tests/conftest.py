@@ -12,12 +12,16 @@ if TEST_DB.exists():
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB.as_posix()}"
 os.environ["JWT_SECRET"] = "test-secret-with-at-least-32-characters"
 
+from app.db import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
+from app.services.seed import seed_demo_data  # noqa: E402
 
 
 @pytest.fixture(scope="session")
 def client() -> TestClient:
     with TestClient(app) as test_client:
+        with SessionLocal() as db:
+            seed_demo_data(db)
         yield test_client
 
 

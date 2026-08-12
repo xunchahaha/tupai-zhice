@@ -1,31 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
-from openpyxl import load_workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Campus, ClassGroup, CourseSession, Room, Rule, Teacher, TimeSlot, User
-from ..schemas import ImportResult
+from ..models import Campus, ClassGroup, CourseSession, Room, Teacher, TimeSlot, User
 from ..security import hash_password
-
-
-def split_values(value: Any) -> list[str]:
-    if value is None or str(value).strip() == "":
-        return []
-    return [item.strip() for item in str(value).split("|") if item.strip()]
-
-
-def as_bool(value: Any) -> bool:
-    return str(value).strip().lower() in {"是", "true", "1", "yes"}
-
-
-def as_int(value: Any, default: int = 0) -> int:
-    if value is None or str(value).strip() == "":
-        return default
-    return int(float(str(value)))
 
 
 def bootstrap_admin(db: Session, username: str, password: str) -> User:
@@ -39,158 +18,110 @@ def bootstrap_admin(db: Session, username: str, password: str) -> User:
     return user
 
 
-def _upsert(db: Session, model: type[Any], match: dict[str, Any], values: dict[str, Any]) -> Any:
-    statement = select(model)
-    for key, value in match.items():
-        statement = statement.where(getattr(model, key) == value)
-    instance = db.scalar(statement)
-    if instance is None:
-        instance = model(**match, **values)
-        db.add(instance)
-    else:
-        for key, value in values.items():
-            setattr(instance, key, value)
-    return instance
+def seed_demo_data(db: Session) -> None:
+    """创建示范主数据，仅用于自动化测试，不参与正式运行。"""
+    campus = Campus(business_id="CAMPUS-DEMO", name="示范校区")
+    db.add(campus)
+    db.flush()
 
-
-def import_sample_workbook(db: Session, workbook_path: Path) -> ImportResult:
-    workbook = load_workbook(workbook_path, data_only=False, read_only=True)
-    campus = db.scalar(select(Campus).where(Campus.business_id == "CAMPUS-DEMO"))
-    if campus is None:
-        campus = Campus(business_id="CAMPUS-DEMO", name="示范校区")
-        db.add(campus)
-        db.flush()
-
-    counts = {
-        "teachers": 0,
-        "class_groups": 0,
-        "rooms": 0,
-        "time_slots": 0,
-        "course_sessions": 0,
-        "rules": 0,
+    teacher_subjects = {
+        "T01": ("教师甲", "数学"),
+        "T02": ("教师乙", "英语"),
+        "T03": ("教师丙", "物理"),
+        "T04": ("教师丁", "化学"),
+        "T05": ("教师戊", "语文"),
+        "T06": ("教师己", "编程"),
     }
-
-    for row in workbook["教师"].iter_rows(min_row=5, values_only=True):
-        if not row[0]:
-            continue
-        _upsert(
-            db,
-            Teacher,
-            {"campus_id": campus.id, "business_id": str(row[0])},
-            {
-                "name": str(row[1]),
-                "subject": str(row[2] or ""),
-                "max_hours": as_int(row[3], 8),
-                "unavailable_slot_ids": split_values(row[4]),
-                "preferred_slot_ids": split_values(row[5]),
-                "data_level": str(row[6] or "内部"),
-            },
+    for business_id, (name, subject) in teacher_subjects.items():
+        db.add(
+            Teacher(
+                campus_id=campus.id,
+                business_id=business_id,
+                name=name,
+                subject=subject,
+            )
         )
-        counts["teachers"] += 1
 
-    for row in workbook["班级"].iter_rows(min_row=5, values_only=True):
-        if not row[0]:
-            continue
-        _upsert(
-            db,
-            ClassGroup,
-            {"campus_id": campus.id, "business_id": str(row[0])},
-            {
-                "name": str(row[1]),
-                "grade": str(row[2] or ""),
-                "subject": str(row[3] or ""),
-                "student_count": as_int(row[4]),
-                "priority": str(row[5] or "常规"),
-                "required_devices": split_values(row[6]),
-                "teacher_business_id": str(row[7]),
-            },
+    class_rows = [
+        ("B01", "初一数学A", "初一", "数学", "T01"),
+        ("B02", "初一英语A", "初一", "英语", "T02"),
+        ("B03", "初二物理A", "初二", "物理", "T03"),
+        ("B04", "初三化学A", "初三", "化学", "T04"),
+        ("B05", "初三语文A", "初三", "语文", "T05"),
+        ("B06", "高中编程A", "高一", "编程", "T06"),
+        ("B07", "初一数学B", "初一", "数学", "T01"),
+        ("B08", "初一英语B", "初一", "英语", "T02"),
+        ("B09", "初二物理B", "初二", "物理", "T03"),
+        ("B10", "初三化学B", "初三", "化学", "T04"),
+        ("B11", "初三语文B", "初三", "语文", "T05"),
+        ("B12", "高中编程B", "高一", "编程", "T06"),
+    ]
+    for business_id, name, grade, subject, teacher_business_id in class_rows:
+        db.add(
+            ClassGroup(
+                campus_id=campus.id,
+                business_id=business_id,
+                name=name,
+                grade=grade,
+                subject=subject,
+                teacher_business_id=teacher_business_id,
+            )
         )
-        counts["class_groups"] += 1
 
-    for row in workbook["教室"].iter_rows(min_row=5, values_only=True):
-        if not row[0]:
-            continue
-        _upsert(
-            db,
-            Room,
-            {"campus_id": campus.id, "business_id": str(row[0])},
-            {
-                "name": str(row[1]),
-                "capacity": as_int(row[2]),
-                "devices": split_values(row[3]),
-                "available_slot_ids": split_values(row[4]),
-                "is_active": True,
-            },
-        )
-        counts["rooms"] += 1
+    room_names = [
+        ("R01", "小班教室1"),
+        ("R02", "小班教室2"),
+        ("R03", "机房"),
+        ("R04", "大班教室1"),
+        ("R05", "大班教室2"),
+        ("R06", "大班综合教室"),
+    ]
+    for business_id, name in room_names:
+        db.add(Room(campus_id=campus.id, business_id=business_id, name=name, is_active=True))
 
-    for sequence, row in enumerate(
-        workbook["时段"].iter_rows(min_row=5, values_only=True), start=1
+    slot_rows = [
+        ("S01", "周一", "18:30", "20:00", "晚间1"),
+        ("S02", "周一", "20:10", "21:40", "晚间2"),
+        ("S03", "周二", "18:30", "20:00", "晚间1"),
+        ("S04", "周二", "20:10", "21:40", "晚间2"),
+        ("S05", "周三", "18:30", "20:00", "晚间1"),
+        ("S06", "周三", "20:10", "21:40", "晚间2"),
+        ("S07", "周四", "18:30", "20:00", "晚间1"),
+        ("S08", "周四", "20:10", "21:40", "晚间2"),
+        ("S09", "周五", "18:30", "20:00", "晚间1"),
+        ("S10", "周五", "20:10", "21:40", "晚间2"),
+    ]
+    for sequence, (business_id, weekday, start_time, end_time, kind) in enumerate(
+        slot_rows, start=1
     ):
-        if not row[0]:
-            continue
-        _upsert(
-            db,
-            TimeSlot,
-            {"campus_id": campus.id, "business_id": str(row[0])},
-            {
-                "weekday": str(row[1]),
-                "start_time": str(row[2]),
-                "end_time": str(row[3]),
-                "kind": str(row[4] or ""),
-                "sequence": sequence,
-                "is_open": as_bool(row[5]),
-            },
+        db.add(
+            TimeSlot(
+                campus_id=campus.id,
+                business_id=business_id,
+                weekday=weekday,
+                start_time=start_time,
+                end_time=end_time,
+                kind=kind,
+                sequence=sequence,
+            )
         )
-        counts["time_slots"] += 1
 
-    for row in workbook["课程需求"].iter_rows(min_row=5, values_only=True):
-        if not row[0]:
-            continue
-        _upsert(
-            db,
-            CourseSession,
-            {"campus_id": campus.id, "business_id": str(row[0])},
-            {
-                "class_business_id": str(row[1]),
-                "teacher_business_id": str(row[2]),
-                "subject": str(row[3] or ""),
-                "student_count": as_int(row[4]),
-                "required_devices": split_values(row[5]),
-                "duration_minutes": as_int(row[6], 90),
-                "suggested_slot_id": str(row[7]) if row[7] else None,
-                "is_locked": False,
-            },
-        )
-        counts["course_sessions"] += 1
-
-    for row in workbook["规则样本"].iter_rows(min_row=5, values_only=True):
-        if not row[0]:
-            continue
-        hardness = "hard" if str(row[4]) == "硬" else "soft"
-        _upsert(
-            db,
-            Rule,
-            {"business_id": str(row[0])},
-            {
-                "source_text": str(row[1]),
-                "actor_type": str(row[2] or "system"),
-                "actor_ids": [],
-                "constraint_type": str(row[3] or "declared_constraint"),
-                "scope": {},
-                "hardness": hardness,
-                "weight": None if hardness == "hard" else as_int(row[6], 1),
-                "structured_expression": {"expression": str(row[5] or "")},
-                "source_doc": "数据分析样本/规则样本",
-                "confidence": 1.0,
-                "status": "active" if str(row[7]) == "已确认" else "awaiting_confirmation",
-            },
-        )
-        counts["rules"] += 1
-
+    for business_id, _name, _grade, subject, teacher_business_id in class_rows:
+        for session_index in (1, 2):
+            db.add(
+                CourseSession(
+                    campus_id=campus.id,
+                    business_id=f"{business_id}-{session_index}",
+                    class_business_id=business_id,
+                    teacher_business_id=teacher_business_id,
+                    subject=subject,
+                    lesson_name=f"{subject}·示范课节{session_index}",
+                    schedule_source="示范课表",
+                    stage="基础阶段",
+                    planned_sessions=2,
+                    planned_hours=6,
+                    session_no=session_index,
+                    duration_minutes=90,
+                )
+            )
     db.commit()
-    return ImportResult(
-        source=str(workbook_path),
-        campuses=1,
-        **counts,
-    )

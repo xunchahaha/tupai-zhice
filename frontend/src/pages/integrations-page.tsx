@@ -54,14 +54,14 @@ const resources = [
 ] as const;
 
 const permissionLabels: Record<string, string> = {
-  offline_access: "后台持续同步",
+  offline_access: "持续访问已授权的数据",
   "base:app:create": "创建多维表格",
-  "base:app:read": "读取多维表格信息",
-  "base:table:create": "创建数据表",
-  "base:table:read": "读取数据表信息",
-  "base:table:update": "修改数据表",
+  "base:app:read": "获取多维表格信息",
+  "base:table:create": "新增数据表",
+  "base:table:read": "获取数据表信息",
+  "base:table:update": "更新数据表",
   "base:record:create": "新增记录",
-  "base:record:retrieve": "读取记录",
+  "base:record:retrieve": "根据条件搜索记录",
   "base:record:update": "更新记录",
 };
 

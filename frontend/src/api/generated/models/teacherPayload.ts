@@ -11,8 +11,4 @@ export interface TeacherPayload {
   business_id: string;
   name: string;
   subject?: string;
-  max_hours?: number;
-  unavailable_slot_ids?: string[];
-  preferred_slot_ids?: string[];
-  data_level?: string;
 }

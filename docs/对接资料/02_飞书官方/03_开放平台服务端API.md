@@ -14,9 +14,11 @@
 
 实现约束：
 
+- 授权地址必填参数为 `client_id`（值取应用 App ID）、`response_type=code` 和 `redirect_uri`；`scope`、`state`、`prompt` 为可选参数。
 - 回调 URL 必须预先配置在开发者后台的“安全设置 -> 重定向 URL”。
-- 授权请求必须携带并校验 `state`；生产实现同时使用 PKCE，`code_challenge_method=S256`。
+- 授权请求必须携带并校验 `state`；使用 `state` 防止 CSRF。
 - 授权码有效期为 5 分钟，且只能使用一次。
+- 不使用 PKCE：飞书开放平台创建的应用均为 Confidential Client，凭 `client_secret` 完成客户端认证，官方“获取授权码”请求示例同样不带 `code_challenge`；实测携带 PKCE 参数时令牌端点返回 20049（PKCE code challenge failed），故按官方示例移除。
 - 需要后台持续同步时，授权范围必须包含 `offline_access`。
 - `refresh_token` 每次刷新后立即轮换，旧值随即失效；新旧令牌替换必须在一次数据库事务内完成。
 - 飞书开放平台创建的应用属于 Confidential Client，`App Secret` 只保存在后端。
@@ -50,9 +52,13 @@
 
 ## 记录读写与幂等
 
-- 查询记录：https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table-record/search
+- 检索记录（按条件搜索）：https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/bitable-v1/app-table-record/search
 - 批量新增：https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table-record/batch_create
 - 批量更新：https://open.feishu.cn/document/server-docs/docs/bitable-v1/app-table-record/batch_update
+
+读取既有记录统一使用检索记录接口 `POST /open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search`，分页参数 `page_size`、`page_token` 放在查询参数中，`page_size` 最大 500。该接口的官方权限要求为 `base:record:retrieve`（或完整 `bitable:app`）。
+
+不使用 `GET .../records` 批量获取接口：该接口的官方权限要求是 `bitable:app` 或 `bitable:app:readonly`，不在途排智策的最小权限集内。
 
 每张业务表必须包含稳定的“业务标识”字段。首次发布查询现有业务标识，缺失项批量新增；已有项使用飞书 `record_id` 批量更新。后端保存业务 ID 与 `record_id` 的绑定，重试时先对账再写入，避免重复记录。
 
@@ -60,17 +66,19 @@
 
 权限列表：https://open.feishu.cn/document/server-docs/application-scope/scope-list
 
-| 权限键 | 用途 |
-| --- | --- |
-| `offline_access` | 获取并轮换刷新令牌 |
-| `base:app:create` | 创建多维表格 |
-| `base:app:read` | 读取并检查多维表格元数据 |
-| `base:table:create` | 创建带初始字段的数据表 |
-| `base:table:read` | 对账已创建的数据表 |
-| `base:table:update` | 将创建接口附带的默认表改名为“接入说明” |
-| `base:record:create` | 批量写入新记录 |
-| `base:record:retrieve` | 按业务标识查询记录 |
-| `base:record:update` | 更新已有记录和发布状态 |
+以下权限键、官方中文名称均按飞书开放平台“API 权限列表”页面逐条核对，全部支持用户身份调用：
+
+| 权限键 | 官方中文名称 | 用途 |
+| --- | --- | --- |
+| `offline_access` | 持续访问已授权的数据 | 获取并轮换刷新令牌 |
+| `base:app:create` | 创建多维表格 | 创建多维表格 |
+| `base:app:read` | 获取多维表格信息 | 读取并检查多维表格元数据 |
+| `base:table:create` | 新增数据表 | 创建带初始字段的数据表 |
+| `base:table:read` | 获取数据表信息 | 对账已创建的数据表 |
+| `base:table:update` | 更新数据表 | 将创建接口附带的默认表改名为“接入说明” |
+| `base:record:create` | 新增记录 | 批量写入新记录 |
+| `base:record:retrieve` | 根据条件搜索记录 | 按业务标识检索记录 |
+| `base:record:update` | 更新记录 | 更新已有记录和发布状态 |
 
 当前不申请删除表、删除记录和完整 `bitable:app` 权限。
 

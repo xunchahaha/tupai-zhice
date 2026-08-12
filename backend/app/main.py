@@ -5,13 +5,11 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
 
 from .api import router
-from .config import PROJECT_ROOT, get_settings
+from .config import get_settings
 from .db import SessionLocal, create_all
-from .models import Teacher
-from .services.seed import bootstrap_admin, import_sample_workbook
+from .services.seed import bootstrap_admin
 
 settings = get_settings()
 
@@ -21,10 +19,6 @@ async def lifespan(app: FastAPI):
     create_all()
     with SessionLocal() as db:
         bootstrap_admin(db, settings.bootstrap_admin_username, settings.bootstrap_admin_password)
-        teacher_count = int(db.scalar(select(func.count(Teacher.id))) or 0)
-        sample = PROJECT_ROOT / "data" / "imports" / "sample.xlsx"
-        if teacher_count == 0 and sample.exists():
-            import_sample_workbook(db, sample)
     yield
 
 

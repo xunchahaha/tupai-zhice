@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
@@ -40,10 +39,6 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
             (BUSINESS_KEY_FIELD, 1),
             ("教师名称", 1),
             ("学科", 1),
-            ("周最大课时", 2),
-            ("不可用时段", 1),
-            ("偏好时段", 1),
-            ("数据级别", 1),
         ],
     ),
     "class_groups": (
@@ -51,11 +46,8 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
         [
             (BUSINESS_KEY_FIELD, 1),
             ("班级名称", 1),
-            ("年级", 1),
-            ("学科", 1),
-            ("学生数", 2),
-            ("优先级", 1),
-            ("设备需求", 1),
+            ("班型", 1),
+            ("业务线", 1),
             ("教师标识", 1),
         ],
     ),
@@ -64,9 +56,6 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
         [
             (BUSINESS_KEY_FIELD, 1),
             ("教室名称", 1),
-            ("容量", 2),
-            ("设备", 1),
-            ("可用时段", 1),
             ("是否启用", 1),
         ],
     ),
@@ -89,8 +78,13 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
             ("班级标识", 1),
             ("教师标识", 1),
             ("学科", 1),
-            ("学生数", 2),
-            ("设备需求", 1),
+            ("课节名称", 1),
+            ("编排来源", 1),
+            ("编排阶段", 1),
+            ("计划课次", 2),
+            ("计划课时", 2),
+            ("课次序号", 2),
+            ("上课日期", 1),
             ("时长分钟", 2),
             ("建议时段", 1),
             ("是否锁定", 1),
@@ -359,13 +353,30 @@ class FeishuService:
             params=params,
             timeout=timeout,
         )
-        response.raise_for_status()
+        if response.status_code >= 400:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                code = payload.get("code")
+                message = (
+                    payload.get("msg")
+                    or payload.get("error_description")
+                    or payload.get("error")
+                    or "接口返回错误"
+                )
+                raise FeishuServiceError(
+                    f"飞书接口请求失败（HTTP {response.status_code}，错误码 {code}）：{message}"
+                )
+            response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
             raise FeishuServiceError("飞书接口返回了非预期响应")
         if payload.get("code") not in (None, 0):
+            code = payload.get("code")
             message = payload.get("msg") or payload.get("error_description") or "接口返回错误"
-            raise FeishuServiceError(f"飞书接口请求失败：{message}")
+            raise FeishuServiceError(f"飞书接口请求失败（错误码 {code}）：{message}")
         data = payload.get("data", payload)
         if not isinstance(data, dict):
             raise FeishuServiceError("飞书接口响应缺少数据对象")
@@ -373,32 +384,24 @@ class FeishuService:
 
     def create_oauth_start(self, user_id: str) -> dict[str, Any]:
         app = self._app_configuration()
-        cipher = self._cipher()
         state = secrets.token_urlsafe(32)
-        verifier = secrets.token_urlsafe(64)
-        challenge = (
-            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
-            .rstrip(b"=")
-            .decode("ascii")
-        )
         expires_at = _utcnow() + timedelta(minutes=10)
         self.db.add(
             FeishuOAuthState(
                 user_id=user_id,
                 state_hash=self._state_hash(state),
-                pkce_verifier_encrypted=cipher.encrypt(verifier),
+                pkce_verifier_encrypted="",
                 expires_at=expires_at,
             )
         )
         self.db.commit()
         query = urlencode(
             {
-                "app_id": app.app_id,
+                "client_id": app.app_id,
+                "response_type": "code",
                 "redirect_uri": app.oauth_redirect_uri,
                 "scope": " ".join(FEISHU_REQUIRED_SCOPES),
                 "state": state,
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
             }
         )
         return {"authorization_url": f"{AUTHORIZATION_URL}?{query}", "expires_at": expires_at}
@@ -414,7 +417,6 @@ class FeishuService:
         if _aware(oauth_state.expires_at) <= now:
             raise FeishuServiceError("飞书授权状态已过期，请重新发起授权")
 
-        verifier = self._cipher().decrypt(oauth_state.pkce_verifier_encrypted)
         oauth_state.used_at = now
         self.db.commit()
         data, _ = self._request(
@@ -426,7 +428,6 @@ class FeishuService:
                 "client_secret": app.app_secret,
                 "code": code,
                 "redirect_uri": app.oauth_redirect_uri,
-                "code_verifier": verifier,
             },
             timeout=15,
         )
@@ -555,7 +556,7 @@ class FeishuService:
             "status": workspace.status,
             "last_error": workspace.last_error,
             "tables": tables,
-            "created_at": workspace.created_at,
+            "created_at": _aware(workspace.created_at),
         }
 
     def connection_view(self, user_id: str) -> dict[str, Any]:
@@ -594,7 +595,7 @@ class FeishuService:
             "missing_fields": missing_fields,
             "granted_scopes": granted,
             "missing_scopes": missing_scopes,
-            "access_expires_at": connection.access_expires_at if connection else None,
+            "access_expires_at": _aware(connection.access_expires_at) if connection else None,
             "message": message,
             "console_url": "https://open.feishu.cn/app/",
             "docs_url": (
@@ -743,10 +744,12 @@ class FeishuService:
             if page_token:
                 params["page_token"] = page_token
             data, log_id = self._request(
-                "GET",
-                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/{table_id}/records",
+                "POST",
+                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                f"{table_id}/records/search",
                 token=token,
                 params=params,
+                json_body={"field_names": [BUSINESS_KEY_FIELD]},
             )
             if log_id:
                 log_ids.append(log_id)

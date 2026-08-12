@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Annotated, Any
 from urllib.parse import urlencode
 
@@ -84,11 +85,13 @@ from .schemas import (
     UserResponse,
 )
 from .security import create_access_token, get_current_user, require_roles, verify_password
+from .services.converter_zhengzhou import import_schedule_workbook
 from .services.feishu import FeishuService, FeishuServiceError, json_text
-from .services.seed import import_sample_workbook
 from .services.snapshot import create_snapshot
 from .services.tasks import enqueue_solver_run, execute_solver_run
 from .services.xlsx_io import export_schedule_xlsx
+
+logger = logging.getLogger("tupai.feishu")
 
 settings = get_settings()
 router = APIRouter(prefix=settings.api_prefix)
@@ -223,14 +226,6 @@ def overview(db: Db, user: CurrentUser) -> OverviewResponse:
     )
 
 
-@router.post("/imports/sample", response_model=ImportResult, tags=["imports"])
-def import_sample(db: Db, user: AdminOrScheduler) -> ImportResult:
-    result = import_sample_workbook(db, PROJECT_ROOT / "data" / "imports" / "sample.xlsx")
-    audit(db, user, "import_sample", "workbook", None, result.model_dump())
-    db.commit()
-    return result
-
-
 @router.get("/imports/sample.xlsx", tags=["imports"])
 def download_sample_workbook(user: CurrentUser) -> FileResponse:
     sample = PROJECT_ROOT / "data" / "imports" / "sample.xlsx"
@@ -239,7 +234,7 @@ def download_sample_workbook(user: CurrentUser) -> FileResponse:
     return FileResponse(
         sample,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename="途排智策_主数据示例.xlsx",
+        filename="途排智策_官方课表数据源示例.xlsx",
     )
 
 
@@ -251,10 +246,19 @@ def import_xlsx(
         raise HTTPException(status_code=400, detail="只接受 .xlsx 工作簿")
     target = PROJECT_ROOT / "data" / "imports" / "uploaded.xlsx"
     target.write_bytes(file.file.read())
-    result = import_sample_workbook(db, target)
-    audit(db, user, "import_xlsx", "workbook", file.filename, result.model_dump())
+    result = import_schedule_workbook(db, target)
+    audit(db, user, "import_xlsx", "workbook", file.filename, result)
     db.commit()
-    return result
+    return ImportResult(
+        source=file.filename or target.name,
+        campuses=1,
+        teachers=result["teachers"],
+        class_groups=result["class_groups"],
+        rooms=result["rooms"],
+        time_slots=result["time_slots"],
+        course_sessions=result["course_sessions_created"],
+        rules=0,
+    )
 
 
 @router.get("/campuses", response_model=list[CampusResponse], tags=["master-data"])
@@ -918,7 +922,8 @@ def complete_feishu_oauth(
         return RedirectResponse(f"{frontend}/integrations?{query}")
     try:
         connection = service.complete_oauth(code, state)
-    except (FeishuServiceError, httpx.HTTPError):
+    except (FeishuServiceError, httpx.HTTPError) as exc:
+        logger.exception("飞书 OAuth 回调失败：%s", exc)
         query = urlencode({"feishu": "error"})
         return RedirectResponse(f"{frontend}/integrations?{query}")
     actor = db.get(User, connection.user_id)
@@ -965,10 +970,6 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
                 "业务标识": item.business_id,
                 "教师名称": item.name,
                 "学科": item.subject,
-                "周最大课时": item.max_hours,
-                "不可用时段": "|".join(item.unavailable_slot_ids),
-                "偏好时段": "|".join(item.preferred_slot_ids),
-                "数据级别": item.data_level,
             }
             for item in db.scalars(select(Teacher).order_by(Teacher.business_id))
         ]
@@ -977,11 +978,8 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
             {
                 "业务标识": item.business_id,
                 "班级名称": item.name,
-                "年级": item.grade,
-                "学科": item.subject,
-                "学生数": item.student_count,
-                "优先级": item.priority,
-                "设备需求": "|".join(item.required_devices),
+                "班型": item.grade,
+                "业务线": item.subject,
                 "教师标识": item.teacher_business_id,
             }
             for item in db.scalars(select(ClassGroup).order_by(ClassGroup.business_id))
@@ -991,9 +989,6 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
             {
                 "业务标识": item.business_id,
                 "教室名称": item.name,
-                "容量": item.capacity,
-                "设备": "|".join(item.devices),
-                "可用时段": "|".join(item.available_slot_ids),
                 "是否启用": "是" if item.is_active else "否",
             }
             for item in db.scalars(select(Room).order_by(Room.business_id))
@@ -1018,8 +1013,13 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
                 "班级标识": item.class_business_id,
                 "教师标识": item.teacher_business_id,
                 "学科": item.subject,
-                "学生数": item.student_count,
-                "设备需求": "|".join(item.required_devices),
+                "课节名称": item.lesson_name,
+                "编排来源": item.schedule_source,
+                "编排阶段": item.stage,
+                "计划课次": item.planned_sessions,
+                "计划课时": item.planned_hours,
+                "课次序号": item.session_no,
+                "上课日期": item.lesson_date.isoformat() if item.lesson_date else "",
                 "时长分钟": item.duration_minutes,
                 "建议时段": item.suggested_slot_id or "",
                 "是否锁定": "是" if item.is_locked else "否",
@@ -1187,8 +1187,6 @@ def aily_context(db: Db) -> AilyContextResponse:
                 {
                     "business_id": item.business_id,
                     "name": item.name,
-                    "capacity": item.capacity,
-                    "devices": item.devices,
                 }
                 for item in db.scalars(select(Room).order_by(Room.business_id))
             ],

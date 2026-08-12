@@ -10,10 +10,6 @@ export interface RoomResponse {
   campus_id: string;
   business_id: string;
   name: string;
-  /** */
-  capacity: number;
-  devices?: string[];
-  available_slot_ids?: string[];
   is_active?: boolean;
   id: string;
 }

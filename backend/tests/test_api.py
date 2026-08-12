@@ -40,7 +40,7 @@ def test_download_master_data_sample(client: TestClient, auth_headers: dict[str,
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     workbook = load_workbook(BytesIO(response.content), read_only=True, data_only=True)
-    assert {"教师", "班级", "教室", "时段", "课程需求"}.issubset(workbook.sheetnames)
+    assert {"使用说明", "课表数据源"}.issubset(workbook.sheetnames)
 
 
 def test_sample_solve_publish_and_xlsx(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -50,7 +50,7 @@ def test_sample_solve_publish_and_xlsx(client: TestClient, auth_headers: dict[st
     schedule = schedules[0]
     assert len(schedule["assignments"]) == 24
     assert schedule["metrics"]["hard_conflicts"] == 0
-    assert schedule["metrics"]["seat_utilization"] >= 0.65
+    assert schedule["metrics"]["room_slot_occupancy"] >= 0
 
     published = client.post(f"/api/v1/schedules/{schedule['id']}/publish", headers=auth_headers)
     assert published.status_code == 200

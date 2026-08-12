@@ -3,30 +3,14 @@ from __future__ import annotations
 from app.services.solver import solve_problem
 
 
-def test_solver_respects_capacity_equipment_and_unavailability() -> None:
+def test_solver_assigns_every_session_without_conflicts() -> None:
     payload = {
         "teachers": [
-            {
-                "business_id": "T1",
-                "unavailable_slot_ids": ["S2"],
-                "preferred_slot_ids": ["S1"],
-            }
+            {"business_id": "T1", "name": "教师甲", "subject": "数学"},
         ],
         "rooms": [
-            {
-                "business_id": "R1",
-                "capacity": 20,
-                "devices": ["projector"],
-                "available_slot_ids": ["S1", "S2"],
-                "is_active": True,
-            },
-            {
-                "business_id": "R2",
-                "capacity": 50,
-                "devices": [],
-                "available_slot_ids": ["S1", "S2"],
-                "is_active": True,
-            },
+            {"business_id": "R1", "name": "教室1", "is_active": True},
+            {"business_id": "R2", "name": "教室2", "is_active": True},
         ],
         "time_slots": [
             {"business_id": "S1", "is_open": True},
@@ -34,13 +18,19 @@ def test_solver_respects_capacity_equipment_and_unavailability() -> None:
         ],
         "course_sessions": [
             {
-                "id": "course-db-id",
+                "id": "course-db-1",
                 "business_id": "C1",
                 "class_business_id": "B1",
                 "teacher_business_id": "T1",
-                "student_count": 18,
-                "required_devices": ["projector"],
-            }
+                "subject": "数学",
+            },
+            {
+                "id": "course-db-2",
+                "business_id": "C2",
+                "class_business_id": "B1",
+                "teacher_business_id": "T1",
+                "subject": "数学",
+            },
         ],
         "rules": [],
         "time_limit_seconds": 3,
@@ -48,23 +38,44 @@ def test_solver_respects_capacity_equipment_and_unavailability() -> None:
     }
     result = solve_problem(payload)
     assert result["model_status"] == "OPTIMAL"
-    assert result["assignments"][0]["room_business_id"] == "R1"
-    assert result["assignments"][0]["slot_business_id"] == "S1"
+    assert len(result["assignments"]) == 2
+
+
+def test_solver_skips_inactive_rooms() -> None:
+    payload = {
+        "teachers": [
+            {"business_id": "T1", "name": "教师甲", "subject": "数学"},
+        ],
+        "rooms": [
+            {"business_id": "R1", "name": "停用教室", "is_active": False},
+        ],
+        "time_slots": [
+            {"business_id": "S1", "is_open": True},
+        ],
+        "course_sessions": [
+            {
+                "id": "course-db-1",
+                "business_id": "C1",
+                "class_business_id": "B1",
+                "teacher_business_id": "T1",
+                "subject": "数学",
+            },
+        ],
+        "rules": [],
+        "time_limit_seconds": 3,
+        "random_seed": 2026,
+    }
+    result = solve_problem(payload)
+    assert result["model_status"] == "INFEASIBLE"
 
 
 def test_solver_applies_consecutive_soft_rule() -> None:
     payload = {
         "teachers": [
-            {"business_id": "T1", "unavailable_slot_ids": [], "preferred_slot_ids": []}
+            {"business_id": "T1", "name": "教师甲", "subject": "数学"}
         ],
         "rooms": [
-            {
-                "business_id": "R1",
-                "capacity": 30,
-                "devices": [],
-                "available_slot_ids": ["S1", "S2", "S3"],
-                "is_active": True,
-            }
+            {"business_id": "R1", "name": "教室1", "is_active": True}
         ],
         "time_slots": [
             {"business_id": "S1", "weekday": "周一", "sequence": 1, "is_open": True},
@@ -77,16 +88,14 @@ def test_solver_applies_consecutive_soft_rule() -> None:
                 "business_id": "C1",
                 "class_business_id": "B1",
                 "teacher_business_id": "T1",
-                "student_count": 20,
-                "required_devices": [],
+                "subject": "数学",
             },
             {
                 "id": "C2-db",
                 "business_id": "C2",
                 "class_business_id": "B1",
                 "teacher_business_id": "T1",
-                "student_count": 20,
-                "required_devices": [],
+                "subject": "数学",
             },
         ],
         "rules": [

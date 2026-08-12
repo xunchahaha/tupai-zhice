@@ -8,14 +8,12 @@ from sqlalchemy import func, select
 from ..config import get_settings
 from ..db import SessionLocal
 from ..models import (
-    CourseSession,
     DataSnapshot,
     RescheduleEvent,
     Room,
     ScheduleAssignment,
     ScheduleVersion,
     SolverRun,
-    Teacher,
     TimeSlot,
 )
 from .solver import solve_problem
@@ -32,40 +30,19 @@ def _get_executor() -> ProcessPoolExecutor:
 
 
 def calculate_metrics(db: Any, assignments: list[dict[str, Any]]) -> dict[str, Any]:
-    courses = {item.id: item for item in db.scalars(select(CourseSession)).all()}
     rooms = {item.business_id: item for item in db.scalars(select(Room)).all()}
-    teachers = {item.business_id: item for item in db.scalars(select(Teacher)).all()}
     open_slots = list(db.scalars(select(TimeSlot).where(TimeSlot.is_open.is_(True))))
-    student_total = 0
-    capacity_total = 0
-    preferred = 0
-    preferred_denominator = 0
     room_slots: set[tuple[str, str]] = set()
     for item in assignments:
-        course = courses[item["course_session_id"]]
         room = rooms[item["room_business_id"]]
-        teacher = teachers[course.teacher_business_id]
-        student_total += course.student_count
-        capacity_total += room.capacity
         room_slots.add((room.business_id, item["slot_business_id"]))
-        if teacher.preferred_slot_ids:
-            preferred_denominator += 1
-            preferred += int(item["slot_business_id"] in teacher.preferred_slot_ids)
-    available_room_slots = sum(
-        len(room.available_slot_ids or [slot.business_id for slot in open_slots])
-        for room in rooms.values()
-        if room.is_active
-    )
+    available_room_slots = sum(1 for room in rooms.values() if room.is_active) * len(open_slots)
     return {
         "assignment_count": len(assignments),
         "hard_conflicts": 0,
-        "seat_utilization": round(student_total / capacity_total, 4) if capacity_total else 0,
         "room_slot_occupancy": round(len(room_slots) / available_room_slots, 4)
         if available_room_slots
         else 0,
-        "preference_satisfaction": round(preferred / preferred_denominator, 4)
-        if preferred_denominator
-        else 1,
     }
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -39,10 +39,6 @@ class TeacherPayload(BaseModel):
     business_id: str
     name: str
     subject: str = ""
-    max_hours: int = 8
-    unavailable_slot_ids: list[str] = Field(default_factory=list)
-    preferred_slot_ids: list[str] = Field(default_factory=list)
-    data_level: str = "内部"
 
 
 class TeacherResponse(TeacherPayload, ORMModel):
@@ -55,9 +51,6 @@ class ClassGroupPayload(BaseModel):
     name: str
     grade: str = ""
     subject: str = ""
-    student_count: int = Field(gt=0)
-    priority: str = "常规"
-    required_devices: list[str] = Field(default_factory=list)
     teacher_business_id: str
 
 
@@ -69,9 +62,6 @@ class RoomPayload(BaseModel):
     campus_id: str
     business_id: str
     name: str
-    capacity: int = Field(gt=0)
-    devices: list[str] = Field(default_factory=list)
-    available_slot_ids: list[str] = Field(default_factory=list)
     is_active: bool = True
 
 
@@ -100,8 +90,13 @@ class CourseSessionPayload(BaseModel):
     class_business_id: str
     teacher_business_id: str
     subject: str = ""
-    student_count: int = Field(gt=0)
-    required_devices: list[str] = Field(default_factory=list)
+    lesson_name: str = ""
+    schedule_source: str = ""
+    stage: str = ""
+    planned_sessions: int = Field(default=0, ge=0)
+    planned_hours: float = Field(default=0, ge=0)
+    session_no: int = Field(default=0, ge=0)
+    lesson_date: date | None = None
     duration_minutes: int = Field(default=90, gt=0)
     suggested_slot_id: str | None = None
     is_locked: bool = False

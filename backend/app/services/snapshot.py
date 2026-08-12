@@ -32,44 +32,21 @@ def build_snapshot_payload(db: Session) -> dict[str, object]:
         "teachers": [
             _model_dict(
                 item,
-                [
-                    "id",
-                    "business_id",
-                    "name",
-                    "subject",
-                    "max_hours",
-                    "unavailable_slot_ids",
-                    "preferred_slot_ids",
-                ],
+                ["id", "business_id", "name", "subject"],
             )
             for item in teachers
         ],
         "class_groups": [
             _model_dict(
                 item,
-                [
-                    "id",
-                    "business_id",
-                    "name",
-                    "student_count",
-                    "required_devices",
-                    "teacher_business_id",
-                ],
+                ["id", "business_id", "name", "grade", "subject", "teacher_business_id"],
             )
             for item in classes
         ],
         "rooms": [
             _model_dict(
                 item,
-                [
-                    "id",
-                    "business_id",
-                    "name",
-                    "capacity",
-                    "devices",
-                    "available_slot_ids",
-                    "is_active",
-                ],
+                ["id", "business_id", "name", "is_active"],
             )
             for item in rooms
         ],
@@ -98,8 +75,13 @@ def build_snapshot_payload(db: Session) -> dict[str, object]:
                     "class_business_id",
                     "teacher_business_id",
                     "subject",
-                    "student_count",
-                    "required_devices",
+                    "lesson_name",
+                    "schedule_source",
+                    "stage",
+                    "planned_sessions",
+                    "planned_hours",
+                    "session_no",
+                    "lesson_date",
                     "duration_minutes",
                     "suggested_slot_id",
                     "is_locked",

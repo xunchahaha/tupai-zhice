@@ -5,6 +5,7 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { CourseSessionPayloadLessonDate } from './courseSessionPayloadLessonDate';
 import type { CourseSessionPayloadSuggestedSlotId } from './courseSessionPayloadSuggestedSlotId';
 
 export interface CourseSessionPayload {
@@ -13,9 +14,16 @@ export interface CourseSessionPayload {
   class_business_id: string;
   teacher_business_id: string;
   subject?: string;
-  /** */
-  student_count: number;
-  required_devices?: string[];
+  lesson_name?: string;
+  schedule_source?: string;
+  stage?: string;
+  /** @minimum 0 */
+  planned_sessions?: number;
+  /** @minimum 0 */
+  planned_hours?: number;
+  /** @minimum 0 */
+  session_no?: number;
+  lesson_date?: CourseSessionPayloadLessonDate;
   /** */
   duration_minutes?: number;
   suggested_slot_id?: CourseSessionPayloadSuggestedSlotId;

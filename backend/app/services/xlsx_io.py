@@ -31,14 +31,13 @@ def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
         "场次ID",
         "班级ID",
         "教师ID",
+        "课节名称",
         "星期",
         "开始时间",
         "结束时间",
         "时段ID",
         "教室ID",
         "教室名称",
-        "学生数",
-        "教室容量",
         "变更状态",
     ]
     sheet.append(headers)
@@ -52,14 +51,13 @@ def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
                 course.business_id,
                 course.class_business_id,
                 course.teacher_business_id,
+                course.lesson_name,
                 slot.weekday,
                 slot.start_time,
                 slot.end_time,
                 slot.business_id,
                 room.business_id,
                 room.name,
-                course.student_count,
-                room.capacity,
                 assignment.change_kind,
             ]
         )
@@ -68,7 +66,7 @@ def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
         cell.font = Font(color="FFFFFF", bold=True)
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center")
-    widths = [10, 14, 12, 12, 10, 12, 12, 10, 10, 18, 10, 10, 12]
+    widths = [10, 14, 12, 12, 22, 10, 12, 12, 10, 10, 18, 12]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[chr(64 + index)].width = width
     sheet.freeze_panes = "A2"

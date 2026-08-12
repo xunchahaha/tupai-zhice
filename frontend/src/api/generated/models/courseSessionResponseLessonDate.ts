@@ -6,10 +6,4 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface TeacherResponse {
-  campus_id: string;
-  business_id: string;
-  name: string;
-  subject?: string;
-  id: string;
-}
+export type CourseSessionResponseLessonDate = string | null;

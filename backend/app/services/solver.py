@@ -102,18 +102,11 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
     variables: dict[tuple[str, str, str], cp_model.IntVar] = {}
 
     for course in sessions:
-        teacher = teachers[course["teacher_business_id"]]
         feasible: list[cp_model.IntVar] = []
         for room_id, room in rooms.items():
-            if not room["is_active"] or int(room["capacity"]) < int(course["student_count"]):
-                continue
-            if not set(course["required_devices"]).issubset(set(room["devices"])):
+            if not room["is_active"]:
                 continue
             for slot_id in slots:
-                if slot_id in set(teacher["unavailable_slot_ids"]):
-                    continue
-                if room["available_slot_ids"] and slot_id not in set(room["available_slot_ids"]):
-                    continue
                 if _event_blocks(event, course, room_id, slot_id):
                     continue
                 variable = model.new_bool_var(f"x_{course['business_id']}_{room_id}_{slot_id}")
@@ -194,8 +187,6 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
             else:
                 model.add_bool_or([]).only_enforce_if(literal)
 
-    preference_weight = int(payload.get("preference_weight", 100))
-    seat_waste_weight = int(payload.get("seat_waste_weight", 1))
     change_weight = int(payload.get("change_weight", 100000))
     previous = {
         item["course_business_id"]: (item["room_business_id"], item["slot_business_id"])
@@ -203,12 +194,6 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
     }
     objective_terms: list[Any] = []
     for (course_id, room_id, slot_id), variable in variables.items():
-        course = next(item for item in sessions if item["business_id"] == course_id)
-        teacher = teachers[course["teacher_business_id"]]
-        if teacher["preferred_slot_ids"] and slot_id not in set(teacher["preferred_slot_ids"]):
-            objective_terms.append(preference_weight * variable)
-        seat_waste = max(0, int(rooms[room_id]["capacity"]) - int(course["student_count"]))
-        objective_terms.append(seat_waste_weight * seat_waste * variable)
         if course_id in previous and previous[course_id] != (room_id, slot_id):
             objective_terms.append(change_weight * variable)
 

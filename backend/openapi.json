@@ -149,32 +149,6 @@
         ]
       }
     },
-    "/api/v1/imports/sample": {
-      "post": {
-        "tags": [
-          "imports"
-        ],
-        "summary": "Import Sample",
-        "operationId": "import_sample_api_v1_imports_sample_post",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ImportResult"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ]
-      }
-    },
     "/api/v1/imports/sample.xlsx": {
       "get": {
         "tags": [
@@ -2592,23 +2566,6 @@
             "title": "Subject",
             "default": ""
           },
-          "student_count": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Student Count"
-          },
-          "priority": {
-            "type": "string",
-            "title": "Priority",
-            "default": "常规"
-          },
-          "required_devices": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Required Devices"
-          },
           "teacher_business_id": {
             "type": "string",
             "title": "Teacher Business Id"
@@ -2619,7 +2576,6 @@
           "campus_id",
           "business_id",
           "name",
-          "student_count",
           "teacher_business_id"
         ],
         "title": "ClassGroupPayload"
@@ -2648,23 +2604,6 @@
             "title": "Subject",
             "default": ""
           },
-          "student_count": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Student Count"
-          },
-          "priority": {
-            "type": "string",
-            "title": "Priority",
-            "default": "常规"
-          },
-          "required_devices": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Required Devices"
-          },
           "teacher_business_id": {
             "type": "string",
             "title": "Teacher Business Id"
@@ -2679,7 +2618,6 @@
           "campus_id",
           "business_id",
           "name",
-          "student_count",
           "teacher_business_id",
           "id"
         ],
@@ -2708,17 +2646,50 @@
             "title": "Subject",
             "default": ""
           },
-          "student_count": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Student Count"
+          "lesson_name": {
+            "type": "string",
+            "title": "Lesson Name",
+            "default": ""
           },
-          "required_devices": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Required Devices"
+          "schedule_source": {
+            "type": "string",
+            "title": "Schedule Source",
+            "default": ""
+          },
+          "stage": {
+            "type": "string",
+            "title": "Stage",
+            "default": ""
+          },
+          "planned_sessions": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Planned Sessions",
+            "default": 0
+          },
+          "planned_hours": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Planned Hours",
+            "default": 0
+          },
+          "session_no": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Session No",
+            "default": 0
+          },
+          "lesson_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lesson Date"
           },
           "duration_minutes": {
             "type": "integer",
@@ -2748,8 +2719,7 @@
           "campus_id",
           "business_id",
           "class_business_id",
-          "teacher_business_id",
-          "student_count"
+          "teacher_business_id"
         ],
         "title": "CourseSessionPayload"
       },
@@ -2776,17 +2746,50 @@
             "title": "Subject",
             "default": ""
           },
-          "student_count": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Student Count"
+          "lesson_name": {
+            "type": "string",
+            "title": "Lesson Name",
+            "default": ""
           },
-          "required_devices": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Required Devices"
+          "schedule_source": {
+            "type": "string",
+            "title": "Schedule Source",
+            "default": ""
+          },
+          "stage": {
+            "type": "string",
+            "title": "Stage",
+            "default": ""
+          },
+          "planned_sessions": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Planned Sessions",
+            "default": 0
+          },
+          "planned_hours": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Planned Hours",
+            "default": 0
+          },
+          "session_no": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Session No",
+            "default": 0
+          },
+          "lesson_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lesson Date"
           },
           "duration_minutes": {
             "type": "integer",
@@ -2821,7 +2824,6 @@
           "business_id",
           "class_business_id",
           "teacher_business_id",
-          "student_count",
           "id"
         ],
         "title": "CourseSessionResponse"
@@ -3494,25 +3496,6 @@
             "type": "string",
             "title": "Name"
           },
-          "capacity": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Capacity"
-          },
-          "devices": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Devices"
-          },
-          "available_slot_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Available Slot Ids"
-          },
           "is_active": {
             "type": "boolean",
             "title": "Is Active",
@@ -3523,8 +3506,7 @@
         "required": [
           "campus_id",
           "business_id",
-          "name",
-          "capacity"
+          "name"
         ],
         "title": "RoomPayload"
       },
@@ -3542,25 +3524,6 @@
             "type": "string",
             "title": "Name"
           },
-          "capacity": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Capacity"
-          },
-          "devices": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Devices"
-          },
-          "available_slot_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Available Slot Ids"
-          },
           "is_active": {
             "type": "boolean",
             "title": "Is Active",
@@ -3576,7 +3539,6 @@
           "campus_id",
           "business_id",
           "name",
-          "capacity",
           "id"
         ],
         "title": "RoomResponse"
@@ -4302,30 +4264,6 @@
             "type": "string",
             "title": "Subject",
             "default": ""
-          },
-          "max_hours": {
-            "type": "integer",
-            "title": "Max Hours",
-            "default": 8
-          },
-          "unavailable_slot_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Unavailable Slot Ids"
-          },
-          "preferred_slot_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Preferred Slot Ids"
-          },
-          "data_level": {
-            "type": "string",
-            "title": "Data Level",
-            "default": "内部"
           }
         },
         "type": "object",
@@ -4354,30 +4292,6 @@
             "type": "string",
             "title": "Subject",
             "default": ""
-          },
-          "max_hours": {
-            "type": "integer",
-            "title": "Max Hours",
-            "default": 8
-          },
-          "unavailable_slot_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Unavailable Slot Ids"
-          },
-          "preferred_slot_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Preferred Slot Ids"
-          },
-          "data_level": {
-            "type": "string",
-            "title": "Data Level",
-            "default": "内部"
           },
           "id": {
             "type": "string",

@@ -74,13 +74,15 @@ def complete_authorization(
     expires_in: int = 7200,
 ) -> str:
     state, query = start_authorization(client, auth_headers)
-    assert query["code_challenge_method"] == ["S256"]
+    assert "code_challenge" not in query
+    assert "code_challenge_method" not in query
     assert "offline_access" in query["scope"][0]
 
     def token_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
         body = kwargs["json"]
         assert body["grant_type"] == "authorization_code"
-        assert body["code_verifier"]
+        assert body["client_id"] == "cli_test"
+        assert "code_verifier" not in body
         return response(
             method,
             url,
@@ -144,7 +146,8 @@ def test_admin_configures_app_from_frontend_and_secret_is_encrypted(
     )
     assert started.status_code == 200
     query = parse_qs(urlparse(started.json()["authorization_url"]).query)
-    assert query["app_id"] == ["cli_frontend_test"]
+    assert query["client_id"] == ["cli_frontend_test"]
+    assert query["response_type"] == ["code"]
     with SessionLocal() as db:
         stored = db.get(FeishuAppConfiguration, "default")
         assert stored is not None
@@ -280,7 +283,8 @@ def test_auto_create_workspace_and_sync_idempotently(
             (part for part in url.split("/") if part.startswith("tbl-") and part != "tbl-default"),
             "",
         )
-        if method == "GET" and url.endswith("/records"):
+        if method == "POST" and url.endswith("/records/search"):
+            assert body == {"field_names": ["业务标识"]}
             return response(
                 method,
                 url,

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -143,10 +144,6 @@ class Teacher(TimestampMixin, Base):
     business_id: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(120))
     subject: Mapped[str] = mapped_column(String(80), default="")
-    max_hours: Mapped[int] = mapped_column(Integer, default=8)
-    unavailable_slot_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
-    preferred_slot_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
-    data_level: Mapped[str] = mapped_column(String(30), default="内部")
 
 
 class ClassGroup(TimestampMixin, Base):
@@ -159,9 +156,6 @@ class ClassGroup(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(120))
     grade: Mapped[str] = mapped_column(String(50), default="")
     subject: Mapped[str] = mapped_column(String(80), default="")
-    student_count: Mapped[int] = mapped_column(Integer)
-    priority: Mapped[str] = mapped_column(String(30), default="常规")
-    required_devices: Mapped[list[str]] = mapped_column(JSON, default=list)
     teacher_business_id: Mapped[str] = mapped_column(String(40))
 
 
@@ -173,9 +167,6 @@ class Room(TimestampMixin, Base):
     campus_id: Mapped[str] = mapped_column(ForeignKey("campuses.id"), index=True)
     business_id: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(120))
-    capacity: Mapped[int] = mapped_column(Integer)
-    devices: Mapped[list[str]] = mapped_column(JSON, default=list)
-    available_slot_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -204,8 +195,13 @@ class CourseSession(TimestampMixin, Base):
     class_business_id: Mapped[str] = mapped_column(String(40))
     teacher_business_id: Mapped[str] = mapped_column(String(40))
     subject: Mapped[str] = mapped_column(String(80), default="")
-    student_count: Mapped[int] = mapped_column(Integer)
-    required_devices: Mapped[list[str]] = mapped_column(JSON, default=list)
+    lesson_name: Mapped[str] = mapped_column(String(120), default="")
+    schedule_source: Mapped[str] = mapped_column(String(80), default="")
+    stage: Mapped[str] = mapped_column(String(40), default="")
+    planned_sessions: Mapped[int] = mapped_column(Integer, default=0)
+    planned_hours: Mapped[float] = mapped_column(Float, default=0)
+    session_no: Mapped[int] = mapped_column(Integer, default=0)
+    lesson_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     duration_minutes: Mapped[int] = mapped_column(Integer, default=90)
     suggested_slot_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     is_locked: Mapped[bool] = mapped_column(Boolean, default=False)

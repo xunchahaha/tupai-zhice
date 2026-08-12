@@ -3,7 +3,7 @@ import axios, { type AxiosRequestConfig } from "axios";
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 const TOKEN_KEY = "tupai:access-token";
 
-export const http = axios.create({ baseURL: API_BASE_URL, timeout: 30_000 });
+export const http = axios.create({ baseURL: API_BASE_URL, timeout: 180_000 });
 
 http.interceptors.request.use((config) => {
   const token = window.localStorage.getItem(TOKEN_KEY);
