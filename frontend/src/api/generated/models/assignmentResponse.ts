@@ -5,12 +5,14 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { AssignmentResponseLessonDate } from './assignmentResponseLessonDate';
 
 export interface AssignmentResponse {
   course_session_id: string;
   course_business_id: string;
   class_business_id: string;
   teacher_business_id: string;
+  lesson_date?: AssignmentResponseLessonDate;
   slot_business_id: string;
   room_business_id: string;
   change_kind: string;

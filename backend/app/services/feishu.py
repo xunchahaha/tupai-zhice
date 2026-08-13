@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -39,6 +39,7 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
             (BUSINESS_KEY_FIELD, 1),
             ("教师名称", 1),
             ("学科", 1),
+            ("飞书用户标识", 1),
         ],
     ),
     "class_groups": (
@@ -75,8 +76,11 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
         "课程场次",
         [
             (BUSINESS_KEY_FIELD, 1),
+            ("业务线", 1),
+            ("产品班型", 1),
             ("班级标识", 1),
             ("教师标识", 1),
+            ("具体日程账号", 1),
             ("学科", 1),
             ("课节名称", 1),
             ("编排来源", 1),
@@ -87,6 +91,9 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
             ("上课日期", 1),
             ("时长分钟", 2),
             ("建议时段", 1),
+            ("固定开始时间", 1),
+            ("固定结束时间", 1),
+            ("原始教室标识", 1),
             ("是否锁定", 1),
         ],
     ),
@@ -116,16 +123,34 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
             ("是否当前版本", 1),
             ("发布状态", 1),
             ("场次标识", 1),
+            ("业务线", 1),
+            ("产品班型", 1),
             ("班级标识", 1),
             ("教师标识", 1),
+            ("具体日程账号", 1),
             ("学科", 1),
+            ("上课日期", 1),
             ("时段标识", 1),
             ("星期", 1),
             ("开始时间", 1),
             ("结束时间", 1),
+            ("固定开始时间", 1),
+            ("固定结束时间", 1),
+            ("原始教室标识", 1),
             ("教室标识", 1),
             ("教室名称", 1),
             ("变更类型", 1),
+        ],
+    ),
+    "public_summary": (
+        "公开展示汇总",
+        [
+            (BUSINESS_KEY_FIELD, 1),
+            ("指标名称", 1),
+            ("指标值", 1),
+            ("月份", 1),
+            ("产品线匿名标签", 1),
+            ("更新时间", 1),
         ],
     ),
 }
@@ -247,6 +272,11 @@ class FeishuService:
                 "secret_configured": True,
                 "oauth_redirect_uri": environment.oauth_redirect_uri,
                 "frontend_url": environment.frontend_url,
+                "aily_configured": bool(
+                    self.settings.aily_app_id and self.settings.aily_skill_id
+                ),
+                "aily_app_id": self.settings.aily_app_id or None,
+                "aily_skill_id": self.settings.aily_skill_id or None,
             }
         stored = self._stored_configuration()
         if stored is not None:
@@ -257,6 +287,9 @@ class FeishuService:
                 "secret_configured": True,
                 "oauth_redirect_uri": stored.oauth_redirect_uri,
                 "frontend_url": stored.frontend_url,
+                "aily_configured": bool(stored.aily_app_id and stored.aily_skill_id),
+                "aily_app_id": stored.aily_app_id or None,
+                "aily_skill_id": stored.aily_skill_id or None,
             }
         return {
             "configured": False,
@@ -265,6 +298,9 @@ class FeishuService:
             "secret_configured": False,
             "oauth_redirect_uri": self.settings.feishu_oauth_redirect_uri,
             "frontend_url": self.settings.frontend_url,
+            "aily_configured": False,
+            "aily_app_id": None,
+            "aily_skill_id": None,
         }
 
     @staticmethod
@@ -279,24 +315,34 @@ class FeishuService:
         self,
         user_id: str,
         app_id: str,
-        app_secret: str,
+        app_secret: str | None,
         oauth_redirect_uri: str,
         frontend_url: str,
+        aily_app_id: str,
+        aily_skill_id: str,
     ) -> FeishuAppConfiguration:
         if self._environment_configuration() is not None:
             raise FeishuServiceError("当前飞书应用由部署环境统一管理")
         normalized_app_id = app_id.strip()
         if not normalized_app_id.startswith("cli_"):
             raise FeishuServiceError("飞书应用编号应以 cli_ 开头")
-        normalized_secret = app_secret.strip()
-        if len(normalized_secret) < 8:
-            raise FeishuServiceError("飞书应用密钥长度不正确")
+        normalized_secret = (app_secret or "").strip()
         redirect_uri = self._validate_url(oauth_redirect_uri, "授权回调地址")
         if not redirect_uri.endswith("/api/v1/integrations/feishu/oauth/callback"):
             raise FeishuServiceError("授权回调地址必须指向途排智策飞书回调接口")
         normalized_frontend_url = self._validate_url(frontend_url, "前端地址")
+        normalized_aily_app_id = aily_app_id.strip()
+        normalized_aily_skill_id = aily_skill_id.strip()
+        if not normalized_aily_app_id.startswith("spring_"):
+            raise FeishuServiceError("Aily 应用标识应以 spring_ 开头")
+        if not normalized_aily_skill_id.startswith("skill_"):
+            raise FeishuServiceError("Aily 技能标识应以 skill_ 开头")
 
         stored = self._stored_configuration()
+        if stored is None and len(normalized_secret) < 8:
+            raise FeishuServiceError("首次配置必须填写正确的飞书应用密钥")
+        if normalized_secret and len(normalized_secret) < 8:
+            raise FeishuServiceError("飞书应用密钥长度不正确")
         if stored is not None and stored.app_id != normalized_app_id:
             connected = self.db.scalar(select(FeishuConnection.id).limit(1))
             if connected is not None:
@@ -308,13 +354,18 @@ class FeishuService:
                 app_secret_encrypted="",
                 oauth_redirect_uri=redirect_uri,
                 frontend_url=normalized_frontend_url,
+                aily_app_id=normalized_aily_app_id,
+                aily_skill_id=normalized_aily_skill_id,
                 configured_by=user_id,
             )
             self.db.add(stored)
         stored.app_id = normalized_app_id
-        stored.app_secret_encrypted = self._cipher().encrypt(normalized_secret)
+        if normalized_secret:
+            stored.app_secret_encrypted = self._cipher().encrypt(normalized_secret)
         stored.oauth_redirect_uri = redirect_uri
         stored.frontend_url = normalized_frontend_url
+        stored.aily_app_id = normalized_aily_app_id
+        stored.aily_skill_id = normalized_aily_skill_id
         stored.configured_by = user_id
         self.db.commit()
         self.db.refresh(stored)
@@ -611,6 +662,182 @@ class FeishuService:
         if missing:
             raise FeishuServiceError(f"飞书授权缺少权限：{'、'.join(missing)}")
 
+    @staticmethod
+    def _rfc3339_datetime(value: str, field_name: str) -> datetime:
+        normalized = value.strip()
+        try:
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise FeishuServiceError(f"{field_name}必须是 RFC 3339 日期时间") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise FeishuServiceError(f"{field_name}必须包含时区偏移")
+        return parsed
+
+    def batch_freebusy(
+        self,
+        user_id: str,
+        *,
+        user_ids: list[str],
+        time_min: str,
+        time_max: str,
+        user_id_type: str = "open_id",
+        include_external_calendar: bool = True,
+        only_busy: bool = True,
+        need_rsvp_status: bool = True,
+    ) -> dict[str, Any]:
+        """Query up to ten users' primary-calendar busy intervals for at most two weeks."""
+        normalized_user_ids = [item.strip() for item in user_ids if item.strip()]
+        if not 1 <= len(normalized_user_ids) <= 10:
+            raise FeishuServiceError("单次飞书忙闲查询必须包含 1 至 10 个用户")
+        if len(set(normalized_user_ids)) != len(normalized_user_ids):
+            raise FeishuServiceError("单次飞书忙闲查询不能包含重复用户")
+        start = self._rfc3339_datetime(time_min, "忙闲查询开始时间")
+        end = self._rfc3339_datetime(time_max, "忙闲查询结束时间")
+        if end <= start:
+            raise FeishuServiceError("忙闲查询结束时间必须晚于开始时间")
+        if end - start > timedelta(days=14):
+            raise FeishuServiceError("单次飞书忙闲查询时间范围不能超过两周")
+
+        connection, token = self.access_token(user_id)
+        self._require_scopes(connection, {"calendar:calendar.free_busy:read"})
+        data, _ = self._request(
+            "POST",
+            f"{OPEN_API_URL}/calendar/v4/freebusy/batch",
+            token=token,
+            params={"user_id_type": user_id_type},
+            json_body={
+                "time_min": time_min,
+                "time_max": time_max,
+                "user_ids": normalized_user_ids,
+                "include_external_calendar": include_external_calendar,
+                "only_busy": only_busy,
+                "need_rsvp_status": need_rsvp_status,
+            },
+        )
+        return data
+
+    def create_calendar_event(
+        self,
+        user_id: str,
+        *,
+        calendar_id: str,
+        event: dict[str, Any],
+        idempotency_key: str | None = None,
+        user_id_type: str = "open_id",
+    ) -> dict[str, Any]:
+        """Create an event in a primary or shared calendar with the supplied event body."""
+        normalized_calendar_id = calendar_id.strip()
+        if not normalized_calendar_id:
+            raise FeishuServiceError("创建飞书日程时必须提供日历标识")
+        if not isinstance(event.get("start_time"), dict) or not isinstance(
+            event.get("end_time"), dict
+        ):
+            raise FeishuServiceError("创建飞书日程时必须提供开始时间和结束时间对象")
+        params: dict[str, Any] = {"user_id_type": user_id_type}
+        if idempotency_key is not None:
+            normalized_key = idempotency_key.strip()
+            if not 32 <= len(normalized_key) <= 128:
+                raise FeishuServiceError("飞书日程幂等键长度必须为 32 至 128 个字符")
+            params["idempotency_key"] = normalized_key
+
+        connection, token = self.access_token(user_id)
+        self._require_scopes(connection, {"calendar:calendar.event:create"})
+        data, _ = self._request(
+            "POST",
+            f"{OPEN_API_URL}/calendar/v4/calendars/{quote(normalized_calendar_id, safe='')}/events",
+            token=token,
+            params=params,
+            json_body=dict(event),
+        )
+        return data
+
+    def add_event_attendee(
+        self,
+        user_id: str,
+        *,
+        calendar_id: str,
+        event_id: str,
+        attendee_user_id: str,
+        user_id_type: str = "open_id",
+        is_optional: bool = False,
+        need_notification: bool = True,
+    ) -> dict[str, Any]:
+        """Add one in-tenant user as an attendee of an existing calendar event."""
+        normalized_calendar_id = calendar_id.strip()
+        normalized_event_id = event_id.strip()
+        normalized_attendee_id = attendee_user_id.strip()
+        if not normalized_calendar_id or not normalized_event_id:
+            raise FeishuServiceError("添加日程参与人时必须提供日历标识和日程标识")
+        if not normalized_attendee_id:
+            raise FeishuServiceError("添加日程参与人时必须提供飞书用户标识")
+
+        connection, token = self.access_token(user_id)
+        self._require_scopes(connection, {"calendar:calendar.event:update"})
+        data, _ = self._request(
+            "POST",
+            (
+                f"{OPEN_API_URL}/calendar/v4/calendars/"
+                f"{quote(normalized_calendar_id, safe='')}/events/"
+                f"{quote(normalized_event_id, safe='')}/attendees"
+            ),
+            token=token,
+            params={"user_id_type": user_id_type},
+            json_body={
+                "attendees": [
+                    {
+                        "type": "user",
+                        "user_id": normalized_attendee_id,
+                        "is_optional": is_optional,
+                    }
+                ],
+                "need_notification": need_notification,
+            },
+        )
+        return data
+
+    def start_aily_skill(
+        self,
+        user_id: str,
+        *,
+        app_id: str,
+        skill_id: str,
+        query: str,
+        input_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Invoke a configured Aily workflow skill and decode its JSON output."""
+        normalized_app_id = app_id.strip()
+        normalized_skill_id = skill_id.strip()
+        if not normalized_app_id.startswith("spring_") or not normalized_skill_id.startswith(
+            "skill_"
+        ):
+            raise FeishuServiceError("Aily 应用标识或技能标识格式不正确")
+        connection, token = self.access_token(user_id)
+        self._require_scopes(connection, {"aily:skill:write"})
+        body: dict[str, Any] = {"query": query}
+        if input_payload is not None:
+            body["input"] = json.dumps(input_payload, ensure_ascii=False)
+        data, _ = self._request(
+            "POST",
+            (
+                f"{OPEN_API_URL}/aily/v1/apps/{quote(normalized_app_id, safe='')}"
+                f"/skills/{quote(normalized_skill_id, safe='')}/start"
+            ),
+            token=token,
+            json_body=body,
+        )
+        if data.get("status") not in (None, "success"):
+            raise FeishuServiceError(f"Aily 技能执行未成功：{data.get('status')}")
+        output = data.get("output")
+        if not isinstance(output, str) or not output.strip():
+            raise FeishuServiceError("Aily 技能响应缺少 output")
+        try:
+            decoded = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise FeishuServiceError("Aily 技能 output 不是合法 JSON") from exc
+        if not isinstance(decoded, dict):
+            raise FeishuServiceError("Aily 技能 output 必须是 JSON 对象")
+        return decoded
+
     def create_workspace(self, user_id: str, name: str) -> FeishuWorkspace:
         connection, token = self.access_token(user_id)
         self._require_scopes(
@@ -625,8 +852,6 @@ class FeishuService:
             )
             .order_by(FeishuWorkspace.created_at.desc())
         )
-        if workspace and workspace.status == "active":
-            return workspace
         try:
             if workspace is None:
                 data, _ = self._request(

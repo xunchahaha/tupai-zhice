@@ -5,6 +5,9 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { SolveRequestDateFrom } from './solveRequestDateFrom';
+import type { SolveRequestDateTo } from './solveRequestDateTo';
+import type { SolveRequestSolverRulesItem } from './solveRequestSolverRulesItem';
 
 export interface SolveRequest {
   /**
@@ -27,5 +30,16 @@ export interface SolveRequest {
    * @maximum 1000000
    */
   change_weight?: number;
+  business_lines?: string[];
+  product_types?: string[];
+  class_business_ids?: string[];
+  date_from?: SolveRequestDateFrom;
+  date_to?: SolveRequestDateTo;
+  /**
+   * @minimum 0
+   * @maximum 31
+   */
+  date_window_days?: number;
+  solver_rules?: SolveRequestSolverRulesItem[];
   wait?: boolean;
 }

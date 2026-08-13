@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import cast
 
-from sqlalchemy import text
+from sqlalchemy import Table, text
 
 from app.db import Base, SessionLocal, engine
 from app.models import (
     AuditLog,
+    CalendarEventBinding,
     Campus,
     ClassGroup,
     CourseSession,
@@ -29,7 +31,8 @@ from app.models import (
 )
 from app.services.converter_zhengzhou import import_schedule_workbook
 
-BUSINESS_TABLES = [
+BUSINESS_TABLES = cast(list[Table], [
+    CalendarEventBinding.__table__,
     ScheduleAssignment.__table__,
     RescheduleEvent.__table__,
     ScheduleVersion.__table__,
@@ -44,7 +47,7 @@ BUSINESS_TABLES = [
     Campus.__table__,
     AuditLog.__table__,
     IntegrationSync.__table__,
-]
+])
 
 
 def main() -> None:
@@ -63,7 +66,7 @@ def main() -> None:
         db.commit()
         with engine.begin() as connection:
             connection.execute(
-                text("UPDATE alembic_version SET version_num = 'c0d7e2f4a1b6'")
+                text("UPDATE alembic_version SET version_num = 'e3b1c7a9d420'")
             )
 
     print("已清空示范数据并仅导入官方数据：")

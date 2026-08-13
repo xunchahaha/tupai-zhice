@@ -5,14 +5,20 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { CourseSessionResponseCalendarUserId } from './courseSessionResponseCalendarUserId';
 import type { CourseSessionResponseLessonDate } from './courseSessionResponseLessonDate';
 import type { CourseSessionResponseSuggestedSlotId } from './courseSessionResponseSuggestedSlotId';
+import type { CourseSessionResponseOriginalRoomBusinessId } from './courseSessionResponseOriginalRoomBusinessId';
 
 export interface CourseSessionResponse {
   campus_id: string;
   business_id: string;
+  source_row_id?: string;
+  business_line?: string;
+  product_type?: string;
   class_business_id: string;
   teacher_business_id: string;
+  calendar_user_id?: CourseSessionResponseCalendarUserId;
   subject?: string;
   lesson_name?: string;
   schedule_source?: string;
@@ -27,6 +33,9 @@ export interface CourseSessionResponse {
   /** */
   duration_minutes?: number;
   suggested_slot_id?: CourseSessionResponseSuggestedSlotId;
+  fixed_start_time?: string;
+  fixed_end_time?: string;
+  original_room_business_id?: CourseSessionResponseOriginalRoomBusinessId;
   is_locked?: boolean;
   id: string;
 }

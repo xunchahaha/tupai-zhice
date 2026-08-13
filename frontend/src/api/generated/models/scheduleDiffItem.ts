@@ -5,8 +5,10 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { ScheduleDiffItemBeforeLessonDate } from './scheduleDiffItemBeforeLessonDate';
 import type { ScheduleDiffItemBeforeSlotId } from './scheduleDiffItemBeforeSlotId';
 import type { ScheduleDiffItemBeforeRoomId } from './scheduleDiffItemBeforeRoomId';
+import type { ScheduleDiffItemAfterLessonDate } from './scheduleDiffItemAfterLessonDate';
 import type { ScheduleDiffItemAfterSlotId } from './scheduleDiffItemAfterSlotId';
 import type { ScheduleDiffItemAfterRoomId } from './scheduleDiffItemAfterRoomId';
 import type { ScheduleDiffItemChangeKind } from './scheduleDiffItemChangeKind';
@@ -15,8 +17,10 @@ export interface ScheduleDiffItem {
   course_business_id: string;
   class_business_id: string;
   teacher_business_id: string;
+  before_lesson_date?: ScheduleDiffItemBeforeLessonDate;
   before_slot_id?: ScheduleDiffItemBeforeSlotId;
   before_room_id?: ScheduleDiffItemBeforeRoomId;
+  after_lesson_date?: ScheduleDiffItemAfterLessonDate;
   after_slot_id?: ScheduleDiffItemAfterSlotId;
   after_room_id?: ScheduleDiffItemAfterRoomId;
   change_kind: ScheduleDiffItemChangeKind;

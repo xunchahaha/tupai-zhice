@@ -5,10 +5,12 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { TeacherPayloadCalendarUserId } from './teacherPayloadCalendarUserId';
 
 export interface TeacherPayload {
   campus_id: string;
   business_id: string;
   name: string;
   subject?: string;
+  calendar_user_id?: TeacherPayloadCalendarUserId;
 }

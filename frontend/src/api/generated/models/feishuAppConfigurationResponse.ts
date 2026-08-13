@@ -7,6 +7,8 @@
  */
 import type { FeishuAppConfigurationResponseSource } from './feishuAppConfigurationResponseSource';
 import type { FeishuAppConfigurationResponseAppId } from './feishuAppConfigurationResponseAppId';
+import type { FeishuAppConfigurationResponseAilyAppId } from './feishuAppConfigurationResponseAilyAppId';
+import type { FeishuAppConfigurationResponseAilySkillId } from './feishuAppConfigurationResponseAilySkillId';
 
 export interface FeishuAppConfigurationResponse {
   configured: boolean;
@@ -15,4 +17,7 @@ export interface FeishuAppConfigurationResponse {
   secret_configured: boolean;
   oauth_redirect_uri: string;
   frontend_url: string;
+  aily_configured: boolean;
+  aily_app_id: FeishuAppConfigurationResponseAilyAppId;
+  aily_skill_id: FeishuAppConfigurationResponseAilySkillId;
 }

@@ -5,6 +5,7 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { FeishuAppConfigurationInputAppSecret } from './feishuAppConfigurationInputAppSecret';
 
 export interface FeishuAppConfigurationInput {
   /**
@@ -12,11 +13,7 @@ export interface FeishuAppConfigurationInput {
    * @maxLength 100
    */
   app_id: string;
-  /**
-   * @minLength 8
-   * @maxLength 200
-   */
-  app_secret: string;
+  app_secret?: FeishuAppConfigurationInputAppSecret;
   /**
    * @minLength 10
    * @maxLength 500
@@ -27,4 +24,14 @@ export interface FeishuAppConfigurationInput {
    * @maxLength 500
    */
   frontend_url: string;
+  /**
+   * @minLength 8
+   * @maxLength 100
+   */
+  aily_app_id: string;
+  /**
+   * @minLength 8
+   * @maxLength 100
+   */
+  aily_skill_id: string;
 }

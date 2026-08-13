@@ -71,6 +71,9 @@ const baseConnection = {
     secret_configured: true,
     oauth_redirect_uri: "http://127.0.0.1:8002/api/v1/integrations/feishu/oauth/callback",
     frontend_url: "http://127.0.0.1:5175",
+    aily_configured: true,
+    aily_app_id: "spring_test",
+    aily_skill_id: "skill_test",
   },
   workspace: null,
 };
@@ -127,11 +130,17 @@ describe("飞书生产接入页", () => {
     await user.type(screen.getByLabelText("飞书应用编号"), "cli_frontend_test");
     await user.clear(screen.getByLabelText("飞书应用密钥"));
     await user.type(screen.getByLabelText("飞书应用密钥"), "frontend-secret");
+    await user.clear(screen.getByLabelText("飞书 Aily 应用标识"));
+    await user.type(screen.getByLabelText("飞书 Aily 应用标识"), "spring_frontend_test");
+    await user.clear(screen.getByLabelText("飞书 Aily 技能标识"));
+    await user.type(screen.getByLabelText("飞书 Aily 技能标识"), "skill_frontend_test");
     await user.click(screen.getByRole("button", { name: "保存应用配置" }));
     expect(mocks.configureApp).toHaveBeenCalledWith({
       data: expect.objectContaining({
         app_id: "cli_frontend_test",
         app_secret: "frontend-secret",
+        aily_app_id: "spring_frontend_test",
+        aily_skill_id: "skill_frontend_test",
         oauth_redirect_uri:
           "http://127.0.0.1:8000/api/v1/integrations/feishu/oauth/callback",
       }),
@@ -167,26 +176,6 @@ describe("飞书生产接入页", () => {
     });
   });
 
-  it("后端滚动升级期间收到旧版连接字段仍可正常显示", () => {
-    mocks.connection.current = {
-      mode: "live",
-      configured: true,
-      connected: true,
-      table_mapping_configured: true,
-      missing_fields: [],
-      missing_resources: [],
-      message: "飞书生产连接已验证。",
-      console_url: "https://open.feishu.cn/app/",
-      docs_url: "https://open.feishu.cn/document/",
-    };
-
-    renderPage();
-
-    expect(screen.getByText("飞书生产连接已验证。")).toBeVisible();
-    expect(screen.getByText("管理员账号已授权")).toBeVisible();
-    expect(screen.getByRole("button", { name: "自动创建排课表格" })).toBeEnabled();
-  });
-
   it("建表完成后按中文资源执行真实幂等同步", async () => {
     const tables = [
       ["teachers", "教师"],
@@ -196,6 +185,7 @@ describe("飞书生产接入页", () => {
       ["course_sessions", "课程场次"],
       ["rules", "规则"],
       ["schedule", "课表"],
+      ["public_summary", "公开展示汇总"],
     ].map(([resource, table_name], index) => ({ resource, table_name, table_id: `tbl-${index}` }));
     mocks.connection.current = {
       ...baseConnection,

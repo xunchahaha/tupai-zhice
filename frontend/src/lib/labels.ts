@@ -52,6 +52,7 @@ const labels: Record<string, string> = {
   running: "求解中",
   scheduler: "排课员",
   schedule: "课表版本",
+  public_summary: "公开展示汇总",
   schedule_version: "课表版本",
   solver_run: "求解任务",
   submit: "提交求解",

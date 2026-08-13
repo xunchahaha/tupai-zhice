@@ -13,3 +13,10 @@ export function preferredSchedule<T extends ScheduleCandidate>(
     schedules[0]
   );
 }
+
+
+export function latestDraftSchedule<T extends ScheduleCandidate>(
+  schedules: readonly T[] | undefined,
+): T | undefined {
+  return schedules?.find((schedule) => schedule.status === "draft");
+}

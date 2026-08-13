@@ -5,6 +5,9 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { AilySolveRequestDateFrom } from './ailySolveRequestDateFrom';
+import type { AilySolveRequestDateTo } from './ailySolveRequestDateTo';
+import type { AilySolveRequestSolverRulesItem } from './ailySolveRequestSolverRulesItem';
 
 export interface AilySolveRequest {
   /**
@@ -12,4 +15,20 @@ export interface AilySolveRequest {
    * @maximum 900
    */
   time_limit_seconds?: number;
+  /**
+   * @minLength 2
+   * @maxLength 2000
+   */
+  instruction?: string;
+  business_lines?: string[];
+  product_types?: string[];
+  class_business_ids?: string[];
+  date_from?: AilySolveRequestDateFrom;
+  date_to?: AilySolveRequestDateTo;
+  /**
+   * @minimum 0
+   * @maximum 31
+   */
+  date_window_days?: number;
+  solver_rules?: AilySolveRequestSolverRulesItem[];
 }

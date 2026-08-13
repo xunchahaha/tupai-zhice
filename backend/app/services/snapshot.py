@@ -32,7 +32,7 @@ def build_snapshot_payload(db: Session) -> dict[str, object]:
         "teachers": [
             _model_dict(
                 item,
-                ["id", "business_id", "name", "subject"],
+                ["id", "business_id", "name", "subject", "calendar_user_id"],
             )
             for item in teachers
         ],
@@ -72,8 +72,12 @@ def build_snapshot_payload(db: Session) -> dict[str, object]:
                 [
                     "id",
                     "business_id",
+                    "source_row_id",
+                    "business_line",
+                    "product_type",
                     "class_business_id",
                     "teacher_business_id",
+                    "calendar_user_id",
                     "subject",
                     "lesson_name",
                     "schedule_source",
@@ -84,6 +88,9 @@ def build_snapshot_payload(db: Session) -> dict[str, object]:
                     "lesson_date",
                     "duration_minutes",
                     "suggested_slot_id",
+                    "fixed_start_time",
+                    "fixed_end_time",
+                    "original_room_business_id",
                     "is_locked",
                 ],
             )

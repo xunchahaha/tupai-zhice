@@ -5,11 +5,13 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select
 
 from app.api import settings
+from app.config import FEISHU_REQUIRED_SCOPES
 from app.db import SessionLocal
 from app.models import (
     FeishuAppConfiguration,
@@ -18,7 +20,7 @@ from app.models import (
     FeishuRecordBinding,
     User,
 )
-from app.services.feishu import FeishuService, TokenCipher
+from app.services.feishu import TABLE_SCHEMAS, FeishuService, FeishuServiceError, TokenCipher
 
 
 def response(
@@ -77,6 +79,12 @@ def complete_authorization(
     assert "code_challenge" not in query
     assert "code_challenge_method" not in query
     assert "offline_access" in query["scope"][0]
+    assert set(FEISHU_REQUIRED_SCOPES) == set(query["scope"][0].split())
+    assert {
+        "calendar:calendar.event:create",
+        "calendar:calendar.event:update",
+        "calendar:calendar.free_busy:read",
+    } <= set(query["scope"][0].split())
 
     def token_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
         body = kwargs["json"]
@@ -107,6 +115,27 @@ def complete_authorization(
     return state
 
 
+def test_start_aily_skill_decodes_workflow_output(monkeypatch: Any) -> None:
+    service = object.__new__(FeishuService)
+    connection = type("Connection", (), {"scopes": ["aily:skill:write"]})()
+    monkeypatch.setattr(service, "access_token", lambda user_id: (connection, "token"))
+    monkeypatch.setattr(service, "_require_scopes", lambda connection, scopes: None)
+
+    def request(method: str, url: str, **kwargs: Any) -> tuple[dict[str, Any], None]:
+        assert url.endswith("/aily/v1/apps/spring_demo__c/skills/skill_demo/start")
+        assert kwargs["json_body"]["query"] == "安排考研班"
+        return {"output": '{"business_lines":["考研"],"date_window_days":2}'}, None
+
+    monkeypatch.setattr(service, "_request", request)
+    result = service.start_aily_skill(
+        "user",
+        app_id="spring_demo__c",
+        skill_id="skill_demo",
+        query="安排考研班",
+    )
+    assert result["business_lines"] == ["考研"]
+
+
 def test_admin_configures_app_from_frontend_and_secret_is_encrypted(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -126,6 +155,8 @@ def test_admin_configures_app_from_frontend_and_secret_is_encrypted(
             "app_secret": "frontend-secret-value",
             "oauth_redirect_uri": ("http://testserver/api/v1/integrations/feishu/oauth/callback"),
             "frontend_url": "http://frontend.test",
+            "aily_app_id": "spring_frontend_test",
+            "aily_skill_id": "skill_frontend_test",
         },
     )
     assert configured.status_code == 200, configured.text
@@ -136,6 +167,9 @@ def test_admin_configures_app_from_frontend_and_secret_is_encrypted(
         "secret_configured": True,
         "oauth_redirect_uri": "http://testserver/api/v1/integrations/feishu/oauth/callback",
         "frontend_url": "http://frontend.test",
+        "aily_configured": True,
+        "aily_app_id": "spring_frontend_test",
+        "aily_skill_id": "skill_frontend_test",
     }
     assert "frontend-secret-value" not in configured.text
     assert key_file.exists()
@@ -154,6 +188,8 @@ def test_admin_configures_app_from_frontend_and_secret_is_encrypted(
         assert stored.app_secret_encrypted != "frontend-secret-value"
         cipher = TokenCipher(key_file.read_text(encoding="ascii").strip())
         assert cipher.decrypt(stored.app_secret_encrypted) == "frontend-secret-value"
+        assert stored.aily_app_id == "spring_frontend_test"
+        assert stored.aily_skill_id == "skill_frontend_test"
         db.execute(delete(FeishuOAuthState))
         db.delete(stored)
         db.commit()
@@ -324,7 +360,7 @@ def test_auto_create_workspace_and_sync_idempotently(
     )
     assert workspace.status_code == 201, workspace.text
     assert workspace.json()["status"] == "active"
-    assert len(workspace.json()["tables"]) == 7
+    assert len(workspace.json()["tables"]) == len(TABLE_SCHEMAS)
     assert [table["name"] for table in created_tables] == [
         "教师",
         "班级",
@@ -333,6 +369,7 @@ def test_auto_create_workspace_and_sync_idempotently(
         "课程场次",
         "规则",
         "课表",
+        "公开展示汇总",
     ]
     assert all(table["fields"][0]["field_name"] == "业务标识" for table in created_tables)
 
@@ -364,3 +401,127 @@ def test_auto_create_workspace_and_sync_idempotently(
     assert len(remote_records["tbl-1"]) == 6
     with SessionLocal() as db:
         assert db.scalar(select(func.count(FeishuRecordBinding.id))) == 6
+
+
+def test_calendar_table_schemas_include_binding_and_fixed_time_fields() -> None:
+    teacher_fields = {name for name, _ in TABLE_SCHEMAS["teachers"][1]}
+    session_fields = {name for name, _ in TABLE_SCHEMAS["course_sessions"][1]}
+    schedule_fields = {name for name, _ in TABLE_SCHEMAS["schedule"][1]}
+
+    assert "飞书用户标识" in teacher_fields
+    assert {
+        "业务线",
+        "产品班型",
+        "固定开始时间",
+        "固定结束时间",
+        "原始教室标识",
+        "具体日程账号",
+    } <= session_fields
+    assert {"上课日期", "固定开始时间", "固定结束时间"} <= schedule_fields
+
+
+def test_calendar_requests_use_user_token_and_official_payloads(monkeypatch: Any) -> None:
+    calls: list[dict[str, Any]] = []
+    service = FeishuService(settings, object())  # type: ignore[arg-type]
+    connection = FeishuConnection(
+        user_id="admin-user",
+        access_token_encrypted="unused",
+        refresh_token_encrypted="unused",
+        access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+        scopes=list(FEISHU_REQUIRED_SCOPES),
+    )
+    monkeypatch.setattr(service, "access_token", lambda user_id: (connection, "calendar-token"))
+
+    def calendar_request(method: str, url: str, **kwargs: Any) -> tuple[dict[str, Any], str]:
+        calls.append({"method": method, "url": url, **kwargs})
+        if url.endswith("/freebusy/batch"):
+            return {"freebusy_lists": []}, "log-freebusy"
+        if url.endswith("/attendees"):
+            return {"attendees": [{"attendee_id": "attendee-1"}]}, "log-attendee"
+        return {"event": {"event_id": "event-1"}}, "log-event"
+
+    monkeypatch.setattr(service, "_request", calendar_request)
+
+    freebusy = service.batch_freebusy(
+        "admin-user",
+        user_ids=["ou_teacher_1", "ou_teacher_2"],
+        time_min="2026-08-17T08:00:00+08:00",
+        time_max="2026-08-24T18:00:00+08:00",
+    )
+    event = service.create_calendar_event(
+        "admin-user",
+        calendar_id="feishu.cn_teacher/calendar@primary",
+        idempotency_key="schedule-assignment-000000000000001",
+        event={
+            "summary": "课程安排",
+            "start_time": {"timestamp": "1786928400", "timezone": "Asia/Shanghai"},
+            "end_time": {"timestamp": "1786939200", "timezone": "Asia/Shanghai"},
+            "free_busy_status": "busy",
+        },
+    )
+    attendee = service.add_event_attendee(
+        "admin-user",
+        calendar_id="feishu.cn_teacher/calendar@primary",
+        event_id="event/1",
+        attendee_user_id="ou_teacher_1",
+    )
+
+    assert freebusy == {"freebusy_lists": []}
+    assert event["event"]["event_id"] == "event-1"
+    assert attendee["attendees"][0]["attendee_id"] == "attendee-1"
+    assert calls[0] == {
+        "method": "POST",
+        "url": "https://open.feishu.cn/open-apis/calendar/v4/freebusy/batch",
+        "token": "calendar-token",
+        "params": {"user_id_type": "open_id"},
+        "json_body": {
+            "time_min": "2026-08-17T08:00:00+08:00",
+            "time_max": "2026-08-24T18:00:00+08:00",
+            "user_ids": ["ou_teacher_1", "ou_teacher_2"],
+            "include_external_calendar": True,
+            "only_busy": True,
+            "need_rsvp_status": True,
+        },
+    }
+    assert calls[1]["url"].endswith(
+        "/calendar/v4/calendars/feishu.cn_teacher%2Fcalendar%40primary/events"
+    )
+    assert calls[1]["params"] == {
+        "user_id_type": "open_id",
+        "idempotency_key": "schedule-assignment-000000000000001",
+    }
+    assert calls[1]["json_body"]["free_busy_status"] == "busy"
+    assert calls[2]["url"].endswith(
+        "/calendar/v4/calendars/feishu.cn_teacher%2Fcalendar%40primary/events/"
+        "event%2F1/attendees"
+    )
+    assert calls[2]["json_body"] == {
+        "attendees": [
+            {"type": "user", "user_id": "ou_teacher_1", "is_optional": False}
+        ],
+        "need_notification": True,
+    }
+
+
+def test_batch_freebusy_rejects_oversized_user_and_time_windows(monkeypatch: Any) -> None:
+    service = FeishuService(settings, object())  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        service,
+        "access_token",
+        lambda user_id: (_ for _ in ()).throw(AssertionError("validation must run first")),
+    )
+
+    with pytest.raises(FeishuServiceError, match="1 至 10"):
+        service.batch_freebusy(
+            "admin-user",
+            user_ids=[f"ou_{index}" for index in range(11)],
+            time_min="2026-08-01T00:00:00+08:00",
+            time_max="2026-08-02T00:00:00+08:00",
+        )
+    with pytest.raises(FeishuServiceError, match="不能超过两周"):
+        service.batch_freebusy(
+            "admin-user",
+            user_ids=["ou_teacher"],
+            time_min="2026-08-01T00:00:00+08:00",
+            time_max="2026-08-16T00:00:00+08:00",
+        )

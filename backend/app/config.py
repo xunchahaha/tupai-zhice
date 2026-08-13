@@ -17,6 +17,7 @@ FEISHU_RESOURCES = (
     "course_sessions",
     "rules",
     "schedule",
+    "public_summary",
 )
 
 FEISHU_REQUIRED_SCOPES = (
@@ -29,6 +30,10 @@ FEISHU_REQUIRED_SCOPES = (
     "base:record:create",
     "base:record:retrieve",
     "base:record:update",
+    "calendar:calendar.event:create",
+    "calendar:calendar.event:update",
+    "calendar:calendar.free_busy:read",
+    "aily:skill:write",
 )
 
 
@@ -45,6 +50,8 @@ class Settings(BaseSettings):
     bootstrap_admin_username: str = "admin"
     bootstrap_admin_password: str = "tupai-demo"
     aily_skill_api_key: str = "aily-demo-key"
+    aily_app_id: str = ""
+    aily_skill_id: str = ""
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"]
     )

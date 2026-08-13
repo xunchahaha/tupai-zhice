@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import Counter
+from datetime import date, datetime, time, timedelta
 from typing import Annotated, Any
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import (
@@ -27,6 +30,7 @@ from .config import PROJECT_ROOT, get_settings
 from .db import get_db
 from .models import (
     AuditLog,
+    CalendarEventBinding,
     Campus,
     ClassGroup,
     CourseSession,
@@ -47,13 +51,20 @@ from .schemas import (
     AilyRuleBatch,
     AilySolveRequest,
     AssignmentResponse,
+    AssistantInterpretRequest,
+    AssistantInterpretResponse,
+    AssistantSolveRequest,
     AuditLogResponse,
+    CalendarEventBindingResponse,
+    CalendarPublishRequest,
+    CalendarPublishResponse,
     CampusCreate,
     CampusResponse,
     ClassGroupPayload,
     ClassGroupResponse,
     CourseSessionPayload,
     CourseSessionResponse,
+    CourseSessionUpdate,
     FeishuAppConfigurationInput,
     FeishuAppConfigurationResponse,
     FeishuConnectionResponse,
@@ -64,6 +75,7 @@ from .schemas import (
     ImportResult,
     IntegrationSyncResponse,
     OverviewResponse,
+    PublicScheduleSummary,
     RescheduleCreate,
     RescheduleResponse,
     RoomPayload,
@@ -95,6 +107,7 @@ logger = logging.getLogger("tupai.feishu")
 
 settings = get_settings()
 router = APIRouter(prefix=settings.api_prefix)
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 Db = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminOrScheduler = Annotated[User, Depends(require_roles("admin", "scheduler"))]
@@ -158,6 +171,7 @@ def schedule_response(db: Session, schedule: ScheduleVersion) -> ScheduleRespons
                 course_business_id=courses[row.course_session_id].business_id,
                 class_business_id=courses[row.course_session_id].class_business_id,
                 teacher_business_id=courses[row.course_session_id].teacher_business_id,
+                lesson_date=row.lesson_date,
                 slot_business_id=row.slot_business_id,
                 room_business_id=row.room_business_id,
                 change_kind=row.change_kind,
@@ -413,10 +427,10 @@ def create_course_session(
     "/course-sessions/{object_id}", response_model=CourseSessionResponse, tags=["master-data"]
 )
 def update_course_session(
-    object_id: str, payload: CourseSessionPayload, db: Db, user: AdminOrScheduler
+    object_id: str, payload: CourseSessionUpdate, db: Db, user: AdminOrScheduler
 ) -> CourseSession:
     instance = get_or_404(db, CourseSession, object_id)
-    for key, value in payload.model_dump().items():
+    for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(instance, key, value)
     audit(db, user, "update", "course_session", object_id)
     db.commit()
@@ -598,8 +612,37 @@ def create_solver_run(
         "seat_waste_weight": getattr(request, "seat_waste_weight", 1),
         "change_weight": getattr(request, "change_weight", 100000),
         "random_seed": settings.solver_random_seed,
+        "business_lines": request.business_lines,
+        "product_types": request.product_types,
+        "class_business_ids": request.class_business_ids,
+        "date_from": request.date_from.isoformat() if request.date_from else None,
+        "date_to": request.date_to.isoformat() if request.date_to else None,
+        "date_window_days": request.date_window_days,
+        "solver_rules": request.solver_rules,
     }
-    payload.update(extra or {})
+    if isinstance(request, AilySolveRequest):
+        payload["instruction"] = request.instruction
+    run_extra = dict(extra or {})
+    is_partial_scope = bool(
+        request.business_lines
+        or request.product_types
+        or request.class_business_ids
+        or request.date_from
+        or request.date_to
+    )
+    if is_partial_scope and "parent_schedule_id" not in run_extra:
+        parent = db.scalar(
+            select(ScheduleVersion)
+            .where(ScheduleVersion.status == "published")
+            .order_by(ScheduleVersion.version_no.desc())
+        )
+        if parent:
+            parent_response = schedule_response(db, parent)
+            run_extra["parent_schedule_id"] = parent.id
+            run_extra["previous_assignments"] = [
+                item.model_dump(mode="json") for item in parent_response.assignments
+            ]
+    payload.update(run_extra)
     run = SolverRun(
         snapshot_id=snapshot.id,
         run_type=run_type,
@@ -704,7 +747,8 @@ def diff_schedules(
             kind = "added"
         elif new is None:
             kind = "removed"
-        elif (old.slot_business_id, old.room_business_id) != (
+        elif (old.lesson_date, old.slot_business_id, old.room_business_id) != (
+            new.lesson_date,
             new.slot_business_id,
             new.room_business_id,
         ):
@@ -718,8 +762,10 @@ def diff_schedules(
                 course_business_id=course_id,
                 class_business_id=reference.class_business_id,
                 teacher_business_id=reference.teacher_business_id,
+                before_lesson_date=old.lesson_date if old else None,
                 before_slot_id=old.slot_business_id if old else None,
                 before_room_id=old.room_business_id if old else None,
+                after_lesson_date=new.lesson_date if new else None,
                 after_slot_id=new.slot_business_id if new else None,
                 after_room_id=new.room_business_id if new else None,
                 change_kind=kind,
@@ -784,6 +830,276 @@ def export_schedule(schedule_id: str, db: Db, user: CurrentUser) -> Response:
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get(
+    "/schedules/{schedule_id}/calendar-bindings",
+    response_model=list[CalendarEventBindingResponse],
+    tags=["schedules", "integrations"],
+)
+def list_calendar_bindings(
+    schedule_id: str, db: Db, user: CurrentUser
+) -> list[CalendarEventBinding]:
+    get_or_404(db, ScheduleVersion, schedule_id)
+    return list(
+        db.scalars(
+            select(CalendarEventBinding)
+            .where(CalendarEventBinding.schedule_version_id == schedule_id)
+            .order_by(CalendarEventBinding.created_at, CalendarEventBinding.course_session_id)
+        )
+    )
+
+
+@router.post(
+    "/schedules/{schedule_id}/calendar-publish",
+    response_model=CalendarPublishResponse,
+    tags=["schedules", "integrations"],
+)
+def publish_schedule_to_calendar(
+    schedule_id: str,
+    request: CalendarPublishRequest,
+    db: Db,
+    user: AdminOrScheduler,
+) -> CalendarPublishResponse:
+    schedule = get_or_404(db, ScheduleVersion, schedule_id)
+    assignments = list(
+        db.scalars(
+            select(ScheduleAssignment)
+            .where(ScheduleAssignment.schedule_version_id == schedule.id)
+            .order_by(ScheduleAssignment.lesson_date, ScheduleAssignment.course_session_id)
+        )
+    )
+    courses = {
+        item.id: item
+        for item in db.scalars(
+            select(CourseSession).where(
+                CourseSession.id.in_([item.course_session_id for item in assignments])
+            )
+        )
+    }
+    teacher_ids = {item.teacher_business_id for item in courses.values()}
+    teachers = {
+        item.business_id: item
+        for item in db.scalars(select(Teacher).where(Teacher.business_id.in_(teacher_ids)))
+    }
+    rooms = {item.business_id: item for item in db.scalars(select(Room))}
+    existing_bindings = {
+        item.course_session_id: item
+        for item in db.scalars(
+            select(CalendarEventBinding).where(
+                CalendarEventBinding.schedule_version_id == schedule.id
+            )
+        )
+    }
+    publishable: list[tuple[ScheduleAssignment, CourseSession, str, datetime, datetime]] = []
+    skipped_unmapped = 0
+    for assignment in assignments:
+        binding = existing_bindings.get(assignment.course_session_id)
+        if binding and binding.status in {"published", "published_with_conflict"}:
+            continue
+        course = courses.get(assignment.course_session_id)
+        if course is None or assignment.lesson_date is None:
+            skipped_unmapped += 1
+            continue
+        teacher = teachers.get(course.teacher_business_id)
+        calendar_user_id = (course.calendar_user_id or "").strip() or (
+            (teacher.calendar_user_id or "").strip() if teacher else ""
+        )
+        if not calendar_user_id or not course.fixed_start_time or not course.fixed_end_time:
+            skipped_unmapped += 1
+            continue
+        try:
+            start = datetime.combine(
+                assignment.lesson_date, _parse_clock(course.fixed_start_time), SHANGHAI_TZ
+            )
+            end = datetime.combine(
+                assignment.lesson_date, _parse_clock(course.fixed_end_time), SHANGHAI_TZ
+            )
+        except ValueError:
+            skipped_unmapped += 1
+            continue
+        if end <= start:
+            skipped_unmapped += 1
+            continue
+        publishable.append((assignment, course, calendar_user_id, start, end))
+
+    service = FeishuService(settings, db)
+    busy_by_user: dict[str, list[tuple[datetime, datetime]]] = {}
+    if publishable:
+        min_date = min(item[3].date() for item in publishable)
+        max_date = max(item[4].date() for item in publishable)
+        for chunk_start in (
+            min_date + timedelta(days=offset)
+            for offset in range(0, (max_date - min_date).days + 1, 14)
+        ):
+            chunk_end = min(chunk_start + timedelta(days=14), max_date + timedelta(days=1))
+            relevant_users = sorted(
+                {
+                    item[2]
+                    for item in publishable
+                    if item[3].date() < chunk_end and item[4].date() >= chunk_start
+                }
+            )
+            for user_offset in range(0, len(relevant_users), 10):
+                user_chunk = relevant_users[user_offset : user_offset + 10]
+                payload = service.batch_freebusy(
+                    user.id,
+                    user_ids=user_chunk,
+                    time_min=datetime.combine(chunk_start, time.min, SHANGHAI_TZ).isoformat(),
+                    time_max=datetime.combine(chunk_end, time.min, SHANGHAI_TZ).isoformat(),
+                )
+                response_lists = payload.get("freebusy_lists") or payload.get("freebusy_list")
+                if isinstance(response_lists, list):
+                    for index, item in enumerate(response_lists):
+                        if not isinstance(item, dict):
+                            continue
+                        target_user = str(
+                            item.get("user_id")
+                            or item.get("open_id")
+                            or (user_chunk[index] if index < len(user_chunk) else "")
+                        )
+                        if target_user:
+                            busy_by_user.setdefault(target_user, []).extend(_busy_intervals(item))
+                else:
+                    intervals = _busy_intervals(payload)
+                    for target_user in user_chunk:
+                        busy_by_user.setdefault(target_user, []).extend(intervals)
+
+    conflicts = []
+    conflicted_course_ids: set[str] = set()
+    for assignment, course, calendar_user_id, start, end in publishable:
+        if any(
+            _intervals_overlap(start, end, interval)
+            for interval in busy_by_user.get(calendar_user_id, [])
+        ):
+            conflicted_course_ids.add(course.id)
+            conflicts.append(
+                {
+                    "course_session_id": course.id,
+                    "calendar_user_id": calendar_user_id,
+                    "lesson_date": assignment.lesson_date,
+                    "start_time": course.fixed_start_time,
+                    "end_time": course.fixed_end_time,
+                    "source": "feishu_freebusy",
+                }
+            )
+    by_calendar_user: dict[
+        str, list[tuple[ScheduleAssignment, CourseSession, datetime, datetime]]
+    ] = {}
+    for assignment, course, calendar_user_id, start, end in publishable:
+        by_calendar_user.setdefault(calendar_user_id, []).append((assignment, course, start, end))
+    for calendar_user_id, items in by_calendar_user.items():
+        ordered = sorted(items, key=lambda item: (item[2], item[3], item[1].id))
+        for index, current in enumerate(ordered):
+            for other in ordered[index + 1 :]:
+                if not _intervals_overlap(current[2], current[3], (other[2], other[3])):
+                    continue
+                for assignment, course, _, _ in (current, other):
+                    if course.id in conflicted_course_ids:
+                        continue
+                    conflicted_course_ids.add(course.id)
+                    conflicts.append(
+                        {
+                            "course_session_id": course.id,
+                            "calendar_user_id": calendar_user_id,
+                            "lesson_date": assignment.lesson_date,
+                            "start_time": course.fixed_start_time,
+                            "end_time": course.fixed_end_time,
+                            "source": "schedule_overlap",
+                        }
+                    )
+
+    published = 0
+    if not request.dry_run:
+        for assignment, course, calendar_user_id, _start, _end in publishable:
+            idempotency_key = f"tupai:{schedule.id}:{course.id}"
+            room = rooms.get(assignment.room_business_id)
+            assert assignment.lesson_date is not None
+            binding = existing_bindings.get(course.id)
+            if binding is None:
+                response = service.create_calendar_event(
+                    user.id,
+                    calendar_id=request.calendar_id,
+                    idempotency_key=idempotency_key,
+                    event={
+                        "summary": course.lesson_name or "课程安排",
+                        "description": (
+                            f"途排智策课表 V{schedule.version_no}；"
+                            f"班级 {course.class_business_id}；场次 {course.business_id}"
+                        ),
+                        "start_time": {
+                            "timestamp": _timestamp_epoch(
+                                assignment.lesson_date, course.fixed_start_time
+                            ),
+                            "timezone": "Asia/Shanghai",
+                        },
+                        "end_time": {
+                            "timestamp": _timestamp_epoch(
+                                assignment.lesson_date, course.fixed_end_time
+                            ),
+                            "timezone": "Asia/Shanghai",
+                        },
+                        "visibility": "private",
+                        "free_busy_status": "busy",
+                        "location": {
+                            "name": room.name if room else assignment.room_business_id
+                        },
+                    },
+                )
+                binding = CalendarEventBinding(
+                    schedule_version_id=schedule.id,
+                    course_session_id=course.id,
+                    calendar_id=request.calendar_id,
+                    event_id=_event_id(response),
+                    calendar_user_id=calendar_user_id,
+                    idempotency_key=idempotency_key,
+                    status="event_created",
+                )
+                db.add(binding)
+                existing_bindings[course.id] = binding
+                # The external event already exists at this point. Persist its
+                # ID before adding the attendee so retries do not duplicate it.
+                db.commit()
+            try:
+                service.add_event_attendee(
+                    user.id,
+                    calendar_id=binding.calendar_id,
+                    event_id=binding.event_id,
+                    attendee_user_id=calendar_user_id,
+                    need_notification=request.need_notification,
+                )
+            except Exception:
+                binding.status = "attendee_failed"
+                db.commit()
+                raise
+            binding.status = (
+                "published_with_conflict" if course.id in conflicted_course_ids else "published"
+            )
+            db.commit()
+            published += 1
+        audit(
+            db,
+            user,
+            "calendar_publish",
+            "schedule",
+            schedule.id,
+            {"published": published, "conflicts": len(conflicts)},
+        )
+        db.commit()
+
+    return CalendarPublishResponse(
+        schedule_id=schedule.id,
+        dry_run=request.dry_run,
+        would_publish=len(publishable),
+        published=published,
+        existing=sum(
+            item.status in {"published", "published_with_conflict"}
+            for item in existing_bindings.values()
+        ),
+        skipped_unmapped=skipped_unmapped,
+        conflict_count=len(conflicts),
+        conflicts=conflicts,
     )
 
 
@@ -877,6 +1193,8 @@ def configure_feishu_app(
             request.app_secret,
             request.oauth_redirect_uri,
             request.frontend_url,
+            request.aily_app_id,
+            request.aily_skill_id,
         )
     except FeishuServiceError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -970,6 +1288,7 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
                 "业务标识": item.business_id,
                 "教师名称": item.name,
                 "学科": item.subject,
+                "飞书用户标识": item.calendar_user_id or "",
             }
             for item in db.scalars(select(Teacher).order_by(Teacher.business_id))
         ]
@@ -1007,11 +1326,21 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
             for item in db.scalars(select(TimeSlot).order_by(TimeSlot.sequence))
         ]
     if resource == "course_sessions":
+        teachers = {item.business_id: item for item in db.scalars(select(Teacher))}
         return [
             {
                 "业务标识": item.business_id,
+                "业务线": item.business_line,
+                "产品班型": item.product_type,
                 "班级标识": item.class_business_id,
                 "教师标识": item.teacher_business_id,
+                "具体日程账号": item.calendar_user_id
+                or (
+                    teachers[item.teacher_business_id].calendar_user_id
+                    if item.teacher_business_id in teachers
+                    else ""
+                )
+                or "",
                 "学科": item.subject,
                 "课节名称": item.lesson_name,
                 "编排来源": item.schedule_source,
@@ -1022,6 +1351,9 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
                 "上课日期": item.lesson_date.isoformat() if item.lesson_date else "",
                 "时长分钟": item.duration_minutes,
                 "建议时段": item.suggested_slot_id or "",
+                "固定开始时间": item.fixed_start_time,
+                "固定结束时间": item.fixed_end_time,
+                "原始教室标识": item.original_room_business_id or "",
                 "是否锁定": "是" if item.is_locked else "否",
             }
             for item in db.scalars(select(CourseSession).order_by(CourseSession.business_id))
@@ -1060,6 +1392,7 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
             )
         )
         sessions = {item.id: item for item in db.scalars(select(CourseSession))}
+        teachers = {item.business_id: item for item in db.scalars(select(Teacher))}
         slots = {item.business_id: item for item in db.scalars(select(TimeSlot))}
         rooms = {item.business_id: item for item in db.scalars(select(Room))}
         status_labels = {
@@ -1089,13 +1422,28 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
                         "是否当前版本": "是" if version.status == "published" else "否",
                         "发布状态": status_labels.get(version.status, version.status),
                         "场次标识": session.business_id,
+                        "业务线": session.business_line,
+                        "产品班型": session.product_type,
                         "班级标识": session.class_business_id,
                         "教师标识": session.teacher_business_id,
+                        "具体日程账号": session.calendar_user_id
+                        or (
+                            teachers[session.teacher_business_id].calendar_user_id
+                            if session.teacher_business_id in teachers
+                            else ""
+                        )
+                        or "",
                         "学科": session.subject,
+                        "上课日期": assignment.lesson_date.isoformat()
+                        if assignment.lesson_date
+                        else "",
                         "时段标识": assignment.slot_business_id,
                         "星期": slot.weekday if slot else "",
-                        "开始时间": slot.start_time if slot else "",
-                        "结束时间": slot.end_time if slot else "",
+                        "开始时间": session.fixed_start_time,
+                        "结束时间": session.fixed_end_time,
+                        "固定开始时间": session.fixed_start_time,
+                        "固定结束时间": session.fixed_end_time,
+                        "原始教室标识": session.original_room_business_id or "",
                         "教室标识": assignment.room_business_id,
                         "教室名称": room.name if room else "",
                         "变更类型": change_labels.get(
@@ -1104,7 +1452,129 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
                     }
                 )
         return rows
+    if resource == "public_summary":
+        summary = _public_summary(db)
+        updated_at = utcnow().isoformat()
+        public_rows: list[dict[str, Any]] = [
+            {
+                "业务标识": "total_sessions",
+                "指标名称": "总课次",
+                "指标值": str(summary.total_sessions),
+                "月份": "",
+                "产品线匿名标签": "",
+                "更新时间": updated_at,
+            },
+            {
+                "业务标识": "room_utilization",
+                "指标名称": "教室利用率",
+                "指标值": f"{summary.room_utilization:.4f}",
+                "月份": "",
+                "产品线匿名标签": "",
+                "更新时间": updated_at,
+            },
+        ]
+        public_rows.extend(
+            {
+                "业务标识": f"line:{label}",
+                "指标名称": "产品线占比",
+                "指标值": f"{share:.4f}",
+                "月份": "",
+                "产品线匿名标签": label,
+                "更新时间": updated_at,
+            }
+            for label, share in summary.business_line_share.items()
+        )
+        public_rows.extend(
+            {
+                "业务标识": f"month:{month}",
+                "指标名称": "月度课次",
+                "指标值": str(count),
+                "月份": month,
+                "产品线匿名标签": "",
+                "更新时间": updated_at,
+            }
+            for month, count in summary.monthly_sessions.items()
+        )
+        return public_rows
     return []
+
+
+def _parse_clock(value: str) -> time:
+    """Parse the fixed clock text used by the official workbook."""
+    normalized = value.strip().replace("：", ":")
+    parts = normalized.split(":", 1)
+    if len(parts) != 2:
+        raise ValueError(f"无法解析时间: {value}")
+    return time(hour=int(parts[0]), minute=int(parts[1]))
+
+
+def _timestamp_epoch(date_value: date, clock_value: str) -> str:
+    value = datetime.combine(date_value, _parse_clock(clock_value), SHANGHAI_TZ)
+    return str(int(value.timestamp()))
+
+
+def _busy_intervals(payload: dict[str, Any]) -> list[tuple[datetime, datetime]]:
+    """Normalize the several freebusy response shapes used by Feishu versions."""
+    candidates: list[Any] = []
+    for key in (
+        "freebusy_lists",
+        "freebusy_list",
+        "freebusy_items",
+        "freebusy",
+        "busy",
+        "busy_periods",
+        "items",
+    ):
+        value = payload.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+    if not candidates and isinstance(payload.get("data"), dict):
+        return _busy_intervals(payload["data"])
+    intervals: list[tuple[datetime, datetime]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        start = item.get("start_time") or item.get("start") or item.get("time_min")
+        end = item.get("end_time") or item.get("end") or item.get("time_max")
+        if isinstance(start, dict):
+            start = start.get("timestamp") or start.get("date")
+        if isinstance(end, dict):
+            end = end.get("timestamp") or end.get("date")
+        try:
+            if isinstance(start, str) and start.isdigit():
+                start_dt = datetime.fromtimestamp(int(start), tz=SHANGHAI_TZ)
+            else:
+                start_dt = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+            if isinstance(end, str) and end.isdigit():
+                end_dt = datetime.fromtimestamp(int(end), tz=SHANGHAI_TZ)
+            else:
+                end_dt = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=SHANGHAI_TZ)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=SHANGHAI_TZ)
+            if end_dt > start_dt:
+                intervals.append((start_dt.astimezone(SHANGHAI_TZ), end_dt.astimezone(SHANGHAI_TZ)))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return intervals
+
+
+def _intervals_overlap(start: datetime, end: datetime, busy: tuple[datetime, datetime]) -> bool:
+    return start < busy[1] and busy[0] < end
+
+
+def _event_id(payload: dict[str, Any]) -> str:
+    for candidate in (payload.get("event_id"), payload.get("id")):
+        if candidate:
+            return str(candidate)
+    nested = payload.get("event")
+    if isinstance(nested, dict):
+        return _event_id(nested)
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return _event_id(data)
+    raise FeishuServiceError("飞书创建日程响应缺少 event_id")
 
 
 @router.post(
@@ -1173,6 +1643,28 @@ def require_aily_key(x_aily_key: Annotated[str, Header()]) -> None:
     dependencies=[Depends(require_aily_key)],
 )
 def aily_context(db: Db) -> AilyContextResponse:
+    teachers = {item.business_id: item for item in db.scalars(select(Teacher))}
+
+    def course_context(item: CourseSession) -> dict[str, Any]:
+        teacher = teachers.get(item.teacher_business_id)
+        calendar_user_id = item.calendar_user_id or (
+            teacher.calendar_user_id if teacher else None
+        )
+        return {
+            "business_id": item.business_id,
+            "business_line": item.business_line,
+            "product_type": item.product_type,
+            "class_business_id": item.class_business_id,
+            "teacher_business_id": item.teacher_business_id,
+            "calendar_user_id": calendar_user_id,
+            "calendar_mapping_status": "mapped" if calendar_user_id else "unmapped",
+            "subject": item.subject,
+            "lesson_date": item.lesson_date.isoformat() if item.lesson_date else None,
+            "fixed_start_time": item.fixed_start_time,
+            "fixed_end_time": item.fixed_end_time,
+            "original_room_business_id": item.original_room_business_id,
+        }
+
     return AilyContextResponse(
         entities={
             "teachers": [
@@ -1191,12 +1683,7 @@ def aily_context(db: Db) -> AilyContextResponse:
                 for item in db.scalars(select(Room).order_by(Room.business_id))
             ],
             "courses": [
-                {
-                    "business_id": item.business_id,
-                    "class_business_id": item.class_business_id,
-                    "teacher_business_id": item.teacher_business_id,
-                    "subject": item.subject,
-                }
+                course_context(item)
                 for item in db.scalars(select(CourseSession).order_by(CourseSession.business_id))
             ],
             "time_slots": [
@@ -1217,6 +1704,12 @@ def aily_context(db: Db) -> AilyContextResponse:
             "hard_rule_policy": "硬约束必须由教务人工确认后生效",
             "entity_policy": "actor_ids 和 scope 中的业务 ID 必须来自 entities",
             "batch_endpoint": "/api/v1/aily/rule-proposals",
+            "solve_endpoint": "/api/v1/assistant/solve",
+            "skill_contract": {
+                "input": "自然语言排课意图 + 可选结构化筛选",
+                "output": "结构化范围/规则 + solver_run_id",
+                "external_call": "由飞书 Aily Skill 按该契约调用；本服务不伪造外部调用记录",
+            },
         },
     )
 
@@ -1258,3 +1751,274 @@ def aily_solve(request: AilySolveRequest, db: Db) -> SolverRun:
     run = create_solver_run(db, None, request)
     enqueue_solver_run(run.id)
     return run
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+SOLVER_RULE_LABELS = {
+    "fixed_time": "固定时段不可调整",
+    "room_no_overlap": "同一教室真实时间区间不可重叠",
+    "calendar_no_overlap": "同一具体日程账号不可重叠",
+    "minimize_changes": "优先最小化日期和教室变更",
+}
+
+
+def _solver_rules_from_labels(labels: list[str]) -> list[str]:
+    matched = [key for key, label in SOLVER_RULE_LABELS.items() if label in labels]
+    # 固定时段及两类资源冲突是企业确认的基础硬约束，不能因模型漏字段而消失。
+    mandatory = ["fixed_time", "room_no_overlap", "calendar_no_overlap"]
+    return list(dict.fromkeys([*mandatory, *matched]))
+
+
+def _validated_assistant_scope(db: Session, parsed: dict[str, Any]) -> dict[str, Any]:
+    available = {
+        "business_lines": {
+            item for item in db.scalars(select(CourseSession.business_line)).all() if item
+        },
+        "product_types": {
+            item for item in db.scalars(select(CourseSession.product_type)).all() if item
+        },
+        "class_business_ids": set(db.scalars(select(CourseSession.class_business_id)).all()),
+    }
+    invalid: dict[str, list[str]] = {}
+    for field, valid_values in available.items():
+        values = _string_list(parsed.get(field))
+        unknown = sorted(set(values) - valid_values)
+        if unknown:
+            invalid[field] = unknown
+        parsed[field] = values
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "排课范围包含未知业务实体", **invalid},
+        )
+    return parsed
+
+
+@router.post(
+    "/assistant/interpret",
+    response_model=AssistantInterpretResponse,
+    tags=["aily", "assistant"],
+)
+def assistant_interpret(
+    request: AssistantInterpretRequest, db: Db, user: AdminOrScheduler
+) -> AssistantInterpretResponse:
+    configuration = FeishuService(settings, db).configuration_view()
+    aily_app_id = settings.aily_app_id or configuration.get("aily_app_id")
+    aily_skill_id = settings.aily_skill_id or configuration.get("aily_skill_id")
+    if not aily_app_id or not aily_skill_id:
+        raise HTTPException(
+            status_code=409,
+            detail="尚未配置飞书 Aily，请先前往“飞书集成”填写 Aily 应用标识和技能标识。",
+        )
+    try:
+        aily_output = FeishuService(settings, db).start_aily_skill(
+            user.id,
+            app_id=str(aily_app_id),
+            skill_id=str(aily_skill_id),
+            query=request.instruction,
+            input_payload={
+                "contract": {
+                    "business_lines": "string[]",
+                    "product_types": "string[]",
+                    "class_business_ids": "string[]",
+                    "date_from": "YYYY-MM-DD|null",
+                    "date_to": "YYYY-MM-DD|null",
+                    "date_window_days": "integer",
+                    "recognized_rules": "string[]",
+                    "solver_rules": (
+                        "fixed_time|room_no_overlap|calendar_no_overlap|minimize_changes[]"
+                    ),
+                }
+            },
+        )
+    except (FeishuServiceError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=502, detail=f"飞书 Aily 解析失败：{exc}") from exc
+    required_fields = {
+        "business_lines",
+        "product_types",
+        "class_business_ids",
+        "date_from",
+        "date_to",
+        "date_window_days",
+        "recognized_rules",
+    }
+    missing_fields = sorted(required_fields - set(aily_output))
+    if missing_fields:
+        raise HTTPException(
+            status_code=502,
+            detail=f"飞书 Aily 输出缺少字段：{', '.join(missing_fields)}",
+        )
+    parsed = {
+        "business_lines": _string_list(aily_output["business_lines"]),
+        "product_types": _string_list(aily_output["product_types"]),
+        "class_business_ids": _string_list(aily_output["class_business_ids"]),
+        "date_from": aily_output["date_from"],
+        "date_to": aily_output["date_to"],
+        "date_window_days": aily_output["date_window_days"],
+        "recognized_rules": _string_list(aily_output["recognized_rules"]),
+    }
+    parsed["solver_rules"] = _solver_rules_from_labels(parsed["recognized_rules"])
+    try:
+        parsed = _validated_assistant_scope(db, parsed)
+        normalized = AssistantInterpretResponse(
+            instruction=request.instruction,
+            source="feishu_aily",
+            aily_configured=True,
+            **parsed,
+            summary="已解析排课范围和固定业务规则，请教务确认后启动 CP-SAT 求解。",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Aily 返回结构不合法：{exc}") from exc
+    audit(
+        db,
+        user,
+        "assistant_interpret",
+        "instruction",
+        None,
+        {"source": normalized.source, "instruction": request.instruction},
+    )
+    db.commit()
+    return normalized
+
+
+@router.post(
+    "/assistant/solve",
+    response_model=SolverRunResponse,
+    status_code=202,
+    tags=["aily", "assistant"],
+)
+def assistant_solve(
+    request: AssistantSolveRequest, db: Db, user: AdminOrScheduler
+) -> SolverRun:
+    """Login-session entry point for Aily's natural-language scheduling skill.
+
+    Aily may call this endpoint after turning the instruction into structured
+    filters/rules. The instruction is persisted for traceability, while the
+    same CP-SAT path as the regular solver is used for deterministic execution.
+    """
+    scope = _validated_assistant_scope(db, request.model_dump())
+    selected_count = db.scalar(
+        select(func.count(CourseSession.id)).where(
+            *(
+                [CourseSession.business_line.in_(scope["business_lines"])]
+                if scope["business_lines"]
+                else []
+            ),
+            *(
+                [CourseSession.product_type.in_(scope["product_types"])]
+                if scope["product_types"]
+                else []
+            ),
+            *(
+                [CourseSession.class_business_id.in_(scope["class_business_ids"])]
+                if scope["class_business_ids"]
+                else []
+            ),
+            *([CourseSession.lesson_date >= request.date_from] if request.date_from else []),
+            *([CourseSession.lesson_date <= request.date_to] if request.date_to else []),
+        )
+    )
+    if not selected_count:
+        raise HTTPException(status_code=422, detail="确认的排课范围没有匹配到课次")
+    run = create_solver_run(db, user.id, request, extra={"assistant_entry": True})
+    audit(db, user, "assistant_solve", "solver_run", run.id, {"instruction": request.instruction})
+    db.commit()
+    if request.wait:
+        execute_solver_run(run.id)
+    else:
+        enqueue_solver_run(run.id)
+    db.refresh(run)
+    return run
+
+
+def _public_summary(db: Session) -> PublicScheduleSummary:
+    schedule = db.scalar(
+        select(ScheduleVersion)
+        .where(ScheduleVersion.status == "published")
+        .order_by(ScheduleVersion.version_no.desc())
+    )
+    assignments = (
+        list(
+            db.scalars(
+                select(ScheduleAssignment)
+                .where(ScheduleAssignment.schedule_version_id == schedule.id)
+                .order_by(ScheduleAssignment.lesson_date, ScheduleAssignment.course_session_id)
+            )
+        )
+        if schedule
+        else []
+    )
+    courses = {
+        item.id: item
+        for item in db.scalars(
+            select(CourseSession).where(
+                CourseSession.id.in_([item.course_session_id for item in assignments])
+            )
+        )
+    }
+    rooms = {item.business_id: item for item in db.scalars(select(Room))}
+    line_counts: Counter[str] = Counter()
+    monthly_counts: Counter[str] = Counter()
+    room_period_keys: set[tuple[str, date | None, str, str]] = set()
+    date_period_keys: set[tuple[date, str, str]] = set()
+    for assignment in assignments:
+        course = courses.get(assignment.course_session_id)
+        if not course:
+            continue
+        line = course.business_line or "未分类"
+        line_counts[line] += 1
+        if assignment.lesson_date:
+            monthly_counts[assignment.lesson_date.strftime("%Y-%m")] += 1
+        room = rooms.get(assignment.room_business_id)
+        if room and room.is_active:
+            room_period_keys.add(
+                (
+                    assignment.room_business_id,
+                    assignment.lesson_date,
+                    course.fixed_start_time,
+                    course.fixed_end_time,
+                )
+            )
+        if assignment.lesson_date:
+            date_period_keys.add(
+                (assignment.lesson_date, course.fixed_start_time, course.fixed_end_time)
+            )
+    total = sum(line_counts.values())
+    active_rooms = max(sum(1 for item in rooms.values() if item.is_active), 1)
+    capacity = active_rooms * max(len(date_period_keys), 1)
+    # Only anonymous labels and coarse time categories are exposed publicly.
+    preview: list[dict[str, str]] = []
+    for index, assignment in enumerate(assignments[:6], start=1):
+        course = courses.get(assignment.course_session_id)
+        fixed_start = course.fixed_start_time if course else ""
+        start_hour = _parse_clock(fixed_start).hour if fixed_start else 12
+        preview.append(
+            {
+                "class_label": f"班级{chr(64 + index)}",
+                "room_label": f"教室{chr(64 + index)}",
+                "month": (
+                    "月份"
+                    if assignment.lesson_date is None
+                    else assignment.lesson_date.strftime("%Y-%m")
+                ),
+                "time_period": (
+                    "上午" if start_hour < 12 else ("下午" if start_hour < 18 else "晚间")
+                ),
+            }
+        )
+    return PublicScheduleSummary(
+        data_policy="仅公开匿名汇总与脱敏投影，不包含原始班型、班级、教室、教研组、课节或完整日期明细",
+        total_sessions=total,
+        business_line_share={
+            f"产品线{chr(65 + index)}": round(count / total, 4) if total else 0.0
+            for index, count in enumerate(sorted(line_counts.values(), reverse=True))
+        },
+        monthly_sessions=dict(sorted(monthly_counts.items())),
+        room_utilization=round(len(room_period_keys) / capacity, 4) if capacity else 0.0,
+        preview=preview,
+    )

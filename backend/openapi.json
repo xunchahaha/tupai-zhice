@@ -919,7 +919,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CourseSessionPayload"
+                "$ref": "#/components/schemas/CourseSessionUpdate"
               }
             }
           }
@@ -1651,6 +1651,116 @@
         }
       }
     },
+    "/api/v1/schedules/{schedule_id}/calendar-bindings": {
+      "get": {
+        "tags": [
+          "schedules",
+          "integrations"
+        ],
+        "summary": "List Calendar Bindings",
+        "operationId": "list_calendar_bindings_api_v1_schedules__schedule_id__calendar_bindings_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CalendarEventBindingResponse"
+                  },
+                  "title": "Response List Calendar Bindings Api V1 Schedules  Schedule Id  Calendar Bindings Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/schedules/{schedule_id}/calendar-publish": {
+      "post": {
+        "tags": [
+          "schedules",
+          "integrations"
+        ],
+        "summary": "Publish Schedule To Calendar",
+        "operationId": "publish_schedule_to_calendar_api_v1_schedules__schedule_id__calendar_publish_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CalendarPublishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalendarPublishResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/reschedule-events": {
       "get": {
         "tags": [
@@ -2238,6 +2348,101 @@
           }
         }
       }
+    },
+    "/api/v1/assistant/interpret": {
+      "post": {
+        "tags": [
+          "aily",
+          "assistant"
+        ],
+        "summary": "Assistant Interpret",
+        "operationId": "assistant_interpret_api_v1_assistant_interpret_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistantInterpretRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantInterpretResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/assistant/solve": {
+      "post": {
+        "tags": [
+          "aily",
+          "assistant"
+        ],
+        "summary": "Assistant Solve",
+        "description": "Login-session entry point for Aily's natural-language scheduling skill.\n\nAily may call this endpoint after turning the instruction into structured\nfilters/rules. The instruction is persisted for traceability, while the\nsame CP-SAT path as the regular solver is used for deterministic execution.",
+        "operationId": "assistant_solve_api_v1_assistant_solve_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistantSolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SolverRunResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -2321,6 +2526,78 @@
             "minimum": 1.0,
             "title": "Time Limit Seconds",
             "default": 30
+          },
+          "instruction": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 2,
+            "title": "Instruction",
+            "default": "生成满足当前已确认规则的课表"
+          },
+          "business_lines": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Business Lines"
+          },
+          "product_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Product Types"
+          },
+          "class_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Class Business Ids"
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
+          },
+          "date_window_days": {
+            "type": "integer",
+            "maximum": 31.0,
+            "minimum": 0.0,
+            "title": "Date Window Days",
+            "default": 7
+          },
+          "solver_rules": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "fixed_time",
+                "room_no_overlap",
+                "calendar_no_overlap",
+                "minimize_changes"
+              ]
+            },
+            "type": "array",
+            "title": "Solver Rules"
           }
         },
         "type": "object",
@@ -2343,6 +2620,18 @@
           "teacher_business_id": {
             "type": "string",
             "title": "Teacher Business Id"
+          },
+          "lesson_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lesson Date"
           },
           "slot_business_id": {
             "type": "string",
@@ -2368,6 +2657,212 @@
           "change_kind"
         ],
         "title": "AssignmentResponse"
+      },
+      "AssistantInterpretRequest": {
+        "properties": {
+          "instruction": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 2,
+            "title": "Instruction"
+          }
+        },
+        "type": "object",
+        "required": [
+          "instruction"
+        ],
+        "title": "AssistantInterpretRequest"
+      },
+      "AssistantInterpretResponse": {
+        "properties": {
+          "instruction": {
+            "type": "string",
+            "title": "Instruction"
+          },
+          "source": {
+            "type": "string",
+            "const": "feishu_aily",
+            "title": "Source"
+          },
+          "aily_configured": {
+            "type": "boolean",
+            "title": "Aily Configured"
+          },
+          "business_lines": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Business Lines"
+          },
+          "product_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Product Types"
+          },
+          "class_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Class Business Ids"
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
+          },
+          "date_window_days": {
+            "type": "integer",
+            "maximum": 31.0,
+            "minimum": 0.0,
+            "title": "Date Window Days",
+            "default": 7
+          },
+          "recognized_rules": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Recognized Rules"
+          },
+          "solver_rules": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "fixed_time",
+                "room_no_overlap",
+                "calendar_no_overlap",
+                "minimize_changes"
+              ]
+            },
+            "type": "array",
+            "title": "Solver Rules"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "instruction",
+          "source",
+          "aily_configured",
+          "summary"
+        ],
+        "title": "AssistantInterpretResponse"
+      },
+      "AssistantSolveRequest": {
+        "properties": {
+          "time_limit_seconds": {
+            "type": "number",
+            "maximum": 900.0,
+            "minimum": 1.0,
+            "title": "Time Limit Seconds",
+            "default": 30
+          },
+          "instruction": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 2,
+            "title": "Instruction",
+            "default": "生成满足当前已确认规则的课表"
+          },
+          "business_lines": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Business Lines"
+          },
+          "product_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Product Types"
+          },
+          "class_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Class Business Ids"
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
+          },
+          "date_window_days": {
+            "type": "integer",
+            "maximum": 31.0,
+            "minimum": 0.0,
+            "title": "Date Window Days",
+            "default": 7
+          },
+          "solver_rules": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "fixed_time",
+                "room_no_overlap",
+                "calendar_no_overlap",
+                "minimize_changes"
+              ]
+            },
+            "type": "array",
+            "title": "Solver Rules"
+          },
+          "wait": {
+            "type": "boolean",
+            "title": "Wait",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "AssistantSolveRequest"
       },
       "AuditLogResponse": {
         "properties": {
@@ -2501,6 +2996,183 @@
         ],
         "title": "Body_login_api_v1_auth_token_post"
       },
+      "CalendarConflict": {
+        "properties": {
+          "course_session_id": {
+            "type": "string",
+            "title": "Course Session Id"
+          },
+          "calendar_user_id": {
+            "type": "string",
+            "title": "Calendar User Id"
+          },
+          "lesson_date": {
+            "type": "string",
+            "format": "date",
+            "title": "Lesson Date"
+          },
+          "start_time": {
+            "type": "string",
+            "title": "Start Time"
+          },
+          "end_time": {
+            "type": "string",
+            "title": "End Time"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "course_session_id",
+          "calendar_user_id",
+          "lesson_date",
+          "start_time",
+          "end_time",
+          "source"
+        ],
+        "title": "CalendarConflict"
+      },
+      "CalendarEventBindingResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "schedule_version_id": {
+            "type": "string",
+            "title": "Schedule Version Id"
+          },
+          "course_session_id": {
+            "type": "string",
+            "title": "Course Session Id"
+          },
+          "calendar_id": {
+            "type": "string",
+            "title": "Calendar Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "calendar_user_id": {
+            "type": "string",
+            "title": "Calendar User Id"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "title": "Idempotency Key"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "schedule_version_id",
+          "course_session_id",
+          "calendar_id",
+          "event_id",
+          "calendar_user_id",
+          "idempotency_key",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CalendarEventBindingResponse"
+      },
+      "CalendarPublishRequest": {
+        "properties": {
+          "calendar_id": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Calendar Id",
+            "default": "primary"
+          },
+          "block_on_conflict": {
+            "type": "boolean",
+            "title": "Block On Conflict",
+            "default": false
+          },
+          "need_notification": {
+            "type": "boolean",
+            "title": "Need Notification",
+            "default": true
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "CalendarPublishRequest"
+      },
+      "CalendarPublishResponse": {
+        "properties": {
+          "schedule_id": {
+            "type": "string",
+            "title": "Schedule Id"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          },
+          "would_publish": {
+            "type": "integer",
+            "title": "Would Publish",
+            "default": 0
+          },
+          "published": {
+            "type": "integer",
+            "title": "Published"
+          },
+          "existing": {
+            "type": "integer",
+            "title": "Existing"
+          },
+          "skipped_unmapped": {
+            "type": "integer",
+            "title": "Skipped Unmapped"
+          },
+          "conflict_count": {
+            "type": "integer",
+            "title": "Conflict Count",
+            "default": 0
+          },
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/CalendarConflict"
+            },
+            "type": "array",
+            "title": "Conflicts"
+          }
+        },
+        "type": "object",
+        "required": [
+          "schedule_id",
+          "published",
+          "existing",
+          "skipped_unmapped"
+        ],
+        "title": "CalendarPublishResponse"
+      },
       "CampusCreate": {
         "properties": {
           "business_id": {
@@ -2633,6 +3305,21 @@
             "type": "string",
             "title": "Business Id"
           },
+          "source_row_id": {
+            "type": "string",
+            "title": "Source Row Id",
+            "default": ""
+          },
+          "business_line": {
+            "type": "string",
+            "title": "Business Line",
+            "default": ""
+          },
+          "product_type": {
+            "type": "string",
+            "title": "Product Type",
+            "default": ""
+          },
           "class_business_id": {
             "type": "string",
             "title": "Class Business Id"
@@ -2640,6 +3327,17 @@
           "teacher_business_id": {
             "type": "string",
             "title": "Teacher Business Id"
+          },
+          "calendar_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar User Id"
           },
           "subject": {
             "type": "string",
@@ -2707,6 +3405,27 @@
               }
             ],
             "title": "Suggested Slot Id"
+          },
+          "fixed_start_time": {
+            "type": "string",
+            "title": "Fixed Start Time",
+            "default": ""
+          },
+          "fixed_end_time": {
+            "type": "string",
+            "title": "Fixed End Time",
+            "default": ""
+          },
+          "original_room_business_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Room Business Id"
           },
           "is_locked": {
             "type": "boolean",
@@ -2733,6 +3452,21 @@
             "type": "string",
             "title": "Business Id"
           },
+          "source_row_id": {
+            "type": "string",
+            "title": "Source Row Id",
+            "default": ""
+          },
+          "business_line": {
+            "type": "string",
+            "title": "Business Line",
+            "default": ""
+          },
+          "product_type": {
+            "type": "string",
+            "title": "Product Type",
+            "default": ""
+          },
           "class_business_id": {
             "type": "string",
             "title": "Class Business Id"
@@ -2740,6 +3474,17 @@
           "teacher_business_id": {
             "type": "string",
             "title": "Teacher Business Id"
+          },
+          "calendar_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar User Id"
           },
           "subject": {
             "type": "string",
@@ -2808,6 +3553,27 @@
             ],
             "title": "Suggested Slot Id"
           },
+          "fixed_start_time": {
+            "type": "string",
+            "title": "Fixed Start Time",
+            "default": ""
+          },
+          "fixed_end_time": {
+            "type": "string",
+            "title": "Fixed End Time",
+            "default": ""
+          },
+          "original_room_business_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Room Business Id"
+          },
           "is_locked": {
             "type": "boolean",
             "title": "Is Locked",
@@ -2828,6 +3594,46 @@
         ],
         "title": "CourseSessionResponse"
       },
+      "CourseSessionUpdate": {
+        "properties": {
+          "lesson_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lesson Date"
+          },
+          "original_room_business_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Room Business Id"
+          },
+          "calendar_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar User Id"
+          }
+        },
+        "type": "object",
+        "title": "CourseSessionUpdate"
+      },
       "FeishuAppConfigurationInput": {
         "properties": {
           "app_id": {
@@ -2837,9 +3643,15 @@
             "title": "App Id"
           },
           "app_secret": {
-            "type": "string",
-            "maxLength": 200,
-            "minLength": 8,
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "App Secret"
           },
           "oauth_redirect_uri": {
@@ -2853,14 +3665,27 @@
             "maxLength": 500,
             "minLength": 8,
             "title": "Frontend Url"
+          },
+          "aily_app_id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 8,
+            "title": "Aily App Id"
+          },
+          "aily_skill_id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 8,
+            "title": "Aily Skill Id"
           }
         },
         "type": "object",
         "required": [
           "app_id",
-          "app_secret",
           "oauth_redirect_uri",
-          "frontend_url"
+          "frontend_url",
+          "aily_app_id",
+          "aily_skill_id"
         ],
         "title": "FeishuAppConfigurationInput"
       },
@@ -2901,6 +3726,32 @@
           "frontend_url": {
             "type": "string",
             "title": "Frontend Url"
+          },
+          "aily_configured": {
+            "type": "boolean",
+            "title": "Aily Configured"
+          },
+          "aily_app_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aily App Id"
+          },
+          "aily_skill_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aily Skill Id"
           }
         },
         "type": "object",
@@ -2910,7 +3761,10 @@
           "app_id",
           "secret_configured",
           "oauth_redirect_uri",
-          "frontend_url"
+          "frontend_url",
+          "aily_configured",
+          "aily_app_id",
+          "aily_skill_id"
         ],
         "title": "FeishuAppConfigurationResponse"
       },
@@ -3046,7 +3900,8 @@
               "time_slots",
               "course_sessions",
               "rules",
-              "schedule"
+              "schedule",
+              "public_summary"
             ],
             "title": "Resource"
           },
@@ -3906,6 +4761,18 @@
             "type": "string",
             "title": "Teacher Business Id"
           },
+          "before_lesson_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before Lesson Date"
+          },
           "before_slot_id": {
             "anyOf": [
               {
@@ -3927,6 +4794,18 @@
               }
             ],
             "title": "Before Room Id"
+          },
+          "after_lesson_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After Lesson Date"
           },
           "after_slot_id": {
             "anyOf": [
@@ -4113,6 +4992,71 @@
             "title": "Change Weight",
             "default": 100000
           },
+          "business_lines": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Business Lines"
+          },
+          "product_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Product Types"
+          },
+          "class_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Class Business Ids"
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
+          },
+          "date_window_days": {
+            "type": "integer",
+            "maximum": 31.0,
+            "minimum": 0.0,
+            "title": "Date Window Days",
+            "default": 7
+          },
+          "solver_rules": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "fixed_time",
+                "room_no_overlap",
+                "calendar_no_overlap",
+                "minimize_changes"
+              ]
+            },
+            "type": "array",
+            "title": "Solver Rules"
+          },
           "wait": {
             "type": "boolean",
             "title": "Wait",
@@ -4264,6 +5208,17 @@
             "type": "string",
             "title": "Subject",
             "default": ""
+          },
+          "calendar_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar User Id"
           }
         },
         "type": "object",
@@ -4292,6 +5247,17 @@
             "type": "string",
             "title": "Subject",
             "default": ""
+          },
+          "calendar_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar User Id"
           },
           "id": {
             "type": "string",

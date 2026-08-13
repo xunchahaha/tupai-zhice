@@ -5,11 +5,13 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { TeacherResponseCalendarUserId } from './teacherResponseCalendarUserId';
 
 export interface TeacherResponse {
   campus_id: string;
   business_id: string;
   name: string;
   subject?: string;
+  calendar_user_id?: TeacherResponseCalendarUserId;
   id: string;
 }

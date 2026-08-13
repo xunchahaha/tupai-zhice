@@ -32,6 +32,7 @@ CAMPUS_BUSINESS_ID = "CAMPUS-ZZ"
 CAMPUS_NAME = "郑州校区"
 SHEET_NAME = "课表数据源"
 SLOT_START_ORDER = {"08:30": 1, "09:00": 2, "14:00": 3, "18:30": 4}
+OFFICIAL_VERSION_NAME = "郑州官方原始课表（完全重复行已去重）"
 
 
 def _parse_date(value: Any) -> date | None:
@@ -107,6 +108,36 @@ def _read_rows(workbook_path: Path) -> list[dict[str, Any]]:
         )
     workbook.close()
     return rows
+
+
+def _row_identity(row: dict[str, Any]) -> tuple[Any, ...]:
+    """官方确认只删除完全相同的重复行，因此身份键覆盖源表全部 14 个字段。"""
+    return (
+        row["业务线"],
+        row["产品班型"],
+        row["班级标签"],
+        row["教室标签"],
+        row["编排来源"],
+        row["编排阶段"],
+        row["计划课次"],
+        row["计划课时"],
+        row["课次序号"],
+        row["课节名称"],
+        row["上课日期"].isoformat(),
+        row["上课时段"],
+        row["课节时长小时"],
+        row["授课教师"],
+    )
+
+
+def _business_id(row: dict[str, Any], class_index: dict[str, int]) -> str:
+    source_row_id = _source_row_id(row)
+    return f"ZZ-{class_index[row['班级标签']]:02d}-{row['课次序号']:03d}-{source_row_id[:14]}"
+
+
+def _source_row_id(row: dict[str, Any]) -> str:
+    serialized = json.dumps(_row_identity(row), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest().upper()
 
 
 def _upsert(
@@ -186,12 +217,16 @@ def import_schedule_workbook(
             },
         )
 
+    clock_ranges = sorted(
+        {(row["开始时间"], row["结束时间"]) for row in rows},
+        key=lambda item: (SLOT_START_ORDER.get(item[0], 9), item[0]),
+    )
     slot_keys = sorted(
-        {(row["星期"], row["开始时间"]) for row in rows},
+        {(weekday, start, end) for weekday in WEEKDAYS for start, end in clock_ranges},
         key=lambda item: (WEEKDAYS.index(item[0]), SLOT_START_ORDER.get(item[1], 9), item[1]),
     )
     slot_business_ids: dict[tuple[str, str], str] = {}
-    for sequence, (weekday, start) in enumerate(slot_keys, 1):
+    for sequence, (weekday, start, end) in enumerate(slot_keys, 1):
         business_id = f"SLOT-{weekday}-{start.replace(':', '')}"
         slot_business_ids[(weekday, start)] = business_id
         _upsert(
@@ -201,56 +236,60 @@ def import_schedule_workbook(
             {
                 "weekday": weekday,
                 "start_time": start,
-                "end_time": _add_minutes(start, 180),
-                "kind": f"{start}-{_add_minutes(start, 180)}",
+                "end_time": end,
+                "kind": f"{start}-{end}",
                 "sequence": sequence,
             },
         )
 
     class_index = {name: index for index, name in enumerate(sorted(class_labels), 1)}
-    lesson_index = {
-        name: index for index, name in enumerate(sorted({row["课节名称"] for row in rows}), 1)
-    }
-    slot_index = {key: index for index, key in enumerate(slot_keys, 1)}
-    teacher_index = {name: index for index, name in enumerate(teachers, 1)}
-    room_index = {name: index for index, name in enumerate(room_labels, 1)}
 
     deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
     placeholder_room_rows = 0
     for row in rows:
         if row["教室标签"] == PLACEHOLDER_ROOM:
             placeholder_room_rows += 1
-        key = (
-            row["班级标签"],
-            row["课次序号"],
-            row["课节名称"],
-            row["授课教师"],
-            row["教室标签"],
-            row["星期"],
-            row["开始时间"],
-        )
-        deduped[key] = row
+        deduped[_row_identity(row)] = row
 
-    existing_ids = set(
-        db.scalars(
-            select(CourseSession.business_id).where(CourseSession.campus_id == campus.id)
-        )
-    )
     session_rows: dict[str, dict[str, Any]] = {}
     for row in deduped.values():
-        business_id = (
-            f"ZZ-{class_index[row['班级标签']]:02d}-{row['课次序号']:03d}-"
-            f"{lesson_index[row['课节名称']]:02d}-"
-            f"{slot_index[(row['星期'], row['开始时间'])]:02d}-"
-            f"{teacher_index[row['授课教师']]:02d}-{room_index[row['教室标签']]:02d}"
-        )
+        business_id = _business_id(row, class_index)
         session_rows[business_id] = row
 
-    new_rows = [
-        (business_id, row)
-        for business_id, row in session_rows.items()
-        if business_id not in existing_ids
-    ]
+    existing_sessions = {
+        item.business_id: item
+        for item in db.scalars(
+            select(CourseSession).where(CourseSession.campus_id == campus.id)
+        )
+    }
+    new_rows = []
+    for business_id, row in session_rows.items():
+        values = {
+            "source_row_id": _source_row_id(row),
+            "business_line": row["业务线"],
+            "product_type": row["产品班型"],
+            "class_business_id": row["班级标签"],
+            "teacher_business_id": row["授课教师"],
+            "subject": _lesson_subject(row["课节名称"]),
+            "lesson_name": row["课节名称"],
+            "schedule_source": row["编排来源"],
+            "stage": row["编排阶段"],
+            "planned_sessions": row["计划课次"],
+            "planned_hours": row["计划课时"],
+            "session_no": row["课次序号"],
+            "lesson_date": row["上课日期"],
+            "duration_minutes": int(row["课节时长小时"] * 60),
+            "suggested_slot_id": slot_business_ids[(row["星期"], row["开始时间"])],
+            "fixed_start_time": row["开始时间"],
+            "fixed_end_time": row["结束时间"],
+            "original_room_business_id": row["教室标签"],
+        }
+        existing = existing_sessions.get(business_id)
+        if existing is None:
+            new_rows.append((business_id, values))
+        else:
+            for key, value in values.items():
+                setattr(existing, key, value)
     for start_index in range(0, len(new_rows), 500):
         chunk = new_rows[start_index : start_index + 500]
         db.add_all(
@@ -258,20 +297,9 @@ def import_schedule_workbook(
                 CourseSession(
                     campus_id=campus.id,
                     business_id=business_id,
-                    class_business_id=row["班级标签"],
-                    teacher_business_id=row["授课教师"],
-                    subject=_lesson_subject(row["课节名称"]),
-                    lesson_name=row["课节名称"],
-                    schedule_source=row["编排来源"],
-                    stage=row["编排阶段"],
-                    planned_sessions=row["计划课次"],
-                    planned_hours=row["计划课时"],
-                    session_no=row["课次序号"],
-                    lesson_date=row["上课日期"],
-                    duration_minutes=int(row["课节时长小时"] * 60),
-                    suggested_slot_id=slot_business_ids[(row["星期"], row["开始时间"])],
+                    **values,
                 )
-                for business_id, row in chunk
+                for business_id, values in chunk
             ]
         )
         db.flush()
@@ -299,54 +327,51 @@ def import_schedule_workbook(
     db.add(snapshot)
     db.flush()
 
-    groups: dict[tuple[str, str], list[str]] = {}
-    for business_id, row in session_rows.items():
-        groups.setdefault((row["编排来源"], row["编排阶段"]), []).append(business_id)
-
     version_stats: list[dict[str, Any]] = []
     now = datetime.now(UTC)
-    for (source, stage) in sorted(groups):
-        name = f"{source}-{stage}"
-        version = db.scalar(select(ScheduleVersion).where(ScheduleVersion.name == name))
-        if version is None:
-            run = SolverRun(
-                snapshot_id=snapshot.id,
-                run_type="import",
-                status="completed",
-                request_payload={"source": source, "stage": stage},
-            )
-            db.add(run)
-            db.flush()
-            version_no = (db.scalar(select(func.max(ScheduleVersion.version_no))) or 0) + 1
-            version = ScheduleVersion(
-                version_no=version_no,
-                name=name,
-                status="published",
-                solver_run_id=run.id,
-                published_at=now,
-            )
-            db.add(version)
-            db.flush()
-        else:
-            db.execute(
-                delete(ScheduleAssignment).where(
-                    ScheduleAssignment.schedule_version_id == version.id
-                )
-            )
-            version.status = "published"
-            version.published_at = now
-        for business_id in groups[(source, stage)]:
-            row = session_rows[business_id]
-            db.add(
-                ScheduleAssignment(
-                    schedule_version_id=version.id,
-                    course_session_id=session_ids[business_id],
-                    slot_business_id=slot_business_ids[(row["星期"], row["开始时间"])],
-                    room_business_id=row["教室标签"],
-                )
-            )
+    version = db.scalar(
+        select(ScheduleVersion).where(ScheduleVersion.name == OFFICIAL_VERSION_NAME)
+    )
+    if version is None:
+        run = SolverRun(
+            snapshot_id=snapshot.id,
+            run_type="import",
+            status="completed",
+            model_status="IMPORTED",
+            request_payload={"source": workbook_path.name, "deduplication": "exact_row"},
+        )
+        db.add(run)
         db.flush()
-        version_stats.append({"name": name, "rows": len(groups[(source, stage)])})
+        version_no = (db.scalar(select(func.max(ScheduleVersion.version_no))) or 0) + 1
+        version = ScheduleVersion(
+            version_no=version_no,
+            name=OFFICIAL_VERSION_NAME,
+            status="published",
+            solver_run_id=run.id,
+            published_at=now,
+            metrics={"assignment_count": len(session_rows), "source_rows": len(rows)},
+        )
+        db.add(version)
+        db.flush()
+    else:
+        db.execute(
+            delete(ScheduleAssignment).where(ScheduleAssignment.schedule_version_id == version.id)
+        )
+        version.status = "published"
+        version.published_at = now
+        version.metrics = {"assignment_count": len(session_rows), "source_rows": len(rows)}
+    for business_id, row in session_rows.items():
+        db.add(
+            ScheduleAssignment(
+                schedule_version_id=version.id,
+                course_session_id=session_ids[business_id],
+                lesson_date=row["上课日期"],
+                slot_business_id=slot_business_ids[(row["星期"], row["开始时间"])],
+                room_business_id=row["教室标签"],
+            )
+        )
+    db.flush()
+    version_stats.append({"name": OFFICIAL_VERSION_NAME, "rows": len(session_rows)})
 
     hour_warnings: list[dict[str, Any]] = []
     for 班型 in sorted({row["产品班型"] for row in rows}):

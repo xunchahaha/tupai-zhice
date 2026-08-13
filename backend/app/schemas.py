@@ -3,10 +3,17 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Role = Literal["admin", "scheduler", "approver", "viewer"]
 RuleStatus = Literal["draft", "awaiting_confirmation", "active", "rejected", "retired"]
+SolverRule = Literal[
+    "fixed_time", "room_no_overlap", "calendar_no_overlap", "minimize_changes"
+]
+
+
+def default_solver_rules() -> list[SolverRule]:
+    return ["fixed_time", "room_no_overlap", "calendar_no_overlap", "minimize_changes"]
 
 
 class ORMModel(BaseModel):
@@ -39,6 +46,7 @@ class TeacherPayload(BaseModel):
     business_id: str
     name: str
     subject: str = ""
+    calendar_user_id: str | None = None
 
 
 class TeacherResponse(TeacherPayload, ORMModel):
@@ -87,8 +95,12 @@ class TimeSlotResponse(TimeSlotPayload, ORMModel):
 class CourseSessionPayload(BaseModel):
     campus_id: str
     business_id: str
+    source_row_id: str = ""
+    business_line: str = ""
+    product_type: str = ""
     class_business_id: str
     teacher_business_id: str
+    calendar_user_id: str | None = None
     subject: str = ""
     lesson_name: str = ""
     schedule_source: str = ""
@@ -99,7 +111,16 @@ class CourseSessionPayload(BaseModel):
     lesson_date: date | None = None
     duration_minutes: int = Field(default=90, gt=0)
     suggested_slot_id: str | None = None
+    fixed_start_time: str = ""
+    fixed_end_time: str = ""
+    original_room_business_id: str | None = None
     is_locked: bool = False
+
+
+class CourseSessionUpdate(BaseModel):
+    lesson_date: date | None = None
+    original_room_business_id: str | None = None
+    calendar_user_id: str | None = None
 
 
 class CourseSessionResponse(CourseSessionPayload, ORMModel):
@@ -152,7 +173,20 @@ class SolveRequest(BaseModel):
     preference_weight: int = Field(default=100, ge=0, le=10000)
     seat_waste_weight: int = Field(default=1, ge=0, le=1000)
     change_weight: int = Field(default=100000, ge=0, le=1000000)
+    business_lines: list[str] = Field(default_factory=list)
+    product_types: list[str] = Field(default_factory=list)
+    class_business_ids: list[str] = Field(default_factory=list)
+    date_from: date | None = None
+    date_to: date | None = None
+    date_window_days: int = Field(default=7, ge=0, le=31)
+    solver_rules: list[SolverRule] = Field(default_factory=default_solver_rules)
     wait: bool = False
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> SolveRequest:
+        if self.date_from and self.date_to and self.date_from > self.date_to:
+            raise ValueError("date_from 必须早于或等于 date_to")
+        return self
 
 
 class SolverRunResponse(ORMModel):
@@ -177,6 +211,7 @@ class AssignmentResponse(BaseModel):
     course_business_id: str
     class_business_id: str
     teacher_business_id: str
+    lesson_date: date | None = None
     slot_business_id: str
     room_business_id: str
     change_kind: str
@@ -199,8 +234,10 @@ class ScheduleDiffItem(BaseModel):
     course_business_id: str
     class_business_id: str
     teacher_business_id: str
+    before_lesson_date: date | None = None
     before_slot_id: str | None = None
     before_room_id: str | None = None
+    after_lesson_date: date | None = None
     after_slot_id: str | None = None
     after_room_id: str | None = None
     change_kind: Literal["added", "removed", "moved", "unchanged"]
@@ -259,9 +296,11 @@ class OverviewResponse(BaseModel):
 
 class FeishuAppConfigurationInput(BaseModel):
     app_id: str = Field(min_length=4, max_length=100)
-    app_secret: str = Field(min_length=8, max_length=200)
+    app_secret: str | None = Field(default=None, max_length=200)
     oauth_redirect_uri: str = Field(min_length=10, max_length=500)
     frontend_url: str = Field(min_length=8, max_length=500)
+    aily_app_id: str = Field(min_length=8, max_length=100)
+    aily_skill_id: str = Field(min_length=8, max_length=100)
 
 
 class FeishuAppConfigurationResponse(BaseModel):
@@ -271,6 +310,9 @@ class FeishuAppConfigurationResponse(BaseModel):
     secret_configured: bool
     oauth_redirect_uri: str
     frontend_url: str
+    aily_configured: bool
+    aily_app_id: str | None
+    aily_skill_id: str | None
 
 
 class FeishuConnectionResponse(BaseModel):
@@ -316,7 +358,14 @@ class FeishuWorkspaceResponse(ORMModel):
 class FeishuSyncRequest(BaseModel):
     direction: Literal["export"] = "export"
     resource: Literal[
-        "teachers", "class_groups", "rooms", "time_slots", "course_sessions", "rules", "schedule"
+        "teachers",
+        "class_groups",
+        "rooms",
+        "time_slots",
+        "course_sessions",
+        "rules",
+        "schedule",
+        "public_summary",
     ]
     workspace_id: str | None = None
 
@@ -358,3 +407,97 @@ class AilyContextResponse(BaseModel):
 
 class AilySolveRequest(BaseModel):
     time_limit_seconds: float = Field(default=30, ge=1, le=900)
+    instruction: str = Field(default="生成满足当前已确认规则的课表", min_length=2, max_length=2000)
+    business_lines: list[str] = Field(default_factory=list)
+    product_types: list[str] = Field(default_factory=list)
+    class_business_ids: list[str] = Field(default_factory=list)
+    date_from: date | None = None
+    date_to: date | None = None
+    date_window_days: int = Field(default=7, ge=0, le=31)
+    solver_rules: list[SolverRule] = Field(default_factory=default_solver_rules)
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> AilySolveRequest:
+        if self.date_from and self.date_to and self.date_from > self.date_to:
+            raise ValueError("date_from 必须早于或等于 date_to")
+        return self
+
+
+class AssistantSolveRequest(AilySolveRequest):
+    wait: bool = False
+
+
+class AssistantInterpretRequest(BaseModel):
+    instruction: str = Field(min_length=2, max_length=2000)
+
+
+class AssistantInterpretResponse(BaseModel):
+    instruction: str
+    source: Literal["feishu_aily"]
+    aily_configured: bool
+    business_lines: list[str] = Field(default_factory=list)
+    product_types: list[str] = Field(default_factory=list)
+    class_business_ids: list[str] = Field(default_factory=list)
+    date_from: date | None = None
+    date_to: date | None = None
+    date_window_days: int = Field(default=7, ge=0, le=31)
+    recognized_rules: list[str] = Field(default_factory=list)
+    solver_rules: list[SolverRule] = Field(default_factory=default_solver_rules)
+    summary: str
+
+
+class CalendarPublishRequest(BaseModel):
+    calendar_id: str = Field(default="primary", min_length=1, max_length=120)
+    # 保留旧字段以兼容既有调用；忙闲冲突只做提示，不再阻止下发。
+    block_on_conflict: bool = False
+    need_notification: bool = True
+    dry_run: bool = False
+
+
+class CalendarConflict(BaseModel):
+    course_session_id: str
+    calendar_user_id: str
+    lesson_date: date
+    start_time: str
+    end_time: str
+    source: str
+
+
+class CalendarPublishResponse(BaseModel):
+    schedule_id: str
+    dry_run: bool = False
+    would_publish: int = 0
+    published: int
+    existing: int
+    skipped_unmapped: int
+    conflict_count: int = 0
+    conflicts: list[CalendarConflict] = Field(default_factory=list)
+
+
+class CalendarEventBindingResponse(ORMModel):
+    id: str
+    schedule_version_id: str
+    course_session_id: str
+    calendar_id: str
+    event_id: str
+    calendar_user_id: str
+    idempotency_key: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class PublicScheduleShareItem(BaseModel):
+    class_label: str
+    room_label: str
+    month: str
+    time_period: str
+
+
+class PublicScheduleSummary(BaseModel):
+    data_policy: str
+    total_sessions: int
+    business_line_share: dict[str, float]
+    monthly_sessions: dict[str, int]
+    room_utilization: float
+    preview: list[PublicScheduleShareItem]

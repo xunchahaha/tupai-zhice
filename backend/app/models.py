@@ -54,6 +54,8 @@ class FeishuAppConfiguration(TimestampMixin, Base):
     app_secret_encrypted: Mapped[str] = mapped_column(Text)
     oauth_redirect_uri: Mapped[str] = mapped_column(String(500))
     frontend_url: Mapped[str] = mapped_column(String(500))
+    aily_app_id: Mapped[str] = mapped_column(String(100), default="")
+    aily_skill_id: Mapped[str] = mapped_column(String(100), default="")
     configured_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
 
 
@@ -144,6 +146,7 @@ class Teacher(TimestampMixin, Base):
     business_id: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(120))
     subject: Mapped[str] = mapped_column(String(80), default="")
+    calendar_user_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
 
 class ClassGroup(TimestampMixin, Base):
@@ -192,8 +195,12 @@ class CourseSession(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     campus_id: Mapped[str] = mapped_column(ForeignKey("campuses.id"), index=True)
     business_id: Mapped[str] = mapped_column(String(50), index=True)
+    source_row_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    business_line: Mapped[str] = mapped_column(String(40), default="", index=True)
+    product_type: Mapped[str] = mapped_column(String(120), default="", index=True)
     class_business_id: Mapped[str] = mapped_column(String(40))
     teacher_business_id: Mapped[str] = mapped_column(String(40))
+    calendar_user_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     subject: Mapped[str] = mapped_column(String(80), default="")
     lesson_name: Mapped[str] = mapped_column(String(120), default="")
     schedule_source: Mapped[str] = mapped_column(String(80), default="")
@@ -204,6 +211,9 @@ class CourseSession(TimestampMixin, Base):
     lesson_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     duration_minutes: Mapped[int] = mapped_column(Integer, default=90)
     suggested_slot_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    fixed_start_time: Mapped[str] = mapped_column(String(10), default="")
+    fixed_end_time: Mapped[str] = mapped_column(String(10), default="")
+    original_room_business_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -283,11 +293,31 @@ class ScheduleAssignment(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     schedule_version_id: Mapped[str] = mapped_column(ForeignKey("schedule_versions.id"), index=True)
     course_session_id: Mapped[str] = mapped_column(ForeignKey("course_sessions.id"))
+    lesson_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     slot_business_id: Mapped[str] = mapped_column(String(40))
     room_business_id: Mapped[str] = mapped_column(String(40))
     change_kind: Mapped[str] = mapped_column(String(30), default="assigned")
 
     schedule_version: Mapped[ScheduleVersion] = relationship(back_populates="assignments")
+
+
+class CalendarEventBinding(TimestampMixin, Base):
+    __tablename__ = "calendar_event_bindings"
+    __table_args__ = (
+        UniqueConstraint("schedule_version_id", "course_session_id"),
+        UniqueConstraint("idempotency_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_version_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_versions.id"), index=True
+    )
+    course_session_id: Mapped[str] = mapped_column(ForeignKey("course_sessions.id"), index=True)
+    calendar_id: Mapped[str] = mapped_column(String(120))
+    event_id: Mapped[str] = mapped_column(String(120))
+    calendar_user_id: Mapped[str] = mapped_column(String(120), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="created", index=True)
 
 
 class RescheduleEvent(TimestampMixin, Base):

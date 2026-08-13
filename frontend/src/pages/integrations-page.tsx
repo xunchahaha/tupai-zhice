@@ -51,6 +51,7 @@ const resources = [
   "course_sessions",
   "rules",
   "schedule",
+  "public_summary",
 ] as const;
 
 const permissionLabels: Record<string, string> = {
@@ -65,43 +66,6 @@ const permissionLabels: Record<string, string> = {
   "base:record:update": "更新记录",
 };
 
-type LegacyFeishuConnection = Partial<FeishuConnectionResponse> & {
-  configured?: boolean;
-  connected?: boolean;
-  table_mapping_configured?: boolean;
-};
-
-function normalizeConnection(raw: LegacyFeishuConnection | undefined): FeishuConnectionResponse {
-  const appConfigured = raw?.app_configured ?? raw?.configured ?? false;
-  const authorized = raw?.authorized ?? raw?.connected ?? false;
-  const status: FeishuConnectionResponse["status"] =
-    raw?.status ?? (!appConfigured ? "unconfigured" : authorized ? "connected" : "not_authorized");
-
-  return {
-    status,
-    app_configured: appConfigured,
-    authorized,
-    missing_fields: Array.isArray(raw?.missing_fields) ? raw.missing_fields : [],
-    granted_scopes: Array.isArray(raw?.granted_scopes) ? raw.granted_scopes : [],
-    missing_scopes: Array.isArray(raw?.missing_scopes) ? raw.missing_scopes : [],
-    access_expires_at: raw?.access_expires_at ?? null,
-    message: raw?.message ?? "尚未返回飞书连接信息。",
-    console_url: raw?.console_url ?? "https://open.feishu.cn/app/",
-    docs_url:
-      raw?.docs_url ??
-      "https://open.feishu.cn/document/authentication-management/access-token/obtain-oauth-code",
-    app_configuration: raw?.app_configuration ?? {
-      configured: appConfigured,
-      source: appConfigured ? "environment" : "none",
-      app_id: null,
-      secret_configured: appConfigured,
-      oauth_redirect_uri: `${API_BASE_URL.replace(/\/$/, "")}/api/v1/integrations/feishu/oauth/callback`,
-      frontend_url: window.location.origin,
-    },
-    workspace: raw?.workspace ?? null,
-  };
-}
-
 export function IntegrationsPage() {
   const queryClient = useQueryClient();
   const connection = useFeishuConnectionApiV1IntegrationsFeishuConnectionGet();
@@ -112,6 +76,8 @@ export function IntegrationsPage() {
   const [guideStep, setGuideStep] = useState(0);
   const [appId, setAppId] = useState("");
   const [appSecret, setAppSecret] = useState("");
+  const [ailyAppId, setAilyAppId] = useState("");
+  const [ailySkillId, setAilySkillId] = useState("");
   const [redirectUri, setRedirectUri] = useState(
     `${API_BASE_URL.replace(/\/$/, "")}/api/v1/integrations/feishu/oauth/callback`,
   );
@@ -149,7 +115,7 @@ export function IntegrationsPage() {
   const createWorkspace = useCreateFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost({
     mutation: {
       onSuccess: async () => {
-        toast.success("排课多维表格和 7 张业务表已创建");
+        toast.success(`排课多维表格和 ${resources.length} 张业务表已创建`);
         await refreshConnection();
         setGuideStep(4);
       },
@@ -202,11 +168,16 @@ export function IntegrationsPage() {
 
   useEffect(() => {
     if (!connection.data) return;
-    const configured = normalizeConnection(connection.data).app_configuration;
+    const configured = connection.data.app_configuration;
     if (configured.configured) {
       if (configured.app_id) setAppId(configured.app_id);
+      if (configured.aily_app_id) setAilyAppId(configured.aily_app_id);
+      if (configured.aily_skill_id) setAilySkillId(configured.aily_skill_id);
       setRedirectUri(configured.oauth_redirect_uri);
       setFrontendUrl(configured.frontend_url);
+      if (new URLSearchParams(window.location.search).get("section") === "aily") {
+        setEditingApp(true);
+      }
       return;
     }
     setRedirectUri(
@@ -216,9 +187,9 @@ export function IntegrationsPage() {
   }, [connection.data]);
 
   if (connection.isPending || syncs.isPending) return <LoadingState />;
-  if (connection.isError || syncs.isError) return <ErrorState retry={() => void refresh()} />;
+  if (connection.isError || syncs.isError || !connection.data) return <ErrorState retry={() => void refresh()} />;
 
-  const status = normalizeConnection(connection.data);
+  const status = connection.data;
   const workspaceReady = Boolean(
     status.workspace?.status === "active" && status.workspace.tables?.length === resources.length,
   );
@@ -230,11 +201,13 @@ export function IntegrationsPage() {
   );
   const currentStep = !status.app_configured
     ? 0
-    : !status.authorized
+    : !status.app_configuration.aily_configured
       ? 1
+    : !status.authorized
+      ? 2
       : !workspaceReady
-        ? 2
-        : 3;
+        ? 3
+        : 4;
 
   const copyCallback = async () => {
     await navigator.clipboard.writeText(redirectUri);
@@ -285,7 +258,7 @@ export function IntegrationsPage() {
           <FlowStep
             number={1}
             title="配置企业自建应用"
-            description="管理员在这里一次填写应用编号和应用密钥，后端自动加密保存。"
+            description="管理员填写飞书企业自建应用编号和应用密钥，后端自动加密保存。"
             state={status.app_configured ? "completed" : "current"}
             icon={Settings2}
           >
@@ -295,6 +268,10 @@ export function IntegrationsPage() {
               setAppId={setAppId}
               appSecret={appSecret}
               setAppSecret={setAppSecret}
+              ailyAppId={ailyAppId}
+              setAilyAppId={setAilyAppId}
+              ailySkillId={ailySkillId}
+              setAilySkillId={setAilySkillId}
               redirectUri={redirectUri}
               editing={editingApp}
               setEditing={setEditingApp}
@@ -306,6 +283,8 @@ export function IntegrationsPage() {
                     app_secret: appSecret,
                     oauth_redirect_uri: redirectUri.trim(),
                     frontend_url: frontendUrl.trim(),
+                    aily_app_id: ailyAppId.trim(),
+                    aily_skill_id: ailySkillId.trim(),
                   },
                 })
               }
@@ -316,6 +295,22 @@ export function IntegrationsPage() {
 
           <FlowStep
             number={2}
+            title="配置飞书 Aily"
+            description="排课指令只通过飞书 Aily 解析，需要配置 Aily 应用和技能标识。"
+            state={status.app_configuration.aily_configured ? "completed" : "current"}
+            icon={Settings2}
+          >
+            <div id="aily-configuration" className="space-y-3 text-sm text-zinc-700">
+              <div>Aily 应用：<code>{status.app_configuration.aily_app_id ?? "待配置"}</code></div>
+              <div>Aily 技能：<code>{status.app_configuration.aily_skill_id ?? "待配置"}</code></div>
+              <Button size="sm" variant="outline" onClick={() => setEditingApp(true)}>
+                编辑飞书应用与 Aily 配置
+              </Button>
+            </div>
+          </FlowStep>
+
+          <FlowStep
+            number={3}
             title="授权飞书管理员账号"
             description="授权后，多维表格归属该管理员并出现在其飞书云空间。"
             state={status.authorized ? "completed" : status.app_configured ? "current" : "pending"}
@@ -362,9 +357,9 @@ export function IntegrationsPage() {
           </FlowStep>
 
           <FlowStep
-            number={3}
+            number={4}
             title="创建排课多维表格"
-            description="系统自动创建接入说明和 7 张中文业务表，并保存全部表格标识。"
+            description="系统自动创建内部业务表和脱敏公开汇总表，并保存全部表格标识。"
             state={workspaceReady ? "completed" : status.authorized ? "current" : "pending"}
             icon={Database}
           >
@@ -386,14 +381,14 @@ export function IntegrationsPage() {
                   }
                 >
                   <TableProperties className="size-4" />
-                  {createWorkspace.isPending ? "正在创建 7 张表" : "自动创建排课表格"}
+                  {createWorkspace.isPending ? `正在创建 ${resources.length} 张表` : "自动创建排课表格"}
                 </Button>
               </div>
             )}
           </FlowStep>
 
           <FlowStep
-            number={4}
+            number={5}
             title="同步业务数据"
             description="按业务标识新增或更新，重复执行不会产生重复记录。"
             state={ready ? "current" : "pending"}
@@ -425,6 +420,31 @@ export function IntegrationsPage() {
               <p className="mt-2 text-xs text-amber-700">完成账号授权和自动建表后开放同步。</p>
             ) : null}
           </FlowStep>
+
+          <FlowStep
+            number={6}
+            title="在飞书内创建妙搭应用"
+            description="先同步脱敏公开汇总，再打开飞书多维表格，在飞书内部使用妙搭搭建和发布页面。"
+            state={workspaceReady ? "current" : "pending"}
+            icon={ExternalLink}
+          >
+            <div className="space-y-3 text-sm text-zinc-700">
+              <p>此处只负责把“公开展示汇总”写入飞书多维表格；妙搭的创建、搭建和公网发布均在飞书内部完成。</p>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setResource("public_summary");
+                    sync.mutate({ data: { resource: "public_summary" } });
+                  }}
+                  disabled={!ready || sync.isPending}
+                >
+                  同步公开展示汇总
+                </Button>
+                {status.workspace?.url ? <a href={status.workspace.url} target="_blank" rel="noreferrer"><Button variant="outline"><ExternalLink className="size-4" />打开飞书多维表格</Button></a> : null}
+              </div>
+            </div>
+          </FlowStep>
         </div>
       </section>
 
@@ -444,6 +464,10 @@ export function IntegrationsPage() {
         setAppId={setAppId}
         appSecret={appSecret}
         setAppSecret={setAppSecret}
+        ailyAppId={ailyAppId}
+        setAilyAppId={setAilyAppId}
+        ailySkillId={ailySkillId}
+        setAilySkillId={setAilySkillId}
         redirectUri={redirectUri}
         editingApp={editingApp}
         setEditingApp={setEditingApp}
@@ -455,6 +479,8 @@ export function IntegrationsPage() {
               app_secret: appSecret,
               oauth_redirect_uri: redirectUri.trim(),
               frontend_url: frontendUrl.trim(),
+              aily_app_id: ailyAppId.trim(),
+              aily_skill_id: ailySkillId.trim(),
             },
           })
         }
@@ -503,8 +529,9 @@ function ConnectionSummary({
         </div>
         <Badge tone={tone}>{label}</Badge>
       </div>
-      <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <SummaryItem label="应用配置" value={status.app_configured ? "已就绪" : "待完成"} />
+        <SummaryItem label="飞书 Aily" value={status.app_configuration.aily_configured ? "已配置" : "待配置"} />
         <SummaryItem label="管理员账号" value={status.authorized ? "已授权" : "待授权"} />
         <SummaryItem
           label="排课多维表格"
@@ -559,6 +586,10 @@ function ApplicationConfiguration({
   setAppId,
   appSecret,
   setAppSecret,
+  ailyAppId,
+  setAilyAppId,
+  ailySkillId,
+  setAilySkillId,
   redirectUri,
   editing,
   setEditing,
@@ -572,6 +603,10 @@ function ApplicationConfiguration({
   setAppId: (value: string) => void;
   appSecret: string;
   setAppSecret: (value: string) => void;
+  ailyAppId: string;
+  setAilyAppId: (value: string) => void;
+  ailySkillId: string;
+  setAilySkillId: (value: string) => void;
   redirectUri: string;
   editing: boolean;
   setEditing: (value: boolean) => void;
@@ -594,6 +629,11 @@ function ApplicationConfiguration({
         </div>
         <div className="text-xs leading-5 text-zinc-500">
           授权回调地址：{status.app_configuration.oauth_redirect_uri}
+        </div>
+        <div className="text-xs leading-5 text-zinc-500">
+          飞书 Aily：{status.app_configuration.aily_configured
+            ? `${status.app_configuration.aily_app_id} / ${status.app_configuration.aily_skill_id}`
+            : "待配置"}
         </div>
         {environmentManaged ? (
           <p className="text-xs text-zinc-500">当前配置由部署环境统一管理。</p>
@@ -621,7 +661,7 @@ function ApplicationConfiguration({
         <li className="border border-zinc-200 p-3"><strong>三、申请并发布</strong><p className="mt-1 text-zinc-500">申请下列用户身份权限，发布版本并覆盖管理员。</p></li>
       </ol>
       <p className="text-sm text-zinc-700">
-        在途排智策只需填写下面两项。回调地址由系统生成，不需要修改后端配置文件。
+        在途排智策填写飞书应用凭据和 Aily 标识。回调地址由系统生成。
       </p>
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="text-sm text-zinc-700">
@@ -648,6 +688,16 @@ function ApplicationConfiguration({
           />
         </label>
       </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="text-sm text-zinc-700">
+          Aily 应用标识
+          <input aria-label="飞书 Aily 应用标识" value={ailyAppId} onChange={(event) => setAilyAppId(event.target.value)} placeholder="spring_xxxxxxxxxx" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" />
+        </label>
+        <label className="text-sm text-zinc-700">
+          Aily 技能标识
+          <input aria-label="飞书 Aily 技能标识" value={ailySkillId} onChange={(event) => setAilySkillId(event.target.value)} placeholder="skill_xxxxxxxxxx" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" />
+        </label>
+      </div>
       <label className="block text-sm text-zinc-700">
         授权回调地址
         <div className="mt-1.5 flex gap-2">
@@ -669,7 +719,10 @@ function ApplicationConfiguration({
           disabled={
             saving ||
             !appId.trim().startsWith("cli_") ||
-            appSecret.length < 8 ||
+            (!configured && appSecret.length < 8) ||
+            (configured && appSecret.length > 0 && appSecret.length < 8) ||
+            !ailyAppId.trim().startsWith("spring_") ||
+            !ailySkillId.trim().startsWith("skill_") ||
             !redirectUri.trim()
           }
         >
@@ -774,6 +827,10 @@ function OnboardingDialog({
   setAppId,
   appSecret,
   setAppSecret,
+  ailyAppId,
+  setAilyAppId,
+  ailySkillId,
+  setAilySkillId,
   redirectUri,
   editingApp,
   setEditingApp,
@@ -799,6 +856,10 @@ function OnboardingDialog({
   setAppId: (value: string) => void;
   appSecret: string;
   setAppSecret: (value: string) => void;
+  ailyAppId: string;
+  setAilyAppId: (value: string) => void;
+  ailySkillId: string;
+  setAilySkillId: (value: string) => void;
   redirectUri: string;
   editingApp: boolean;
   setEditingApp: (value: boolean) => void;
@@ -816,7 +877,7 @@ function OnboardingDialog({
       { title: "飞书生产接入向导", description: "完成应用配置、管理员授权、自动建表和首次同步。" },
       { title: "配置企业自建应用", description: "管理员在这里一次填写应用编号和应用密钥。" },
       { title: "授权飞书管理员账号", description: "多维表格将创建在授权管理员的飞书云空间。" },
-      { title: "自动创建排课多维表格", description: "途排智策会直接创建接入说明和 7 张中文业务表。" },
+      { title: "自动创建排课多维表格", description: `途排智策会直接创建接入说明和 ${resources.length} 张中文业务表。` },
       { title: "开始发布和同步", description: "发布课表后按业务标识同步，重复同步只更新原记录。" },
     ],
     [],
@@ -841,6 +902,10 @@ function OnboardingDialog({
               setAppId={setAppId}
               appSecret={appSecret}
               setAppSecret={setAppSecret}
+              ailyAppId={ailyAppId}
+              setAilyAppId={setAilyAppId}
+              ailySkillId={ailySkillId}
+              setAilySkillId={setAilySkillId}
               redirectUri={redirectUri}
               editing={editingApp}
               setEditing={setEditingApp}
@@ -927,7 +992,7 @@ function GuideWorkspace({
       </div>
       <input aria-label="向导中的排课空间名称" value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} className="h-9 w-full rounded-md border border-zinc-300 px-3 text-sm" />
       <Button onClick={createWorkspace} disabled={!status.authorized || workspaceName.trim().length < 2 || creatingWorkspace}>
-        <TableProperties className="size-4" />{creatingWorkspace ? "正在创建 7 张表" : "自动创建排课表格"}
+        <TableProperties className="size-4" />{creatingWorkspace ? `正在创建 ${resources.length} 张表` : "自动创建排课表格"}
       </Button>
       {!status.authorized ? <p className="text-xs text-amber-700">请先完成管理员账号授权。</p> : null}
     </div>
