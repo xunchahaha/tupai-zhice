@@ -605,6 +605,98 @@
         }
       }
     },
+    "/api/v1/teachers/batch-update": {
+      "post": {
+        "tags": [
+          "master-data"
+        ],
+        "summary": "Batch Update Teachers",
+        "operationId": "batch_update_teachers_api_v1_teachers_batch_update_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeacherBatchUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/teachers/batch-delete": {
+      "post": {
+        "tags": [
+          "master-data"
+        ],
+        "summary": "Batch Delete Teachers",
+        "operationId": "batch_delete_teachers_api_v1_teachers_batch_delete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MasterDataBatchDelete"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/class-groups": {
       "get": {
         "tags": [
@@ -734,6 +826,98 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/class-groups/batch-update": {
+      "post": {
+        "tags": [
+          "master-data"
+        ],
+        "summary": "Batch Update Class Groups",
+        "operationId": "batch_update_class_groups_api_v1_class_groups_batch_update_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClassGroupBatchUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/class-groups/batch-delete": {
+      "post": {
+        "tags": [
+          "master-data"
+        ],
+        "summary": "Batch Delete Class Groups",
+        "operationId": "batch_delete_class_groups_api_v1_class_groups_batch_delete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MasterDataBatchDelete"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
       }
     },
     "/api/v1/rooms": {
@@ -867,6 +1051,98 @@
         }
       }
     },
+    "/api/v1/rooms/batch-update": {
+      "post": {
+        "tags": [
+          "master-data"
+        ],
+        "summary": "Batch Update Rooms",
+        "operationId": "batch_update_rooms_api_v1_rooms_batch_update_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoomBatchUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/rooms/batch-delete": {
+      "post": {
+        "tags": [
+          "master-data"
+        ],
+        "summary": "Batch Delete Rooms",
+        "operationId": "batch_delete_rooms_api_v1_rooms_batch_delete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MasterDataBatchDelete"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/time-slots": {
       "get": {
         "tags": [
@@ -996,6 +1272,98 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/time-slots/batch-update": {
+      "post": {
+        "tags": [
+          "master-data"
+        ],
+        "summary": "Batch Update Time Slots",
+        "operationId": "batch_update_time_slots_api_v1_time_slots_batch_update_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TimeSlotBatchUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/time-slots/batch-delete": {
+      "post": {
+        "tags": [
+          "master-data"
+        ],
+        "summary": "Batch Delete Time Slots",
+        "operationId": "batch_delete_time_slots_api_v1_time_slots_batch_delete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MasterDataBatchDelete"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
       }
     },
     "/api/v1/course-sessions": {
@@ -3501,6 +3869,41 @@
         ],
         "title": "CampusResponse"
       },
+      "ClassGroupBatchUpdate": {
+        "properties": {
+          "object_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Object Ids"
+          },
+          "grade": {
+            "type": "string",
+            "title": "Grade",
+            "default": ""
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject",
+            "default": ""
+          },
+          "teacher_business_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Teacher Business Id",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "object_ids"
+        ],
+        "title": "ClassGroupBatchUpdate"
+      },
       "ClassGroupPayload": {
         "properties": {
           "campus_id": {
@@ -4482,6 +4885,25 @@
         ],
         "title": "IntegrationSyncResponse"
       },
+      "MasterDataBatchDelete": {
+        "properties": {
+          "object_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Object Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "object_ids"
+        ],
+        "title": "MasterDataBatchDelete"
+      },
       "OverviewResponse": {
         "properties": {
           "counts": {
@@ -4685,6 +5107,30 @@
           "created_at"
         ],
         "title": "RescheduleResponse"
+      },
+      "RoomBatchUpdate": {
+        "properties": {
+          "object_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Object Ids"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "object_ids"
+        ],
+        "title": "RoomBatchUpdate"
       },
       "RoomPayload": {
         "properties": {
@@ -5539,6 +5985,41 @@
         ],
         "title": "SolverRunResponse"
       },
+      "TeacherBatchUpdate": {
+        "properties": {
+          "object_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Object Ids"
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject",
+            "default": ""
+          },
+          "calendar_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calendar User Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "object_ids"
+        ],
+        "title": "TeacherBatchUpdate"
+      },
       "TeacherPayload": {
         "properties": {
           "campus_id": {
@@ -5621,6 +6102,30 @@
           "id"
         ],
         "title": "TeacherResponse"
+      },
+      "TimeSlotBatchUpdate": {
+        "properties": {
+          "object_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Object Ids"
+          },
+          "is_open": {
+            "type": "boolean",
+            "title": "Is Open",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "object_ids"
+        ],
+        "title": "TimeSlotBatchUpdate"
       },
       "TimeSlotPayload": {
         "properties": {

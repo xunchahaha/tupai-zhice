@@ -61,6 +61,7 @@ from .schemas import (
     CalendarPublishResponse,
     CampusCreate,
     CampusResponse,
+    ClassGroupBatchUpdate,
     ClassGroupPayload,
     ClassGroupResponse,
     CourseSessionBatchDelete,
@@ -77,10 +78,12 @@ from .schemas import (
     FeishuWorkspaceResponse,
     ImportResult,
     IntegrationSyncResponse,
+    MasterDataBatchDelete,
     OverviewResponse,
     PublicScheduleSummary,
     RescheduleCreate,
     RescheduleResponse,
+    RoomBatchUpdate,
     RoomPayload,
     RoomResponse,
     RuleCreate,
@@ -92,8 +95,10 @@ from .schemas import (
     ScheduleResponse,
     SolveRequest,
     SolverRunResponse,
+    TeacherBatchUpdate,
     TeacherPayload,
     TeacherResponse,
+    TimeSlotBatchUpdate,
     TimeSlotPayload,
     TimeSlotResponse,
     TokenResponse,
@@ -382,6 +387,156 @@ def create_campus(payload: CampusCreate, db: Db, user: AdminOrScheduler) -> Camp
     return instance
 
 
+def selected_master_rows(
+    db: Session, model: type[Any], object_ids: list[str], resource_label: str
+) -> list[Any]:
+    rows = list(db.scalars(select(model).where(model.id.in_(object_ids))))
+    found_ids = {item.id for item in rows}
+    missing = [item for item in object_ids if item not in found_ids]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"未找到 {len(missing)} 条{resource_label}记录")
+    return rows
+
+
+def raise_reference_conflict(
+    items: list[Any], referenced: set[tuple[str, str]], resource_label: str, references: str
+) -> None:
+    labels = [
+        item.business_id
+        for item in items
+        if (item.campus_id, item.business_id) in referenced
+    ]
+    if not labels:
+        return
+    preview = "、".join(labels[:5])
+    suffix = "等" if len(labels) > 5 else ""
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"{len(labels)} 条{resource_label}已被{references}引用，"
+            f"不能直接删除：{preview}{suffix}"
+        ),
+    )
+
+
+def ensure_teachers_deletable(db: Session, teachers: list[Teacher]) -> None:
+    identities = {(item.campus_id, item.business_id) for item in teachers}
+    campus_ids = {item[0] for item in identities}
+    business_ids = {item[1] for item in identities}
+    class_references = {
+        (campus_id, business_id)
+        for campus_id, business_id in db.execute(
+            select(ClassGroup.campus_id, ClassGroup.teacher_business_id).where(
+                ClassGroup.campus_id.in_(campus_ids),
+                ClassGroup.teacher_business_id.in_(business_ids),
+            )
+        )
+    }
+    course_references = {
+        (campus_id, business_id)
+        for campus_id, business_id in db.execute(
+            select(CourseSession.campus_id, CourseSession.teacher_business_id).where(
+                CourseSession.campus_id.in_(campus_ids),
+                CourseSession.teacher_business_id.in_(business_ids),
+            )
+        )
+    }
+    raise_reference_conflict(
+        teachers,
+        identities & (class_references | course_references),
+        "教师",
+        "班级或课程",
+    )
+
+
+def ensure_class_groups_deletable(db: Session, classes: list[ClassGroup]) -> None:
+    identities = {(item.campus_id, item.business_id) for item in classes}
+    campus_ids = {item[0] for item in identities}
+    business_ids = {item[1] for item in identities}
+    references = {
+        (campus_id, business_id)
+        for campus_id, business_id in db.execute(
+            select(CourseSession.campus_id, CourseSession.class_business_id).where(
+                CourseSession.campus_id.in_(campus_ids),
+                CourseSession.class_business_id.in_(business_ids),
+            )
+        )
+    }
+    raise_reference_conflict(classes, identities & references, "班级", "课程")
+
+
+def ensure_rooms_deletable(db: Session, rooms: list[Room]) -> None:
+    identities = {(item.campus_id, item.business_id) for item in rooms}
+    campus_ids = {item[0] for item in identities}
+    business_ids = {item[1] for item in identities}
+    course_references = {
+        (campus_id, business_id)
+        for campus_id, business_id in db.execute(
+            select(CourseSession.campus_id, CourseSession.original_room_business_id).where(
+                CourseSession.campus_id.in_(campus_ids),
+                CourseSession.original_room_business_id.in_(business_ids),
+            )
+        )
+        if business_id is not None
+    }
+    schedule_references = {
+        (campus_id, business_id)
+        for campus_id, business_id in db.execute(
+            select(CourseSession.campus_id, ScheduleAssignment.room_business_id)
+            .join(
+                ScheduleAssignment,
+                ScheduleAssignment.course_session_id == CourseSession.id,
+            )
+            .where(
+                CourseSession.campus_id.in_(campus_ids),
+                ScheduleAssignment.room_business_id.in_(business_ids),
+            )
+        )
+    }
+    raise_reference_conflict(
+        rooms,
+        identities & (course_references | schedule_references),
+        "教室",
+        "课程或课表版本",
+    )
+
+
+def ensure_time_slots_deletable(db: Session, slots: list[TimeSlot]) -> None:
+    identities = {(item.campus_id, item.business_id) for item in slots}
+    campus_ids = {item[0] for item in identities}
+    business_ids = {item[1] for item in identities}
+    course_references = {
+        (campus_id, business_id)
+        for campus_id, business_id in db.execute(
+            select(CourseSession.campus_id, CourseSession.suggested_slot_id).where(
+                CourseSession.campus_id.in_(campus_ids),
+                CourseSession.suggested_slot_id.in_(business_ids),
+            )
+        )
+        if business_id is not None
+    }
+    schedule_references = {
+        (campus_id, business_id)
+        for campus_id, business_id in db.execute(
+            select(CourseSession.campus_id, ScheduleAssignment.slot_business_id)
+            .join(
+                ScheduleAssignment,
+                ScheduleAssignment.course_session_id == CourseSession.id,
+            )
+            .where(
+                CourseSession.campus_id.in_(campus_ids),
+                ScheduleAssignment.slot_business_id.in_(business_ids),
+            )
+        )
+    }
+    raise_reference_conflict(
+        slots,
+        identities & (course_references | schedule_references),
+        "时段",
+        "课程或课表版本",
+    )
+
+
 @router.get("/teachers", response_model=list[TeacherResponse], tags=["master-data"])
 def list_teachers(db: Db, user: CurrentUser) -> list[Teacher]:
     return list(db.scalars(select(Teacher).order_by(Teacher.business_id)))
@@ -407,6 +562,48 @@ def update_teacher(
     db.commit()
     db.refresh(instance)
     return instance
+
+
+@router.post(
+    "/teachers/batch-update",
+    response_model=BatchOperationResponse,
+    tags=["master-data"],
+)
+def batch_update_teachers(
+    payload: TeacherBatchUpdate, db: Db, user: AdminOrScheduler
+) -> BatchOperationResponse:
+    teachers: list[Teacher] = selected_master_rows(db, Teacher, payload.object_ids, "教师")
+    changes = payload.model_dump(exclude={"object_ids"}, exclude_unset=True)
+    for teacher in teachers:
+        for key, value in changes.items():
+            setattr(teacher, key, value)
+    audit(
+        db,
+        user,
+        "batch_update",
+        "teacher",
+        None,
+        {"count": len(teachers), "fields": sorted(changes)},
+    )
+    db.commit()
+    return BatchOperationResponse(affected_count=len(teachers))
+
+
+@router.post(
+    "/teachers/batch-delete",
+    response_model=BatchOperationResponse,
+    tags=["master-data"],
+)
+def batch_delete_teachers(
+    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler
+) -> BatchOperationResponse:
+    teachers: list[Teacher] = selected_master_rows(db, Teacher, payload.object_ids, "教师")
+    ensure_teachers_deletable(db, teachers)
+    for teacher in teachers:
+        db.delete(teacher)
+    audit(db, user, "batch_delete", "teacher", None, {"count": len(teachers)})
+    db.commit()
+    return BatchOperationResponse(affected_count=len(teachers))
 
 
 @router.get("/class-groups", response_model=list[ClassGroupResponse], tags=["master-data"])
@@ -438,6 +635,71 @@ def update_class_group(
     return instance
 
 
+def validate_class_group_teacher(
+    db: Session, classes: list[ClassGroup], teacher_business_id: str
+) -> None:
+    campus_ids = {item.campus_id for item in classes}
+    matched_campuses = set(
+        db.scalars(
+            select(Teacher.campus_id).where(
+                Teacher.business_id == teacher_business_id,
+                Teacher.campus_id.in_(campus_ids),
+            )
+        )
+    )
+    if matched_campuses != campus_ids:
+        raise HTTPException(status_code=422, detail="指定教师不属于所选班级的校区")
+
+
+@router.post(
+    "/class-groups/batch-update",
+    response_model=BatchOperationResponse,
+    tags=["master-data"],
+)
+def batch_update_class_groups(
+    payload: ClassGroupBatchUpdate, db: Db, user: AdminOrScheduler
+) -> BatchOperationResponse:
+    classes: list[ClassGroup] = selected_master_rows(
+        db, ClassGroup, payload.object_ids, "班级"
+    )
+    changes = payload.model_dump(exclude={"object_ids"}, exclude_unset=True)
+    teacher_business_id = changes.get("teacher_business_id")
+    if teacher_business_id is not None:
+        validate_class_group_teacher(db, classes, teacher_business_id)
+    for class_group in classes:
+        for key, value in changes.items():
+            setattr(class_group, key, value)
+    audit(
+        db,
+        user,
+        "batch_update",
+        "class_group",
+        None,
+        {"count": len(classes), "fields": sorted(changes)},
+    )
+    db.commit()
+    return BatchOperationResponse(affected_count=len(classes))
+
+
+@router.post(
+    "/class-groups/batch-delete",
+    response_model=BatchOperationResponse,
+    tags=["master-data"],
+)
+def batch_delete_class_groups(
+    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler
+) -> BatchOperationResponse:
+    classes: list[ClassGroup] = selected_master_rows(
+        db, ClassGroup, payload.object_ids, "班级"
+    )
+    ensure_class_groups_deletable(db, classes)
+    for class_group in classes:
+        db.delete(class_group)
+    audit(db, user, "batch_delete", "class_group", None, {"count": len(classes)})
+    db.commit()
+    return BatchOperationResponse(affected_count=len(classes))
+
+
 @router.get("/rooms", response_model=list[RoomResponse], tags=["master-data"])
 def list_rooms(db: Db, user: CurrentUser) -> list[Room]:
     return list(db.scalars(select(Room).order_by(Room.business_id)))
@@ -461,6 +723,46 @@ def update_room(object_id: str, payload: RoomPayload, db: Db, user: AdminOrSched
     db.commit()
     db.refresh(instance)
     return instance
+
+
+@router.post(
+    "/rooms/batch-update",
+    response_model=BatchOperationResponse,
+    tags=["master-data"],
+)
+def batch_update_rooms(
+    payload: RoomBatchUpdate, db: Db, user: AdminOrScheduler
+) -> BatchOperationResponse:
+    rooms: list[Room] = selected_master_rows(db, Room, payload.object_ids, "教室")
+    for room in rooms:
+        room.is_active = payload.is_active
+    audit(
+        db,
+        user,
+        "batch_update",
+        "room",
+        None,
+        {"count": len(rooms), "fields": ["is_active"]},
+    )
+    db.commit()
+    return BatchOperationResponse(affected_count=len(rooms))
+
+
+@router.post(
+    "/rooms/batch-delete",
+    response_model=BatchOperationResponse,
+    tags=["master-data"],
+)
+def batch_delete_rooms(
+    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler
+) -> BatchOperationResponse:
+    rooms: list[Room] = selected_master_rows(db, Room, payload.object_ids, "教室")
+    ensure_rooms_deletable(db, rooms)
+    for room in rooms:
+        db.delete(room)
+    audit(db, user, "batch_delete", "room", None, {"count": len(rooms)})
+    db.commit()
+    return BatchOperationResponse(affected_count=len(rooms))
 
 
 @router.get("/time-slots", response_model=list[TimeSlotResponse], tags=["master-data"])
@@ -488,6 +790,46 @@ def update_time_slot(
     db.commit()
     db.refresh(instance)
     return instance
+
+
+@router.post(
+    "/time-slots/batch-update",
+    response_model=BatchOperationResponse,
+    tags=["master-data"],
+)
+def batch_update_time_slots(
+    payload: TimeSlotBatchUpdate, db: Db, user: AdminOrScheduler
+) -> BatchOperationResponse:
+    slots: list[TimeSlot] = selected_master_rows(db, TimeSlot, payload.object_ids, "时段")
+    for slot in slots:
+        slot.is_open = payload.is_open
+    audit(
+        db,
+        user,
+        "batch_update",
+        "time_slot",
+        None,
+        {"count": len(slots), "fields": ["is_open"]},
+    )
+    db.commit()
+    return BatchOperationResponse(affected_count=len(slots))
+
+
+@router.post(
+    "/time-slots/batch-delete",
+    response_model=BatchOperationResponse,
+    tags=["master-data"],
+)
+def batch_delete_time_slots(
+    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler
+) -> BatchOperationResponse:
+    slots: list[TimeSlot] = selected_master_rows(db, TimeSlot, payload.object_ids, "时段")
+    ensure_time_slots_deletable(db, slots)
+    for slot in slots:
+        db.delete(slot)
+    audit(db, user, "batch_delete", "time_slot", None, {"count": len(slots)})
+    db.commit()
+    return BatchOperationResponse(affected_count=len(slots))
 
 
 @router.get("/course-sessions", response_model=list[CourseSessionResponse], tags=["master-data"])
@@ -641,7 +983,15 @@ def delete_master_data(resource: str, object_id: str, db: Db, user: AdminOrSched
     if model is None:
         raise HTTPException(status_code=404, detail="未知主数据资源")
     instance = get_or_404(db, model, object_id)
-    if resource == "course-sessions":
+    if resource == "teachers":
+        ensure_teachers_deletable(db, [instance])
+    elif resource == "class-groups":
+        ensure_class_groups_deletable(db, [instance])
+    elif resource == "rooms":
+        ensure_rooms_deletable(db, [instance])
+    elif resource == "time-slots":
+        ensure_time_slots_deletable(db, [instance])
+    elif resource == "course-sessions":
         ensure_course_sessions_deletable(db, [instance])
     db.delete(instance)
     audit(db, user, "delete", resource, object_id)

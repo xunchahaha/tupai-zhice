@@ -76,6 +76,23 @@ class TeacherResponse(TeacherPayload, ORMModel):
     id: str
 
 
+class TeacherBatchUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    object_ids: list[str] = Field(min_length=1, max_length=1000)
+    subject: str = ""
+    calendar_user_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_requested_changes(self) -> TeacherBatchUpdate:
+        if len(set(self.object_ids)) != len(self.object_ids):
+            raise ValueError("教师记录不能重复选择")
+        editable_fields = {"subject", "calendar_user_id"}
+        if not (self.model_fields_set & editable_fields):
+            raise ValueError("请至少指定一个要批量修改的字段")
+        return self
+
+
 class ClassGroupPayload(BaseModel):
     campus_id: str
     business_id: str
@@ -89,6 +106,24 @@ class ClassGroupResponse(ClassGroupPayload, ORMModel):
     id: str
 
 
+class ClassGroupBatchUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    object_ids: list[str] = Field(min_length=1, max_length=1000)
+    grade: str = ""
+    subject: str = ""
+    teacher_business_id: str = Field(default="", min_length=1)
+
+    @model_validator(mode="after")
+    def validate_requested_changes(self) -> ClassGroupBatchUpdate:
+        if len(set(self.object_ids)) != len(self.object_ids):
+            raise ValueError("班级记录不能重复选择")
+        editable_fields = {"grade", "subject", "teacher_business_id"}
+        if not (self.model_fields_set & editable_fields):
+            raise ValueError("请至少指定一个要批量修改的字段")
+        return self
+
+
 class RoomPayload(BaseModel):
     campus_id: str
     business_id: str
@@ -98,6 +133,21 @@ class RoomPayload(BaseModel):
 
 class RoomResponse(RoomPayload, ORMModel):
     id: str
+
+
+class RoomBatchUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    object_ids: list[str] = Field(min_length=1, max_length=1000)
+    is_active: bool = True
+
+    @model_validator(mode="after")
+    def validate_requested_changes(self) -> RoomBatchUpdate:
+        if len(set(self.object_ids)) != len(self.object_ids):
+            raise ValueError("教室记录不能重复选择")
+        if "is_active" not in self.model_fields_set:
+            raise ValueError("请指定批量启用或停用状态")
+        return self
 
 
 class TimeSlotPayload(BaseModel):
@@ -113,6 +163,33 @@ class TimeSlotPayload(BaseModel):
 
 class TimeSlotResponse(TimeSlotPayload, ORMModel):
     id: str
+
+
+class TimeSlotBatchUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    object_ids: list[str] = Field(min_length=1, max_length=1000)
+    is_open: bool = True
+
+    @model_validator(mode="after")
+    def validate_requested_changes(self) -> TimeSlotBatchUpdate:
+        if len(set(self.object_ids)) != len(self.object_ids):
+            raise ValueError("时段记录不能重复选择")
+        if "is_open" not in self.model_fields_set:
+            raise ValueError("请指定批量开放或关闭状态")
+        return self
+
+
+class MasterDataBatchDelete(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    object_ids: list[str] = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_selected_records(self) -> MasterDataBatchDelete:
+        if len(set(self.object_ids)) != len(self.object_ids):
+            raise ValueError("主数据记录不能重复选择")
+        return self
 
 
 class CourseSessionPayload(BaseModel):
