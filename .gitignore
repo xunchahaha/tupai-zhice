@@ -11,6 +11,7 @@ frontend/playwright-report/
 frontend/test-results/
 frontend/*runtime*.log
 frontend/vite-*.log
+.playwright-cli/
 data/*.db
 data/secrets/
 data/exports/*.xlsx

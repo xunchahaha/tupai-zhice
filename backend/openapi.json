@@ -948,6 +948,98 @@
         }
       }
     },
+    "/api/v1/course-sessions/batch-update": {
+      "post": {
+        "tags": [
+          "master-data"
+        ],
+        "summary": "Batch Update Course Sessions",
+        "operationId": "batch_update_course_sessions_api_v1_course_sessions_batch_update_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CourseSessionBatchUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/course-sessions/batch-delete": {
+      "post": {
+        "tags": [
+          "master-data"
+        ],
+        "summary": "Batch Delete Course Sessions",
+        "operationId": "batch_delete_course_sessions_api_v1_course_sessions_batch_delete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CourseSessionBatchDelete"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/master-data/{resource}/{object_id}": {
       "delete": {
         "tags": [
@@ -2923,6 +3015,20 @@
         ],
         "title": "AuditLogResponse"
       },
+      "BatchOperationResponse": {
+        "properties": {
+          "affected_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Affected Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "affected_count"
+        ],
+        "title": "BatchOperationResponse"
+      },
       "Body_import_xlsx_api_v1_imports_xlsx_post": {
         "properties": {
           "file": {
@@ -3295,6 +3401,67 @@
         ],
         "title": "ClassGroupResponse"
       },
+      "CourseSessionBatchDelete": {
+        "properties": {
+          "object_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Object Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "object_ids"
+        ],
+        "title": "CourseSessionBatchDelete"
+      },
+      "CourseSessionBatchUpdate": {
+        "properties": {
+          "object_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Object Ids"
+          },
+          "lesson_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lesson Date"
+          },
+          "original_room_business_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Room Business Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "object_ids"
+        ],
+        "title": "CourseSessionBatchUpdate"
+      },
       "CourseSessionPayload": {
         "properties": {
           "campus_id": {
@@ -3631,6 +3798,7 @@
             "title": "Calendar User Id"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "CourseSessionUpdate"
       },

@@ -69,6 +69,70 @@ def test_sample_solve_publish_and_xlsx(client: TestClient, auth_headers: dict[st
     assert workbook["课表"].max_row == 25
 
 
+def test_course_session_create_edit_batch_update_and_delete(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    campus = client.get("/api/v1/campuses", headers=auth_headers).json()[0]
+    class_group = client.get("/api/v1/class-groups", headers=auth_headers).json()[0]
+    teacher = client.get("/api/v1/teachers", headers=auth_headers).json()[0]
+    room = client.get("/api/v1/rooms", headers=auth_headers).json()[0]
+
+    created = client.post(
+        "/api/v1/course-sessions",
+        headers=auth_headers,
+        json={
+            "campus_id": campus["id"],
+            "business_id": "MANUAL-COURSE-01",
+            "class_business_id": class_group["business_id"],
+            "teacher_business_id": teacher["business_id"],
+            "business_line": "考研",
+            "product_type": "手工新增班型",
+            "lesson_name": "手工新增课程",
+            "session_no": 1,
+            "lesson_date": "2026-10-01",
+            "duration_minutes": 180,
+            "fixed_start_time": "09:00",
+            "fixed_end_time": "12:00",
+            "original_room_business_id": room["business_id"],
+        },
+    )
+    assert created.status_code == 201
+    course = created.json()
+
+    edited = client.put(
+        f"/api/v1/course-sessions/{course['id']}",
+        headers=auth_headers,
+        json={"lesson_date": "2026-10-02", "original_room_business_id": room["business_id"]},
+    )
+    assert edited.status_code == 200
+    assert edited.json()["lesson_date"] == "2026-10-02"
+    assert edited.json()["teacher_business_id"] == teacher["business_id"]
+    assert edited.json()["fixed_start_time"] == "09:00"
+
+    immutable_field = client.put(
+        f"/api/v1/course-sessions/{course['id']}",
+        headers=auth_headers,
+        json={"teacher_business_id": "OTHER-TEACHER"},
+    )
+    assert immutable_field.status_code == 422
+
+    batch = client.post(
+        "/api/v1/course-sessions/batch-update",
+        headers=auth_headers,
+        json={"object_ids": [course["id"]], "lesson_date": "2026-10-03"},
+    )
+    assert batch.status_code == 200
+    assert batch.json()["affected_count"] == 1
+
+    deleted = client.post(
+        "/api/v1/course-sessions/batch-delete",
+        headers=auth_headers,
+        json={"object_ids": [course["id"]]},
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["affected_count"] == 1
+
+
 def test_infeasible_rules_return_traceable_core(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

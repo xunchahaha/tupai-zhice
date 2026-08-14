@@ -55,6 +55,7 @@ from .schemas import (
     AssistantInterpretResponse,
     AssistantSolveRequest,
     AuditLogResponse,
+    BatchOperationResponse,
     CalendarEventBindingResponse,
     CalendarPublishRequest,
     CalendarPublishResponse,
@@ -62,6 +63,8 @@ from .schemas import (
     CampusResponse,
     ClassGroupPayload,
     ClassGroupResponse,
+    CourseSessionBatchDelete,
+    CourseSessionBatchUpdate,
     CourseSessionPayload,
     CourseSessionResponse,
     CourseSessionUpdate,
@@ -438,6 +441,106 @@ def update_course_session(
     return instance
 
 
+def selected_course_sessions(db: Session, object_ids: list[str]) -> list[CourseSession]:
+    rows = list(db.scalars(select(CourseSession).where(CourseSession.id.in_(object_ids))))
+    found_ids = {item.id for item in rows}
+    missing = [item for item in object_ids if item not in found_ids]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"未找到 {len(missing)} 条课程记录")
+    return rows
+
+
+def validate_course_room(
+    db: Session, courses: list[CourseSession], room_business_id: str | None
+) -> None:
+    if room_business_id is None:
+        return
+    campus_ids = {item.campus_id for item in courses}
+    matched_campuses = set(
+        db.scalars(
+            select(Room.campus_id).where(
+                Room.business_id == room_business_id,
+                Room.campus_id.in_(campus_ids),
+            )
+        )
+    )
+    if matched_campuses != campus_ids:
+        raise HTTPException(status_code=422, detail="指定教室不属于所选课程的校区")
+
+
+def ensure_course_sessions_deletable(db: Session, courses: list[CourseSession]) -> None:
+    course_ids = [item.id for item in courses]
+    referenced_ids = set(
+        db.scalars(
+            select(ScheduleAssignment.course_session_id).where(
+                ScheduleAssignment.course_session_id.in_(course_ids)
+            )
+        )
+    )
+    referenced_ids.update(
+        db.scalars(
+            select(CalendarEventBinding.course_session_id).where(
+                CalendarEventBinding.course_session_id.in_(course_ids)
+            )
+        )
+    )
+    if referenced_ids:
+        labels = [item.business_id for item in courses if item.id in referenced_ids]
+        preview = "、".join(labels[:5])
+        suffix = "等" if len(labels) > 5 else ""
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{len(labels)} 条课程已被课表版本或飞书日程引用，"
+                f"不能直接删除：{preview}{suffix}"
+            ),
+        )
+
+
+@router.post(
+    "/course-sessions/batch-update",
+    response_model=BatchOperationResponse,
+    tags=["master-data"],
+)
+def batch_update_course_sessions(
+    payload: CourseSessionBatchUpdate, db: Db, user: AdminOrScheduler
+) -> BatchOperationResponse:
+    courses = selected_course_sessions(db, payload.object_ids)
+    changes = payload.model_dump(exclude={"object_ids"}, exclude_unset=True)
+    if "original_room_business_id" in changes:
+        validate_course_room(db, courses, changes["original_room_business_id"])
+    for course in courses:
+        for key, value in changes.items():
+            setattr(course, key, value)
+    audit(
+        db,
+        user,
+        "batch_update",
+        "course_session",
+        None,
+        {"count": len(courses), "fields": sorted(changes)},
+    )
+    db.commit()
+    return BatchOperationResponse(affected_count=len(courses))
+
+
+@router.post(
+    "/course-sessions/batch-delete",
+    response_model=BatchOperationResponse,
+    tags=["master-data"],
+)
+def batch_delete_course_sessions(
+    payload: CourseSessionBatchDelete, db: Db, user: AdminOrScheduler
+) -> BatchOperationResponse:
+    courses = selected_course_sessions(db, payload.object_ids)
+    ensure_course_sessions_deletable(db, courses)
+    for course in courses:
+        db.delete(course)
+    audit(db, user, "batch_delete", "course_session", None, {"count": len(courses)})
+    db.commit()
+    return BatchOperationResponse(affected_count=len(courses))
+
+
 MASTER_MODELS = {
     "teachers": Teacher,
     "class-groups": ClassGroup,
@@ -453,6 +556,8 @@ def delete_master_data(resource: str, object_id: str, db: Db, user: AdminOrSched
     if model is None:
         raise HTTPException(status_code=404, detail="未知主数据资源")
     instance = get_or_404(db, model, object_id)
+    if resource == "course-sessions":
+        ensure_course_sessions_deletable(db, [instance])
     db.delete(instance)
     audit(db, user, "delete", resource, object_id)
     db.commit()

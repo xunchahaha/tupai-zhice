@@ -1,14 +1,56 @@
-import { type ColumnDef, flexRender, getCoreRowModel, getPaginationRowModel, getSortedRowModel, useReactTable } from "@tanstack/react-table";
+import { type ColumnDef, flexRender, getCoreRowModel, getPaginationRowModel, getSortedRowModel, type RowSelectionState, useReactTable } from "@tanstack/react-table";
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsUpDown } from "lucide-react";
 
 import { cn } from "@/lib/cn";
 
 const PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500];
 
-export function DataTable<T>({ columns, data, empty = "暂无数据", paginated = false, defaultPageSize = 50 }: { columns: ColumnDef<T>[]; data: T[]; empty?: string; paginated?: boolean; defaultPageSize?: number }) {
+interface DataTableProps<T> {
+  columns: ColumnDef<T>[];
+  data: T[];
+  empty?: string;
+  paginated?: boolean;
+  defaultPageSize?: number;
+  selectable?: boolean;
+  getRowId?: (row: T, index: number, parent?: unknown) => string;
+  selectedRowIds?: RowSelectionState;
+  onSelectionChange?: (selection: RowSelectionState) => void;
+}
+
+export function DataTable<T>({
+  columns,
+  data,
+  empty = "暂无数据",
+  paginated = false,
+  defaultPageSize = 50,
+  selectable = false,
+  getRowId,
+  selectedRowIds = {},
+  onSelectionChange,
+}: DataTableProps<T>) {
+  const tableColumns: ColumnDef<T>[] = selectable ? [
+    {
+      id: "select",
+      header: ({ table }) => <input aria-label="选择当前页全部记录" type="checkbox" className="size-3.5 align-middle accent-blue-600" checked={table.getIsAllPageRowsSelected()} onChange={table.getToggleAllPageRowsSelectedHandler()} />,
+      cell: ({ row }) => <input aria-label="选择记录" type="checkbox" className="size-3.5 align-middle accent-blue-600" checked={row.getIsSelected()} onChange={row.getToggleSelectedHandler()} />,
+      enableSorting: false,
+      size: 36,
+    },
+    ...columns,
+  ] : columns;
   const table = useReactTable({
     data,
-    columns,
+    columns: tableColumns,
+    getRowId,
+    enableRowSelection: selectable,
+    ...(selectable
+      ? {
+          state: { rowSelection: selectedRowIds },
+          onRowSelectionChange: (updater: RowSelectionState | ((current: RowSelectionState) => RowSelectionState)) => {
+            onSelectionChange?.(typeof updater === "function" ? updater(selectedRowIds) : updater);
+          },
+        }
+      : {}),
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     ...(paginated
@@ -28,7 +70,7 @@ export function DataTable<T>({ columns, data, empty = "暂无数据", paginated 
               return <th key={header.id} className="h-9 border-b border-zinc-200 px-3 font-medium">{header.isPlaceholder ? null : <button className={cn("inline-flex items-center gap-1", header.column.getCanSort() && "hover:text-zinc-950")} onClick={header.column.getToggleSortingHandler()}>{flexRender(header.column.columnDef.header, header.getContext())}{header.column.getCanSort() ? sorted === "asc" ? <ChevronUp className="size-3" /> : sorted === "desc" ? <ChevronDown className="size-3" /> : <ChevronsUpDown className="size-3" /> : null}</button>}</th>;
             })}</tr>)}
           </thead>
-          <tbody>{table.getRowModel().rows.length ? table.getRowModel().rows.map((row) => <tr key={row.id} className="border-b border-zinc-100 last:border-0 hover:bg-zinc-50/70">{row.getVisibleCells().map((cell) => <td key={cell.id} className="h-10 whitespace-nowrap px-3 align-middle text-zinc-700">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>) : <tr><td colSpan={columns.length} className="h-28 px-3 text-center text-zinc-400">{empty}</td></tr>}</tbody>
+          <tbody>{table.getRowModel().rows.length ? table.getRowModel().rows.map((row) => <tr key={row.id} className="border-b border-zinc-100 last:border-0 hover:bg-zinc-50/70">{row.getVisibleCells().map((cell) => <td key={cell.id} className="h-10 whitespace-nowrap px-3 align-middle text-zinc-700">{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>) : <tr><td colSpan={tableColumns.length} className="h-28 px-3 text-center text-zinc-400">{empty}</td></tr>}</tbody>
         </table>
       </div>
       {paginated ? (

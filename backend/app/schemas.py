@@ -118,9 +118,44 @@ class CourseSessionPayload(BaseModel):
 
 
 class CourseSessionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     lesson_date: date | None = None
     original_room_business_id: str | None = None
     calendar_user_id: str | None = None
+
+
+class CourseSessionBatchUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    object_ids: list[str] = Field(min_length=1, max_length=1000)
+    lesson_date: date | None = None
+    original_room_business_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_requested_changes(self) -> CourseSessionBatchUpdate:
+        if len(set(self.object_ids)) != len(self.object_ids):
+            raise ValueError("课程记录不能重复选择")
+        editable_fields = {"lesson_date", "original_room_business_id"}
+        if not (self.model_fields_set & editable_fields):
+            raise ValueError("请至少指定一个要批量修改的字段")
+        return self
+
+
+class CourseSessionBatchDelete(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    object_ids: list[str] = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_selected_courses(self) -> CourseSessionBatchDelete:
+        if len(set(self.object_ids)) != len(self.object_ids):
+            raise ValueError("课程记录不能重复选择")
+        return self
+
+
+class BatchOperationResponse(BaseModel):
+    affected_count: int = Field(ge=0)
 
 
 class CourseSessionResponse(CourseSessionPayload, ORMModel):
