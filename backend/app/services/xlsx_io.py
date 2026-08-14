@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from io import BytesIO
 from typing import cast
 
@@ -94,6 +95,9 @@ def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
     metrics = workbook.create_sheet("指标")
     metrics.append(["指标", "值"])
     for key, value in schedule.metrics.items():
+        # 指标里有分维度明细这类结构化值，Excel 单元格只接受标量。
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False)
         metrics.append([key, value])
     metrics.column_dimensions["A"].width = 28
     metrics.column_dimensions["B"].width = 18

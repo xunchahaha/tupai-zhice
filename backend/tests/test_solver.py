@@ -723,3 +723,38 @@ def test_slot_matrix_path_also_skips_teacher_conflict_for_groups() -> None:
 
     assert solve_problem(payload(is_group=False))["model_status"] == "INFEASIBLE"
     assert solve_problem(payload(is_group=True))["model_status"] == "OPTIMAL"
+
+
+def test_presolve_infeasible_is_distinguishable_from_a_proved_infeasibility() -> None:
+    """短路返回的无解必须打标记：CP-SAT 没跑过，不能说成「已证明无解」。"""
+    presolved = solve_problem(
+        _date_payload(
+            [_course("C1", class_id="B1", room="R1")],
+            rooms=[{"business_id": "R1", "name": "教室1", "is_active": False}],
+        )
+    )
+    assert presolved["model_status"] == "INFEASIBLE"
+    assert presolved["presolve_infeasible"] is True
+    assert presolved["wall_time_seconds"] == 0.0
+
+    solved = solve_problem(
+        _date_payload(
+            [_course("C1", class_id="B1", room="R1")],
+            teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+        )
+    )
+    assert solved["model_status"] == "OPTIMAL"
+    assert solved["presolve_infeasible"] is False
+    assert solved["wall_time_seconds"] > 0
+
+
+def test_empty_scope_is_not_reported_as_a_proved_optimum() -> None:
+    """选不到课次时返回 OPTIMAL，但必须标明这不是求解器的结论。"""
+    result = solve_problem(
+        _date_payload(
+            [_course("C1", class_id="B1", room="R1")],
+            class_business_ids=["不存在的班级"],
+        )
+    )
+    assert result["model_status"] == "OPTIMAL"
+    assert result["presolve_infeasible"] is True

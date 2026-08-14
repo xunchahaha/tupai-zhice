@@ -16,6 +16,7 @@ from ..models import (
     ScheduleAssignment,
     ScheduleVersion,
     SolverRun,
+    Teacher,
     TimeSlot,
 )
 from .solver import solve_problem
@@ -39,12 +40,102 @@ def _get_executor() -> ProcessPoolExecutor:
     return _executor
 
 
+def _clock_minutes(value: str) -> int:
+    hours, minutes = (int(part) for part in value.split(":", 1))
+    return hours * 60 + minutes
+
+
+def _occupancy_window(course: Any, item: dict[str, Any]) -> tuple[Any, ...]:
+    """课次实际占用的时间区间。
+
+    日期感知课表用「日期 + 固定起止时刻」，经典时段课表退化为时段标识本身。
+    """
+    lesson_date = item.get("lesson_date")
+    start = str(getattr(course, "fixed_start_time", "") or "")
+    end = str(getattr(course, "fixed_end_time", "") or "")
+    if lesson_date and start and end:
+        return ("clock", str(lesson_date), _clock_minutes(start), _clock_minutes(end))
+    return ("slot", str(lesson_date or ""), str(item["slot_business_id"]))
+
+
+def _windows_overlap(left: tuple[Any, ...], right: tuple[Any, ...]) -> bool:
+    if left[0] != right[0] or left[1] != right[1]:
+        return False
+    if left[0] == "slot":
+        return left[2] == right[2]
+    return left[2] < right[3] and right[2] < left[3]
+
+
+def count_hard_conflicts(db: Any, assignments: list[dict[str, Any]]) -> dict[str, int]:
+    """按维度实算硬冲突记录数。
+
+    此前该指标是写死的 0，等于用一个恒真值去证明正确性。这里独立于求解器重算一遍，
+    既是发布门禁，也是求解器建模出错时的兜底。
+    """
+    courses = {item.id: item for item in db.scalars(select(CourseSession)).all()}
+    teachers = {item.business_id: item for item in db.scalars(select(Teacher)).all()}
+    entries: list[tuple[dict[str, Any], Any, tuple[Any, ...]]] = []
+    for item in assignments:
+        course = courses.get(item["course_session_id"])
+        if course is None:
+            continue
+        entries.append((item, course, _occupancy_window(course, item)))
+
+    def dimension_key(item: dict[str, Any], course: Any, name: str) -> str | None:
+        if name == "room":
+            return str(item.get("room_business_id") or "") or None
+        if name == "class":
+            return "\x00".join(
+                (
+                    str(getattr(course, "business_line", "") or ""),
+                    str(getattr(course, "product_type", "") or ""),
+                    str(item.get("class_business_id") or ""),
+                )
+            )
+        teacher_id = str(item.get("teacher_business_id") or "")
+        teacher = teachers.get(teacher_id)
+        if name == "teacher":
+            if not teacher_id or (teacher is not None and teacher.is_group):
+                return None
+            return teacher_id
+        calendar_user_id = str(
+            getattr(course, "calendar_user_id", None)
+            or (teacher.calendar_user_id if teacher else None)
+            or ""
+        )
+        return calendar_user_id or None
+
+    breakdown: dict[str, int] = {}
+    for name in ("room", "class", "teacher", "calendar"):
+        grouped: dict[str, list[tuple[dict[str, Any], tuple[Any, ...]]]] = {}
+        for item, course, window in entries:
+            key = dimension_key(item, course, name)
+            if key:
+                grouped.setdefault(key, []).append((item, window))
+        involved: set[str] = set()
+        for rows in grouped.values():
+            for index, (left_item, left_window) in enumerate(rows):
+                for right_item, right_window in rows[index + 1 :]:
+                    if _windows_overlap(left_window, right_window):
+                        involved.add(str(left_item["course_session_id"]))
+                        involved.add(str(right_item["course_session_id"]))
+        breakdown[name] = len(involved)
+    breakdown["total"] = sum(
+        breakdown[name] for name in ("room", "class", "teacher", "calendar")
+    )
+    return breakdown
+
+
 def calculate_metrics(db: Any, assignments: list[dict[str, Any]]) -> dict[str, Any]:
     rooms = {item.business_id: item for item in db.scalars(select(Room)).all()}
     open_slots = list(db.scalars(select(TimeSlot).where(TimeSlot.is_open.is_(True))))
     room_slots: set[tuple[str, str | None, str]] = set()
+    unknown_rooms: set[str] = set()
     for item in assignments:
-        room = rooms[item["room_business_id"]]
+        room = rooms.get(item["room_business_id"])
+        if room is None:
+            unknown_rooms.add(str(item["room_business_id"]))
+            continue
         room_slots.add((room.business_id, item.get("lesson_date"), item["slot_business_id"]))
     scheduled_dates = {item.get("lesson_date") for item in assignments if item.get("lesson_date")}
     available_room_slots = (
@@ -52,9 +143,14 @@ def calculate_metrics(db: Any, assignments: list[dict[str, Any]]) -> dict[str, A
         * max(len(scheduled_dates), 1)
         * max(len({(slot.start_time, slot.end_time) for slot in open_slots}), 1)
     )
+    conflicts = count_hard_conflicts(db, assignments)
     return {
         "assignment_count": len(assignments),
-        "hard_conflicts": 0,
+        "hard_conflicts": conflicts["total"],
+        "hard_conflicts_by_dimension": {
+            key: value for key, value in conflicts.items() if key != "total"
+        },
+        "unassigned_rooms": len(unknown_rooms),
         "room_slot_occupancy": round(len(room_slots) / available_room_slots, 4)
         if available_room_slots
         else 0,

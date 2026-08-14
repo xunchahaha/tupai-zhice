@@ -388,8 +388,14 @@ def _uses_date_aware_model(payload: dict[str, Any]) -> bool:
     )
 
 
-def _empty_result(status: str = "INFEASIBLE") -> dict[str, Any]:
+def _empty_result(status: str = "INFEASIBLE", *, presolved: bool = False) -> dict[str, Any]:
+    """presolved 表示结论来自求解前的预检，CP-SAT 并未运行。
+
+    「已证明无解」和「预检判定无解」对教务的含义完全不同，落库和接口都必须区分，
+    否则 wall_time=0 的短路结论会被当成 CP-SAT 的数学证明。
+    """
     return {
+        "presolve_infeasible": presolved,
         "model_status": status,
         "objective_value": None,
         "best_bound": None,
@@ -615,7 +621,7 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         int(payload.get("change_weight", 100000)) if "minimize_changes" in solver_rules else 0
     )
 
-    result = _empty_result()
+    result = _empty_result(presolved=True)
     if not sessions or not rooms:
         result["conflict_rule_ids"], result["priority_explanations"] = (
             _date_infeasible_diagnostics(payload)
@@ -920,6 +926,7 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
             if grouped:
                 model.add_no_overlap(grouped)
 
+    result["presolve_infeasible"] = False
     model.minimize(sum(objective_terms))
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(payload.get("time_limit_seconds", 30))
@@ -1198,6 +1205,7 @@ def _solve_once(
     status_code = solver.solve(built.model)
     status_name = STATUS_NAMES.get(status_code, "UNKNOWN")
     result: dict[str, Any] = {
+        "presolve_infeasible": False,
         "model_status": status_name,
         "objective_value": None,
         "best_bound": None,
@@ -1235,7 +1243,7 @@ def _solve_once(
 def solve_problem(payload: dict[str, Any]) -> dict[str, Any]:
     selected = _selected_sessions(payload)
     if not selected:
-        return _empty_result("OPTIMAL")
+        return _empty_result("OPTIMAL", presolved=True)
     if _uses_date_aware_model(payload):
         return _solve_date_aware(payload)
     result = _solve_once(payload)

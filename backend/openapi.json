@@ -6108,6 +6108,11 @@
             ],
             "title": "Model Status"
           },
+          "presolve_infeasible": {
+            "type": "boolean",
+            "title": "Presolve Infeasible",
+            "default": false
+          },
           "objective_value": {
             "anyOf": [
               {

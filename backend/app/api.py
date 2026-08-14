@@ -120,7 +120,7 @@ from .services.ai import AIService, AIServiceError
 from .services.converter_zhengzhou import import_schedule_workbook
 from .services.feishu import FeishuService, FeishuServiceError, json_text
 from .services.snapshot import create_snapshot
-from .services.tasks import enqueue_solver_run, execute_solver_run
+from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
 from .services.xlsx_io import export_schedule_xlsx
 
 logger = logging.getLogger("tupai.feishu")
@@ -1338,6 +1338,23 @@ def publish_schedule(schedule_id: str, db: Db, user: Approver) -> ScheduleRespon
     schedule = get_or_404(db, ScheduleVersion, schedule_id)
     if schedule.status != "draft":
         raise HTTPException(status_code=409, detail="只有草稿版本可以发布")
+    # 发布门禁：独立于求解器重算一遍硬冲突，求解器建模有误时在这里兜住。
+    response = schedule_response(db, schedule)
+    conflicts = count_hard_conflicts(
+        db, [item.model_dump(mode="json") for item in response.assignments]
+    )
+    if conflicts["total"]:
+        detail = "、".join(
+            f"{label}冲突 {conflicts[key]} 条"
+            for key, label in (
+                ("room", "教室"),
+                ("class", "班级"),
+                ("teacher", "教师"),
+                ("calendar", "日程账号"),
+            )
+            if conflicts[key]
+        )
+        raise HTTPException(status_code=409, detail=f"课表存在硬冲突，不能发布：{detail}")
     for published in db.scalars(
         select(ScheduleVersion).where(ScheduleVersion.status == "published")
     ):

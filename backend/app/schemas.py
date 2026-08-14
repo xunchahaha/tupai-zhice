@@ -340,6 +340,7 @@ class SolverRunResponse(ORMModel):
     run_type: str
     status: str
     model_status: str | None
+    presolve_infeasible: bool = False
     objective_value: float | None
     best_bound: float | None
     wall_time_seconds: float | None

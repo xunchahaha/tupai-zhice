@@ -17,6 +17,7 @@ export interface SolverRunResponse {
   run_type: string;
   status: string;
   model_status: SolverRunResponseModelStatus;
+  presolve_infeasible?: boolean;
   objective_value: SolverRunResponseObjectiveValue;
   best_bound: SolverRunResponseBestBound;
   wall_time_seconds: SolverRunResponseWallTimeSeconds;

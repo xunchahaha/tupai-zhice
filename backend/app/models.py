@@ -281,6 +281,11 @@ class SolverRun(TimestampMixin, Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
+    @property
+    def presolve_infeasible(self) -> bool:
+        """结论是否来自求解前预检——CP-SAT 未运行，不能表述为「已证明无解」。"""
+        return bool((self.result_payload or {}).get("presolve_infeasible"))
+
 
 class ScheduleVersion(TimestampMixin, Base):
     __tablename__ = "schedule_versions"

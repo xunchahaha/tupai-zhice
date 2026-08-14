@@ -14,6 +14,7 @@ from app.models import (
     ScheduleAssignment,
     ScheduleVersion,
     SolverRun,
+    Teacher,
     TimeSlot,
 )
 from app.services import tasks
@@ -199,3 +200,106 @@ def test_persist_result_merges_unselected_parent_assignments(monkeypatch, tmp_pa
         assert unchanged.lesson_date == date(2026, 9, 7)
         assert unchanged.change_kind == "unchanged"
         assert candidate.metrics["assignment_count"] == 2
+
+
+def _conflict_fixture(tmp_path, *, is_group: bool, same_room: bool):
+    """两节课同一天同一时刻：同班、同教师，可选是否同教室。"""
+    engine = create_engine(f"sqlite:///{(tmp_path / 'conflicts.db').as_posix()}")
+    testing_session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    Base.metadata.create_all(engine)
+    with testing_session() as db:
+        campus = Campus(business_id="CAMPUS", name="测试校区")
+        db.add(campus)
+        db.flush()
+        db.add(Room(campus_id=campus.id, business_id="R1", name="教室1", is_active=True))
+        db.add(Room(campus_id=campus.id, business_id="R2", name="教室2", is_active=True))
+        db.add(
+            Teacher(
+                campus_id=campus.id,
+                business_id="T1",
+                name="教师一",
+                is_group=is_group,
+            )
+        )
+        db.add(
+            TimeSlot(
+                campus_id=campus.id,
+                business_id="S1",
+                weekday="周一",
+                start_time="08:30",
+                end_time="11:30",
+                sequence=1,
+                is_open=True,
+            )
+        )
+        sessions = []
+        for index in (1, 2):
+            course = CourseSession(
+                campus_id=campus.id,
+                business_id=f"C{index}",
+                class_business_id="B1",
+                teacher_business_id="T1",
+                lesson_date=date(2026, 9, 7),
+                fixed_start_time="08:30",
+                fixed_end_time="11:30",
+            )
+            db.add(course)
+            sessions.append(course)
+        db.flush()
+        assignments = [
+            {
+                "course_session_id": course.id,
+                "course_business_id": course.business_id,
+                "class_business_id": "B1",
+                "teacher_business_id": "T1",
+                "lesson_date": "2026-09-07",
+                "slot_business_id": "S1",
+                "room_business_id": "R1" if same_room or index == 0 else "R2",
+            }
+            for index, course in enumerate(sessions)
+        ]
+        db.commit()
+        return testing_session, assignments
+
+
+def test_hard_conflicts_counts_room_class_and_teacher_overlaps(tmp_path) -> None:
+    testing_session, assignments = _conflict_fixture(tmp_path, is_group=False, same_room=True)
+    with testing_session() as db:
+        conflicts = tasks.count_hard_conflicts(db, assignments)
+
+    assert conflicts["room"] == 2
+    assert conflicts["class"] == 2
+    assert conflicts["teacher"] == 2
+    assert conflicts["total"] == 6
+
+
+def test_hard_conflicts_ignores_teaching_groups_but_still_catches_class_overlap(
+    tmp_path,
+) -> None:
+    testing_session, assignments = _conflict_fixture(tmp_path, is_group=True, same_room=False)
+    with testing_session() as db:
+        conflicts = tasks.count_hard_conflicts(db, assignments)
+
+    assert conflicts["teacher"] == 0
+    assert conflicts["room"] == 0
+    assert conflicts["class"] == 2
+
+
+def test_metrics_report_real_conflicts_instead_of_a_hardcoded_zero(tmp_path) -> None:
+    testing_session, assignments = _conflict_fixture(tmp_path, is_group=False, same_room=True)
+    with testing_session() as db:
+        metrics = tasks.calculate_metrics(db, assignments)
+
+    assert metrics["hard_conflicts"] == 6
+    assert metrics["hard_conflicts_by_dimension"]["teacher"] == 2
+
+
+def test_metrics_survive_assignments_pointing_at_unknown_rooms(tmp_path) -> None:
+    """教室标识为空的课次此前会让指标计算抛 KeyError。"""
+    testing_session, assignments = _conflict_fixture(tmp_path, is_group=True, same_room=False)
+    assignments[0]["room_business_id"] = ""
+    with testing_session() as db:
+        metrics = tasks.calculate_metrics(db, assignments)
+
+    assert metrics["unassigned_rooms"] == 1
+    assert metrics["assignment_count"] == 2
