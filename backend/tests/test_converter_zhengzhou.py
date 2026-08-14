@@ -1,12 +1,31 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import Session, sessionmaker
 
-from app.services.converter_zhengzhou import _read_rows, _row_identity
+from app.db import Base
+from app.models import ClassGroup, CourseSession, Room, ScheduleAssignment, Teacher, TimeSlot
+from app.services.converter_zhengzhou import (
+    PLACEHOLDER_ROOM,
+    SHEET_NAME,
+    _read_rows,
+    _row_identity,
+    _split_placeholder_rows,
+    import_schedule_workbook,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SAMPLE_WORKBOOK = PROJECT_ROOT / "data" / "imports" / "sample.xlsx"
+OFFICIAL_WORKBOOK = (
+    PROJECT_ROOT / "相关文件" / "郑州考研公职专升本课表数据源_教室班级标签版.xlsx"
+)
 
 HEADERS = (
     "标准业务线",
@@ -26,67 +45,353 @@ HEADERS = (
 )
 
 
-def _write_workbook(path: Path, rows: list[tuple[object, ...]]) -> None:
+@pytest.fixture
+def db() -> Iterator[Session]:
+    """独立的内存库，避免与 conftest 的会话级共享库互相污染。"""
+    engine = create_engine("sqlite://", future=True)
+    Base.metadata.create_all(bind=engine)
+    factory = sessionmaker(bind=engine, autoflush=False, future=True)
+    with factory() as session:
+        yield session
+    engine.dispose()
+
+
+def _write_workbook(path: Path, rows: list[tuple[Any, ...]]) -> None:
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "课表数据源"
+    sheet.title = SHEET_NAME
     sheet.append(HEADERS)
     for row in rows:
         sheet.append(row)
     workbook.save(path)
 
 
-def test_exact_deduplication_uses_all_fourteen_official_fields(tmp_path: Path) -> None:
-    base = (
-        "公职",
-        "公职·国省考笔面一体全年班",
-        "公职无限学（非考研集训营）",
-        "教室-506",
-        "郑州27年公职产品课表",
-        "基础搭建",
-        120,
-        360,
-        11,
-        "面试·结构化面试先导",
-        datetime(2026, 10, 1),
-        "09:00-12:00",
-        3,
-        "郑州公职面试教研组",
-    )
-    another_product = list(base)
-    another_product[1] = "公职·结构化面试先导"
-    path = tmp_path / "official.xlsx"
-    _write_workbook(path, [base, base, tuple(another_product)])
+def _sample_rows() -> list[tuple[Any, ...]]:
+    """读取官方模板 sample.xlsx 的真实数据行，作为所有用例的基准数据。"""
+    workbook = load_workbook(SAMPLE_WORKBOOK, data_only=True)
+    sheet = workbook[SHEET_NAME]
+    rows = [tuple(row) for row in sheet.iter_rows(min_row=2, values_only=True)]
+    workbook.close()
+    return rows
 
-    rows = _read_rows(path)
-    deduped = {_row_identity(row): row for row in rows}
 
+def test_sample_workbook_matches_the_documented_template() -> None:
+    """模板即导入契约：列名和列序变了，后面按下标取值的逻辑就全错。"""
+    workbook = load_workbook(SAMPLE_WORKBOOK, data_only=True)
+    sheet = workbook[SHEET_NAME]
+    header = tuple(next(sheet.iter_rows(min_row=1, max_row=1, values_only=True)))
+    workbook.close()
+    assert header == HEADERS
+
+
+def test_sample_workbook_carries_one_placeholder_room_row() -> None:
+    rows = _sample_rows()
     assert len(rows) == 3
-    assert len(deduped) == 2
-    assert {row["产品班型"] for row in deduped.values()} == {
-        "公职·国省考笔面一体全年班",
-        "公职·结构化面试先导",
-    }
-    assert {row["授课教师"] for row in deduped.values()} == {"郑州公职面试教研组"}
-    assert {row["开始时间"] for row in deduped.values()} == {"09:00"}
+    assert sum(1 for row in rows if row[3] == PLACEHOLDER_ROOM) == 1
 
 
-def test_official_zhengzhou_workbook_exact_deduplication_count() -> None:
-    path = (
-        Path(__file__).resolve().parents[3]
-        / "郑州考研公职专升本课表数据源_教室班级标签版.xlsx"
+def test_placeholder_rows_are_dropped_at_import_not_kept_as_a_disabled_room(
+    db: Session,
+) -> None:
+    """「教室-待校区确认」整行丢弃：不建教室、不建班级、不建课次。"""
+    result = import_schedule_workbook(db, SAMPLE_WORKBOOK)
+    db.commit()
+
+    dropped = result["warnings"]["dropped_placeholder_room"]
+    assert result["rows_total"] == 3
+    assert dropped["dropped_rows"] == 1
+    assert dropped["dropped_lesson_groups"] == 1
+    assert dropped["affected_classes"] == ["公职无限学（非考研集训营）"]
+    assert result["rows_kept"] == 2
+    assert result["rows_deduped"] == 2
+    assert result["course_sessions_created"] == 2
+
+    room_ids = set(db.scalars(select(Room.business_id)))
+    assert PLACEHOLDER_ROOM not in room_ids
+    assert room_ids == {"教室-510", "教室-305"}
+
+    class_ids = set(db.scalars(select(ClassGroup.business_id)))
+    assert "公职无限学（非考研集训营）" not in class_ids
+    assert class_ids == {"全年集训营二班", "专升本全年班（非考研集训营）"}
+
+    teacher_ids = set(db.scalars(select(Teacher.business_id)))
+    assert "郑州公职申论教研组" not in teacher_ids
+
+    assert db.scalar(select(func.count(CourseSession.id))) == 2
+    assert db.scalar(select(func.count(ScheduleAssignment.id))) == 2
+
+
+def test_workbook_with_only_placeholder_rooms_is_rejected(tmp_path: Path) -> None:
+    """整表都待定教室时必须报错，而不是静默导入一个空课表。"""
+    rows = [row for row in _sample_rows() if row[3] == PLACEHOLDER_ROOM]
+    path = tmp_path / "all-placeholder.xlsx"
+    _write_workbook(path, rows)
+    assert _split_placeholder_rows(_read_rows(path))[0] == []
+
+
+def test_exact_duplicate_rows_are_deduplicated_at_import(db: Session, tmp_path: Path) -> None:
+    """去重发生在导入时，不依赖外部已去重的表格。"""
+    rows = [row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM]
+    path = tmp_path / "with-duplicates.xlsx"
+    _write_workbook(path, [*rows, *rows, rows[0]])
+
+    result = import_schedule_workbook(db, path)
+    db.commit()
+
+    assert result["rows_total"] == len(rows) * 2 + 1
+    assert result["rows_deduped"] == len(rows)
+    assert db.scalar(select(func.count(CourseSession.id))) == len(rows)
+
+
+def test_reimporting_the_same_workbook_does_not_duplicate_rows(db: Session) -> None:
+    first = import_schedule_workbook(db, SAMPLE_WORKBOOK)
+    db.commit()
+    before = db.scalar(select(func.count(CourseSession.id)))
+
+    second = import_schedule_workbook(db, SAMPLE_WORKBOOK)
+    db.commit()
+    after = db.scalar(select(func.count(CourseSession.id)))
+
+    assert first["course_sessions_created"] == before
+    assert second["course_sessions_created"] == 0
+    assert after == before
+    assert db.scalar(select(func.count(ScheduleAssignment.id))) == before
+
+
+def test_import_targets_the_requested_campus_not_a_hardcoded_one(db: Session) -> None:
+    """同一份模板换一所学校导入时，校区必须跟着走。"""
+    result = import_schedule_workbook(
+        db, SAMPLE_WORKBOOK, campus_business_id="CAMPUS-TJ", campus_name="天津校区"
     )
-    if not path.exists():
+    db.commit()
+    assert result["campus"] == "CAMPUS-TJ"
+
+
+def test_another_school_using_the_same_template_imports_cleanly(
+    db: Session, tmp_path: Path
+) -> None:
+    """通用性回归：同模板、不同学校的数据（不同班级/教师/教室/时段）也要能导入。"""
+    rows = [
+        (
+            "高考",
+            "高考·全科冲刺班",
+            "天津一班",
+            "阶梯教室-A1",
+            "天津27年高考产品课表",
+            "冲刺阶段",
+            60,
+            180,
+            1,
+            "语文·现代文阅读专题",
+            datetime(2026, 9, 7),
+            "07:50-09:30",
+            1.5,
+            "天津语文教研组",
+        ),
+        (
+            "高考",
+            "高考·全科冲刺班",
+            "天津一班",
+            "阶梯教室-A1",
+            "天津27年高考产品课表",
+            "冲刺阶段",
+            60,
+            180,
+            2,
+            "数学·导数与圆锥曲线",
+            datetime(2026, 9, 8),
+            "13:30-15:10",
+            1.5,
+            "天津数学教研组",
+        ),
+        (
+            "高考",
+            "高考·全科冲刺班",
+            "天津二班",
+            "阶梯教室-A2",
+            "天津27年高考产品课表",
+            "冲刺阶段",
+            60,
+            180,
+            1,
+            "英语·完形与七选五",
+            datetime(2026, 9, 9),
+            # 与郑州样本重合的时刻，用来暴露「已知时刻排在未知时刻之前」的排序错误
+            "08:30-10:10",
+            1.5,
+            "天津英语教研组",
+        ),
+    ]
+    path = tmp_path / "tianjin.xlsx"
+    _write_workbook(path, rows)
+
+    result = import_schedule_workbook(
+        db, path, campus_business_id="CAMPUS-TJ", campus_name="天津校区"
+    )
+    db.commit()
+
+    assert result["rows_total"] == 3
+    assert result["course_sessions_created"] == 3
+    assert result["warnings"]["dropped_placeholder_room"]["dropped_rows"] == 0
+    assert set(db.scalars(select(Teacher.business_id))) == {
+        "天津语文教研组",
+        "天津数学教研组",
+        "天津英语教研组",
+    }
+    assert set(db.scalars(select(Room.business_id))) == {"阶梯教室-A1", "阶梯教室-A2"}
+
+    slots = list(db.scalars(select(TimeSlot).order_by(TimeSlot.sequence)))
+    starts = [slot.start_time for slot in slots if slot.weekday == "周一"]
+    assert starts == sorted(starts), f"时段顺序必须按上课时间排列，实际为 {starts}"
+
+
+def test_official_workbook_import_counts() -> None:
+    if not OFFICIAL_WORKBOOK.exists():
         pytest.skip("郑州官方数据文件不在工作区")
 
-    rows = _read_rows(path)
-    deduped = {_row_identity(row): row for row in rows}
+    source_rows = _read_rows(OFFICIAL_WORKBOOK)
+    kept, dropped = _split_placeholder_rows(source_rows)
+    deduped = {_row_identity(row): row for row in kept}
 
-    assert len(rows) == 56344
-    assert len(deduped) == 10771
-    assert {row["开始时间"] for row in deduped.values()} == {
-        "08:30",
-        "09:00",
-        "14:00",
-        "18:30",
+    assert len(source_rows) == 56344
+    assert dropped["dropped_rows"] == 19734
+    assert dropped["dropped_lesson_groups"] == 602
+    assert dropped["affected_classes"] == [
+        "专升本全年班（非考研集训营）",
+        "公职无限学（非考研集训营）",
+    ]
+    assert len(kept) == 36610
+    assert len(deduped) == 9340
+
+
+def test_same_start_time_with_two_durations_does_not_collide(db: Session, tmp_path: Path) -> None:
+    """时段业务标识必须带结束时间，否则 08:30-10:00 与 08:30-11:30 会撞同一个标识。"""
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    short = list(base)
+    short[2] = "短课班"
+    short[11] = "08:30-10:00"
+    short[12] = 1.5
+    long = list(base)
+    long[2] = "长课班"
+    long[11] = "08:30-11:30"
+    long[12] = 3
+    path = tmp_path / "two-durations.xlsx"
+    _write_workbook(path, [tuple(short), tuple(long)])
+
+    result = import_schedule_workbook(db, path)
+    db.commit()
+
+    assert result["course_sessions_created"] == 2
+    monday = {
+        slot.business_id: (slot.start_time, slot.end_time)
+        for slot in db.scalars(select(TimeSlot).where(TimeSlot.weekday == "周一"))
     }
+    assert len(monday) == 2, f"两种时长必须产生两个时段，实际 {monday}"
+    assert set(monday.values()) == {("08:30", "10:00"), ("08:30", "11:30")}
+
+
+def _edit_cell(row: tuple[Any, ...], index: int, value: Any) -> tuple[Any, ...]:
+    edited = list(row)
+    edited[index] = value
+    return tuple(edited)
+
+
+def test_editing_a_cell_updates_the_lesson_instead_of_duplicating_it(
+    db: Session, tmp_path: Path
+) -> None:
+    """改教室后重新导入必须是更新，不是新增——业务标识不能含可变字段。"""
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    first = tmp_path / "v1.xlsx"
+    _write_workbook(first, [base])
+    import_schedule_workbook(db, first)
+    db.commit()
+    before = db.scalar(select(CourseSession.business_id))
+
+    second = tmp_path / "v2.xlsx"
+    _write_workbook(second, [_edit_cell(base, 3, "教室-999")])
+    result = import_schedule_workbook(db, second)
+    db.commit()
+
+    sessions = list(db.scalars(select(CourseSession)))
+    assert len(sessions) == 1, [item.business_id for item in sessions]
+    assert sessions[0].business_id == before
+    assert sessions[0].original_room_business_id == "教室-999"
+    assert result["course_sessions_created"] == 0
+
+
+def test_adding_a_class_does_not_duplicate_existing_lessons(db: Session, tmp_path: Path) -> None:
+    """业务标识不能依赖本次导入的班级排序名次。"""
+    rows = [row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM]
+    later, earlier = rows[0], rows[1]
+    first = tmp_path / "one-class.xlsx"
+    _write_workbook(first, [later])
+    import_schedule_workbook(db, first)
+    db.commit()
+    kept = db.scalar(select(CourseSession.business_id))
+
+    second = tmp_path / "two-classes.xlsx"
+    _write_workbook(second, [earlier, later])
+    import_schedule_workbook(db, second)
+    db.commit()
+
+    sessions = list(db.scalars(select(CourseSession)))
+    assert len(sessions) == 2, [item.business_id for item in sessions]
+    assert kept in {item.business_id for item in sessions}
+
+
+def test_rows_removed_from_the_workbook_are_deleted_on_reimport(
+    db: Session, tmp_path: Path
+) -> None:
+    """导入必须收敛到源表当前状态，不能留下孤儿课次。"""
+    rows = [row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM]
+    full = tmp_path / "full.xlsx"
+    _write_workbook(full, rows)
+    import_schedule_workbook(db, full)
+    db.commit()
+    assert db.scalar(select(func.count(CourseSession.id))) == len(rows)
+
+    trimmed = tmp_path / "trimmed.xlsx"
+    _write_workbook(trimmed, rows[:1])
+    result = import_schedule_workbook(db, trimmed)
+    db.commit()
+
+    assert result["orphans"]["deleted"] == len(rows) - 1
+    assert db.scalar(select(func.count(CourseSession.id))) == 1
+    assert db.scalar(select(func.count(ScheduleAssignment.id))) == 1
+
+
+def test_semantic_duplicates_are_collapsed_and_reported(db: Session, tmp_path: Path) -> None:
+    """同一节课被登记了两个教师：收敛成一条，并在导入报告里报出差异。"""
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    path = tmp_path / "conflict.xlsx"
+    _write_workbook(path, [base, _edit_cell(base, 13, "另一个教研组")])
+
+    result = import_schedule_workbook(db, path)
+    db.commit()
+
+    report = result["duplicate_lessons"]
+    assert result["rows_deduped"] == 2
+    assert result["lessons"] == 1
+    assert report["conflicting_lessons"] == 1
+    assert report["discarded_rows"] == 1
+    assert report["examples"][0]["差异字段"] == ["授课教师"]
+    assert db.scalar(select(func.count(CourseSession.id))) == 1
+
+
+def test_same_class_twice_in_one_slot_is_reported_as_a_data_conflict(
+    db: Session, tmp_path: Path
+) -> None:
+    """同一班级同一时刻两节不同的课是源数据问题，必须报出来而不是留给求解器。"""
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    other = _edit_cell(_edit_cell(base, 9, "数学·另一节课"), 8, 2)
+    path = tmp_path / "class-slot.xlsx"
+    _write_workbook(path, [base, other])
+
+    result = import_schedule_workbook(db, path)
+    db.commit()
+
+    report = result["class_slot_conflicts"]
+    assert result["lessons"] == 2
+    assert report["conflicting_groups"] == 1
+    assert report["extra_lessons"] == 1
+    assert len(report["examples"][0]["课节名称"]) == 2

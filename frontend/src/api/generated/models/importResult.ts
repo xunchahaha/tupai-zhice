@@ -15,4 +15,10 @@ export interface ImportResult {
   time_slots: number;
   course_sessions: number;
   rules: number;
+  rows_total?: number;
+  rows_dropped_placeholder_room?: number;
+  dropped_lesson_groups?: number;
+  dropped_classes?: string[];
+  rows_kept?: number;
+  rows_deduped?: number;
 }

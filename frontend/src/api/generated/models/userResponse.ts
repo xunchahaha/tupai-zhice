@@ -6,9 +6,15 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { UserResponseRole } from './userResponseRole';
+import type { UserResponseLastLoginAt } from './userResponseLastLoginAt';
+import type { UserResponseCreatedBy } from './userResponseCreatedBy';
 
 export interface UserResponse {
   id: string;
   username: string;
   role: UserResponseRole;
+  is_active: boolean;
+  created_at: string;
+  last_login_at?: UserResponseLastLoginAt;
+  created_by?: UserResponseCreatedBy;
 }

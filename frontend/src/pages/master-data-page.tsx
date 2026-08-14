@@ -35,6 +35,7 @@ import {
   type ClassGroupResponse,
   type CourseSessionPayload,
   type CourseSessionResponse,
+  type ImportResult,
   type RoomResponse,
   type TeacherResponse,
   type TimeSlotResponse,
@@ -178,6 +179,7 @@ export function MasterDataPage() {
   const readOnly = user.role === "viewer";
   const client = useQueryClient();
   const file = useRef<HTMLInputElement>(null);
+  const [importReport, setImportReport] = useState<ImportResult | null>(null);
   const [entityDialog, setEntityDialog] = useState<EntityDialogState | null>(null);
   const [courseDialogMode, setCourseDialogMode] = useState<CourseDialogMode | null>(null);
   const [courseDraft, setCourseDraft] = useState<CourseDraft>(emptyCourseDraft());
@@ -305,14 +307,15 @@ export function MasterDataPage() {
   });
 
   const refresh = () => void Promise.all([campusQuery.refetch(), teacherQuery.refetch(), classQuery.refetch(), roomQuery.refetch(), slotQuery.refetch(), courseQuery.refetch()]);
-  const afterImport = () => {
+  const afterImport = (result: ImportResult) => {
     [getListCampusesApiV1CampusesGetQueryKey(), getListTeachersApiV1TeachersGetQueryKey(), getListClassGroupsApiV1ClassGroupsGetQueryKey(), getListRoomsApiV1RoomsGetQueryKey(), getListTimeSlotsApiV1TimeSlotsGetQueryKey(), getListCourseSessionsApiV1CourseSessionsGetQueryKey()].forEach(invalidate);
     setTeacherSelection({});
     setClassSelection({});
     setRoomSelection({});
     setSlotSelection({});
     setCourseSelection({});
-    toast.success("主数据已导入");
+    setImportReport(result);
+    toast.success(`主数据已导入：新建 ${result.course_sessions} 个课次`);
   };
   const upload = useImportXlsxApiV1ImportsXlsxPost({ mutation: { onSuccess: afterImport, onError: createError } });
 
@@ -562,6 +565,7 @@ export function MasterDataPage() {
     <div className="space-y-5">
       <input ref={file} className="hidden" type="file" accept=".xlsx" onChange={(event) => { const selected = event.target.files?.[0]; if (selected) upload.mutate({ data: { file: selected as unknown as string } }); event.target.value = ""; }} />
       <PageHeader title="主数据" actions={<><Button size="sm" variant="outline" onClick={refresh}><RefreshCw className="size-3.5" />刷新</Button><Button size="sm" variant="outline" onClick={() => void downloadSample()}><Download className="size-3.5" />下载官方模板</Button>{!readOnly ? <Button size="sm" variant="secondary" onClick={() => file.current?.click()} disabled={upload.isPending}><FileUp className="size-3.5" />导入 XLSX</Button> : null}</>} />
+      {importReport ? <ImportReportPanel report={importReport} onDismiss={() => setImportReport(null)} /> : null}
       {loading ? <LoadingState /> : failed ? <ErrorState retry={refresh} /> : (
         <Tabs defaultValue="teachers">
           <TabsList><TabsTrigger value="teachers">教师</TabsTrigger><TabsTrigger value="classes">班级</TabsTrigger><TabsTrigger value="rooms">教室</TabsTrigger><TabsTrigger value="slots">时段</TabsTrigger><TabsTrigger value="courses">课程场次</TabsTrigger></TabsList>
@@ -742,4 +746,40 @@ function batchFieldLabel(action: EntityBatchAction) {
   if (action === "teacher-calendar") return "新的飞书日程账号（留空可清除）";
   if (action === "class-line") return "新的业务线";
   return "新的班型";
+}
+
+function ImportReportPanel({ report, onDismiss }: { report: ImportResult; onDismiss: () => void }) {
+  const dropped = report.rows_dropped_placeholder_room ?? 0;
+  const stats: Array<{ label: string; value: string }> = [
+    { label: "读取行数", value: String(report.rows_total ?? 0) },
+    { label: "教室待确认丢弃", value: String(dropped) },
+    { label: "参与排课行数", value: String(report.rows_kept ?? 0) },
+    { label: "去重后课次", value: String(report.rows_deduped ?? 0) },
+    { label: "本次新建课次", value: String(report.course_sessions) },
+  ];
+  return (
+    <section className="border border-zinc-200 bg-white">
+      <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3">
+        <div className="text-sm font-semibold">导入报告 · {report.source}</div>
+        <Button size="sm" variant="ghost" onClick={onDismiss} aria-label="关闭导入报告">
+          <X className="size-3.5" />
+        </Button>
+      </div>
+      <dl className="grid gap-px bg-zinc-200 sm:grid-cols-3 lg:grid-cols-5">
+        {stats.map((item) => (
+          <div key={item.label} className="bg-white px-4 py-3">
+            <dt className="text-xs text-zinc-400">{item.label}</dt>
+            <dd className="mt-1 text-lg font-semibold tabular-nums text-zinc-800">{item.value}</dd>
+          </div>
+        ))}
+      </dl>
+      {dropped ? (
+        <p className="border-t border-zinc-200 px-4 py-3 text-xs leading-5 text-amber-800">
+          「教室-待校区确认」的 {dropped} 行已整行丢弃，其中 {report.dropped_lesson_groups ?? 0} 个课次组
+          在源表里没有任何真实教室，因此不进入教室排课范围
+          {report.dropped_classes?.length ? `：${report.dropped_classes.join("、")}` : ""}。
+        </p>
+      ) : null}
+    </section>
+  );
 }

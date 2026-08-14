@@ -320,8 +320,10 @@ def _rule_room_ids(rule: dict[str, Any]) -> set[str]:
     return room_ids
 
 
-def _slot_for_date(slots: dict[tuple[object, object], str], lesson_date: date, start: str) -> str:
-    return slots.get((WEEKDAYS[lesson_date.weekday()], start), "")
+def _slot_for_date(
+    slots: dict[tuple[object, object, object], str], lesson_date: date, start: str, end: str
+) -> str:
+    return slots.get((WEEKDAYS[lesson_date.weekday()], start, end), "")
 
 
 def _event_targets_session(event: dict[str, Any], session: dict[str, Any]) -> bool:
@@ -347,7 +349,9 @@ def _event_blocks_date(
     if event.get("event_type") != "teacher_leave" or not _event_targets_session(event, session):
         return False
     slot_ids = set(event.get("slot_business_ids") or [])
-    candidate_slot = _slot_for_date(slots, candidate, str(session["fixed_start_time"]))
+    candidate_slot = _slot_for_date(
+        slots, candidate, str(session["fixed_start_time"]), str(session["fixed_end_time"])
+    )
     return not slot_ids or candidate_slot in slot_ids
 
 
@@ -550,8 +554,9 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         item["business_id"]: item for item in payload.get("rooms", []) if item.get("is_active")
     }
     teachers = {item["business_id"]: item for item in payload.get("teachers", [])}
+    # 时段标识按 (星期, 开始, 结束) 定位：同一开始时间可以有多种时长。
     slots = {
-        (item.get("weekday"), item.get("start_time")): item["business_id"]
+        (item.get("weekday"), item.get("start_time"), item.get("end_time")): item["business_id"]
         for item in payload.get("time_slots", [])
         if item.get("is_open")
     }
@@ -685,7 +690,8 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
                 matching_dates = {
                     candidate
                     for candidate in allowed_dates
-                    if slots.get((WEEKDAYS[candidate.weekday()], fixed_start)) in slot_ids
+                    if slots.get((WEEKDAYS[candidate.weekday()], fixed_start, fixed_end))
+                    in slot_ids
                 }
                 if constraint_type == "fixed_slot":
                     allowed_dates = [item for item in allowed_dates if item in matching_dates]
@@ -810,7 +816,7 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
             ):
                 outage_slots = set(event.get("slot_business_ids") or [])
                 for candidate in allowed_dates:
-                    if _slot_for_date(slots, candidate, fixed_start) in outage_slots:
+                    if _slot_for_date(slots, candidate, fixed_start, fixed_end) in outage_slots:
                         model.add(day_var != candidate.toordinal()).only_enforce_if(selected)
             for rule in matching_rules:
                 if rule.get("hardness") != "soft":
@@ -888,7 +894,11 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
             and solver.boolean_value(room_choices[(candidate_course, room_id)])
         )
         slot_id = slots.get(
-            (WEEKDAYS[lesson_date.weekday()], str(session["fixed_start_time"]))
+            (
+                WEEKDAYS[lesson_date.weekday()],
+                str(session["fixed_start_time"]),
+                str(session["fixed_end_time"]),
+            )
         )
         if not slot_id:
             slot_id = str(session.get("suggested_slot_id") or "")

@@ -24,14 +24,8 @@ export interface FeishuAppConfigurationInput {
    * @maxLength 500
    */
   frontend_url: string;
-  /**
-   * @minLength 8
-   * @maxLength 100
-   */
-  aily_app_id: string;
-  /**
-   * @minLength 8
-   * @maxLength 100
-   */
-  aily_skill_id: string;
+  /** @maxLength 100 */
+  aily_app_id?: string;
+  /** @maxLength 100 */
+  aily_skill_id?: string;
 }

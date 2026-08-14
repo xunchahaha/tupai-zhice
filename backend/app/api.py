@@ -359,6 +359,7 @@ def import_xlsx(
     result = import_schedule_workbook(db, target)
     audit(db, user, "import_xlsx", "workbook", file.filename, result)
     db.commit()
+    dropped = result["warnings"]["dropped_placeholder_room"]
     return ImportResult(
         source=file.filename or target.name,
         campuses=1,
@@ -368,6 +369,12 @@ def import_xlsx(
         time_slots=result["time_slots"],
         course_sessions=result["course_sessions_created"],
         rules=0,
+        rows_total=result["rows_total"],
+        rows_dropped_placeholder_room=dropped["dropped_rows"],
+        dropped_lesson_groups=dropped["dropped_lesson_groups"],
+        dropped_classes=dropped["affected_classes"],
+        rows_kept=result["rows_kept"],
+        rows_deduped=result["rows_deduped"],
     )
 
 

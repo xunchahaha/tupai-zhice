@@ -418,6 +418,12 @@ class ImportResult(BaseModel):
     time_slots: int
     course_sessions: int
     rules: int
+    rows_total: int = 0
+    rows_dropped_placeholder_room: int = 0
+    dropped_lesson_groups: int = 0
+    dropped_classes: list[str] = Field(default_factory=list)
+    rows_kept: int = 0
+    rows_deduped: int = 0
 
 
 class OverviewResponse(BaseModel):

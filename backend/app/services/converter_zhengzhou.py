@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
 from ..models import (
+    CalendarEventBinding,
     Campus,
     ClassGroup,
     CourseSession,
@@ -31,7 +32,6 @@ PLACEHOLDER_ROOM = "教室-待校区确认"
 CAMPUS_BUSINESS_ID = "CAMPUS-ZZ"
 CAMPUS_NAME = "郑州校区"
 SHEET_NAME = "课表数据源"
-SLOT_START_ORDER = {"08:30": 1, "09:00": 2, "14:00": 3, "18:30": 4}
 OFFICIAL_VERSION_NAME = "郑州官方原始课表（完全重复行已去重）"
 
 
@@ -52,6 +52,11 @@ def _parse_date(value: Any) -> date | None:
 def _normalize_clock(text: str) -> str:
     hours, minutes = (part.strip() for part in text.split(":", 1))
     return f"{int(hours):02d}:{int(minutes):02d}"
+
+
+def _clock_minutes(clock: str) -> int:
+    hours, minutes = (int(part) for part in clock.split(":", 1))
+    return hours * 60 + minutes
 
 
 def _add_minutes(clock: str, minutes: int) -> str:
@@ -110,6 +115,32 @@ def _read_rows(workbook_path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _lesson_group(row: dict[str, Any]) -> tuple[str, str, str]:
+    """课次组：同一班级在同一天同一时段最多只能有一节课。"""
+    return (row["班级标签"], row["上课日期"].isoformat(), row["上课时段"])
+
+
+def _split_placeholder_rows(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """丢弃教室待确认的行。
+
+    经业务确认，「教室-待校区确认」不是待补的教室，而是标记该课次不占用校区教室。
+    这些课次不进入教室排课范围，因此在导入阶段整行丢弃，而不是建成停用教室后继续参与求解。
+    丢弃口径必须可追溯，所以同时返回被丢弃的行数、课次组数和受影响班级。
+    """
+    kept = [row for row in rows if row["教室标签"] != PLACEHOLDER_ROOM]
+    dropped = [row for row in rows if row["教室标签"] == PLACEHOLDER_ROOM]
+    kept_groups = {_lesson_group(row) for row in kept}
+    dropped_groups = {_lesson_group(row) for row in dropped}
+    return kept, {
+        "placeholder_room": PLACEHOLDER_ROOM,
+        "dropped_rows": len(dropped),
+        "dropped_lesson_groups": len(dropped_groups - kept_groups),
+        "affected_classes": sorted({row["班级标签"] for row in dropped}),
+    }
+
+
 def _row_identity(row: dict[str, Any]) -> tuple[Any, ...]:
     """官方确认只删除完全相同的重复行，因此身份键覆盖源表全部 14 个字段。"""
     return (
@@ -130,14 +161,95 @@ def _row_identity(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _business_id(row: dict[str, Any], class_index: dict[str, int]) -> str:
-    source_row_id = _source_row_id(row)
-    return f"ZZ-{class_index[row['班级标签']]:02d}-{row['课次序号']:03d}-{source_row_id[:14]}"
+LESSON_IDENTITY_FIELDS = ("班级标签", "课次序号", "课节名称", "上课日期", "上课时段")
+MUTABLE_FIELDS = (
+    "业务线",
+    "产品班型",
+    "教室标签",
+    "编排来源",
+    "编排阶段",
+    "计划课次",
+    "计划课时",
+    "课节时长小时",
+    "授课教师",
+)
+
+
+def _lesson_identity(row: dict[str, Any]) -> tuple[Any, ...]:
+    """一节课的稳定身份。
+
+    只由「哪个班、第几课次、什么课、哪天、什么时段」决定。教室、教师、编排来源等
+    都是这节课的**属性**而非身份——把它们放进身份键，会让修正表格里的一个单元格
+    变成"新增一节课"，重新导入即成倍产生脏数据。
+    """
+    return (
+        row["班级标签"],
+        row["课次序号"],
+        row["课节名称"],
+        row["上课日期"].isoformat(),
+        row["上课时段"],
+    )
+
+
+def _business_id(row: dict[str, Any], campus_business_id: str) -> str:
+    digest = _digest(_lesson_identity(row))
+    return f"{campus_business_id}-{digest[:16]}"
+
+
+def _digest(value: tuple[Any, ...]) -> str:
+    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest().upper()
 
 
 def _source_row_id(row: dict[str, Any]) -> str:
-    serialized = json.dumps(_row_identity(row), ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest().upper()
+    return _digest(_row_identity(row))
+
+
+def _collect_lesson_rows(
+    rows: list[dict[str, Any]], campus_business_id: str
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """按稳定身份收敛到「每节课一条」，并报告身份相同但内容冲突的行。
+
+    完全相同的行直接消除。身份相同、可变字段不同的行是**语义重复**（同一个班同一
+    时刻被登记了两节不同的课或两个不同教师），源表里真实存在，必须报出来而不是
+    静默双写进课表。取用顺序按整行内容排序，保证同一份表多次导入结果一致。
+    """
+    grouped: dict[str, dict[tuple[Any, ...], dict[str, Any]]] = {}
+    for row in rows:
+        business_id = _business_id(row, campus_business_id)
+        grouped.setdefault(business_id, {})[_row_identity(row)] = row
+
+    session_rows: dict[str, dict[str, Any]] = {}
+    conflicts: list[dict[str, Any]] = []
+    for business_id, variants in grouped.items():
+        ordered = [variants[key] for key in sorted(variants)]
+        session_rows[business_id] = ordered[0]
+        if len(ordered) == 1:
+            continue
+        differing = sorted(
+            field for field in MUTABLE_FIELDS if len({str(item[field]) for item in ordered}) > 1
+        )
+        conflicts.append(
+            {
+                "业务标识": business_id,
+                "班级标签": ordered[0]["班级标签"],
+                "课次序号": ordered[0]["课次序号"],
+                "上课日期": ordered[0]["上课日期"].isoformat(),
+                "上课时段": ordered[0]["上课时段"],
+                "冲突行数": len(ordered),
+                "差异字段": differing,
+                "取用": {field: str(ordered[0][field]) for field in differing},
+                "丢弃": [
+                    {field: str(item[field]) for field in differing} for item in ordered[1:]
+                ],
+            }
+        )
+    conflicts.sort(key=lambda item: str(item["业务标识"]))
+    return session_rows, {
+        "conflicting_lessons": len(conflicts),
+        "discarded_rows": sum(int(item["冲突行数"]) - 1 for item in conflicts),
+        "examples": conflicts[:20],
+    }
 
 
 def _upsert(
@@ -156,15 +268,103 @@ def _upsert(
     return instance
 
 
+def _class_slot_conflicts(session_rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """报告「同一班级同一天同一时段有多节课」。
+
+    这是排课的基本不变量，源表里却真实存在。不报出来的话，教务只会看到求解器返回
+    INFEASIBLE，无从知道问题出在输入数据而不是约束配置。
+    """
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in session_rows.values():
+        grouped.setdefault(_lesson_group(row), []).append(row)
+    conflicts = [
+        {
+            "班级标签": key[0],
+            "上课日期": key[1],
+            "上课时段": key[2],
+            "课节数": len(items),
+            "课节名称": sorted({str(item["课节名称"]) for item in items}),
+        }
+        for key, items in grouped.items()
+        if len(items) > 1
+    ]
+    conflicts.sort(key=lambda item: (str(item["班级标签"]), str(item["上课日期"])))
+    return {
+        "lesson_groups": len(grouped),
+        "conflicting_groups": len(conflicts),
+        "extra_lessons": sum(int(item["课节数"]) - 1 for item in conflicts),
+        "examples": conflicts[:20],
+    }
+
+
+def _remove_orphan_sessions(
+    db: Session, campus_id: str, keep_business_ids: set[str]
+) -> dict[str, Any]:
+    """删除源表里已经不存在的课次，让导入收敛到工作簿的当前状态。
+
+    唯一的例外是被求解产出的课表版本引用过的课次：直接删会破坏历史版本与回滚链，
+    因此保留并报出来，由教务决定怎么处理。
+    """
+    orphans = [
+        item
+        for item in db.scalars(select(CourseSession).where(CourseSession.campus_id == campus_id))
+        if item.business_id not in keep_business_ids
+    ]
+    if not orphans:
+        return {"deleted": 0, "retained_by_schedule": 0, "retained_examples": []}
+
+    official_version_id = db.scalar(
+        select(ScheduleVersion.id).where(ScheduleVersion.name == OFFICIAL_VERSION_NAME)
+    )
+    orphan_ids = {item.id for item in orphans}
+    referenced_elsewhere = set(
+        db.scalars(
+            select(ScheduleAssignment.course_session_id).where(
+                ScheduleAssignment.course_session_id.in_(orphan_ids),
+                ScheduleAssignment.schedule_version_id != official_version_id
+                if official_version_id
+                else ScheduleAssignment.course_session_id.is_not(None),
+            )
+        )
+    )
+    removable = [item for item in orphans if item.id not in referenced_elsewhere]
+    retained = [item for item in orphans if item.id in referenced_elsewhere]
+    if removable:
+        removable_ids = [item.id for item in removable]
+        db.execute(
+            delete(CalendarEventBinding).where(
+                CalendarEventBinding.course_session_id.in_(removable_ids)
+            )
+        )
+        db.execute(
+            delete(ScheduleAssignment).where(
+                ScheduleAssignment.course_session_id.in_(removable_ids)
+            )
+        )
+        db.execute(delete(CourseSession).where(CourseSession.id.in_(removable_ids)))
+        db.flush()
+    return {
+        "deleted": len(removable),
+        "retained_by_schedule": len(retained),
+        "retained_examples": sorted(item.business_id for item in retained)[:20],
+    }
+
+
 def import_schedule_workbook(
     db: Session,
     workbook_path: Path,
     campus_business_id: str = CAMPUS_BUSINESS_ID,
     campus_name: str = CAMPUS_NAME,
 ) -> dict[str, Any]:
-    rows = _read_rows(workbook_path)
-    if not rows:
+    source_rows = _read_rows(workbook_path)
+    if not source_rows:
         raise RuntimeError(f"未从 {workbook_path.name} 解析到任何数据行")
+    rows, placeholder_report = _split_placeholder_rows(source_rows)
+    if not rows:
+        raise RuntimeError(
+            f"{workbook_path.name} 的全部 {len(source_rows)} 行教室标签均为"
+            f"「{PLACEHOLDER_ROOM}」，没有可排课的课次"
+        )
 
     campus = _upsert(
         db, Campus, {"business_id": campus_business_id}, {"name": campus_name}
@@ -211,24 +411,28 @@ def import_schedule_workbook(
             db,
             Room,
             {"campus_id": campus.id, "business_id": label},
-            {
-                "name": label,
-                "is_active": label != PLACEHOLDER_ROOM,
-            },
+            {"name": label, "is_active": True},
         )
 
+    # 时段顺序按真实上课时间排序，不依赖任何校区的固定作息表。
     clock_ranges = sorted(
         {(row["开始时间"], row["结束时间"]) for row in rows},
-        key=lambda item: (SLOT_START_ORDER.get(item[0], 9), item[0]),
+        key=lambda item: (_clock_minutes(item[0]), _clock_minutes(item[1])),
     )
     slot_keys = sorted(
         {(weekday, start, end) for weekday in WEEKDAYS for start, end in clock_ranges},
-        key=lambda item: (WEEKDAYS.index(item[0]), SLOT_START_ORDER.get(item[1], 9), item[1]),
+        key=lambda item: (
+            WEEKDAYS.index(item[0]),
+            _clock_minutes(item[1]),
+            _clock_minutes(item[2]),
+        ),
     )
-    slot_business_ids: dict[tuple[str, str], str] = {}
+    # 时段标识必须带结束时间：同一开始时间可以对应不同时长（例如 08:30-10:00 与
+    # 08:30-11:30），只用开始时间会让两个时段撞同一个业务标识并触发唯一约束冲突。
+    slot_business_ids: dict[tuple[str, str, str], str] = {}
     for sequence, (weekday, start, end) in enumerate(slot_keys, 1):
-        business_id = f"SLOT-{weekday}-{start.replace(':', '')}"
-        slot_business_ids[(weekday, start)] = business_id
+        business_id = f"SLOT-{weekday}-{start.replace(':', '')}-{end.replace(':', '')}"
+        slot_business_ids[(weekday, start, end)] = business_id
         _upsert(
             db,
             TimeSlot,
@@ -242,19 +446,13 @@ def import_schedule_workbook(
             },
         )
 
-    class_index = {name: index for index, name in enumerate(sorted(class_labels), 1)}
-
     deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
-    placeholder_room_rows = 0
     for row in rows:
-        if row["教室标签"] == PLACEHOLDER_ROOM:
-            placeholder_room_rows += 1
         deduped[_row_identity(row)] = row
 
-    session_rows: dict[str, dict[str, Any]] = {}
-    for row in deduped.values():
-        business_id = _business_id(row, class_index)
-        session_rows[business_id] = row
+    session_rows, duplicate_report = _collect_lesson_rows(
+        list(deduped.values()), campus_business_id
+    )
 
     existing_sessions = {
         item.business_id: item
@@ -279,7 +477,7 @@ def import_schedule_workbook(
             "session_no": row["课次序号"],
             "lesson_date": row["上课日期"],
             "duration_minutes": int(row["课节时长小时"] * 60),
-            "suggested_slot_id": slot_business_ids[(row["星期"], row["开始时间"])],
+            "suggested_slot_id": slot_business_ids[(row["星期"], row["开始时间"], row["结束时间"])],
             "fixed_start_time": row["开始时间"],
             "fixed_end_time": row["结束时间"],
             "original_room_business_id": row["教室标签"],
@@ -304,6 +502,8 @@ def import_schedule_workbook(
         )
         db.flush()
 
+    orphan_report = _remove_orphan_sessions(db, campus.id, set(session_rows))
+
     session_ids: dict[str, str] = {
         business_id: session_id
         for business_id, session_id in db.execute(
@@ -320,7 +520,9 @@ def import_schedule_workbook(
         checksum=checksum,
         payload={
             "source": workbook_path.name,
-            "rows_total": len(rows),
+            "rows_total": len(source_rows),
+            "rows_dropped_placeholder_room": placeholder_report["dropped_rows"],
+            "rows_kept": len(rows),
             "rows_deduped": len(deduped),
         },
     )
@@ -366,7 +568,7 @@ def import_schedule_workbook(
                 schedule_version_id=version.id,
                 course_session_id=session_ids[business_id],
                 lesson_date=row["上课日期"],
-                slot_business_id=slot_business_ids[(row["星期"], row["开始时间"])],
+                slot_business_id=slot_business_ids[(row["星期"], row["开始时间"], row["结束时间"])],
                 room_business_id=row["教室标签"],
             )
         )
@@ -392,8 +594,10 @@ def import_schedule_workbook(
                 )
 
     return {
-        "campus": CAMPUS_BUSINESS_ID,
-        "rows_total": len(rows),
+        "campus": campus_business_id,
+        "rows_total": len(source_rows),
+        "rows_dropped_placeholder_room": placeholder_report["dropped_rows"],
+        "rows_kept": len(rows),
         "rows_deduped": len(deduped),
         "teachers": len(teachers),
         "class_groups": len(class_labels),
@@ -401,9 +605,12 @@ def import_schedule_workbook(
         "time_slots": len(slot_keys),
         "course_sessions_created": len(new_rows),
         "schedule_versions": version_stats,
+        "lessons": len(session_rows),
+        "duplicate_lessons": duplicate_report,
+        "class_slot_conflicts": _class_slot_conflicts(session_rows),
+        "orphans": orphan_report,
         "warnings": {
-            "placeholder_room_rows": placeholder_room_rows,
-            "placeholder_room": PLACEHOLDER_ROOM,
+            "dropped_placeholder_room": placeholder_report,
             "teachers_are_groups": teachers,
             "planned_hours_mismatch": hour_warnings,
         },

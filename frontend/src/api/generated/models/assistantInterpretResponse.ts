@@ -5,13 +5,15 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { AssistantInterpretResponseSource } from './assistantInterpretResponseSource';
 import type { AssistantInterpretResponseDateFrom } from './assistantInterpretResponseDateFrom';
 import type { AssistantInterpretResponseDateTo } from './assistantInterpretResponseDateTo';
 import type { AssistantInterpretResponseSolverRulesItem } from './assistantInterpretResponseSolverRulesItem';
 
 export interface AssistantInterpretResponse {
   instruction: string;
-  source: 'feishu_aily';
+  source: AssistantInterpretResponseSource;
+  ai_configured: boolean;
   aily_configured: boolean;
   business_lines?: string[];
   product_types?: string[];

@@ -4992,6 +4992,38 @@
           "rules": {
             "type": "integer",
             "title": "Rules"
+          },
+          "rows_total": {
+            "type": "integer",
+            "title": "Rows Total",
+            "default": 0
+          },
+          "rows_dropped_placeholder_room": {
+            "type": "integer",
+            "title": "Rows Dropped Placeholder Room",
+            "default": 0
+          },
+          "dropped_lesson_groups": {
+            "type": "integer",
+            "title": "Dropped Lesson Groups",
+            "default": 0
+          },
+          "dropped_classes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Dropped Classes"
+          },
+          "rows_kept": {
+            "type": "integer",
+            "title": "Rows Kept",
+            "default": 0
+          },
+          "rows_deduped": {
+            "type": "integer",
+            "title": "Rows Deduped",
+            "default": 0
           }
         },
         "type": "object",

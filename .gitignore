@@ -15,4 +15,6 @@ frontend/vite-*.log
 data/*.db
 data/secrets/
 data/exports/*.xlsx
+# 上传的真实课表数据不进版本库，赛后需按保密要求删除
+data/imports/*.xlsx
 !data/imports/sample.xlsx
