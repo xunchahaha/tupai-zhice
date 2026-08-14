@@ -97,9 +97,18 @@ from .schemas import (
     TimeSlotPayload,
     TimeSlotResponse,
     TokenResponse,
+    UserCreate,
+    UserPasswordReset,
     UserResponse,
+    UserStatusUpdate,
 )
-from .security import create_access_token, get_current_user, require_roles, verify_password
+from .security import (
+    create_access_token,
+    get_current_user,
+    hash_password,
+    require_roles,
+    verify_password,
+)
 from .services.converter_zhengzhou import import_schedule_workbook
 from .services.feishu import FeishuService, FeishuServiceError, json_text
 from .services.snapshot import create_snapshot
@@ -187,8 +196,10 @@ def schedule_response(db: Session, schedule: ScheduleVersion) -> ScheduleRespons
 @router.post("/auth/token", response_model=TokenResponse, tags=["auth"])
 def login(form: Annotated[OAuth2PasswordRequestForm, Depends()], db: Db) -> TokenResponse:
     user = db.scalar(select(User).where(User.username == form.username))
-    if not user or not verify_password(form.password, user.password_hash):
+    if not user or not user.is_active or not verify_password(form.password, user.password_hash):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    user.last_login_at = utcnow()
+    db.commit()
     return TokenResponse(
         access_token=create_access_token(user), user=UserResponse.model_validate(user)
     )
@@ -197,6 +208,80 @@ def login(form: Annotated[OAuth2PasswordRequestForm, Depends()], db: Db) -> Toke
 @router.get("/auth/me", response_model=UserResponse, tags=["auth"])
 def current_user(user: CurrentUser) -> UserResponse:
     return UserResponse.model_validate(user)
+
+
+@router.get("/users", response_model=list[UserResponse], tags=["accounts"])
+def list_users(db: Db, user: Admin) -> list[User]:
+    return list(db.scalars(select(User).order_by(User.created_at, User.username)))
+
+
+@router.post("/users", response_model=UserResponse, status_code=201, tags=["accounts"])
+def create_user(payload: UserCreate, db: Db, user: Admin) -> User:
+    instance = User(
+        username=payload.username,
+        password_hash=hash_password(payload.password),
+        role="viewer",
+        is_active=True,
+        created_by=user.id,
+    )
+    db.add(instance)
+    try:
+        db.flush()
+        audit(
+            db,
+            user,
+            "create",
+            "user",
+            instance.id,
+            {"username": instance.username, "role": instance.role},
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="用户名已存在") from exc
+    db.refresh(instance)
+    return instance
+
+
+@router.patch("/users/{user_id}/status", response_model=UserResponse, tags=["accounts"])
+def update_user_status(
+    user_id: str, payload: UserStatusUpdate, db: Db, user: Admin
+) -> User:
+    target = get_or_404(db, User, user_id)
+    if target.id == user.id and not payload.is_active:
+        raise HTTPException(status_code=409, detail="当前登录账号不能停用自己")
+    if target.role == "admin" and target.is_active and not payload.is_active:
+        active_admins = int(
+            db.scalar(
+                select(func.count(User.id)).where(User.role == "admin", User.is_active.is_(True))
+            )
+            or 0
+        )
+        if active_admins <= 1:
+            raise HTTPException(status_code=409, detail="至少需要保留一个启用中的管理员")
+    target.is_active = payload.is_active
+    audit(
+        db,
+        user,
+        "enable" if payload.is_active else "disable",
+        "user",
+        target.id,
+        {"username": target.username},
+    )
+    db.commit()
+    db.refresh(target)
+    return target
+
+
+@router.post("/users/{user_id}/reset-password", status_code=204, tags=["accounts"])
+def reset_user_password(
+    user_id: str, payload: UserPasswordReset, db: Db, user: Admin
+) -> Response:
+    target = get_or_404(db, User, user_id)
+    target.password_hash = hash_password(payload.password)
+    audit(db, user, "reset_password", "user", target.id, {"username": target.username})
+    db.commit()
+    return Response(status_code=204)
 
 
 @router.get("/health/live", tags=["operations"])

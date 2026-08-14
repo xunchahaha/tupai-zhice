@@ -39,6 +39,76 @@ def test_seeded_overview(client: TestClient, auth_headers: dict[str, str]) -> No
     assert counts["course_sessions"] == 24
 
 
+def test_admin_manages_read_only_member_accounts(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    created = client.post(
+        "/api/v1/users",
+        headers=auth_headers,
+        json={"username": "member_demo", "password": "member-pass-2026"},
+    )
+    assert created.status_code == 201
+    member = created.json()
+    assert member["role"] == "viewer"
+    assert member["is_active"] is True
+
+    login = client.post(
+        "/api/v1/auth/token",
+        data={"username": "member_demo", "password": "member-pass-2026"},
+    )
+    assert login.status_code == 200
+    member_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    assert client.get("/api/v1/teachers", headers=member_headers).status_code == 200
+    assert client.get("/api/v1/users", headers=member_headers).status_code == 403
+    campus = client.get("/api/v1/campuses", headers=member_headers).json()[0]
+    forbidden_write = client.post(
+        "/api/v1/rooms",
+        headers=member_headers,
+        json={
+            "campus_id": campus["id"],
+            "business_id": "MEMBER-FORBIDDEN-ROOM",
+            "name": "成员不可新增",
+            "is_active": True,
+        },
+    )
+    assert forbidden_write.status_code == 403
+
+    disabled = client.patch(
+        f"/api/v1/users/{member['id']}/status",
+        headers=auth_headers,
+        json={"is_active": False},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["is_active"] is False
+    assert client.get("/api/v1/overview", headers=member_headers).status_code == 401
+    assert client.post(
+        "/api/v1/auth/token",
+        data={"username": "member_demo", "password": "member-pass-2026"},
+    ).status_code == 401
+
+    reenabled = client.patch(
+        f"/api/v1/users/{member['id']}/status",
+        headers=auth_headers,
+        json={"is_active": True},
+    )
+    assert reenabled.status_code == 200
+    reset = client.post(
+        f"/api/v1/users/{member['id']}/reset-password",
+        headers=auth_headers,
+        json={"password": "member-new-pass-2026"},
+    )
+    assert reset.status_code == 204
+    assert client.post(
+        "/api/v1/auth/token",
+        data={"username": "member_demo", "password": "member-pass-2026"},
+    ).status_code == 401
+    assert client.post(
+        "/api/v1/auth/token",
+        data={"username": "member_demo", "password": "member-new-pass-2026"},
+    ).status_code == 200
+
+
 def test_download_master_data_sample(client: TestClient, auth_headers: dict[str, str]) -> None:
     response = client.get("/api/v1/imports/sample.xlsx", headers=auth_headers)
     assert response.status_code == 200

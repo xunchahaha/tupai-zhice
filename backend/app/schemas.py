@@ -30,6 +30,29 @@ class UserResponse(ORMModel):
     id: str
     username: str
     role: Role
+    is_active: bool
+    created_at: datetime
+    last_login_at: datetime | None = None
+    created_by: str | None = None
+
+
+class UserCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    username: str = Field(min_length=3, max_length=80)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class UserStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    is_active: bool
+
+
+class UserPasswordReset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(min_length=8, max_length=128)
 
 
 class CampusCreate(BaseModel):
