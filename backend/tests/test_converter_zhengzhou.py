@@ -122,6 +122,57 @@ def test_placeholder_rows_are_dropped_at_import_not_kept_as_a_disabled_room(
     assert db.scalar(select(func.count(ScheduleAssignment.id))) == 2
 
 
+def test_placeholder_report_names_the_dimensions_that_disappear_entirely(
+    db: Session,
+) -> None:
+    """丢弃口径必须报到维度级。
+
+    只报「丢了 N 行」看不出一整条业务线连同它的教研组和时钟窗口都没进库；而一旦某条
+    业务线整体消失，跨产品线的教室/教师冲突检查在数据层就不成立了。
+    """
+    result = import_schedule_workbook(db, SAMPLE_WORKBOOK)
+    db.commit()
+
+    lost = result["warnings"]["dropped_placeholder_room"]["lost_entirely"]
+    assert lost["business_lines"] == ["公职"]
+    assert lost["product_types"] == ["公职·国省考笔面一体全年班"]
+    assert lost["class_labels"] == ["公职无限学（非考研集训营）"]
+    assert lost["teachers"] == ["郑州公职申论教研组"]
+    assert lost["clock_windows"] == ["14:00-17:00"]
+    assert lost["dates"] == 1
+    assert result["warnings"]["dropped_placeholder_room"]["dropped_rows_by_business_line"] == {
+        "公职": 1
+    }
+
+
+def test_placeholder_drop_counts_groups_that_only_partly_disappear(
+    db: Session, tmp_path: Path
+) -> None:
+    """占位行与真实教室行挤在同一格时，丢弃统计不能把这一格减没。
+
+    原实现用 len(dropped_groups - kept_groups)，同一格里只要还剩一节真实课，被丢掉的
+    那几节就不计数，损耗被自己的统计口径掩盖。
+    """
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    # 同班、同日、同时段，但是另一节课：整行丢弃后这一格仍有课，属于混合格。
+    mixed = _edit_cell(_edit_cell(_edit_cell(base, 3, PLACEHOLDER_ROOM), 9, "政治·政治基础"), 8, 2)
+    path = tmp_path / "mixed-placeholder.xlsx"
+    _write_workbook(path, [base, mixed])
+
+    result = import_schedule_workbook(db, path)
+    db.commit()
+
+    dropped = result["warnings"]["dropped_placeholder_room"]
+    assert dropped["dropped_rows"] == 1
+    assert dropped["dropped_lessons"] == 1
+    assert dropped["dropped_lesson_groups"] == 1
+    assert dropped["partially_dropped_lesson_groups"] == 1
+    # 班级/教师/业务线都还在真实行里，不能算作整建制消失。
+    assert dropped["lost_entirely"]["business_lines"] == []
+    assert dropped["lost_entirely"]["class_labels"] == []
+    assert db.scalar(select(func.count(CourseSession.id))) == 1
+
+
 def test_workbook_with_only_placeholder_rooms_is_rejected(tmp_path: Path) -> None:
     """整表都待定教室时必须报错，而不是静默导入一个空课表。"""
     rows = [row for row in _sample_rows() if row[3] == PLACEHOLDER_ROOM]
@@ -266,6 +317,29 @@ def test_official_workbook_import_counts() -> None:
     assert len(deduped) == 9340
 
 
+def test_official_workbook_placeholder_drop_deletes_two_whole_business_lines() -> None:
+    """郑州这份表的占位教室行 = 公职 + 专升本两条业务线的**全部**行。
+
+    丢掉之后库里只剩考研，跨产品线的教室/教师冲突根本无从检查。行为不改，但代价必须
+    留在回归里：口径一旦被业务方推翻，这个用例就是改动的落点。
+    """
+    if not OFFICIAL_WORKBOOK.exists():
+        pytest.skip("郑州官方数据文件不在工作区")
+
+    source_rows, _ = _read_rows(OFFICIAL_WORKBOOK)
+    _, dropped = _split_placeholder_rows(source_rows)
+
+    assert dropped["dropped_rows_by_business_line"] == {"专升本": 487, "公职": 19247}
+    assert dropped["dropped_lessons"] == 1395
+    assert dropped["partially_dropped_lesson_groups"] == 0
+    lost = dropped["lost_entirely"]
+    assert lost["business_lines"] == ["专升本", "公职"]
+    assert len(lost["product_types"]) == 3
+    assert len(lost["teachers"]) == 7
+    assert lost["clock_windows"] == ["09:00-12:00"]
+    assert lost["dates"] == 97
+
+
 def test_same_start_time_with_two_durations_does_not_collide(db: Session, tmp_path: Path) -> None:
     """时段业务标识必须带结束时间，否则 08:30-10:00 与 08:30-11:30 会撞同一个标识。"""
     base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
@@ -397,6 +471,71 @@ def test_same_class_twice_in_one_slot_is_reported_as_a_data_conflict(
     assert report["conflicting_groups"] == 1
     assert report["extra_lessons"] == 1
     assert len(report["examples"][0]["课节名称"]) == 2
+
+
+def test_one_slot_conflicts_separate_parallel_subjects_from_same_subject_repeats(
+    db: Session, tmp_path: Path
+) -> None:
+    """走班并行和同科重复必须分开计数。
+
+    客户是走班制：同一个行政班里选数学与不选数学的学生按科目分流，同一格里并排两个
+    不同科目是正常业务形态。把它和「同一批学生同一时刻上同一科的两门课」混在一起报，
+    教务只会看到一个笼统的冲突数，无从判断该不该改数据。
+    """
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    parallel = _edit_cell(_edit_cell(base, 9, "数学·高等数学基础精讲"), 8, 2)
+    same_subject = _edit_cell(
+        _edit_cell(_edit_cell(base, 2, "另一个班"), 9, "英语·阅读理解方法与真题"), 8, 3
+    )
+    other_lesson = _edit_cell(_edit_cell(same_subject, 9, "英语·词汇与长难句精讲"), 8, 4)
+    path = tmp_path / "walk-in.xlsx"
+    _write_workbook(path, [base, parallel, same_subject, other_lesson])
+
+    result = import_schedule_workbook(db, path)
+    db.commit()
+
+    report = result["class_slot_conflicts"]
+    assert report["conflicting_groups"] == 2
+    assert report["cross_subject_groups"] == 1
+    assert report["same_subject_groups"] == 1
+    parallel_example = next(
+        item for item in report["examples"] if item["班级标签"] == base[2]
+    )
+    assert parallel_example["科目"] == ["数学", "英语"]
+    assert parallel_example["科目是否互不相同"] is True
+
+
+def test_product_type_that_declares_a_subject_absent_but_schedules_it_is_reported(
+    db: Session, tmp_path: Path
+) -> None:
+    """「（无数学）」的产品班型里排了数学课，必须报出来但不能删。
+
+    这些行覆盖整段课次序号、形态与其它课一致，既可能是产品菜单配错、也可能这些班确实
+    有少量数学课。删掉就是替业务方裁决，还可能真丢课。
+    """
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    no_math = _edit_cell(_edit_cell(base, 1, "考研·暑期强化（无数学）"), 2, "暑假营2班")
+    english = _edit_cell(no_math, 9, "英语·词汇与长难句精讲")
+    math = _edit_cell(_edit_cell(no_math, 9, "数学·高等数学基础精讲"), 8, 2)
+    with_math = _edit_cell(
+        _edit_cell(_edit_cell(no_math, 1, "考研·暑期强化（含数学）"), 8, 3),
+        9,
+        "数学·数学真题与题型突破",
+    )
+    path = tmp_path / "no-math.xlsx"
+    _write_workbook(path, [english, math, with_math])
+
+    result = import_schedule_workbook(db, path)
+    db.commit()
+
+    report = result["warnings"]["product_subject_mismatch"]
+    assert report["mismatched_lessons"] == 1
+    assert report["affected_classes"] == ["暑假营2班"]
+    assert report["examples"][0]["产品班型"] == "考研·暑期强化（无数学）"
+    assert report["examples"][0]["科目"] == "数学"
+    assert report["examples"][0]["课节名称"] == ["数学·高等数学基础精讲"]
+    # 只报不删：三节课全部入库。
+    assert db.scalar(select(func.count(CourseSession.id))) == 3
 
 
 def test_header_mismatch_is_rejected_instead_of_silently_misreading(tmp_path: Path) -> None:

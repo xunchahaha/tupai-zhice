@@ -187,8 +187,22 @@ def _read_rows(workbook_path: Path) -> tuple[list[dict[str, Any]], list[dict[str
 
 
 def _lesson_group(row: dict[str, Any]) -> tuple[str, str, str]:
-    """课次组：同一班级在同一天同一时段最多只能有一节课。"""
+    """课次组：同一班级、同一天、同一时段的一格。
+
+    注意这一格里出现多节课**不必然**是数据错误：客户是走班制，同一个行政班里选数学
+    与不选数学的学生按科目分流，同一格里并排两节不同科目的课是正常业务形态。因此这
+    个键只用于统计和报告，不用来删数据。
+    """
     return (row["班级标签"], row["上课日期"].isoformat(), row["上课时段"])
+
+
+def _entirely_lost_values(
+    kept: list[dict[str, Any]], dropped: list[dict[str, Any]], field: str
+) -> list[str]:
+    """只出现在被丢弃行里的取值——即这次导入整建制消失的那一批。"""
+    kept_values = {str(row[field]) for row in kept if str(row[field])}
+    dropped_values = {str(row[field]) for row in dropped if str(row[field])}
+    return sorted(dropped_values - kept_values)
 
 
 def _split_placeholder_rows(
@@ -196,19 +210,43 @@ def _split_placeholder_rows(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """丢弃教室待确认的行。
 
-    经业务确认，「教室-待校区确认」不是待补的教室，而是标记该课次不占用校区教室。
-    这些课次不进入教室排课范围，因此在导入阶段整行丢弃，而不是建成停用教室后继续参与求解。
-    丢弃口径必须可追溯，所以同时返回被丢弃的行数、课次组数和受影响班级。
+    现行口径：「教室-待校区确认」被当作「该课次不占用校区教室」，整行丢弃。这个口径
+    只有代码注释支撑、没有书面依据，而列名字面是「待确认」，两种读法结论相反，必须由
+    业务方拍板——所以这里不改行为，只把丢弃的**完整代价**报出来。
+
+    代价必须报到维度级：当某条业务线的行 100% 是占位教室时，整条业务线连同它的教研组、
+    时钟窗口和上课日期会从库里消失，此时「跨产品线检查教室/教师冲突」在数据层就不成立
+    了，而按行数统计完全看不出这一点。
     """
     kept = [row for row in rows if row["教室标签"] != PLACEHOLDER_ROOM]
     dropped = [row for row in rows if row["教室标签"] == PLACEHOLDER_ROOM]
     kept_groups = {_lesson_group(row) for row in kept}
     dropped_groups = {_lesson_group(row) for row in dropped}
+    kept_lessons = {_lesson_identity(row) for row in kept}
+    dropped_lessons = {_lesson_identity(row) for row in dropped}
+    dropped_dates = {row["上课日期"] for row in dropped} - {row["上课日期"] for row in kept}
     return kept, {
         "placeholder_room": PLACEHOLDER_ROOM,
         "dropped_rows": len(dropped),
-        "dropped_lesson_groups": len(dropped_groups - kept_groups),
+        # 按导入器自己的身份键算：这才是「库里少了多少条课次」，行数会被完全重复行放大。
+        "dropped_lessons": len(dropped_lessons - kept_lessons),
+        # 原实现用 len(dropped_groups - kept_groups)：某一格同时有占位行和真实教室行时，
+        # 这一格会被减掉、报成 0，而占位的那几节课照样消失。改为报「受影响的格数」，
+        # 并单独报出这种混合格，否则损耗会被自己的统计口径掩盖。
+        "dropped_lesson_groups": len(dropped_groups),
+        "partially_dropped_lesson_groups": len(dropped_groups & kept_groups),
         "affected_classes": sorted({row["班级标签"] for row in dropped}),
+        "dropped_rows_by_business_line": dict(
+            sorted(Counter(row["业务线"] for row in dropped).items())
+        ),
+        "lost_entirely": {
+            "business_lines": _entirely_lost_values(kept, dropped, "业务线"),
+            "product_types": _entirely_lost_values(kept, dropped, "产品班型"),
+            "class_labels": _entirely_lost_values(kept, dropped, "班级标签"),
+            "teachers": _entirely_lost_values(kept, dropped, "授课教师"),
+            "clock_windows": _entirely_lost_values(kept, dropped, "上课时段"),
+            "dates": len(dropped_dates),
+        },
     }
 
 
@@ -340,31 +378,98 @@ def _upsert(
 
 
 def _class_slot_conflicts(session_rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """报告「同一班级同一天同一时段有多节课」。
+    """报告「同一班级同一天同一时段有多节课」，并按科目分成两类。
 
-    这是排课的基本不变量，源表里却真实存在。不报出来的话，教务只会看到求解器返回
-    INFEASIBLE，无从知道问题出在输入数据而不是约束配置。
+    这一格里有多节课，在走班制下有两种完全不同的含义，混在一起报会把教务引向错误的
+    修数据方向：
+
+    - 科目互不相同：可能是**并行走班**（选数学的去数学教室，其余人上公共课），也可能
+      是同一批学生被排了两节课。只看这张表分辨不了，必须由业务方裁决。
+    - 同一科目出现多次：同一批学生同一时刻上同一科的两门课，教学上不成立，更像是源表
+      把科目菜单展开到了每个课次上。
+
+    两类都不在导入阶段删数据——删错了就是真丢课。
     """
     grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for row in session_rows.values():
         grouped.setdefault(_lesson_group(row), []).append(row)
-    conflicts = [
-        {
-            "班级标签": key[0],
-            "上课日期": key[1],
-            "上课时段": key[2],
-            "课节数": len(items),
-            "课节名称": sorted({str(item["课节名称"]) for item in items}),
-        }
-        for key, items in grouped.items()
-        if len(items) > 1
-    ]
+    conflicts: list[dict[str, Any]] = []
+    for key, items in grouped.items():
+        if len(items) <= 1:
+            continue
+        subjects = [_lesson_subject(str(item["课节名称"])) for item in items]
+        conflicts.append(
+            {
+                "班级标签": key[0],
+                "上课日期": key[1],
+                "上课时段": key[2],
+                "课节数": len(items),
+                "课节名称": sorted({str(item["课节名称"]) for item in items}),
+                "科目": sorted(set(subjects)),
+                "科目是否互不相同": len(set(subjects)) == len(subjects),
+            }
+        )
     conflicts.sort(key=lambda item: (str(item["班级标签"]), str(item["上课日期"])))
+    cross_subject = [item for item in conflicts if item["科目是否互不相同"]]
     return {
         "lesson_groups": len(grouped),
         "conflicting_groups": len(conflicts),
         "extra_lessons": sum(int(str(item["课节数"])) - 1 for item in conflicts),
+        # 走班制下这一类未必是错，单独计数，避免把并行走班当成必须清理的脏数据。
+        "cross_subject_groups": len(cross_subject),
+        "same_subject_groups": len(conflicts) - len(cross_subject),
         "examples": conflicts[:20],
+    }
+
+
+def _product_subject_mismatches(session_rows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """报告「产品班型声明不含某科目，却排了该科目的课」。
+
+    例如「考研·暑期强化（无数学）」下出现「数学·高等数学基础精讲」。这批行不是随机噪声：
+    它们覆盖整段课次序号、形态与其它课一致，既可能是产品班型菜单配错，也可能是这些班
+    确实有少量该科目的课。两种读法对「能不能按产品班型名判定走班轨道」的结论完全相反，
+    所以这里只报不删——删掉就是替业务方做了裁决。
+    """
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for row in session_rows.values():
+        subject = _lesson_subject(str(row["课节名称"]))
+        if not subject:
+            continue
+        product_type = str(row["产品班型"])
+        # 「无{科目}」是产品班型名里对科目的显式否定声明。
+        if f"无{subject}" not in product_type:
+            continue
+        key = (str(row["业务线"]), product_type, str(row["班级标签"]), subject)
+        grouped.setdefault(key, []).append(row)
+    examples = [
+        {
+            "业务线": key[0],
+            "产品班型": key[1],
+            "班级标签": key[2],
+            "科目": key[3],
+            "课次数": len(items),
+            "课节名称": sorted({str(item["课节名称"]) for item in items}),
+            "日期范围": [
+                min(item["上课日期"] for item in items).isoformat(),
+                max(item["上课日期"] for item in items).isoformat(),
+            ],
+        }
+        for key, items in grouped.items()
+    ]
+    # 排序必须完全确定，否则同一份表两次导入的报告会抖动。
+    examples.sort(
+        key=lambda item: (
+            -int(str(item["课次数"])),
+            str(item["产品班型"]),
+            str(item["班级标签"]),
+            str(item["科目"]),
+        )
+    )
+    return {
+        "rule": "产品班型名称含「无{科目}」，但该课次的课节名称属于该科目",
+        "mismatched_lessons": sum(len(items) for items in grouped.values()),
+        "affected_classes": sorted({str(key[2]) for key in grouped}),
+        "examples": examples[:20],
     }
 
 
@@ -696,6 +801,7 @@ def import_schedule_workbook(
             "dropped_placeholder_room": placeholder_report,
             "teachers_are_groups": teachers,
             "planned_hours_mismatch": hour_warnings,
+            "product_subject_mismatch": _product_subject_mismatches(session_rows),
         },
     }
 
