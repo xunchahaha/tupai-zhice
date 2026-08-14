@@ -64,7 +64,7 @@ const labels: Record<string, string> = {
   unchanged: "未变更",
   unavailable_slot: "不可用时段",
   unknown: "未知",
-  viewer: "查看者",
+  viewer: "成员",
 };
 
 export function statusLabel(value?: string | null): string {

@@ -2,6 +2,8 @@ import { Navigate, createBrowserRouter } from "react-router-dom";
 
 import { AppShell } from "@/app/app-shell";
 import { AuthBoundary } from "@/app/auth-boundary";
+import { RoleRoute } from "@/app/role-route";
+import { AccountsPage } from "@/pages/accounts-page";
 import { DiagnosticsPage } from "@/pages/diagnostics-page";
 import { IntegrationsPage } from "@/pages/integrations-page";
 import { LoginPage } from "@/pages/login-page";
@@ -16,7 +18,17 @@ import { VersionsPage } from "@/pages/versions-page";
 export const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
   { element: <AuthBoundary />, children: [{ element: <AppShell />, children: [
-    { path: "/overview", element: <OverviewPage /> }, { path: "/master-data", element: <MasterDataPage /> }, { path: "/rules", element: <RulesPage /> }, { path: "/solver", element: <SolverPage /> }, { path: "/schedule", element: <SchedulePage /> }, { path: "/diagnostics", element: <DiagnosticsPage /> }, { path: "/reschedule", element: <ReschedulePage /> }, { path: "/versions", element: <VersionsPage /> }, { path: "/integrations", element: <IntegrationsPage /> }, { path: "*", element: <Navigate to="/overview" replace /> },
+    { path: "/overview", element: <OverviewPage /> },
+    { path: "/master-data", element: <MasterDataPage /> },
+    { path: "/rules", element: <RulesPage /> },
+    { path: "/solver", element: <RoleRoute roles={["admin", "scheduler", "approver"]}><SolverPage /></RoleRoute> },
+    { path: "/schedule", element: <SchedulePage /> },
+    { path: "/diagnostics", element: <DiagnosticsPage /> },
+    { path: "/reschedule", element: <RoleRoute roles={["admin", "scheduler", "approver"]}><ReschedulePage /></RoleRoute> },
+    { path: "/versions", element: <VersionsPage /> },
+    { path: "/integrations", element: <RoleRoute roles={["admin", "scheduler", "approver"]}><IntegrationsPage /></RoleRoute> },
+    { path: "/accounts", element: <RoleRoute roles={["admin"]}><AccountsPage /></RoleRoute> },
+    { path: "*", element: <Navigate to="/overview" replace /> },
   ] }] },
   { path: "*", element: <Navigate to="/overview" replace /> },
 ]);
