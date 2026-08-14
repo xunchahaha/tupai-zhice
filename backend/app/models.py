@@ -61,6 +61,17 @@ class FeishuAppConfiguration(TimestampMixin, Base):
     configured_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
 
 
+class AIProviderConfiguration(TimestampMixin, Base):
+    __tablename__ = "ai_provider_configurations"
+
+    id: Mapped[str] = mapped_column(String(30), primary_key=True, default="default")
+    provider: Mapped[str] = mapped_column(String(50), default="openai_compatible")
+    base_url: Mapped[str] = mapped_column(String(500))
+    api_key_encrypted: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(200))
+    configured_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
 class FeishuOAuthState(TimestampMixin, Base):
     __tablename__ = "feishu_oauth_states"
 

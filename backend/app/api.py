@@ -5,7 +5,7 @@ import json
 import logging
 from collections import Counter
 from datetime import date, datetime, time, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
@@ -50,6 +50,8 @@ from .schemas import (
     AilyContextResponse,
     AilyRuleBatch,
     AilySolveRequest,
+    AIProviderConfigurationInput,
+    AIProviderConfigurationResponse,
     AssignmentResponse,
     AssistantInterpretRequest,
     AssistantInterpretResponse,
@@ -114,6 +116,7 @@ from .security import (
     require_roles,
     verify_password,
 )
+from .services.ai import AIService, AIServiceError
 from .services.converter_zhengzhou import import_schedule_workbook
 from .services.feishu import FeishuService, FeishuServiceError, json_text
 from .services.snapshot import create_snapshot
@@ -1709,6 +1712,50 @@ def list_audit_logs(
 
 
 @router.get(
+    "/integrations/ai/configuration",
+    response_model=AIProviderConfigurationResponse,
+    tags=["integrations", "ai"],
+)
+def ai_configuration(db: Db, user: CurrentUser) -> dict[str, Any]:
+    return AIService(settings, db).configuration_view()
+
+
+@router.post(
+    "/integrations/ai/configuration",
+    response_model=AIProviderConfigurationResponse,
+    tags=["integrations", "ai"],
+)
+def configure_ai_provider(
+    request: AIProviderConfigurationInput, db: Db, user: Admin
+) -> dict[str, Any]:
+    service = AIService(settings, db)
+    try:
+        service.save_configuration(
+            user.id,
+            provider=request.provider,
+            base_url=request.base_url,
+            api_key=request.api_key,
+            model=request.model,
+        )
+    except AIServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    audit(
+        db,
+        user,
+        "configure",
+        "ai_provider",
+        None,
+        {
+            "provider": request.provider,
+            "base_url": request.base_url,
+            "model": request.model,
+        },
+    )
+    db.commit()
+    return service.configuration_view()
+
+
+@router.get(
     "/integrations/feishu/connection",
     response_model=FeishuConnectionResponse,
     tags=["integrations"],
@@ -2347,37 +2394,70 @@ def _validated_assistant_scope(db: Session, parsed: dict[str, Any]) -> dict[str,
 def assistant_interpret(
     request: AssistantInterpretRequest, db: Db, user: AdminOrScheduler
 ) -> AssistantInterpretResponse:
+    ai_service = AIService(settings, db)
+    ai_configuration = ai_service.configuration_view()
     configuration = FeishuService(settings, db).configuration_view()
     aily_app_id = settings.aily_app_id or configuration.get("aily_app_id")
     aily_skill_id = settings.aily_skill_id or configuration.get("aily_skill_id")
-    if not aily_app_id or not aily_skill_id:
+    aily_configured = bool(aily_app_id and aily_skill_id)
+    source: Literal["openai_compatible", "feishu_aily"]
+    output: dict[str, Any]
+    if ai_configuration["configured"]:
+        context = {
+            "business_lines": sorted(
+                {
+                    item
+                    for item in db.scalars(select(CourseSession.business_line)).all()
+                    if item
+                }
+            ),
+            "product_types": sorted(
+                {
+                    item
+                    for item in db.scalars(select(CourseSession.product_type)).all()
+                    if item
+                }
+            ),
+            "class_business_ids": sorted(
+                set(db.scalars(select(CourseSession.class_business_id)).all())
+            ),
+            "fixed_rule_labels": list(SOLVER_RULE_LABELS.values()),
+        }
+        try:
+            output = ai_service.interpret_instruction(request.instruction, context=context)
+        except AIServiceError as exc:
+            raise HTTPException(status_code=502, detail=f"AI 指令解析失败：{exc}") from exc
+        source = "openai_compatible"
+    elif aily_configured:
+        try:
+            output = FeishuService(settings, db).start_aily_skill(
+                user.id,
+                app_id=str(aily_app_id),
+                skill_id=str(aily_skill_id),
+                query=request.instruction,
+                input_payload={
+                    "contract": {
+                        "business_lines": "string[]",
+                        "product_types": "string[]",
+                        "class_business_ids": "string[]",
+                        "date_from": "YYYY-MM-DD|null",
+                        "date_to": "YYYY-MM-DD|null",
+                        "date_window_days": "integer",
+                        "recognized_rules": "string[]",
+                        "solver_rules": (
+                            "fixed_time|room_no_overlap|calendar_no_overlap|minimize_changes[]"
+                        ),
+                    }
+                },
+            )
+        except (FeishuServiceError, httpx.HTTPError) as exc:
+            raise HTTPException(status_code=502, detail=f"飞书 Aily 解析失败：{exc}") from exc
+        source = "feishu_aily"
+    else:
         raise HTTPException(
             status_code=409,
-            detail="尚未配置飞书 Aily，请先前往“飞书集成”填写 Aily 应用标识和技能标识。",
+            detail="尚未配置一句话排课 AI，请先前往“飞书集成”填写模型接口配置。",
         )
-    try:
-        aily_output = FeishuService(settings, db).start_aily_skill(
-            user.id,
-            app_id=str(aily_app_id),
-            skill_id=str(aily_skill_id),
-            query=request.instruction,
-            input_payload={
-                "contract": {
-                    "business_lines": "string[]",
-                    "product_types": "string[]",
-                    "class_business_ids": "string[]",
-                    "date_from": "YYYY-MM-DD|null",
-                    "date_to": "YYYY-MM-DD|null",
-                    "date_window_days": "integer",
-                    "recognized_rules": "string[]",
-                    "solver_rules": (
-                        "fixed_time|room_no_overlap|calendar_no_overlap|minimize_changes[]"
-                    ),
-                }
-            },
-        )
-    except (FeishuServiceError, httpx.HTTPError) as exc:
-        raise HTTPException(status_code=502, detail=f"飞书 Aily 解析失败：{exc}") from exc
     required_fields = {
         "business_lines",
         "product_types",
@@ -2387,33 +2467,39 @@ def assistant_interpret(
         "date_window_days",
         "recognized_rules",
     }
-    missing_fields = sorted(required_fields - set(aily_output))
+    missing_fields = sorted(required_fields - set(output))
     if missing_fields:
         raise HTTPException(
             status_code=502,
-            detail=f"飞书 Aily 输出缺少字段：{', '.join(missing_fields)}",
+            detail=f"AI 输出缺少字段：{', '.join(missing_fields)}",
         )
     parsed = {
-        "business_lines": _string_list(aily_output["business_lines"]),
-        "product_types": _string_list(aily_output["product_types"]),
-        "class_business_ids": _string_list(aily_output["class_business_ids"]),
-        "date_from": aily_output["date_from"],
-        "date_to": aily_output["date_to"],
-        "date_window_days": aily_output["date_window_days"],
-        "recognized_rules": _string_list(aily_output["recognized_rules"]),
+        "business_lines": _string_list(output["business_lines"]),
+        "product_types": _string_list(output["product_types"]),
+        "class_business_ids": _string_list(output["class_business_ids"]),
+        "date_from": output["date_from"],
+        "date_to": output["date_to"],
+        "date_window_days": output["date_window_days"],
+        "recognized_rules": _string_list(output["recognized_rules"]),
     }
     parsed["solver_rules"] = _solver_rules_from_labels(parsed["recognized_rules"])
     try:
         parsed = _validated_assistant_scope(db, parsed)
         normalized = AssistantInterpretResponse(
             instruction=request.instruction,
-            source="feishu_aily",
-            aily_configured=True,
+            source=source,
+            ai_configured=bool(ai_configuration["configured"]),
+            aily_configured=aily_configured,
             **parsed,
-            summary="已解析排课范围和固定业务规则，请教务确认后启动 CP-SAT 求解。",
+            summary=(
+                "通用 AI 模型已解析排课范围和固定业务规则"
+                if source == "openai_compatible"
+                else "飞书 Aily 已解析排课范围和固定业务规则"
+            )
+            + "，请教务确认后启动 CP-SAT 求解。",
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=f"Aily 返回结构不合法：{exc}") from exc
+        raise HTTPException(status_code=422, detail=f"AI 返回结构不合法：{exc}") from exc
     audit(
         db,
         user,

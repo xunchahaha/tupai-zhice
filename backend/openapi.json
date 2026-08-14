@@ -2530,6 +2530,78 @@
         }
       }
     },
+    "/api/v1/integrations/ai/configuration": {
+      "get": {
+        "tags": [
+          "integrations",
+          "ai"
+        ],
+        "summary": "Ai Configuration",
+        "operationId": "ai_configuration_api_v1_integrations_ai_configuration_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AIProviderConfigurationResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "integrations",
+          "ai"
+        ],
+        "summary": "Configure Ai Provider",
+        "operationId": "configure_ai_provider_api_v1_integrations_ai_configuration_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AIProviderConfigurationInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AIProviderConfigurationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/integrations/feishu/connection": {
       "get": {
         "tags": [
@@ -3088,6 +3160,110 @@
   },
   "components": {
     "schemas": {
+      "AIProviderConfigurationInput": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "const": "openai_compatible",
+            "title": "Provider",
+            "default": "openai_compatible"
+          },
+          "base_url": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 8,
+            "title": "Base Url"
+          },
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model"
+          }
+        },
+        "type": "object",
+        "required": [
+          "base_url",
+          "model"
+        ],
+        "title": "AIProviderConfigurationInput"
+      },
+      "AIProviderConfigurationResponse": {
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "title": "Configured"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "environment",
+              "frontend",
+              "none"
+            ],
+            "title": "Source"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "api_key_configured": {
+            "type": "boolean",
+            "title": "Api Key Configured"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          }
+        },
+        "type": "object",
+        "required": [
+          "configured",
+          "source",
+          "provider",
+          "base_url",
+          "api_key_configured",
+          "model"
+        ],
+        "title": "AIProviderConfigurationResponse"
+      },
       "AilyContextResponse": {
         "properties": {
           "entities": {
@@ -3322,8 +3498,15 @@
           },
           "source": {
             "type": "string",
-            "const": "feishu_aily",
+            "enum": [
+              "openai_compatible",
+              "feishu_aily"
+            ],
             "title": "Source"
+          },
+          "ai_configured": {
+            "type": "boolean",
+            "title": "Ai Configured"
           },
           "aily_configured": {
             "type": "boolean",
@@ -3410,6 +3593,7 @@
         "required": [
           "instruction",
           "source",
+          "ai_configured",
           "aily_configured",
           "summary"
         ],
@@ -4421,23 +4605,21 @@
           "aily_app_id": {
             "type": "string",
             "maxLength": 100,
-            "minLength": 8,
-            "title": "Aily App Id"
+            "title": "Aily App Id",
+            "default": ""
           },
           "aily_skill_id": {
             "type": "string",
             "maxLength": 100,
-            "minLength": 8,
-            "title": "Aily Skill Id"
+            "title": "Aily Skill Id",
+            "default": ""
           }
         },
         "type": "object",
         "required": [
           "app_id",
           "oauth_redirect_uri",
-          "frontend_url",
-          "aily_app_id",
-          "aily_skill_id"
+          "frontend_url"
         ],
         "title": "FeishuAppConfigurationInput"
       },

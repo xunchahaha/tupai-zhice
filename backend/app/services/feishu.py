@@ -15,7 +15,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from ..config import FEISHU_REQUIRED_SCOPES, FEISHU_RESOURCES, Settings
+from ..config import AILY_OPTIONAL_SCOPES, FEISHU_REQUIRED_SCOPES, FEISHU_RESOURCES, Settings
 from ..models import (
     FeishuAppConfiguration,
     FeishuConnection,
@@ -333,9 +333,11 @@ class FeishuService:
         normalized_frontend_url = self._validate_url(frontend_url, "前端地址")
         normalized_aily_app_id = aily_app_id.strip()
         normalized_aily_skill_id = aily_skill_id.strip()
-        if not normalized_aily_app_id.startswith("spring_"):
+        if bool(normalized_aily_app_id) != bool(normalized_aily_skill_id):
+            raise FeishuServiceError("Aily 应用标识和技能标识需要同时填写或同时留空")
+        if normalized_aily_app_id and not normalized_aily_app_id.startswith("spring_"):
             raise FeishuServiceError("Aily 应用标识应以 spring_ 开头")
-        if not normalized_aily_skill_id.startswith("skill_"):
+        if normalized_aily_skill_id and not normalized_aily_skill_id.startswith("skill_"):
             raise FeishuServiceError("Aily 技能标识应以 skill_ 开头")
 
         stored = self._stored_configuration()
@@ -435,6 +437,9 @@ class FeishuService:
 
     def create_oauth_start(self, user_id: str) -> dict[str, Any]:
         app = self._app_configuration()
+        scopes = list(FEISHU_REQUIRED_SCOPES)
+        if self.configuration_view()["aily_configured"]:
+            scopes.extend(AILY_OPTIONAL_SCOPES)
         state = secrets.token_urlsafe(32)
         expires_at = _utcnow() + timedelta(minutes=10)
         self.db.add(
@@ -451,7 +456,7 @@ class FeishuService:
                 "client_id": app.app_id,
                 "response_type": "code",
                 "redirect_uri": app.oauth_redirect_uri,
-                "scope": " ".join(FEISHU_REQUIRED_SCOPES),
+                "scope": " ".join(scopes),
                 "state": state,
             }
         )

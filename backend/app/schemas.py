@@ -429,13 +429,29 @@ class OverviewResponse(BaseModel):
     latest_sync_status: str | None
 
 
+class AIProviderConfigurationInput(BaseModel):
+    provider: Literal["openai_compatible"] = "openai_compatible"
+    base_url: str = Field(min_length=8, max_length=500)
+    api_key: str | None = Field(default=None, max_length=1000)
+    model: str = Field(min_length=1, max_length=200)
+
+
+class AIProviderConfigurationResponse(BaseModel):
+    configured: bool
+    source: Literal["environment", "frontend", "none"]
+    provider: str | None
+    base_url: str | None
+    api_key_configured: bool
+    model: str | None
+
+
 class FeishuAppConfigurationInput(BaseModel):
     app_id: str = Field(min_length=4, max_length=100)
     app_secret: str | None = Field(default=None, max_length=200)
     oauth_redirect_uri: str = Field(min_length=10, max_length=500)
     frontend_url: str = Field(min_length=8, max_length=500)
-    aily_app_id: str = Field(min_length=8, max_length=100)
-    aily_skill_id: str = Field(min_length=8, max_length=100)
+    aily_app_id: str = Field(default="", max_length=100)
+    aily_skill_id: str = Field(default="", max_length=100)
 
 
 class FeishuAppConfigurationResponse(BaseModel):
@@ -568,7 +584,8 @@ class AssistantInterpretRequest(BaseModel):
 
 class AssistantInterpretResponse(BaseModel):
     instruction: str
-    source: Literal["feishu_aily"]
+    source: Literal["openai_compatible", "feishu_aily"]
+    ai_configured: bool
     aily_configured: bool
     business_lines: list[str] = Field(default_factory=list)
     product_types: list[str] = Field(default_factory=list)

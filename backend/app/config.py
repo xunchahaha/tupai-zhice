@@ -33,8 +33,9 @@ FEISHU_REQUIRED_SCOPES = (
     "calendar:calendar.event:create",
     "calendar:calendar.event:update",
     "calendar:calendar.free_busy:read",
-    "aily:skill:write",
 )
+
+AILY_OPTIONAL_SCOPES = ("aily:skill:write",)
 
 
 class Settings(BaseSettings):
@@ -52,6 +53,13 @@ class Settings(BaseSettings):
     aily_skill_api_key: str = "aily-demo-key"
     aily_app_id: str = ""
     aily_skill_id: str = ""
+    ai_provider: str = "openai_compatible"
+    ai_base_url: str = ""
+    ai_api_key: str = ""
+    ai_model: str = ""
+    ai_request_timeout_seconds: float = 60.0
+    ai_token_encryption_key: str = ""
+    ai_token_key_file: Path = PROJECT_ROOT / "data" / "secrets" / "ai.key"
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"]
     )
@@ -78,6 +86,10 @@ class Settings(BaseSettings):
     @property
     def feishu_environment_configured(self) -> bool:
         return bool(self.feishu_app_id and self.feishu_app_secret)
+
+    @property
+    def ai_environment_configured(self) -> bool:
+        return bool(self.ai_base_url and self.ai_api_key and self.ai_model)
 
     @property
     def feishu_environment_missing_fields(self) -> list[str]:
