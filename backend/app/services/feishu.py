@@ -688,9 +688,19 @@ class FeishuService:
         user_id_type: str = "open_id",
         include_external_calendar: bool = True,
         only_busy: bool = True,
-        need_rsvp_status: bool = True,
     ) -> dict[str, Any]:
-        """Query up to ten users' primary-calendar busy intervals for at most two weeks."""
+        """查询若干用户主日历的忙闲区间。
+
+        官方「查询主日历日程忙闲信息」接口是
+        ``POST /open-apis/calendar/v4/freebusy/list``，一次只接受**一个**
+        ``user_id`` 或 ``room_id``（参数为 time_min、time_max、user_id/room_id、
+        include_external_calendar、only_busy）。此前实现调用的
+        ``/calendar/v4/freebusy/batch`` 与复数 ``user_ids`` 在官方文档中不存在，
+        真实环境会直接失败。这里改为逐用户请求后汇总，对外仍返回
+        ``freebusy_lists``，调用方无需改动。
+
+        单批仍限制在 10 个用户、两周窗口内，用来控制请求量。
+        """
         normalized_user_ids = [item.strip() for item in user_ids if item.strip()]
         if not 1 <= len(normalized_user_ids) <= 10:
             raise FeishuServiceError("单次飞书忙闲查询必须包含 1 至 10 个用户")
@@ -705,21 +715,29 @@ class FeishuService:
 
         connection, token = self.access_token(user_id)
         self._require_scopes(connection, {"calendar:calendar.free_busy:read"})
-        data, _ = self._request(
-            "POST",
-            f"{OPEN_API_URL}/calendar/v4/freebusy/batch",
-            token=token,
-            params={"user_id_type": user_id_type},
-            json_body={
-                "time_min": time_min,
-                "time_max": time_max,
-                "user_ids": normalized_user_ids,
-                "include_external_calendar": include_external_calendar,
-                "only_busy": only_busy,
-                "need_rsvp_status": need_rsvp_status,
-            },
-        )
-        return data
+        freebusy_lists: list[dict[str, Any]] = []
+        for target_user_id in normalized_user_ids:
+            data, _ = self._request(
+                "POST",
+                f"{OPEN_API_URL}/calendar/v4/freebusy/list",
+                token=token,
+                params={"user_id_type": user_id_type},
+                json_body={
+                    "time_min": time_min,
+                    "time_max": time_max,
+                    "user_id": target_user_id,
+                    "include_external_calendar": include_external_calendar,
+                    "only_busy": only_busy,
+                },
+            )
+            entries = data.get("freebusy_list")
+            freebusy_lists.append(
+                {
+                    "user_id": target_user_id,
+                    "freebusy_list": entries if isinstance(entries, list) else [],
+                }
+            )
+        return {"freebusy_lists": freebusy_lists}
 
     def create_calendar_event(
         self,

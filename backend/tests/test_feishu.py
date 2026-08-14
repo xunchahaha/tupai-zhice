@@ -434,8 +434,8 @@ def test_calendar_requests_use_user_token_and_official_payloads(monkeypatch: Any
 
     def calendar_request(method: str, url: str, **kwargs: Any) -> tuple[dict[str, Any], str]:
         calls.append({"method": method, "url": url, **kwargs})
-        if url.endswith("/freebusy/batch"):
-            return {"freebusy_lists": []}, "log-freebusy"
+        if url.endswith("/freebusy/list"):
+            return {"freebusy_list": [{"start_time": "s", "end_time": "e"}]}, "log-freebusy"
         if url.endswith("/attendees"):
             return {"attendees": [{"attendee_id": "attendee-1"}]}, "log-attendee"
         return {"event": {"event_id": "event-1"}}, "log-event"
@@ -466,36 +466,42 @@ def test_calendar_requests_use_user_token_and_official_payloads(monkeypatch: Any
         attendee_user_id="ou_teacher_1",
     )
 
-    assert freebusy == {"freebusy_lists": []}
+    # 官方接口一次只查一个用户，服务层逐用户请求后汇总。
+    assert freebusy == {
+        "freebusy_lists": [
+            {"user_id": "ou_teacher_1", "freebusy_list": [{"start_time": "s", "end_time": "e"}]},
+            {"user_id": "ou_teacher_2", "freebusy_list": [{"start_time": "s", "end_time": "e"}]},
+        ]
+    }
     assert event["event"]["event_id"] == "event-1"
     assert attendee["attendees"][0]["attendee_id"] == "attendee-1"
     assert calls[0] == {
         "method": "POST",
-        "url": "https://open.feishu.cn/open-apis/calendar/v4/freebusy/batch",
+        "url": "https://open.feishu.cn/open-apis/calendar/v4/freebusy/list",
         "token": "calendar-token",
         "params": {"user_id_type": "open_id"},
         "json_body": {
             "time_min": "2026-08-17T08:00:00+08:00",
             "time_max": "2026-08-24T18:00:00+08:00",
-            "user_ids": ["ou_teacher_1", "ou_teacher_2"],
+            "user_id": "ou_teacher_1",
             "include_external_calendar": True,
             "only_busy": True,
-            "need_rsvp_status": True,
         },
     }
-    assert calls[1]["url"].endswith(
+    assert calls[1]["json_body"]["user_id"] == "ou_teacher_2"
+    assert calls[2]["url"].endswith(
         "/calendar/v4/calendars/feishu.cn_teacher%2Fcalendar%40primary/events"
     )
-    assert calls[1]["params"] == {
+    assert calls[2]["params"] == {
         "user_id_type": "open_id",
         "idempotency_key": "schedule-assignment-000000000000001",
     }
-    assert calls[1]["json_body"]["free_busy_status"] == "busy"
-    assert calls[2]["url"].endswith(
+    assert calls[2]["json_body"]["free_busy_status"] == "busy"
+    assert calls[3]["url"].endswith(
         "/calendar/v4/calendars/feishu.cn_teacher%2Fcalendar%40primary/events/"
         "event%2F1/attendees"
     )
-    assert calls[2]["json_body"] == {
+    assert calls[3]["json_body"] == {
         "attendees": [
             {"type": "user", "user_id": "ou_teacher_1", "is_optional": False}
         ],

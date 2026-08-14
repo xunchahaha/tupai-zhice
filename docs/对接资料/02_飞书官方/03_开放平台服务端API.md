@@ -82,6 +82,23 @@
 
 当前不申请删除表、删除记录和完整 `bitable:app` 权限。
 
+## 日历接口
+
+- 创建日程：`POST /open-apis/calendar/v4/calendars/{calendar_id}/events`
+- 添加日程参与人：`POST /open-apis/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees`
+- 查询主日历忙闲：`POST /open-apis/calendar/v4/freebusy/list`
+
+实现约束（2026-08-15 逐页复核）：
+
+- 三个接口均支持 `user_access_token`，与本项目「资源归属授权管理员」的选择一致。
+- 忙闲查询**一次只接受一个** `user_id` 或 `room_id`，参数为 `time_min`、`time_max`、
+  `user_id`/`room_id`、`include_external_calendar`、`only_busy`。不存在
+  `freebusy/batch` 地址，也不存在复数 `user_ids` 参数。需要查多个教师时逐个请求后汇总。
+- 权限均为「开启任一权限即可」：创建日程用 `calendar:calendar.event:create`，
+  添加参与人用 `calendar:calendar.event:update`，忙闲查询用
+  `calendar:calendar.free_busy:read`；三者也都可由粗粒度的 `calendar:calendar` 覆盖，
+  本项目按最小权限申请细粒度键。
+
 ## 多维表格插件的边界
 
 官方概述：https://open.feishu.cn/document/base-extensions/base-extension-introduction
