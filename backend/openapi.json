@@ -2020,7 +2020,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/SolverRunResponse"
+                    "$ref": "#/components/schemas/SolverRunDetailResponse"
                   },
                   "type": "array",
                   "title": "Response List Solver Runs Api V1 Solver Runs Get"
@@ -2057,7 +2057,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SolverRunResponse"
+                  "$ref": "#/components/schemas/SolverRunDetailResponse"
                 }
               }
             }
@@ -2109,7 +2109,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SolverRunResponse"
+                  "$ref": "#/components/schemas/SolverRunDetailResponse"
                 }
               }
             }
@@ -2169,7 +2169,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SolverRunExplanation"
+                  "$ref": "#/components/schemas/SolverRunExplanationDetail"
                 }
               }
             }
@@ -6600,6 +6600,146 @@
         "type": "object",
         "title": "SolveRequest"
       },
+      "SolverRunDetailResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "snapshot_id": {
+            "type": "string",
+            "title": "Snapshot Id"
+          },
+          "run_type": {
+            "type": "string",
+            "title": "Run Type"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "model_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Status"
+          },
+          "presolve_infeasible": {
+            "type": "boolean",
+            "title": "Presolve Infeasible",
+            "default": false
+          },
+          "objective_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objective Value"
+          },
+          "best_bound": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Best Bound"
+          },
+          "wall_time_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wall Time Seconds"
+          },
+          "conflict_rule_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Conflict Rule Ids"
+          },
+          "priority_rule_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Priority Rule Ids"
+          },
+          "priority_explanations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Priority Explanations"
+          },
+          "explanation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SolverRunExplanationDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "snapshot_id",
+          "run_type",
+          "status",
+          "model_status",
+          "objective_value",
+          "best_bound",
+          "wall_time_seconds",
+          "conflict_rule_ids",
+          "priority_rule_ids",
+          "priority_explanations",
+          "error_message",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SolverRunDetailResponse",
+        "description": "求解任务响应，解释部分带上建议指令。\n\n解释以 JSON 落在 `SolverRun.explanation` 里，列表和详情都要能把这段建议原样带回\n前端，否则刷新页面后建议指令就消失了。"
+      },
       "SolverRunExplanation": {
         "properties": {
           "headline": {
@@ -6668,6 +6808,87 @@
           "source"
         ],
         "title": "SolverRunExplanation"
+      },
+      "SolverRunExplanationDetail": {
+        "properties": {
+          "headline": {
+            "type": "string",
+            "title": "Headline"
+          },
+          "explanation": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Explanation"
+          },
+          "next_actions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Next Actions"
+          },
+          "intent_review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IntentReview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "deterministic",
+              "ai"
+            ],
+            "title": "Source"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage"
+          },
+          "ai_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ai Error"
+          },
+          "suggested_instruction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggested Instruction"
+          }
+        },
+        "type": "object",
+        "required": [
+          "headline",
+          "source"
+        ],
+        "title": "SolverRunExplanationDetail",
+        "description": "比 `SolverRunExplanation` 多一段可直接粘回「一句话排课」输入框的指令草稿。\n\n这段文字由 `explain.build_retry_instruction` 确定性拼出，不是模型写的，\n因此不与 AI 措辞共用契约；求解正常结束时为 None。"
       },
       "SolverRunResponse": {
         "properties": {

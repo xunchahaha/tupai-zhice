@@ -131,7 +131,12 @@ from .services.converter_zhengzhou import (
     WorkbookFormatError,
     import_schedule_workbook,
 )
-from .services.explain import build_explanation_facts, deterministic_summary
+from .services.explain import (
+    SOLVER_RULE_LABELS,
+    build_explanation_facts,
+    build_retry_instruction,
+    deterministic_summary,
+)
 from .services.feishu import FeishuService, FeishuServiceError, json_text
 from .services.snapshot import create_snapshot
 from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
@@ -1552,7 +1557,29 @@ def create_solver_run(
     return run
 
 
-@router.post("/solver-runs", response_model=SolverRunResponse, status_code=202, tags=["solver"])
+class SolverRunExplanationDetail(SolverRunExplanation):
+    """比 `SolverRunExplanation` 多一段可直接粘回「一句话排课」输入框的指令草稿。
+
+    这段文字由 `explain.build_retry_instruction` 确定性拼出，不是模型写的，
+    因此不与 AI 措辞共用契约；求解正常结束时为 None。
+    """
+
+    suggested_instruction: str | None = None
+
+
+class SolverRunDetailResponse(SolverRunResponse):
+    """求解任务响应，解释部分带上建议指令。
+
+    解释以 JSON 落在 `SolverRun.explanation` 里，列表和详情都要能把这段建议原样带回
+    前端，否则刷新页面后建议指令就消失了。
+    """
+
+    explanation: SolverRunExplanationDetail | None = None
+
+
+@router.post(
+    "/solver-runs", response_model=SolverRunDetailResponse, status_code=202, tags=["solver"]
+)
 def submit_solver_run(request: SolveRequest, db: Db, user: AdminOrScheduler) -> SolverRun:
     run = create_solver_run(db, user.id, request)
     audit(db, user, "submit", "solver_run", run.id)
@@ -1565,19 +1592,19 @@ def submit_solver_run(request: SolveRequest, db: Db, user: AdminOrScheduler) -> 
     return run
 
 
-@router.get("/solver-runs", response_model=list[SolverRunResponse], tags=["solver"])
+@router.get("/solver-runs", response_model=list[SolverRunDetailResponse], tags=["solver"])
 def list_solver_runs(db: Db, user: CurrentUser) -> list[SolverRun]:
     return list(db.scalars(select(SolverRun).order_by(SolverRun.created_at.desc()).limit(50)))
 
 
-@router.get("/solver-runs/{run_id}", response_model=SolverRunResponse, tags=["solver"])
+@router.get("/solver-runs/{run_id}", response_model=SolverRunDetailResponse, tags=["solver"])
 def get_solver_run(run_id: str, db: Db, user: CurrentUser) -> SolverRun:
     return get_or_404(db, SolverRun, run_id)
 
 
 @router.post(
     "/solver-runs/{run_id}/explanation",
-    response_model=SolverRunExplanation,
+    response_model=SolverRunExplanationDetail,
     tags=["solver"],
 )
 def explain_solver_run(
@@ -1595,7 +1622,14 @@ def explain_solver_run(
     if run.status not in {"completed", "failed"}:
         raise HTTPException(status_code=409, detail="求解尚未结束，暂时无法解释结果")
     if run.explanation and not refresh:
-        return dict(run.explanation)
+        cached = dict(run.explanation)
+        # 这次求解之前落库的解释没有建议指令这一段，按当前事实补一次，
+        # 免得同样排不出来的两条记录一条给得出建议、一条给不出。
+        if "suggested_instruction" not in cached:
+            cached["suggested_instruction"] = build_retry_instruction(
+                build_explanation_facts(db, run)
+            )
+        return cached
 
     facts = build_explanation_facts(db, run)
     payload = deterministic_summary(facts)
@@ -1603,6 +1637,9 @@ def explain_solver_run(
         payload = AIService(settings, db).explain_solver_run(facts)
     except AIServiceError as exc:
         payload["ai_error"] = str(exc)
+    # 建议指令要能被 /assistant/interpret 原样解析，所以无论措辞来自模型还是兜底，
+    # 都用同一段确定性文本，不让模型自由发挥出解析不了的指令。
+    payload["suggested_instruction"] = build_retry_instruction(facts)
 
     run.explanation = payload
     audit(
@@ -2871,15 +2908,6 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
-
-
-SOLVER_RULE_LABELS = {
-    "fixed_time": "固定时段不可调整",
-    "room_no_overlap": "同一教室真实时间区间不可重叠",
-    "teacher_no_overlap": "同一教师不可同时上两节课",
-    "calendar_no_overlap": "同一具体日程账号不可重叠",
-    "minimize_changes": "优先最小化日期和教室变更",
-}
 
 
 def _solver_rules_from_labels(labels: list[str]) -> list[str]:
