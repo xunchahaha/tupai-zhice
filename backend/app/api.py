@@ -2356,6 +2356,7 @@ def _string_list(value: Any) -> list[str]:
 SOLVER_RULE_LABELS = {
     "fixed_time": "固定时段不可调整",
     "room_no_overlap": "同一教室真实时间区间不可重叠",
+    "teacher_no_overlap": "同一教师不可同时上两节课",
     "calendar_no_overlap": "同一具体日程账号不可重叠",
     "minimize_changes": "优先最小化日期和教室变更",
 }
@@ -2364,7 +2365,7 @@ SOLVER_RULE_LABELS = {
 def _solver_rules_from_labels(labels: list[str]) -> list[str]:
     matched = [key for key, label in SOLVER_RULE_LABELS.items() if label in labels]
     # 固定时段及两类资源冲突是企业确认的基础硬约束，不能因模型漏字段而消失。
-    mandatory = ["fixed_time", "room_no_overlap", "calendar_no_overlap"]
+    mandatory = ["fixed_time", "room_no_overlap", "teacher_no_overlap", "calendar_no_overlap"]
     return list(dict.fromkeys([*mandatory, *matched]))
 
 

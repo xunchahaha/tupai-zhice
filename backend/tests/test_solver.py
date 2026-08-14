@@ -232,6 +232,13 @@ def test_date_solver_allows_reused_class_label_across_product_types() -> None:
                 product_type="考研·走读SMART春季（无数学）",
             ),
         ],
+        teachers=[
+            {
+                "business_id": "郑州考研英语教研组",
+                "name": "郑州考研英语教研组",
+                "is_group": True,
+            }
+        ],
         date_window_days=0,
     )
 
@@ -251,6 +258,7 @@ def test_teacher_group_text_does_not_create_personal_calendar_conflict() -> None
             {
                 "business_id": "郑州考研英语教研组",
                 "name": "郑州考研英语教研组",
+                "is_group": True,
                 "calendar_user_id": None,
             }
         ],
@@ -274,6 +282,7 @@ def test_concrete_calendar_user_cannot_have_overlapping_sessions() -> None:
             {
                 "business_id": "郑州考研英语教研组",
                 "name": "郑州考研英语教研组",
+                "is_group": True,
                 "calendar_user_id": "ou_teacher_1",
             }
         ],
@@ -294,6 +303,7 @@ def test_solver_rule_contract_is_applied_by_date_model() -> None:
             {
                 "business_id": "郑州考研英语教研组",
                 "name": "郑州考研英语教研组",
+                "is_group": True,
                 "calendar_user_id": "ou_teacher_1",
             }
         ],
@@ -325,6 +335,7 @@ def test_course_calendar_user_takes_priority_over_teacher_mapping() -> None:
             {
                 "business_id": "郑州考研英语教研组",
                 "name": "郑州考研英语教研组",
+                "is_group": True,
                 "calendar_user_id": "ou_teacher_shared",
             }
         ],
@@ -616,3 +627,99 @@ def test_filtered_solver_respects_unselected_parent_assignment_as_fixed_occupanc
 
     assert result["model_status"] == "OPTIMAL"
     assert result["assignments"][0]["lesson_date"] != "2026-09-07"
+
+
+def test_plain_teacher_cannot_be_double_booked_without_calendar_mapping() -> None:
+    """没有飞书日历映射的普通教师，也必须拿到「同一时刻至多一节课」这条硬约束。
+
+    这是「换一所学校也能用」的底线：以前教师互斥只在 calendar_user_id 非空时才建，
+    而导入器从不写这个字段，等于任何新导入的数据都没有教师约束。
+    """
+    payload = _date_payload(
+        [
+            _course("C1", class_id="B1", teacher_id="T-1001", room="R1"),
+            _course("C2", class_id="B2", teacher_id="T-1001", room="R2"),
+        ],
+        teachers=[{"business_id": "T-1001", "name": "王老师", "calendar_user_id": None}],
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "INFEASIBLE"
+    assert "SYSTEM-TEACHER-NO-OVERLAP" in result["conflict_rule_ids"]
+
+
+def test_unknown_teacher_defaults_to_person_not_group() -> None:
+    """主数据里查不到的教师按自然人处理——宁可多约束，也不要静默排出双排课表。"""
+    payload = _date_payload(
+        [
+            _course("C1", class_id="B1", teacher_id="T-未登记", room="R1"),
+            _course("C2", class_id="B2", teacher_id="T-未登记", room="R2"),
+        ],
+        teachers=[],
+    )
+
+    assert solve_problem(payload)["model_status"] == "INFEASIBLE"
+
+
+def test_teaching_group_may_run_parallel_sessions_when_declared() -> None:
+    """教研组代表多名自然人，显式声明后允许并行开课。"""
+    payload = _date_payload(
+        [
+            _course("C1", class_id="B1", teacher_id="英语教研组", room="R1"),
+            _course("C2", class_id="B2", teacher_id="英语教研组", room="R2"),
+        ],
+        teachers=[{"business_id": "英语教研组", "name": "英语教研组", "is_group": True}],
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "OPTIMAL"
+    assert len(result["assignments"]) == 2
+
+
+def test_slot_matrix_path_also_skips_teacher_conflict_for_groups() -> None:
+    """两条求解路径的教师语义必须一致，否则同一份数据会得到互相矛盾的可行性判断。"""
+    slots = [
+        {
+            "business_id": "S1",
+            "weekday": "周一",
+            "start_time": "08:30",
+            "end_time": "11:30",
+            "kind": "上午",
+            "sequence": 1,
+            "is_open": True,
+        }
+    ]
+    rooms = [
+        {"business_id": "R1", "name": "教室1", "is_active": True},
+        {"business_id": "R2", "name": "教室2", "is_active": True},
+    ]
+
+    def payload(is_group: bool) -> dict:
+        return {
+            "teachers": [
+                {"business_id": "T1", "name": "教师一", "is_group": is_group},
+            ],
+            "rooms": rooms,
+            "time_slots": slots,
+            "course_sessions": [
+                {
+                    "id": "db-C1",
+                    "business_id": "C1",
+                    "class_business_id": "B1",
+                    "teacher_business_id": "T1",
+                },
+                {
+                    "id": "db-C2",
+                    "business_id": "C2",
+                    "class_business_id": "B2",
+                    "teacher_business_id": "T1",
+                },
+            ],
+            "rules": [],
+            "time_limit_seconds": 5,
+        }
+
+    assert solve_problem(payload(is_group=False))["model_status"] == "INFEASIBLE"
+    assert solve_problem(payload(is_group=True))["model_status"] == "OPTIMAL"

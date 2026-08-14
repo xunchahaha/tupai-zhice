@@ -160,6 +160,8 @@ class Teacher(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(120))
     subject: Mapped[str] = mapped_column(String(80), default="")
     calendar_user_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # 教研组代表多名自然人，可以同时开课；自然人不行。求解器据此决定是否建教师互斥。
+    is_group: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class ClassGroup(TimestampMixin, Base):

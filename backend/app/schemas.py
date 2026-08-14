@@ -8,12 +8,22 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 Role = Literal["admin", "scheduler", "approver", "viewer"]
 RuleStatus = Literal["draft", "awaiting_confirmation", "active", "rejected", "retired"]
 SolverRule = Literal[
-    "fixed_time", "room_no_overlap", "calendar_no_overlap", "minimize_changes"
+    "fixed_time",
+    "room_no_overlap",
+    "teacher_no_overlap",
+    "calendar_no_overlap",
+    "minimize_changes",
 ]
 
 
 def default_solver_rules() -> list[SolverRule]:
-    return ["fixed_time", "room_no_overlap", "calendar_no_overlap", "minimize_changes"]
+    return [
+        "fixed_time",
+        "room_no_overlap",
+        "teacher_no_overlap",
+        "calendar_no_overlap",
+        "minimize_changes",
+    ]
 
 
 class ORMModel(BaseModel):

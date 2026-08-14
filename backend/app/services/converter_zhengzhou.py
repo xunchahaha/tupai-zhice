@@ -385,6 +385,8 @@ def import_schedule_workbook(
             {
                 "name": name,
                 "subject": subjects.most_common(1)[0][0] if subjects else "",
+                # 源表「授课教师」列填的是教研组，不是自然人。
+                "is_group": True,
             },
         )
 

@@ -13,6 +13,7 @@ export type SolveRequestSolverRulesItem = typeof SolveRequestSolverRulesItem[key
 export const SolveRequestSolverRulesItem = {
   fixed_time: 'fixed_time',
   room_no_overlap: 'room_no_overlap',
+  teacher_no_overlap: 'teacher_no_overlap',
   calendar_no_overlap: 'calendar_no_overlap',
   minimize_changes: 'minimize_changes',
 } as const;

@@ -44,7 +44,7 @@ def build_snapshot_payload(db: Session) -> dict[str, object]:
         "teachers": [
             _model_dict(
                 item,
-                ["id", "business_id", "name", "subject", "calendar_user_id"],
+                ["id", "business_id", "name", "subject", "calendar_user_id", "is_group"],
             )
             for item in teachers
         ],

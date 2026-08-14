@@ -422,12 +422,22 @@ def _date_infeasible_diagnostics(payload: dict[str, Any]) -> tuple[list[str], li
         ids.append("SYSTEM-CLASS-NO-OVERLAP")
     solver_rules = set(
         payload.get("solver_rules")
-        or {"fixed_time", "room_no_overlap", "calendar_no_overlap", "minimize_changes"}
+        or {
+            "fixed_time",
+            "room_no_overlap",
+            "teacher_no_overlap",
+            "calendar_no_overlap",
+            "minimize_changes",
+        }
     )
     if "room_no_overlap" in solver_rules and any(
         item.startswith("SYSTEM-ROOM-NO-OVERLAP") for item in capacity_explanations
     ):
         ids.append("SYSTEM-ROOM-NO-OVERLAP")
+    if "teacher_no_overlap" in solver_rules and any(
+        item.startswith("SYSTEM-TEACHER-NO-OVERLAP") for item in capacity_explanations
+    ):
+        ids.append("SYSTEM-TEACHER-NO-OVERLAP")
     if "calendar_no_overlap" in solver_rules and any(
         item.startswith("SYSTEM-CALENDAR-NO-OVERLAP") for item in capacity_explanations
     ):
@@ -439,6 +449,11 @@ def _date_infeasible_diagnostics(payload: dict[str, Any]) -> tuple[list[str], li
                 *(
                     ["SYSTEM-ROOM-NO-OVERLAP"]
                     if "room_no_overlap" in solver_rules
+                    else []
+                ),
+                *(
+                    ["SYSTEM-TEACHER-NO-OVERLAP"]
+                    if "teacher_no_overlap" in solver_rules
                     else []
                 ),
                 *(
@@ -472,10 +487,17 @@ def _date_capacity_explanations(payload: dict[str, Any]) -> list[str]:
     active_rooms = sum(1 for item in payload.get("rooms", []) if item.get("is_active"))
     solver_rules = set(
         payload.get("solver_rules")
-        or {"fixed_time", "room_no_overlap", "calendar_no_overlap", "minimize_changes"}
+        or {
+            "fixed_time",
+            "room_no_overlap",
+            "teacher_no_overlap",
+            "calendar_no_overlap",
+            "minimize_changes",
+        }
     )
     groups: dict[tuple[str, Any], list[tuple[date, date, str]]] = defaultdict(list)
     calendar_groups: dict[tuple[str, Any], list[tuple[date, date, str]]] = defaultdict(list)
+    person_groups: dict[tuple[str, Any], list[tuple[date, date, str]]] = defaultdict(list)
     room_groups: dict[Any, list[tuple[date, date, str]]] = defaultdict(list)
     for session in sessions:
         original = _parse_date(session.get("lesson_date"))
@@ -499,6 +521,9 @@ def _date_capacity_explanations(payload: dict[str, Any]) -> list[str]:
         ).strip()
         if calendar_user_id:
             calendar_groups[(calendar_user_id, clock)].append(interval)
+        teacher_id = str(session.get("teacher_business_id") or "")
+        if teacher_id and _is_person(teacher):
+            person_groups[(teacher_id, clock)].append(interval)
 
     explanations: list[str] = []
 
@@ -542,9 +567,20 @@ def _date_capacity_explanations(payload: dict[str, Any]) -> list[str]:
     scan(groups, 1, "SYSTEM-CLASS-NO-OVERLAP", "班级场景")
     if "room_no_overlap" in solver_rules:
         scan(room_groups, active_rooms, "SYSTEM-ROOM-NO-OVERLAP", "教室")
+    if "teacher_no_overlap" in solver_rules:
+        scan(person_groups, 1, "SYSTEM-TEACHER-NO-OVERLAP", "教师")
     if "calendar_no_overlap" in solver_rules:
         scan(calendar_groups, 1, "SYSTEM-CALENDAR-NO-OVERLAP", "具体日程账号")
     return explanations[:3]
+
+
+def _is_person(teacher: dict[str, Any]) -> bool:
+    """教研组可以同时开课，自然人不行。
+
+    缺省按自然人处理：任何没有显式声明为教研组的数据集，都必须拿到「同一教师同一
+    时刻至多一节课」这条硬约束，否则换一份没有飞书日历映射的数据就会静默排出双排课表。
+    """
+    return not bool(teacher.get("is_group"))
 
 
 def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
@@ -563,7 +599,13 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
     rules = _normalized_rules(payload)
     solver_rules = set(
         payload.get("solver_rules")
-        or {"fixed_time", "room_no_overlap", "calendar_no_overlap", "minimize_changes"}
+        or {
+            "fixed_time",
+            "room_no_overlap",
+            "teacher_no_overlap",
+            "calendar_no_overlap",
+            "minimize_changes",
+        }
     )
     event = payload.get("event") or {}
     date_window = int(payload.get("date_window_days", 7))
@@ -594,7 +636,8 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
     room_choices: dict[tuple[str, str], cp_model.IntVar] = {}
     room_intervals: dict[str, list[cp_model.IntervalVar]] = {room_id: [] for room_id in rooms}
     class_intervals: dict[tuple[str, str, str], list[cp_model.IntervalVar]] = {}
-    teacher_intervals: dict[str, list[cp_model.IntervalVar]] = {}
+    calendar_intervals: dict[str, list[cp_model.IntervalVar]] = {}
+    person_intervals: dict[str, list[cp_model.IntervalVar]] = {}
     objective_terms: list[Any] = []
 
     selected_business_ids = {str(item["business_id"]) for item in sessions}
@@ -624,12 +667,15 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         if room_id in room_intervals:
             room_intervals[room_id].append(fixed_interval)
         class_intervals.setdefault(_class_scope_key(course), []).append(fixed_interval)
-        teacher = teachers.get(str(course["teacher_business_id"]), {})
+        teacher_id = str(course["teacher_business_id"])
+        teacher = teachers.get(teacher_id, {})
         calendar_user_id = str(
             course.get("calendar_user_id") or teacher.get("calendar_user_id") or ""
         ).strip()
         if calendar_user_id:
-            teacher_intervals.setdefault(calendar_user_id, []).append(fixed_interval)
+            calendar_intervals.setdefault(calendar_user_id, []).append(fixed_interval)
+        if teacher_id and _is_person(teacher):
+            person_intervals.setdefault(teacher_id, []).append(fixed_interval)
 
     for session in sessions:
         course_id = session["business_id"]
@@ -850,17 +896,27 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         if grouped:
             model.add_no_overlap(grouped)
 
-    # 原始“授课教师”是教研组。只有映射到具体飞书用户后，才按个人日历做不重叠约束。
+    # 教师维度有两层：自然人（教师标识本身）和具体飞书日程账号。
+    # 教研组不是自然人，只有映射到具体账号后才按个人日历约束。
     for session in sessions:
+        teacher_id = str(session["teacher_business_id"])
         teacher = teachers.get(session["teacher_business_id"], {})
         calendar_user_id = str(
             session.get("calendar_user_id") or teacher.get("calendar_user_id") or ""
         ).strip()
         teacher_interval = intervals.get(session["business_id"])
-        if calendar_user_id and teacher_interval is not None:
-            teacher_intervals.setdefault(calendar_user_id, []).append(teacher_interval)
+        if teacher_interval is None:
+            continue
+        if calendar_user_id:
+            calendar_intervals.setdefault(calendar_user_id, []).append(teacher_interval)
+        if teacher_id and _is_person(teacher):
+            person_intervals.setdefault(teacher_id, []).append(teacher_interval)
+    if "teacher_no_overlap" in solver_rules:
+        for grouped in person_intervals.values():
+            if grouped:
+                model.add_no_overlap(grouped)
     if "calendar_no_overlap" in solver_rules:
-        for grouped in teacher_intervals.values():
+        for grouped in calendar_intervals.values():
             if grouped:
                 model.add_no_overlap(grouped)
 
@@ -941,7 +997,22 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
         else:
             model.add_bool_or([])
 
-    for teacher_id in teachers:
+    solver_rules = set(
+        payload.get("solver_rules")
+        or {
+            "fixed_time",
+            "room_no_overlap",
+            "teacher_no_overlap",
+            "calendar_no_overlap",
+            "minimize_changes",
+        }
+    )
+    person_teacher_ids = (
+        [key for key, item in teachers.items() if _is_person(item)]
+        if "teacher_no_overlap" in solver_rules
+        else []
+    )
+    for teacher_id in person_teacher_ids:
         for slot_id in slots:
             model.add_at_most_one(
                 variable
