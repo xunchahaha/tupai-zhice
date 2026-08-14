@@ -378,6 +378,22 @@ class AssignmentResponse(BaseModel):
     change_kind: str
 
 
+class ScheduleSummaryResponse(ORMModel):
+    """课表列表项。不内联 assignments——真实数据下每个版本上万行，
+    列表接口会把全部版本的排课行一次性吐给前端。"""
+
+    id: str
+    version_no: int
+    name: str
+    status: str
+    parent_id: str | None
+    solver_run_id: str
+    metrics: dict[str, Any]
+    assignment_count: int = 0
+    published_at: datetime | None
+    created_at: datetime
+
+
 class ScheduleResponse(ORMModel):
     id: str
     version_no: int

@@ -99,6 +99,7 @@ from .schemas import (
     ScheduleDiffItem,
     ScheduleDiffResponse,
     ScheduleResponse,
+    ScheduleSummaryResponse,
     SolveRequest,
     SolverRunResponse,
     TeacherBatchUpdate,
@@ -1382,10 +1383,35 @@ async def solver_run_events(run_id: str, user: CurrentUser) -> StreamingResponse
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@router.get("/schedules", response_model=list[ScheduleResponse], tags=["schedules"])
-def list_schedules(db: Db, user: CurrentUser) -> list[ScheduleResponse]:
-    versions = list(db.scalars(select(ScheduleVersion).order_by(ScheduleVersion.version_no.desc())))
-    return [schedule_response(db, item) for item in versions]
+@router.get("/schedules", response_model=list[ScheduleSummaryResponse], tags=["schedules"])
+def list_schedules(db: Db, user: CurrentUser) -> list[ScheduleSummaryResponse]:
+    versions = list(
+        db.scalars(select(ScheduleVersion).order_by(ScheduleVersion.version_no.desc()))
+    )
+    counts: dict[str, int] = {
+        str(version_id): int(total)
+        for version_id, total in db.execute(
+            select(
+                ScheduleAssignment.schedule_version_id,
+                func.count(ScheduleAssignment.id),
+            ).group_by(ScheduleAssignment.schedule_version_id)
+        ).all()
+    }
+    return [
+        ScheduleSummaryResponse(
+            id=item.id,
+            version_no=item.version_no,
+            name=item.name,
+            status=item.status,
+            parent_id=item.parent_id,
+            solver_run_id=item.solver_run_id,
+            metrics=item.metrics,
+            assignment_count=counts.get(item.id, 0),
+            published_at=item.published_at,
+            created_at=item.created_at,
+        )
+        for item in versions
+    ]
 
 
 @router.get("/schedules/{schedule_id}", response_model=ScheduleResponse, tags=["schedules"])

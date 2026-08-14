@@ -8,6 +8,8 @@
 import type { RescheduleCreateEventType } from './rescheduleCreateEventType';
 import type { RescheduleCreateTeacherBusinessId } from './rescheduleCreateTeacherBusinessId';
 import type { RescheduleCreateRoomBusinessId } from './rescheduleCreateRoomBusinessId';
+import type { RescheduleCreateDateFrom } from './rescheduleCreateDateFrom';
+import type { RescheduleCreateDateTo } from './rescheduleCreateDateTo';
 import type { RescheduleCreateCourseBusinessId } from './rescheduleCreateCourseBusinessId';
 
 export interface RescheduleCreate {
@@ -17,6 +19,8 @@ export interface RescheduleCreate {
   teacher_business_id?: RescheduleCreateTeacherBusinessId;
   room_business_id?: RescheduleCreateRoomBusinessId;
   slot_business_ids?: string[];
+  date_from?: RescheduleCreateDateFrom;
+  date_to?: RescheduleCreateDateTo;
   course_business_id?: RescheduleCreateCourseBusinessId;
   /**
    * @minimum 1

@@ -2155,7 +2155,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/ScheduleResponse"
+                    "$ref": "#/components/schemas/ScheduleSummaryResponse"
                   },
                   "type": "array",
                   "title": "Response List Schedules Api V1 Schedules Get"
@@ -6159,6 +6159,82 @@
           "created_at"
         ],
         "title": "ScheduleResponse"
+      },
+      "ScheduleSummaryResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "version_no": {
+            "type": "integer",
+            "title": "Version No"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "solver_run_id": {
+            "type": "string",
+            "title": "Solver Run Id"
+          },
+          "metrics": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metrics"
+          },
+          "assignment_count": {
+            "type": "integer",
+            "title": "Assignment Count",
+            "default": 0
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "version_no",
+          "name",
+          "status",
+          "parent_id",
+          "solver_run_id",
+          "metrics",
+          "published_at",
+          "created_at"
+        ],
+        "title": "ScheduleSummaryResponse",
+        "description": "课表列表项。不内联 assignments——真实数据下每个版本上万行，\n列表接口会把全部版本的排课行一次性吐给前端。"
       },
       "SolveRequest": {
         "properties": {

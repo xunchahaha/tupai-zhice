@@ -62,6 +62,7 @@ import type {
   HealthLiveApiV1HealthLiveGet200,
   HealthReadyApiV1HealthReadyGet200,
   ImportResult,
+  ImportXlsxApiV1ImportsXlsxPostParams,
   IntegrationSyncResponse,
   ListAuditLogsApiV1AuditLogsGetParams,
   ListRulesApiV1RulesGetParams,
@@ -79,6 +80,7 @@ import type {
   RuleUpdate,
   ScheduleDiffResponse,
   ScheduleResponse,
+  ScheduleSummaryResponse,
   SolveRequest,
   SolverRunResponse,
   TeacherBatchUpdate,
@@ -1066,6 +1068,7 @@ export function useDownloadSampleWorkbookApiV1ImportsSampleXlsxGet<TData = Await
  */
 export const importXlsxApiV1ImportsXlsxPost = (
     bodyImportXlsxApiV1ImportsXlsxPost: BodyImportXlsxApiV1ImportsXlsxPost,
+    params?: ImportXlsxApiV1ImportsXlsxPostParams,
  signal?: AbortSignal
 ) => {
       
@@ -1075,7 +1078,8 @@ formData.append(`file`, bodyImportXlsxApiV1ImportsXlsxPost.file)
       return customInstance<ImportResult>(
       {url: `/api/v1/imports/xlsx`, method: 'POST',
       headers: {'Content-Type': 'multipart/form-data', },
-       data: formData, signal
+       data: formData,
+        params, signal
     },
       );
     }
@@ -1083,8 +1087,8 @@ formData.append(`file`, bodyImportXlsxApiV1ImportsXlsxPost.file)
 
 
 export const getImportXlsxApiV1ImportsXlsxPostMutationOptions = <TError = HTTPValidationError,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof importXlsxApiV1ImportsXlsxPost>>, TError,{data: BodyImportXlsxApiV1ImportsXlsxPost}, TContext>, }
-): UseMutationOptions<Awaited<ReturnType<typeof importXlsxApiV1ImportsXlsxPost>>, TError,{data: BodyImportXlsxApiV1ImportsXlsxPost}, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof importXlsxApiV1ImportsXlsxPost>>, TError,{data: BodyImportXlsxApiV1ImportsXlsxPost;params?: ImportXlsxApiV1ImportsXlsxPostParams}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof importXlsxApiV1ImportsXlsxPost>>, TError,{data: BodyImportXlsxApiV1ImportsXlsxPost;params?: ImportXlsxApiV1ImportsXlsxPostParams}, TContext> => {
 
 const mutationKey = ['importXlsxApiV1ImportsXlsxPost'];
 const {mutation: mutationOptions} = options ?
@@ -1096,10 +1100,10 @@ const {mutation: mutationOptions} = options ?
       
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof importXlsxApiV1ImportsXlsxPost>>, {data: BodyImportXlsxApiV1ImportsXlsxPost}> = (props) => {
-          const {data} = props ?? {};
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof importXlsxApiV1ImportsXlsxPost>>, {data: BodyImportXlsxApiV1ImportsXlsxPost;params?: ImportXlsxApiV1ImportsXlsxPostParams}> = (props) => {
+          const {data,params} = props ?? {};
 
-          return  importXlsxApiV1ImportsXlsxPost(data,)
+          return  importXlsxApiV1ImportsXlsxPost(data,params,)
         }
 
         
@@ -1115,11 +1119,11 @@ const {mutation: mutationOptions} = options ?
  * @summary Import Xlsx
  */
 export const useImportXlsxApiV1ImportsXlsxPost = <TError = HTTPValidationError,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof importXlsxApiV1ImportsXlsxPost>>, TError,{data: BodyImportXlsxApiV1ImportsXlsxPost}, TContext>, }
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof importXlsxApiV1ImportsXlsxPost>>, TError,{data: BodyImportXlsxApiV1ImportsXlsxPost;params?: ImportXlsxApiV1ImportsXlsxPostParams}, TContext>, }
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof importXlsxApiV1ImportsXlsxPost>>,
         TError,
-        {data: BodyImportXlsxApiV1ImportsXlsxPost},
+        {data: BodyImportXlsxApiV1ImportsXlsxPost;params?: ImportXlsxApiV1ImportsXlsxPostParams},
         TContext
       > => {
 
@@ -3757,7 +3761,7 @@ export const listSchedulesApiV1SchedulesGet = (
 ) => {
       
       
-      return customInstance<ScheduleResponse[]>(
+      return customInstance<ScheduleSummaryResponse[]>(
       {url: `/api/v1/schedules`, method: 'GET', signal
     },
       );

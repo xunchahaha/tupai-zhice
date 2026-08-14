@@ -5,6 +5,7 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { ImportResultSkippedExamplesItem } from './importResultSkippedExamplesItem';
 
 export interface ImportResult {
   source: string;
@@ -21,4 +22,9 @@ export interface ImportResult {
   dropped_classes?: string[];
   rows_kept?: number;
   rows_deduped?: number;
+  rows_skipped?: number;
+  skipped_examples?: ImportResultSkippedExamplesItem[];
+  duplicate_lessons?: number;
+  class_slot_conflicts?: number;
+  orphans_deleted?: number;
 }

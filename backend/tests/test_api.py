@@ -121,7 +121,9 @@ def test_sample_solve_publish_and_xlsx(client: TestClient, auth_headers: dict[st
     run = solve(client, auth_headers)
     assert run["model_status"] in {"OPTIMAL", "FEASIBLE"}
     schedules = client.get("/api/v1/schedules", headers=auth_headers).json()
-    schedule = schedules[0]
+    schedule = client.get(
+        f"/api/v1/schedules/{schedules[0]['id']}", headers=auth_headers
+    ).json()
     assert len(schedule["assignments"]) == 24
     assert schedule["metrics"]["hard_conflicts"] == 0
     assert schedule["metrics"]["room_slot_occupancy"] >= 0
@@ -346,7 +348,9 @@ def test_product_loop_calendar_assistant_export_and_public_summary(
 ) -> None:
     run = solve(client, auth_headers)
     schedules = client.get("/api/v1/schedules", headers=auth_headers).json()
-    schedule = next(item for item in schedules if item["solver_run_id"] == run["id"])
+    summary = next(item for item in schedules if item["solver_run_id"] == run["id"])
+    schedule = client.get(f"/api/v1/schedules/{summary['id']}", headers=auth_headers).json()
+    assert summary["assignment_count"] == len(schedule["assignments"])
     published = client.post(f"/api/v1/schedules/{schedule['id']}/publish", headers=auth_headers)
     assert published.status_code == 200
 
