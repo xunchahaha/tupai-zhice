@@ -76,7 +76,8 @@ test("管理员完成排课、调课、回滚和飞书生产接入引导流程",
     const response = await api.get(`/api/v1/solver-runs/${solverRun.id}`);
     return (await response.json()).model_status;
   }, { timeout: 30_000 }).toBe("OPTIMAL");
-  await expect(page.getByText("最优解", { exact: true }).first()).toBeVisible();
+  // 求解结论的文案在 f076b9f 已改成「已证明最优」，与任务状态区分开。
+  await expect(page.getByText("已证明最优", { exact: true }).first()).toBeVisible();
 
   await page.getByRole("link", { name: "课表视图" }).click();
   await expect(page.getByRole("heading", { name: "课表视图" })).toBeVisible();
