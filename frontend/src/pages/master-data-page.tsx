@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ColumnDef, type RowSelectionState } from "@tanstack/react-table";
-import { CalendarDays, Download, FileUp, Pencil, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
-import { type Dispatch, type FormEvent, type SetStateAction, useEffect, useMemo, useRef, useState } from "react";
+import { CalendarDays, Columns3, Download, Eraser, FileUp, ListChecks, Pencil, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { type Dispatch, type FormEvent, type ReactNode, type SetStateAction, useEffect, useMemo, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -45,13 +45,23 @@ import { http } from "@/api/http";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DataTable } from "@/components/data-table";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
+import { ColumnHeader, CopyableId, TableText } from "@/components/table-cell";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/format";
+
+/**
+ * 后端全部批量端点都只收 object_ids 列表，且 schema 上限是 1000 条
+ * （backend/app/schemas.py 的 CourseSessionBatchUpdate / BatchDelete 等）。
+ * 没有「按筛选条件批量」的入口，所以前端的「全选筛选结果」也只能选到这个上限为止。
+ */
+const BATCH_LIMIT = 1000;
 
 type MasterResource = "teachers" | "class-groups" | "rooms" | "time-slots" | "course-sessions";
 type EntityKind = "teacher" | "class" | "room" | "slot";
+type CourseColumnKey = "business_id" | "business_line" | "product_type" | "lesson_name" | "fixed_time";
 type EntityDialogMode = "create" | "edit";
 type CourseDialogMode = "create" | "edit";
 type CourseBatchAction = "date" | "room" | "delete";
@@ -121,6 +131,22 @@ interface SlotDraft {
 
 const inputClass = "mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm outline-none focus:border-blue-500";
 const compactInputClass = "h-8 rounded-md border border-zinc-300 bg-white px-2 text-xs outline-none focus:border-blue-500";
+
+/** 可关闭的课程列。课程 ID 是内部标识，默认不占版面，需要时再打开。 */
+const COURSE_OPTIONAL_COLUMNS: Array<{ key: CourseColumnKey; label: string }> = [
+  { key: "business_id", label: "课程 ID" },
+  { key: "business_line", label: "业务线" },
+  { key: "product_type", label: "班型" },
+  { key: "lesson_name", label: "课节名称" },
+  { key: "fixed_time", label: "固定时段" },
+];
+const DEFAULT_COURSE_COLUMNS: Record<CourseColumnKey, boolean> = {
+  business_id: false,
+  business_line: true,
+  product_type: true,
+  lesson_name: true,
+  fixed_time: true,
+};
 
 function emptyCourseDraft(campusId = ""): CourseDraft {
   return {
@@ -198,6 +224,8 @@ export function MasterDataPage() {
   const [classFilter, setClassFilter] = useState("");
   const [teacherFilter, setTeacherFilter] = useState("");
   const [dateFilter, setDateFilter] = useState("");
+  const [courseColumnPanel, setCourseColumnPanel] = useState(false);
+  const [visibleCourseColumns, setVisibleCourseColumns] = useState<Record<CourseColumnKey, boolean>>(DEFAULT_COURSE_COLUMNS);
   const [entityBatch, setEntityBatch] = useState<EntityBatchState | null>(null);
   const [entityBatchValue, setEntityBatchValue] = useState("");
   const [batchAction, setBatchAction] = useState<CourseBatchAction | null>(null);
@@ -352,7 +380,13 @@ export function MasterDataPage() {
   const selectedClassIds = selectedIds(classSelection);
   const selectedRoomIds = selectedIds(roomSelection);
   const selectedSlotIds = selectedIds(slotSelection);
-  const selectedCourseIds = Object.entries(courseSelection).filter(([, selected]) => selected).map(([id]) => id);
+  // 课程量级大（真实数据近两万条），选中集合与筛选结果的比对放在 memo 里算一次。
+  const courseSelectionStats = useMemo(() => {
+    const ids = selectedIds(courseSelection);
+    const visible = new Set(filteredCourses.map((course) => course.id));
+    return { ids, offFilter: ids.filter((id) => !visible.has(id)).length };
+  }, [courseSelection, filteredCourses]);
+  const selectedCourseIds = courseSelectionStats.ids;
   const clearCourseFilters = () => { setCourseSearch(""); setBusinessLineFilter(""); setProductTypeFilter(""); setClassFilter(""); setTeacherFilter(""); setDateFilter(""); };
   const hasCourseFilters = Boolean(courseSearch || businessLineFilter || productTypeFilter || classFilter || teacherFilter || dateFilter);
 
@@ -462,7 +496,7 @@ export function MasterDataPage() {
   };
 
   const runBatchAction = () => {
-    if (!batchAction || selectedCourseIds.length === 0) return;
+    if (!batchAction || selectedCourseIds.length === 0 || selectedCourseIds.length > BATCH_LIMIT) return;
     if (batchAction === "delete") {
       batchDeleteCourses.mutate(selectedCourseIds);
     } else if (batchAction === "date" && batchDate) {
@@ -477,6 +511,24 @@ export function MasterDataPage() {
     else if (kind === "class") setClassSelection({});
     else if (kind === "room") setRoomSelection({});
     else setSlotSelection({});
+  };
+
+  const selectAllFiltered = (items: Array<{ id: string }>, apply: (selection: RowSelectionState) => void) => {
+    // 整份替换而不是合并：结果就是「当前筛选结果的前 BATCH_LIMIT 条」，
+    // 顺带把其它页、其它筛选条件下残留的勾选清掉。
+    apply(Object.fromEntries(items.slice(0, BATCH_LIMIT).map((item) => [item.id, true])));
+  };
+
+  const selectAllForEntity = (kind: EntityKind) => {
+    if (kind === "teacher") selectAllFiltered(filteredTeachers, setTeacherSelection);
+    else if (kind === "class") selectAllFiltered(filteredClasses, setClassSelection);
+    else if (kind === "room") selectAllFiltered(filteredRooms, setRoomSelection);
+    else selectAllFiltered(filteredSlots, setSlotSelection);
+  };
+
+  const offFilterCount = (selection: RowSelectionState, items: Array<{ id: string }>) => {
+    const visible = new Set(items.map((item) => item.id));
+    return selectedIds(selection).filter((id) => !visible.has(id)).length;
   };
 
   const idsForEntityKind = (kind: EntityKind) => kind === "teacher"
@@ -495,7 +547,7 @@ export function MasterDataPage() {
   const runEntityBatch = () => {
     if (!entityBatch) return;
     const objectIds = idsForEntityKind(entityBatch.kind);
-    if (!objectIds.length) return;
+    if (!objectIds.length || objectIds.length > BATCH_LIMIT) return;
     const resource = entityConfig(entityBatch.kind).resource;
     if (entityBatch.action === "delete") {
       batchDeleteEntities.mutate({ resource, objectIds });
@@ -512,46 +564,54 @@ export function MasterDataPage() {
     batchUpdateEntities.mutate({ resource, objectIds, changes });
   };
 
+  const actionsColumn = <T,>(cell: (row: T) => ReactNode): ColumnDef<T> => ({
+    id: "actions",
+    header: () => <ColumnHeader>操作</ColumnHeader>,
+    enableSorting: false,
+    cell: ({ row }) => cell(row.original),
+  });
+
   const teacherColumns: ColumnDef<TeacherResponse>[] = [
-    { id: "teacher", header: "教师（教研组）", cell: ({ row }) => <IdentityValue item={row.original} /> },
-    { accessorKey: "subject", header: "学科" },
-    { accessorKey: "calendar_user_id", header: "飞书日程账号" },
-    ...(!readOnly ? [{ id: "actions", header: "操作", enableSorting: false, cell: ({ row }: { row: { original: TeacherResponse } }) => <RowActions editLabel="编辑教师" onEdit={() => openEditEntity("teacher", row.original)} deleting={deletingKey === `teachers:${row.original.id}`} onDelete={() => confirmDelete({ id: row.original.id, label: identityLabel(row.original), resource: "teachers", resourceLabel: "教师" })} /> }] : []),
+    { id: "teacher", header: () => <ColumnHeader>教师（教研组）</ColumnHeader>, cell: ({ row }) => <IdentityValue item={row.original} className="w-48" /> },
+    { accessorKey: "subject", header: () => <ColumnHeader>学科</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.subject} className="w-24" /> },
+    { accessorKey: "calendar_user_id", header: () => <ColumnHeader>飞书日程账号</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.calendar_user_id} className="w-40" /> },
+    ...(!readOnly ? [actionsColumn<TeacherResponse>((item) => <RowActions editLabel="编辑教师" onEdit={() => openEditEntity("teacher", item)} deleting={deletingKey === `teachers:${item.id}`} onDelete={() => confirmDelete({ id: item.id, label: identityLabel(item), resource: "teachers", resourceLabel: "教师" })} />)] : []),
   ];
   const classColumns: ColumnDef<ClassGroupResponse>[] = [
-    { id: "class", header: "班级", cell: ({ row }) => <IdentityValue item={row.original} /> },
-    { accessorKey: "subject", header: "业务线" },
-    { accessorKey: "grade", header: "班型" },
-    { accessorKey: "teacher_business_id", header: "教师（教研组）" },
-    ...(!readOnly ? [{ id: "actions", header: "操作", enableSorting: false, cell: ({ row }: { row: { original: ClassGroupResponse } }) => <RowActions editLabel="编辑班级" onEdit={() => openEditEntity("class", row.original)} deleting={deletingKey === `class-groups:${row.original.id}`} onDelete={() => confirmDelete({ id: row.original.id, label: identityLabel(row.original), resource: "class-groups", resourceLabel: "班级" })} /> }] : []),
+    { id: "class", header: () => <ColumnHeader>班级</ColumnHeader>, cell: ({ row }) => <IdentityValue item={row.original} className="w-56" /> },
+    { accessorKey: "subject", header: () => <ColumnHeader>业务线</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.subject} className="w-20" /> },
+    { accessorKey: "grade", header: () => <ColumnHeader>班型</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.grade} className="w-40" /> },
+    { accessorKey: "teacher_business_id", header: () => <ColumnHeader>教师（教研组）</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.teacher_business_id} className="w-36" /> },
+    ...(!readOnly ? [actionsColumn<ClassGroupResponse>((item) => <RowActions editLabel="编辑班级" onEdit={() => openEditEntity("class", item)} deleting={deletingKey === `class-groups:${item.id}`} onDelete={() => confirmDelete({ id: item.id, label: identityLabel(item), resource: "class-groups", resourceLabel: "班级" })} />)] : []),
   ];
   const roomColumns: ColumnDef<RoomResponse>[] = [
-    { id: "room", header: "教室", cell: ({ row }) => <IdentityValue item={row.original} /> },
-    { accessorFn: (row) => row.is_active ? "启用" : "停用", id: "active", header: "状态" },
-    ...(!readOnly ? [{ id: "actions", header: "操作", enableSorting: false, cell: ({ row }: { row: { original: RoomResponse } }) => <RowActions editLabel="编辑教室" onEdit={() => openEditEntity("room", row.original)} deleting={deletingKey === `rooms:${row.original.id}`} onDelete={() => confirmDelete({ id: row.original.id, label: identityLabel(row.original), resource: "rooms", resourceLabel: "教室" })} /> }] : []),
+    { id: "room", header: () => <ColumnHeader>教室</ColumnHeader>, cell: ({ row }) => <IdentityValue item={row.original} className="w-48" /> },
+    { accessorFn: (row) => row.is_active ? "启用" : "停用", id: "active", header: () => <ColumnHeader>状态</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.is_active ? "启用" : "停用"} className="w-16" /> },
+    ...(!readOnly ? [actionsColumn<RoomResponse>((item) => <RowActions editLabel="编辑教室" onEdit={() => openEditEntity("room", item)} deleting={deletingKey === `rooms:${item.id}`} onDelete={() => confirmDelete({ id: item.id, label: identityLabel(item), resource: "rooms", resourceLabel: "教室" })} />)] : []),
   ];
   const slotColumns: ColumnDef<TimeSlotResponse>[] = [
-    { accessorKey: "business_id", header: "时段 ID" },
-    { accessorKey: "weekday", header: "星期" },
-    { accessorKey: "start_time", header: "开始" },
-    { accessorKey: "end_time", header: "结束" },
-    { accessorKey: "kind", header: "类型" },
-    { accessorKey: "sequence", header: "序号" },
-    { id: "open", header: "状态", accessorFn: (row) => row.is_open ? "开放" : "关闭" },
-    ...(!readOnly ? [{ id: "actions", header: "操作", enableSorting: false, cell: ({ row }: { row: { original: TimeSlotResponse } }) => <RowActions editLabel="编辑时段" onEdit={() => openEditEntity("slot", row.original)} deleting={deletingKey === `time-slots:${row.original.id}`} onDelete={() => confirmDelete({ id: row.original.id, label: row.original.business_id, resource: "time-slots", resourceLabel: "时段" })} /> }] : []),
+    { accessorKey: "business_id", header: () => <ColumnHeader>时段 ID</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.business_id} className="w-40" /> },
+    { accessorKey: "weekday", header: () => <ColumnHeader>星期</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.weekday} className="w-16" /> },
+    { accessorKey: "start_time", header: () => <ColumnHeader>开始</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.start_time} className="w-16 tabular-nums" /> },
+    { accessorKey: "end_time", header: () => <ColumnHeader>结束</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.end_time} className="w-16 tabular-nums" /> },
+    { accessorKey: "kind", header: () => <ColumnHeader>类型</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.kind} className="w-16" /> },
+    { accessorKey: "sequence", header: () => <ColumnHeader>序号</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.sequence} className="w-14 tabular-nums" /> },
+    { id: "open", header: () => <ColumnHeader>状态</ColumnHeader>, accessorFn: (row) => row.is_open ? "开放" : "关闭", cell: ({ row }) => <TableText value={row.original.is_open ? "开放" : "关闭"} className="w-16" /> },
+    ...(!readOnly ? [actionsColumn<TimeSlotResponse>((item) => <RowActions editLabel="编辑时段" onEdit={() => openEditEntity("slot", item)} deleting={deletingKey === `time-slots:${item.id}`} onDelete={() => confirmDelete({ id: item.id, label: item.business_id, resource: "time-slots", resourceLabel: "时段" })} />)] : []),
   ];
+  // 每一列都给了固定宽度：排序换掉当前页数据时列宽不会跳，整表宽度也就固定下来了。
   const courseColumns: ColumnDef<CourseSessionResponse>[] = [
-    { accessorKey: "business_id", header: "课程 ID" },
-    { accessorKey: "business_line", header: "业务线" },
-    { accessorKey: "product_type", header: "班型" },
-    { accessorKey: "class_business_id", header: "班级标签" },
-    { accessorKey: "teacher_business_id", header: "教师（教研组）" },
-    { accessorKey: "lesson_name", header: "课节名称" },
-    { accessorKey: "session_no", header: "课次序号" },
-    { accessorKey: "lesson_date", header: "上课日期" },
-    { id: "fixed_time", header: "固定时段", accessorFn: (row) => `${row.fixed_start_time ?? ""}-${row.fixed_end_time ?? ""}` },
-    { accessorKey: "original_room_business_id", header: "授课教室" },
-    ...(!readOnly ? [{ id: "actions", header: "操作", enableSorting: false, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <RowActions editLabel="编辑课程" editTitle="编辑日期、教室和日程账号" onEdit={() => { setCourseDraft(draftFromCourse(row.original)); setCourseDialogMode("edit"); }} deleting={deletingKey === `course-sessions:${row.original.id}`} onDelete={() => confirmDelete({ id: row.original.id, label: row.original.business_id, resource: "course-sessions", resourceLabel: "课程" })} /> }] : []),
+    ...(visibleCourseColumns.business_id ? [{ accessorKey: "business_id", header: () => <ColumnHeader>课程 ID</ColumnHeader>, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <CopyableId value={row.original.business_id} className="w-32" /> } as ColumnDef<CourseSessionResponse>] : []),
+    ...(visibleCourseColumns.business_line ? [{ accessorKey: "business_line", header: () => <ColumnHeader>业务线</ColumnHeader>, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TableText value={row.original.business_line} className="w-16" /> } as ColumnDef<CourseSessionResponse>] : []),
+    ...(visibleCourseColumns.product_type ? [{ accessorKey: "product_type", header: () => <ColumnHeader>班型</ColumnHeader>, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TableText value={row.original.product_type} className="w-36" /> } as ColumnDef<CourseSessionResponse>] : []),
+    { accessorKey: "class_business_id", header: () => <ColumnHeader>班级标签</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.class_business_id} className="w-32" /> },
+    { accessorKey: "teacher_business_id", header: () => <ColumnHeader>教师（教研组）</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.teacher_business_id} className="w-32" /> },
+    ...(visibleCourseColumns.lesson_name ? [{ accessorKey: "lesson_name", header: () => <ColumnHeader>课节名称</ColumnHeader>, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TableText value={row.original.lesson_name} className="w-40" /> } as ColumnDef<CourseSessionResponse>] : []),
+    { accessorKey: "session_no", header: () => <ColumnHeader>课次序号</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.session_no} className="w-12 tabular-nums" /> },
+    { accessorKey: "lesson_date", header: () => <ColumnHeader>上课日期</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.lesson_date} className="w-24 tabular-nums" /> },
+    ...(visibleCourseColumns.fixed_time ? [{ id: "fixed_time", header: () => <ColumnHeader>固定时段</ColumnHeader>, accessorFn: (row: CourseSessionResponse) => `${row.fixed_start_time ?? ""}-${row.fixed_end_time ?? ""}`, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TableText value={`${row.original.fixed_start_time ?? ""}-${row.original.fixed_end_time ?? ""}`} className="w-24 tabular-nums" /> } as ColumnDef<CourseSessionResponse>] : []),
+    { accessorKey: "original_room_business_id", header: () => <ColumnHeader>授课教室</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.original_room_business_id} className="w-20" /> },
+    ...(!readOnly ? [actionsColumn<CourseSessionResponse>((item) => <RowActions editLabel="编辑课程" editTitle="编辑日期、教室和日程账号" onEdit={() => { setCourseDraft(draftFromCourse(item)); setCourseDialogMode("edit"); }} deleting={deletingKey === `course-sessions:${item.id}`} onDelete={() => confirmDelete({ id: item.id, label: item.business_id, resource: "course-sessions", resourceLabel: "课程" })} />)] : []),
   ];
 
   const loading = [campusQuery, teacherQuery, classQuery, roomQuery, slotQuery, courseQuery].some((item) => item.isPending);
@@ -569,15 +629,22 @@ export function MasterDataPage() {
       {loading ? <LoadingState /> : failed ? <ErrorState retry={refresh} /> : (
         <Tabs defaultValue="teachers">
           <TabsList><TabsTrigger value="teachers">教师</TabsTrigger><TabsTrigger value="classes">班级</TabsTrigger><TabsTrigger value="rooms">教室</TabsTrigger><TabsTrigger value="slots">时段</TabsTrigger><TabsTrigger value="courses">课程场次</TabsTrigger></TabsList>
-          <TabsContent value="teachers" className="pt-4"><EntityToolbar label="教师" total={teacherQuery.data?.length ?? 0} filtered={filteredTeachers.length} selected={selectedTeacherIds.length} search={teacherSearch} setSearch={setTeacherSearch} readOnly={readOnly} onAdd={() => openCreateEntity("teacher")} disabled={!campusId} actions={[{ label: "批量改学科", action: "teacher-subject" }, { label: "批量改日程账号", action: "teacher-calendar" }]} onBatch={(action) => openEntityBatch("teacher", action)} /><DataTable columns={teacherColumns} data={filteredTeachers} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={teacherSelection} onSelectionChange={setTeacherSelection} /></TabsContent>
-          <TabsContent value="classes" className="pt-4"><EntityToolbar label="班级" total={classQuery.data?.length ?? 0} filtered={filteredClasses.length} selected={selectedClassIds.length} search={classSearch} setSearch={setClassSearch} readOnly={readOnly} onAdd={() => openCreateEntity("class")} disabled={!campusId || !teacherQuery.data?.length} actions={[{ label: "批量改业务线", action: "class-line" }, { label: "批量改班型", action: "class-type" }, { label: "批量改教师", action: "class-teacher" }]} onBatch={(action) => openEntityBatch("class", action)} /><DataTable columns={classColumns} data={filteredClasses} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={classSelection} onSelectionChange={setClassSelection} /></TabsContent>
-          <TabsContent value="rooms" className="pt-4"><EntityToolbar label="教室" total={roomQuery.data?.length ?? 0} filtered={filteredRooms.length} selected={selectedRoomIds.length} search={roomSearch} setSearch={setRoomSearch} readOnly={readOnly} onAdd={() => openCreateEntity("room")} disabled={!campusId} actions={[{ label: "批量启用/停用", action: "room-status" }]} onBatch={(action) => openEntityBatch("room", action)} /><DataTable columns={roomColumns} data={filteredRooms} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={roomSelection} onSelectionChange={setRoomSelection} /></TabsContent>
-          <TabsContent value="slots" className="pt-4"><EntityToolbar label="时段" total={slotQuery.data?.length ?? 0} filtered={filteredSlots.length} selected={selectedSlotIds.length} search={slotSearch} setSearch={setSlotSearch} readOnly={readOnly} onAdd={() => openCreateEntity("slot")} disabled={!campusId} actions={[{ label: "批量开放/关闭", action: "slot-status" }]} onBatch={(action) => openEntityBatch("slot", action)} /><DataTable columns={slotColumns} data={filteredSlots} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={slotSelection} onSelectionChange={setSlotSelection} /></TabsContent>
+          <TabsContent value="teachers" className="pt-4"><EntityToolbar label="教师" total={teacherQuery.data?.length ?? 0} filtered={filteredTeachers.length} selected={selectedTeacherIds.length} offFilter={offFilterCount(teacherSelection, filteredTeachers)} onSelectAll={() => selectAllForEntity("teacher")} onClearSelection={() => clearEntitySelection("teacher")} search={teacherSearch} setSearch={setTeacherSearch} readOnly={readOnly} onAdd={() => openCreateEntity("teacher")} disabled={!campusId} actions={[{ label: "批量改学科", action: "teacher-subject" }, { label: "批量改日程账号", action: "teacher-calendar" }]} onBatch={(action) => openEntityBatch("teacher", action)} /><DataTable columns={teacherColumns} data={filteredTeachers} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={teacherSelection} onSelectionChange={setTeacherSelection} /></TabsContent>
+          <TabsContent value="classes" className="pt-4"><EntityToolbar label="班级" total={classQuery.data?.length ?? 0} filtered={filteredClasses.length} selected={selectedClassIds.length} offFilter={offFilterCount(classSelection, filteredClasses)} onSelectAll={() => selectAllForEntity("class")} onClearSelection={() => clearEntitySelection("class")} search={classSearch} setSearch={setClassSearch} readOnly={readOnly} onAdd={() => openCreateEntity("class")} disabled={!campusId || !teacherQuery.data?.length} actions={[{ label: "批量改业务线", action: "class-line" }, { label: "批量改班型", action: "class-type" }, { label: "批量改教师", action: "class-teacher" }]} onBatch={(action) => openEntityBatch("class", action)} /><DataTable columns={classColumns} data={filteredClasses} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={classSelection} onSelectionChange={setClassSelection} /></TabsContent>
+          <TabsContent value="rooms" className="pt-4"><EntityToolbar label="教室" total={roomQuery.data?.length ?? 0} filtered={filteredRooms.length} selected={selectedRoomIds.length} offFilter={offFilterCount(roomSelection, filteredRooms)} onSelectAll={() => selectAllForEntity("room")} onClearSelection={() => clearEntitySelection("room")} search={roomSearch} setSearch={setRoomSearch} readOnly={readOnly} onAdd={() => openCreateEntity("room")} disabled={!campusId} actions={[{ label: "批量启用/停用", action: "room-status" }]} onBatch={(action) => openEntityBatch("room", action)} /><DataTable columns={roomColumns} data={filteredRooms} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={roomSelection} onSelectionChange={setRoomSelection} /></TabsContent>
+          <TabsContent value="slots" className="pt-4"><EntityToolbar label="时段" total={slotQuery.data?.length ?? 0} filtered={filteredSlots.length} selected={selectedSlotIds.length} offFilter={offFilterCount(slotSelection, filteredSlots)} onSelectAll={() => selectAllForEntity("slot")} onClearSelection={() => clearEntitySelection("slot")} search={slotSearch} setSearch={setSlotSearch} readOnly={readOnly} onAdd={() => openCreateEntity("slot")} disabled={!campusId} actions={[{ label: "批量开放/关闭", action: "slot-status" }]} onBatch={(action) => openEntityBatch("slot", action)} /><DataTable columns={slotColumns} data={filteredSlots} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={slotSelection} onSelectionChange={setSlotSelection} /></TabsContent>
           <TabsContent value="courses" className="pt-4">
             <CourseToolbar
               total={courseQuery.data?.length ?? 0}
               filtered={filteredCourses.length}
               selected={selectedCourseIds.length}
+              offFilter={courseSelectionStats.offFilter}
+              onSelectAll={() => selectAllFiltered(filteredCourses, setCourseSelection)}
+              onClearSelection={() => setCourseSelection({})}
+              columns={visibleCourseColumns}
+              setColumns={setVisibleCourseColumns}
+              columnPanelOpen={courseColumnPanel}
+              toggleColumnPanel={() => setCourseColumnPanel((open) => !open)}
               search={courseSearch}
               setSearch={setCourseSearch}
               businessLine={businessLineFilter}
@@ -634,12 +701,58 @@ export function MasterDataPage() {
   );
 }
 
-function CourseToolbar({ total, filtered, selected, search, setSearch, businessLine, setBusinessLine, productType, setProductType, classBusinessId, setClassBusinessId, teacherBusinessId, setTeacherBusinessId, lessonDate, setLessonDate, options, hasFilters, clearFilters, readOnly, onAdd, onBatch }: { total: number; filtered: number; selected: number; search: string; setSearch: (value: string) => void; businessLine: string; setBusinessLine: (value: string) => void; productType: string; setProductType: (value: string) => void; classBusinessId: string; setClassBusinessId: (value: string) => void; teacherBusinessId: string; setTeacherBusinessId: (value: string) => void; lessonDate: string; setLessonDate: (value: string) => void; options: { businessLines: string[]; productTypes: string[]; classes: string[]; teachers: string[] }; hasFilters: boolean; clearFilters: () => void; readOnly: boolean; onAdd: () => void; onBatch: (action: CourseBatchAction) => void }) {
-  return <div className="mb-3 space-y-3 border border-zinc-200 bg-white p-3"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3 text-xs text-zinc-500"><span>筛选 {filtered} / {total} 条</span>{selected > 0 ? <span className="font-medium text-blue-700">已选择 {selected} 条</span> : null}</div>{!readOnly ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={selected === 0} onClick={() => onBatch("date")}><CalendarDays className="size-3.5" />批量改日期</Button><Button size="sm" variant="outline" disabled={selected === 0} onClick={() => onBatch("room")}>批量改教室</Button><Button size="sm" variant="outline" disabled={selected === 0} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd}><Plus className="size-3.5" />新增课程</Button></div> : <span className="text-xs text-zinc-400">成员账号为只读视图</span>}</div><div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6"><label className="relative"><Search className="absolute left-2.5 top-2 size-3.5 text-zinc-400" /><input aria-label="搜索课程" className={`${compactInputClass} w-full pl-8`} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="课程、班级、教师、教室" /></label><FilterSelect label="全部业务线" value={businessLine} setValue={setBusinessLine} options={options.businessLines} /><FilterSelect label="全部班型" value={productType} setValue={setProductType} options={options.productTypes} /><FilterSelect label="全部班级" value={classBusinessId} setValue={setClassBusinessId} options={options.classes} /><FilterSelect label="全部教师" value={teacherBusinessId} setValue={setTeacherBusinessId} options={options.teachers} /><div className="flex gap-2"><input aria-label="筛选上课日期" type="date" className={`${compactInputClass} min-w-0 flex-1`} value={lessonDate} onChange={(event) => setLessonDate(event.target.value)} />{hasFilters ? <Button size="icon" variant="ghost" title="清除筛选" aria-label="清除筛选" onClick={clearFilters}><X className="size-3.5" /></Button> : null}</div></div></div>;
+function CourseToolbar({ total, filtered, selected, offFilter, onSelectAll, onClearSelection, columns, setColumns, columnPanelOpen, toggleColumnPanel, search, setSearch, businessLine, setBusinessLine, productType, setProductType, classBusinessId, setClassBusinessId, teacherBusinessId, setTeacherBusinessId, lessonDate, setLessonDate, options, hasFilters, clearFilters, readOnly, onAdd, onBatch }: { total: number; filtered: number; selected: number; offFilter: number; onSelectAll: () => void; onClearSelection: () => void; columns: Record<CourseColumnKey, boolean>; setColumns: Dispatch<SetStateAction<Record<CourseColumnKey, boolean>>>; columnPanelOpen: boolean; toggleColumnPanel: () => void; search: string; setSearch: (value: string) => void; businessLine: string; setBusinessLine: (value: string) => void; productType: string; setProductType: (value: string) => void; classBusinessId: string; setClassBusinessId: (value: string) => void; teacherBusinessId: string; setTeacherBusinessId: (value: string) => void; lessonDate: string; setLessonDate: (value: string) => void; options: { businessLines: string[]; productTypes: string[]; classes: string[]; teachers: string[] }; hasFilters: boolean; clearFilters: () => void; readOnly: boolean; onAdd: () => void; onBatch: (action: CourseBatchAction) => void }) {
+  const overLimit = selected > BATCH_LIMIT;
+  return <div className="mb-3 space-y-3 border border-zinc-200 bg-white p-3">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-zinc-500">
+        <span className="tabular-nums">筛选 {filtered} / {total} 条</span>
+        {!readOnly ? <SelectionControls selected={selected} filtered={filtered} offFilter={offFilter} onSelectAll={onSelectAll} onClear={onClearSelection} /> : null}
+      </div>
+      {!readOnly ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("date")}><CalendarDays className="size-3.5" />批量改日期</Button><Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("room")}>批量改教室</Button><Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd}><Plus className="size-3.5" />新增课程</Button></div> : <span className="text-xs text-zinc-400">成员账号为只读视图</span>}
+    </div>
+    {overLimit ? <BatchLimitNotice selected={selected} /> : null}
+    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
+      <label className="relative min-w-0"><Search className="absolute left-2.5 top-2 size-3.5 text-zinc-400" /><input aria-label="搜索课程" className={`${compactInputClass} w-full min-w-0 pl-8`} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="课程、班级、教师、教室" /></label>
+      <FilterSelect label="全部业务线" value={businessLine} setValue={setBusinessLine} options={options.businessLines} />
+      <FilterSelect label="全部班型" value={productType} setValue={setProductType} options={options.productTypes} />
+      <FilterSelect label="全部班级" value={classBusinessId} setValue={setClassBusinessId} options={options.classes} />
+      <FilterSelect label="全部教师" value={teacherBusinessId} setValue={setTeacherBusinessId} options={options.teachers} />
+      <div className="flex min-w-0 gap-2"><input aria-label="筛选上课日期" type="date" className={`${compactInputClass} min-w-0 flex-1`} value={lessonDate} onChange={(event) => setLessonDate(event.target.value)} />{hasFilters ? <Button size="icon" variant="ghost" title="清除筛选" aria-label="清除筛选" onClick={clearFilters}><X className="size-3.5" /></Button> : null}</div>
+    </div>
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-zinc-100 pt-2">
+      <Button size="sm" variant="ghost" aria-expanded={columnPanelOpen} onClick={toggleColumnPanel}><Columns3 className="size-3.5" />显示列</Button>
+      {columnPanelOpen ? <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-zinc-600">
+        {COURSE_OPTIONAL_COLUMNS.map((column) => <label key={column.key} className="flex items-center gap-1.5">
+          <input type="checkbox" className="size-3.5 accent-blue-600" checked={columns[column.key]} onChange={(event) => setColumns((current) => ({ ...current, [column.key]: event.target.checked }))} />
+          {column.label}
+        </label>)}
+        <span className="text-zinc-400">课程 ID 是内部标识，默认隐藏；打开后截断显示，悬停看全量、点击图标复制。</span>
+      </div> : null}
+    </div>
+  </div>;
+}
+
+/** 选中数量 + 全选筛选结果 + 一键清除（清的是整个选中集合，含其它分页、其它筛选条件下的残留）。 */
+function SelectionControls({ selected, filtered, offFilter, onSelectAll, onClear }: { selected: number; filtered: number; offFilter: number; onSelectAll: () => void; onClear: () => void }) {
+  const capped = filtered > BATCH_LIMIT;
+  return <>
+    <span className={cn("tabular-nums", selected > 0 ? "font-medium text-blue-700" : "text-zinc-400")}>已选 {selected} 条</span>
+    {offFilter > 0 ? <span className="tabular-nums text-amber-700">其中 {offFilter} 条不在当前筛选内</span> : null}
+    <Button size="sm" variant="outline" disabled={filtered === 0} onClick={onSelectAll} title={capped ? `后端批量接口单次只收 ${BATCH_LIMIT} 条 id，这里会按数据原始顺序取筛选结果里的 ${BATCH_LIMIT} 条（与表头排序无关）；要精确控制范围请先收窄筛选条件` : `选中当前筛选出的 ${filtered} 条`}>
+      <ListChecks className="size-3.5" />全选筛选结果{capped ? `（上限 ${BATCH_LIMIT} 条）` : filtered > 0 ? `（${filtered} 条）` : ""}
+    </Button>
+    <Button size="sm" variant="ghost" disabled={selected === 0} onClick={onClear}><Eraser className="size-3.5" />清除选择</Button>
+  </>;
+}
+
+function BatchLimitNotice({ selected }: { selected: number }) {
+  return <p className="border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">已选 {selected} 条，超过后端批量接口单次上限 {BATCH_LIMIT} 条，批量操作已暂时禁用。请先「清除选择」再缩小筛选范围分批处理。</p>;
 }
 
 function FilterSelect({ label, value, setValue, options }: { label: string; value: string; setValue: (value: string) => void; options: string[] }) {
-  return <select aria-label={label} className={`${compactInputClass} w-full`} value={value} onChange={(event) => setValue(event.target.value)}><option value="">{label}</option>{options.map((option) => <option key={option} value={option}>{option}</option>)}</select>;
+  // min-w-0：select 的固有宽度由最长选项决定（班级标签很长），不压住会把整行网格撑出容器。
+  return <select aria-label={label} className={`${compactInputClass} w-full min-w-0`} value={value} onChange={(event) => setValue(event.target.value)}><option value="">{label}</option>{options.map((option) => <option key={option} value={option}>{option}</option>)}</select>;
 }
 
 function CourseEditorDialog({ open, mode, draft, setDraft, campuses, teachers, classes, rooms, saving, close, submit }: { open: boolean; mode: CourseDialogMode; draft: CourseDraft; setDraft: (draft: CourseDraft) => void; campuses: Array<{ id: string; name: string }>; teachers: TeacherResponse[]; classes: ClassGroupResponse[]; rooms: RoomResponse[]; saving: boolean; close: () => void; submit: (event: FormEvent<HTMLFormElement>) => void }) {
@@ -681,9 +794,9 @@ function identityLabel(item: { business_id: string; name: string }) {
   return item.name === item.business_id ? item.name : `${item.name}（${item.business_id}）`;
 }
 
-function IdentityValue({ item }: { item: { business_id: string; name: string } }) {
-  if (item.name === item.business_id) return <span>{item.name}</span>;
-  return <div><div>{item.name}</div><div className="font-mono text-[11px] text-zinc-400">{item.business_id}</div></div>;
+function IdentityValue({ item, className }: { item: { business_id: string; name: string }; className?: string }) {
+  if (item.name === item.business_id) return <span className={cn("block truncate", className)} title={item.name}>{item.name}</span>;
+  return <div className={cn("min-w-0", className)}><div className="truncate" title={item.name}>{item.name}</div><div className="truncate font-mono text-[11px] text-zinc-400" title={item.business_id}>{item.business_id}</div></div>;
 }
 
 function DeleteButton({ disabled, onClick }: { disabled: boolean; onClick: () => void }) {
@@ -694,8 +807,19 @@ function RowActions({ editLabel, editTitle, onEdit, deleting, onDelete }: { edit
   return <div className="flex items-center gap-1"><Button size="icon" variant="ghost" aria-label={editLabel} title={editTitle ?? editLabel} onClick={onEdit}><Pencil className="size-3.5 text-blue-600" /></Button><DeleteButton disabled={deleting} onClick={onDelete} /></div>;
 }
 
-function EntityToolbar({ label, total, filtered, selected, search, setSearch, readOnly, onAdd, disabled, actions, onBatch }: { label: string; total: number; filtered: number; selected: number; search: string; setSearch: (value: string) => void; readOnly: boolean; onAdd: () => void; disabled: boolean; actions: Array<{ label: string; action: EntityBatchAction }>; onBatch: (action: EntityBatchAction) => void }) {
-  return <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border border-zinc-200 bg-white p-3"><div className="flex flex-wrap items-center gap-3"><label className="relative"><Search className="absolute left-2.5 top-2 size-3.5 text-zinc-400" /><input aria-label={`搜索${label}`} className={`${compactInputClass} w-64 pl-8`} value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`搜索${label}标签或属性`} /></label><span className="text-xs text-zinc-500">筛选 {filtered} / {total} 条</span>{selected > 0 ? <span className="text-xs font-medium text-blue-700">已选择 {selected} 条</span> : null}</div>{readOnly ? <span className="text-xs text-zinc-400">成员账号为只读视图</span> : <div className="flex flex-wrap gap-2">{actions.map((item) => <Button key={item.action} size="sm" variant="outline" disabled={selected === 0} onClick={() => onBatch(item.action)}>{item.label}</Button>)}<Button size="sm" variant="outline" disabled={selected === 0} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd} disabled={disabled}><Plus className="size-3.5" />新增{label}</Button></div>}</div>;
+function EntityToolbar({ label, total, filtered, selected, offFilter, onSelectAll, onClearSelection, search, setSearch, readOnly, onAdd, disabled, actions, onBatch }: { label: string; total: number; filtered: number; selected: number; offFilter: number; onSelectAll: () => void; onClearSelection: () => void; search: string; setSearch: (value: string) => void; readOnly: boolean; onAdd: () => void; disabled: boolean; actions: Array<{ label: string; action: EntityBatchAction }>; onBatch: (action: EntityBatchAction) => void }) {
+  const overLimit = selected > BATCH_LIMIT;
+  return <div className="mb-3 space-y-3 border border-zinc-200 bg-white p-3">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-zinc-500">
+        <label className="relative"><Search className="absolute left-2.5 top-2 size-3.5 text-zinc-400" /><input aria-label={`搜索${label}`} className={`${compactInputClass} w-64 max-w-full pl-8`} value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`搜索${label}标签或属性`} /></label>
+        <span className="tabular-nums">筛选 {filtered} / {total} 条</span>
+        {!readOnly ? <SelectionControls selected={selected} filtered={filtered} offFilter={offFilter} onSelectAll={onSelectAll} onClear={onClearSelection} /> : null}
+      </div>
+      {readOnly ? <span className="text-xs text-zinc-400">成员账号为只读视图</span> : <div className="flex flex-wrap gap-2">{actions.map((item) => <Button key={item.action} size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch(item.action)}>{item.label}</Button>)}<Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd} disabled={disabled}><Plus className="size-3.5" />新增{label}</Button></div>}
+    </div>
+    {overLimit ? <BatchLimitNotice selected={selected} /> : null}
+  </div>;
 }
 
 function selectedIds(selection: RowSelectionState) {
@@ -775,8 +899,8 @@ function ImportReportPanel({ report, onDismiss }: { report: ImportResult; onDism
       </dl>
       {dropped ? (
         <p className="border-t border-zinc-200 px-4 py-3 text-xs leading-5 text-amber-800">
-          「教室-待校区确认」的 {dropped} 行已整行丢弃，其中 {report.dropped_lesson_groups ?? 0} 个课次组
-          在源表里没有任何真实教室，因此不进入教室排课范围
+          「教室-待校区确认」的 {dropped} 行已整行丢弃，涉及 {report.dropped_lesson_groups ?? 0} 个
+          「班级 × 日期 × 时段」课次组，这些行不进入教室排课范围
           {report.dropped_classes?.length ? `：${report.dropped_classes.join("、")}` : ""}。
         </p>
       ) : null}
