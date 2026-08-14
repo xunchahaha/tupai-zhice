@@ -466,6 +466,10 @@ def _date_capacity_explanations(payload: dict[str, Any]) -> list[str]:
     request_to = _parse_date(payload.get("date_to"))
     teachers = {str(item.get("business_id")): item for item in payload.get("teachers", [])}
     active_rooms = sum(1 for item in payload.get("rooms", []) if item.get("is_active"))
+    solver_rules = set(
+        payload.get("solver_rules")
+        or {"fixed_time", "room_no_overlap", "calendar_no_overlap", "minimize_changes"}
+    )
     groups: dict[tuple[str, Any], list[tuple[date, date, str]]] = defaultdict(list)
     calendar_groups: dict[tuple[str, Any], list[tuple[date, date, str]]] = defaultdict(list)
     room_groups: dict[Any, list[tuple[date, date, str]]] = defaultdict(list)
@@ -532,8 +536,10 @@ def _date_capacity_explanations(payload: dict[str, Any]) -> list[str]:
                     return
 
     scan(groups, 1, "SYSTEM-CLASS-NO-OVERLAP", "班级场景")
-    scan(room_groups, active_rooms, "SYSTEM-ROOM-NO-OVERLAP", "教室")
-    scan(calendar_groups, 1, "SYSTEM-CALENDAR-NO-OVERLAP", "具体日程账号")
+    if "room_no_overlap" in solver_rules:
+        scan(room_groups, active_rooms, "SYSTEM-ROOM-NO-OVERLAP", "教室")
+    if "calendar_no_overlap" in solver_rules:
+        scan(calendar_groups, 1, "SYSTEM-CALENDAR-NO-OVERLAP", "具体日程账号")
     return explanations[:3]
 
 
@@ -564,6 +570,13 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
 
     result = _empty_result()
     if not sessions or not rooms:
+        result["conflict_rule_ids"], result["priority_explanations"] = (
+            _date_infeasible_diagnostics(payload)
+        )
+        result["priority_rule_ids"] = list(result["conflict_rule_ids"])
+        return result
+    capacity_explanations = _date_capacity_explanations(payload)
+    if capacity_explanations:
         result["conflict_rule_ids"], result["priority_explanations"] = (
             _date_infeasible_diagnostics(payload)
         )
