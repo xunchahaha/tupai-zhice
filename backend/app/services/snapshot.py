@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date, datetime, time
+from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -19,6 +22,15 @@ from ..models import (
 
 def _model_dict(instance: object, fields: list[str]) -> dict[str, object]:
     return {field: getattr(instance, field) for field in fields}
+
+
+def _json_default(value: Any) -> str:
+    """Convert database scalar values to the JSON form used by snapshots."""
+    if isinstance(value, (date, datetime, time)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def build_snapshot_payload(db: Session) -> dict[str, object]:
@@ -122,7 +134,14 @@ def build_snapshot_payload(db: Session) -> dict[str, object]:
 
 def create_snapshot(db: Session, created_by: str | None) -> DataSnapshot:
     payload = build_snapshot_payload(db)
-    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=_json_default,
+    )
+    payload = json.loads(serialized)
     checksum = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     existing = db.scalar(select(DataSnapshot).where(DataSnapshot.checksum == checksum))
     if existing:
