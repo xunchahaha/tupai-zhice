@@ -785,3 +785,63 @@ def test_rule_rejects_a_hardness_the_type_does_not_support(client, auth_headers)
         },
     )
     assert response.status_code == 422
+
+
+def test_infeasible_run_explanation_translates_conflicts_into_business_wording(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """无解时的解释必须把 SYSTEM-* 和教务规则都翻成人话，且不依赖 AI 可用。"""
+    rule_ids: list[str] = []
+    for business_id, course_id in [("TEST-EXPLAIN-1", "B01-1"), ("TEST-EXPLAIN-2", "B07-1")]:
+        created = client.post(
+            "/api/v1/rules",
+            headers=auth_headers,
+            json={
+                "business_id": business_id,
+                "source_text": f"{course_id} 必须固定在周一晚间第一节",
+                "actor_type": "course",
+                "actor_ids": [course_id],
+                "constraint_type": "fixed_slot",
+                "scope": {"slot_id": "S01"},
+                "hardness": "hard",
+            },
+        )
+        assert created.status_code == 201
+        rule_id = created.json()["id"]
+        rule_ids.append(rule_id)
+        assert (
+            client.post(
+                f"/api/v1/rules/{rule_id}/transition",
+                headers=auth_headers,
+                json={"status": "active"},
+            ).status_code
+            == 200
+        )
+
+    run = solve(client, auth_headers)
+    assert run["model_status"] == "INFEASIBLE"
+
+    explained = client.post(
+        f"/api/v1/solver-runs/{run['id']}/explanation", headers=auth_headers
+    )
+    assert explained.status_code == 200, explained.text
+    payload = explained.json()
+    joined = "\n".join(payload["explanation"])
+    # 教务规则用它自己的原文说话，而不是回显规则标识。
+    assert "必须固定在周一晚间第一节" in joined
+    assert payload["next_actions"]
+
+    # 解释随求解任务一起返回，前端轮询同一个接口就能拿到。
+    fetched = client.get(f"/api/v1/solver-runs/{run['id']}", headers=auth_headers)
+    assert fetched.status_code == 200
+    assert fetched.json()["explanation"]["headline"] == payload["headline"]
+
+    for rule_id in rule_ids:
+        assert (
+            client.post(
+                f"/api/v1/rules/{rule_id}/transition",
+                headers=auth_headers,
+                json={"status": "retired"},
+            ).status_code
+            == 200
+        )

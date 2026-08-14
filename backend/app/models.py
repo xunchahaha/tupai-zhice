@@ -288,6 +288,8 @@ class SolverRun(TimestampMixin, Base):
     conflict_rule_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     priority_rule_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     priority_explanations: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # 求解结果的人话解释：确定性事实包由代码算，措辞由 AI 写，生成后落库避免重复计费。
+    explanation: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 

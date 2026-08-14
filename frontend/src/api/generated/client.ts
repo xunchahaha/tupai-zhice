@@ -52,6 +52,7 @@ import type {
   CourseSessionPayload,
   CourseSessionResponse,
   CourseSessionUpdate,
+  ExplainSolverRunApiV1SolverRunsRunIdExplanationPostParams,
   FeishuAppConfigurationInput,
   FeishuAppConfigurationResponse,
   FeishuConnectionResponse,
@@ -83,6 +84,7 @@ import type {
   ScheduleResponse,
   ScheduleSummaryResponse,
   SolveRequest,
+  SolverRunExplanation,
   SolverRunResponse,
   TeacherBatchUpdate,
   TeacherPayload,
@@ -3754,6 +3756,75 @@ export function useGetSolverRunApiV1SolverRunsRunIdGet<TData = Awaited<ReturnTyp
 
 
 
+/**
+ * 把求解结论翻译成教务读得懂的话，并做一次意图核对。
+
+事实包由代码算，AI 只负责措辞与意图核对；模型不可用时退回确定性兜底解释，
+界面仍然拿得到 SYSTEM-* 的业务口径翻译，而不是裸标识。
+ * @summary Explain Solver Run
+ */
+export const explainSolverRunApiV1SolverRunsRunIdExplanationPost = (
+    runId: string,
+    params?: ExplainSolverRunApiV1SolverRunsRunIdExplanationPostParams,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<SolverRunExplanation>(
+      {url: `/api/v1/solver-runs/${runId}/explanation`, method: 'POST',
+        params, signal
+    },
+      );
+    }
+  
+
+
+export const getExplainSolverRunApiV1SolverRunsRunIdExplanationPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof explainSolverRunApiV1SolverRunsRunIdExplanationPost>>, TError,{runId: string;params?: ExplainSolverRunApiV1SolverRunsRunIdExplanationPostParams}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof explainSolverRunApiV1SolverRunsRunIdExplanationPost>>, TError,{runId: string;params?: ExplainSolverRunApiV1SolverRunsRunIdExplanationPostParams}, TContext> => {
+
+const mutationKey = ['explainSolverRunApiV1SolverRunsRunIdExplanationPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof explainSolverRunApiV1SolverRunsRunIdExplanationPost>>, {runId: string;params?: ExplainSolverRunApiV1SolverRunsRunIdExplanationPostParams}> = (props) => {
+          const {runId,params} = props ?? {};
+
+          return  explainSolverRunApiV1SolverRunsRunIdExplanationPost(runId,params,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ExplainSolverRunApiV1SolverRunsRunIdExplanationPostMutationResult = NonNullable<Awaited<ReturnType<typeof explainSolverRunApiV1SolverRunsRunIdExplanationPost>>>
+    
+    export type ExplainSolverRunApiV1SolverRunsRunIdExplanationPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Explain Solver Run
+ */
+export const useExplainSolverRunApiV1SolverRunsRunIdExplanationPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof explainSolverRunApiV1SolverRunsRunIdExplanationPost>>, TError,{runId: string;params?: ExplainSolverRunApiV1SolverRunsRunIdExplanationPostParams}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof explainSolverRunApiV1SolverRunsRunIdExplanationPost>>,
+        TError,
+        {runId: string;params?: ExplainSolverRunApiV1SolverRunsRunIdExplanationPostParams},
+        TContext
+      > => {
+
+      const mutationOptions = getExplainSolverRunApiV1SolverRunsRunIdExplanationPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
 /**
  * @summary Solver Run Events
  */

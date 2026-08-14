@@ -9,6 +9,7 @@ import type { SolverRunResponseModelStatus } from './solverRunResponseModelStatu
 import type { SolverRunResponseObjectiveValue } from './solverRunResponseObjectiveValue';
 import type { SolverRunResponseBestBound } from './solverRunResponseBestBound';
 import type { SolverRunResponseWallTimeSeconds } from './solverRunResponseWallTimeSeconds';
+import type { SolverRunResponseExplanation } from './solverRunResponseExplanation';
 import type { SolverRunResponseErrorMessage } from './solverRunResponseErrorMessage';
 
 export interface SolverRunResponse {
@@ -24,6 +25,7 @@ export interface SolverRunResponse {
   conflict_rule_ids: string[];
   priority_rule_ids: string[];
   priority_explanations: string[];
+  explanation?: SolverRunResponseExplanation;
   error_message: SolverRunResponseErrorMessage;
   created_at: string;
   updated_at: string;

@@ -378,6 +378,25 @@ class SolveRequest(BaseModel):
         return self
 
 
+class IntentReview(BaseModel):
+    """把教务原始那句话和最终课表对照的结论。仅供参考，不改变硬约束判定。"""
+
+    verdict: Literal["matched", "deviated", "unclear"]
+    concerns: list[str] = Field(default_factory=list)
+
+
+class SolverRunExplanation(BaseModel):
+    headline: str
+    explanation: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+    intent_review: IntentReview | None = None
+    # deterministic=纯代码生成的兜底解释；ai=模型润色过的版本。
+    source: Literal["deterministic", "ai"]
+    usage: dict[str, Any] | None = None
+    # AI 调用失败时保留原因，界面据此说明为什么只有兜底解释。
+    ai_error: str | None = None
+
+
 class SolverRunResponse(ORMModel):
     id: str
     snapshot_id: str
@@ -391,6 +410,7 @@ class SolverRunResponse(ORMModel):
     conflict_rule_ids: list[str]
     priority_rule_ids: list[str]
     priority_explanations: list[str]
+    explanation: SolverRunExplanation | None = None
     error_message: str | None
     created_at: datetime
     updated_at: datetime

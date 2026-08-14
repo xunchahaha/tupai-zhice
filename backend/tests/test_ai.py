@@ -4,12 +4,13 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from app.api import settings
 from app.db import SessionLocal
-from app.models import AIProviderConfiguration
+from app.models import AIProviderConfiguration, SolverRun
 from app.services.ai import AISecretCipher, AIService
 
 
@@ -175,3 +176,138 @@ def test_assistant_interpret_uses_configured_ai_provider(
     assert payload["ai_configured"] is True
     assert payload["date_window_days"] == 3
     assert "fixed_time" in payload["solver_rules"]
+
+
+def _solve_once(client: TestClient, headers: dict[str, str]) -> dict[str, Any]:
+    response = client.post(
+        "/api/v1/solver-runs",
+        headers=headers,
+        json={"wait": True, "time_limit_seconds": 10, "change_weight": 100000},
+    )
+    assert response.status_code == 202, response.text
+    return response.json()
+
+
+def test_explanation_falls_back_to_deterministic_text_without_ai(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: Any,
+) -> None:
+    """AI 不可用时仍要给出人话解释：SYSTEM-* 的翻译本来就是代码能做完的部分。"""
+    monkeypatch.setattr(settings, "ai_base_url", "https://model.example/v1")
+    monkeypatch.setattr(settings, "ai_api_key", "environment-ai-key")
+    monkeypatch.setattr(settings, "ai_model", "scheduling-model")
+
+    def unreachable(url: str, **kwargs: Any) -> httpx.Response:
+        raise httpx.ConnectError("模型服务不可达", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("app.services.ai.httpx.post", unreachable)
+    run = _solve_once(client, auth_headers)
+    response = client.post(
+        f"/api/v1/solver-runs/{run['id']}/explanation",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["source"] == "deterministic"
+    assert payload["ai_error"]
+    assert payload["headline"]
+    assert payload["explanation"]
+
+
+def test_explanation_translates_builtin_conflict_ids(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    from app.services.explain import SYSTEM_RULE_GLOSSARY, describe_conflict_rule
+
+    with SessionLocal() as db:
+        described = describe_conflict_rule(db, "SYSTEM-CLASS-NO-OVERLAP")
+    assert described["origin"] == "solver_builtin"
+    assert described["meaning"] == SYSTEM_RULE_GLOSSARY["SYSTEM-CLASS-NO-OVERLAP"]
+    assert "SYSTEM" not in described["meaning"]
+
+
+def test_explanation_uses_ai_wording_and_records_token_usage(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(settings, "ai_base_url", "https://model.example/v1")
+    monkeypatch.setattr(settings, "ai_api_key", "environment-ai-key")
+    monkeypatch.setattr(settings, "ai_model", "scheduling-model")
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        captured["body"] = kwargs["json"]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "headline": "已排定全部课次",
+                                    "explanation": ["同一班级没有被排到同一时刻。"],
+                                    "next_actions": [],
+                                    "intent_review": {"verdict": "matched", "concerns": []},
+                                },
+                                ensure_ascii=False,
+                            )
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 812, "completion_tokens": 96, "total_tokens": 908},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.services.ai.httpx.post", fake_post)
+    run = _solve_once(client, auth_headers)
+    response = client.post(
+        f"/api/v1/solver-runs/{run['id']}/explanation",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["source"] == "ai"
+    assert payload["headline"] == "已排定全部课次"
+    assert payload["intent_review"] == {"verdict": "matched", "concerns": []}
+    assert payload["usage"]["total_tokens"] == 908
+
+    # 事实包必须带上确定性重算的冲突指标，且 prompt 明确禁止模型改写这个结论。
+    system_prompt = captured["body"]["messages"][0]["content"]
+    assert "禁止判断排课结果是否正确" in system_prompt
+    facts = json.loads(captured["body"]["messages"][1]["content"])
+    assert "hard_conflicts" in facts["schedule"]["metrics"]
+
+    # 解释已落库，再次请求不应重复调用模型。
+    monkeypatch.setattr(
+        "app.services.ai.httpx.post",
+        lambda *args, **kwargs: pytest.fail("已存解释不应重新调用 AI"),
+    )
+    cached = client.post(
+        f"/api/v1/solver-runs/{run['id']}/explanation",
+        headers=auth_headers,
+    )
+    assert cached.status_code == 200
+    assert cached.json()["headline"] == "已排定全部课次"
+
+
+def test_explanation_rejects_a_run_that_has_not_finished(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    run = _solve_once(client, auth_headers)
+    with SessionLocal() as db:
+        stored = db.get(SolverRun, run["id"])
+        assert stored is not None
+        stored.status = "running"
+        stored.explanation = None
+        db.commit()
+    response = client.post(
+        f"/api/v1/solver-runs/{run['id']}/explanation",
+        headers=auth_headers,
+    )
+    assert response.status_code == 409

@@ -102,6 +102,7 @@ from .schemas import (
     ScheduleResponse,
     ScheduleSummaryResponse,
     SolveRequest,
+    SolverRunExplanation,
     SolverRunResponse,
     TeacherBatchUpdate,
     TeacherPayload,
@@ -130,6 +131,7 @@ from .services.converter_zhengzhou import (
     WorkbookFormatError,
     import_schedule_workbook,
 )
+from .services.explain import build_explanation_facts, deterministic_summary
 from .services.feishu import FeishuService, FeishuServiceError, json_text
 from .services.snapshot import create_snapshot
 from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
@@ -1573,6 +1575,48 @@ def get_solver_run(run_id: str, db: Db, user: CurrentUser) -> SolverRun:
     return get_or_404(db, SolverRun, run_id)
 
 
+@router.post(
+    "/solver-runs/{run_id}/explanation",
+    response_model=SolverRunExplanation,
+    tags=["solver"],
+)
+def explain_solver_run(
+    run_id: str,
+    db: Db,
+    user: AdminOrScheduler,
+    refresh: bool = Query(default=False, description="忽略已存解释，重新调用 AI 生成"),
+) -> dict[str, Any]:
+    """把求解结论翻译成教务读得懂的话，并做一次意图核对。
+
+    事实包由代码算，AI 只负责措辞与意图核对；模型不可用时退回确定性兜底解释，
+    界面仍然拿得到 SYSTEM-* 的业务口径翻译，而不是裸标识。
+    """
+    run = get_or_404(db, SolverRun, run_id)
+    if run.status not in {"completed", "failed"}:
+        raise HTTPException(status_code=409, detail="求解尚未结束，暂时无法解释结果")
+    if run.explanation and not refresh:
+        return dict(run.explanation)
+
+    facts = build_explanation_facts(db, run)
+    payload = deterministic_summary(facts)
+    try:
+        payload = AIService(settings, db).explain_solver_run(facts)
+    except AIServiceError as exc:
+        payload["ai_error"] = str(exc)
+
+    run.explanation = payload
+    audit(
+        db,
+        user,
+        "explain",
+        "solver_run",
+        run.id,
+        {"source": payload.get("source"), "refresh": refresh},
+    )
+    db.commit()
+    return payload
+
+
 @router.get("/solver-runs/{run_id}/events", tags=["solver"])
 async def solver_run_events(run_id: str, user: CurrentUser) -> StreamingResponse:
     async def event_stream():
@@ -1596,6 +1640,7 @@ async def solver_run_events(run_id: str, user: CurrentUser) -> StreamingResponse
                         "conflict_rule_ids": run.conflict_rule_ids,
                         "priority_rule_ids": run.priority_rule_ids,
                         "priority_explanations": run.priority_explanations,
+                        "explanation": run.explanation,
                         "error_message": run.error_message,
                     },
                     ensure_ascii=False,

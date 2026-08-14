@@ -1,11 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Activity, Bot, CalendarPlus, Play, Settings2, SlidersHorizontal, Sparkles } from "lucide-react";
+import { Activity, Bot, CalendarPlus, MessageSquareText, Play, RefreshCw, Settings2, SlidersHorizontal, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
-import { getListSchedulesApiV1SchedulesGetQueryKey, getListSolverRunsApiV1SolverRunsGetQueryKey, getOverviewApiV1OverviewGetQueryKey, useGetSolverRunApiV1SolverRunsRunIdGet, useListCourseSessionsApiV1CourseSessionsGet, useListRulesApiV1RulesGet, useListSchedulesApiV1SchedulesGet, useListSolverRunsApiV1SolverRunsGet, useSubmitSolverRunApiV1SolverRunsPost } from "@/api/generated/client";
-import { type SolveRequest, type SolverRunResponse } from "@/api/generated/models";
+import { getListSchedulesApiV1SchedulesGetQueryKey, getListSolverRunsApiV1SolverRunsGetQueryKey, getOverviewApiV1OverviewGetQueryKey, useExplainSolverRunApiV1SolverRunsRunIdExplanationPost, useGetSolverRunApiV1SolverRunsRunIdGet, useListCourseSessionsApiV1CourseSessionsGet, useListRulesApiV1RulesGet, useListSchedulesApiV1SchedulesGet, useListSolverRunsApiV1SolverRunsGet, useSubmitSolverRunApiV1SolverRunsPost } from "@/api/generated/client";
+import { type SolveRequest, type SolverRunExplanation, type SolverRunResponse } from "@/api/generated/models";
 import { http } from "@/api/http";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
@@ -324,6 +324,92 @@ function RunPanel({ run }: { run: SolverRunResponse | null }) {
         </div>
       ) : null}
       {run?.error_message ? <div className="mt-4 text-sm text-red-700">{run.error_message}</div> : null}
+      <ExplanationPanel run={run} />
+    </section>
+  );
+}
+
+const INTENT_VERDICTS: Record<string, { label: string; tone: "green" | "yellow" | "neutral" }> = {
+  matched: { label: "与原始意图一致", tone: "green" },
+  deviated: { label: "可能偏离原始意图", tone: "yellow" },
+  unclear: { label: "无法判断", tone: "neutral" },
+};
+
+function ExplanationPanel({ run }: { run: SolverRunResponse | null }) {
+  const client = useQueryClient();
+  const [explanation, setExplanation] = useState<SolverRunExplanation | null>(null);
+  // 换一次求解任务就清掉上一条解释，否则会把旧结论挂在新任务下面。
+  useEffect(() => { setExplanation(run?.explanation ?? null); }, [run?.id, run?.explanation]);
+  const explain = useExplainSolverRunApiV1SolverRunsRunIdExplanationPost({
+    mutation: {
+      onSuccess: (result) => {
+        setExplanation(result);
+        void client.invalidateQueries({ queryKey: getListSolverRunsApiV1SolverRunsGetQueryKey() });
+      },
+      onError: (error) => toast.error(errorMessage(error)),
+    },
+  });
+  if (!run || run.status !== "completed") return null;
+  const intent = explanation?.intent_review;
+  const verdict = intent ? INTENT_VERDICTS[intent.verdict] ?? INTENT_VERDICTS.unclear : null;
+  return (
+    <section className="mt-6 border-t border-zinc-100 pt-5">
+      <div className="flex flex-wrap items-center gap-2">
+        <MessageSquareText className="size-4 text-blue-600" />
+        <h3 className="text-sm font-semibold">结果解释</h3>
+        {explanation ? <Badge tone={explanation.source === "ai" ? "blue" : "neutral"}>{explanation.source === "ai" ? "AI 措辞" : "系统兜底措辞"}</Badge> : null}
+        <Button
+          className="ml-auto"
+          size="sm"
+          variant="outline"
+          disabled={explain.isPending}
+          onClick={() => explain.mutate({ runId: run.id, params: { refresh: Boolean(explanation) } })}
+        >
+          {explanation ? <RefreshCw className="size-3.5" /> : <Sparkles className="size-3.5" />}
+          {explain.isPending ? "生成中" : explanation ? "重新生成" : "解释这次结果"}
+        </Button>
+      </div>
+      {explanation ? (
+        <div className="mt-3 space-y-3 text-sm">
+          <p className="font-medium text-zinc-900">{explanation.headline}</p>
+          {explanation.explanation?.length ? (
+            <ul className="list-disc space-y-1 pl-5 text-zinc-700">
+              {explanation.explanation.map((item, index) => <li key={`${index}-${item.slice(0, 12)}`}>{item}</li>)}
+            </ul>
+          ) : null}
+          {explanation.next_actions?.length ? (
+            <div className="border-l-2 border-blue-400 bg-blue-50/60 px-4 py-3 text-zinc-800">
+              <div className="text-xs font-medium text-blue-800">下一步可以做什么</div>
+              <ul className="mt-1 list-disc space-y-1 pl-5">
+                {explanation.next_actions.map((item, index) => <li key={`${index}-${item.slice(0, 12)}`}>{item}</li>)}
+              </ul>
+            </div>
+          ) : null}
+          {intent && verdict ? (
+            <div className="border-l-2 border-zinc-300 bg-zinc-50 px-4 py-3">
+              <div className="flex items-center gap-2 text-xs text-zinc-500">
+                意图核对
+                <Badge tone={verdict.tone}>{verdict.label}</Badge>
+              </div>
+              {intent.concerns?.length ? (
+                <ul className="mt-1.5 list-disc space-y-1 pl-5 text-zinc-700">
+                  {intent.concerns.map((item, index) => <li key={`${index}-${item.slice(0, 12)}`}>{item}</li>)}
+                </ul>
+              ) : null}
+              <p className="mt-2 text-xs text-zinc-500">
+                意图核对由模型给出，仅供参考。硬冲突是否存在由 CP-SAT 与独立重算的指标判定，不受这里影响。
+              </p>
+            </div>
+          ) : null}
+          {explanation.ai_error ? (
+            <p className="border-l-2 border-amber-500 bg-amber-50 px-4 py-2 text-xs text-amber-900">
+              AI 措辞不可用，已回退到系统兜底解释：{explanation.ai_error}
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <p className="mt-2 text-xs text-zinc-500">把模型状态、冲突规则和课表指标翻译成教务能读的结论；AI 不可用时会回退到系统兜底措辞。</p>
+      )}
     </section>
   );
 }

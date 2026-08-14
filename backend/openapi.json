@@ -2127,6 +2127,66 @@
         }
       }
     },
+    "/api/v1/solver-runs/{run_id}/explanation": {
+      "post": {
+        "tags": [
+          "solver"
+        ],
+        "summary": "Explain Solver Run",
+        "description": "把求解结论翻译成教务读得懂的话，并做一次意图核对。\n\n事实包由代码算，AI 只负责措辞与意图核对；模型不可用时退回确定性兜底解释，\n界面仍然拿得到 SYSTEM-* 的业务口径翻译，而不是裸标识。",
+        "operationId": "explain_solver_run_api_v1_solver_runs__run_id__explanation_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "忽略已存解释，重新调用 AI 生成",
+              "default": false,
+              "title": "Refresh"
+            },
+            "description": "忽略已存解释，重新调用 AI 生成"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SolverRunExplanation"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/solver-runs/{run_id}/events": {
       "get": {
         "tags": [
@@ -5424,6 +5484,32 @@
         ],
         "title": "IntegrationSyncResponse"
       },
+      "IntentReview": {
+        "properties": {
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "matched",
+              "deviated",
+              "unclear"
+            ],
+            "title": "Verdict"
+          },
+          "concerns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Concerns"
+          }
+        },
+        "type": "object",
+        "required": [
+          "verdict"
+        ],
+        "title": "IntentReview",
+        "description": "把教务原始那句话和最终课表对照的结论。仅供参考，不改变硬约束判定。"
+      },
       "MasterDataBatchDelete": {
         "properties": {
           "object_ids": {
@@ -6514,6 +6600,75 @@
         "type": "object",
         "title": "SolveRequest"
       },
+      "SolverRunExplanation": {
+        "properties": {
+          "headline": {
+            "type": "string",
+            "title": "Headline"
+          },
+          "explanation": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Explanation"
+          },
+          "next_actions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Next Actions"
+          },
+          "intent_review": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IntentReview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "deterministic",
+              "ai"
+            ],
+            "title": "Source"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage"
+          },
+          "ai_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ai Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "headline",
+          "source"
+        ],
+        "title": "SolverRunExplanation"
+      },
       "SolverRunResponse": {
         "properties": {
           "id": {
@@ -6601,6 +6756,16 @@
             },
             "type": "array",
             "title": "Priority Explanations"
+          },
+          "explanation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SolverRunExplanation"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "error_message": {
             "anyOf": [
