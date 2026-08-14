@@ -1236,6 +1236,7 @@ def create_solver_run(
         "time_limit_seconds": request.time_limit_seconds,
         "change_weight": getattr(request, "change_weight", 100000),
         "random_seed": settings.solver_random_seed,
+        "search_workers": settings.solver_search_workers,
         "business_lines": request.business_lines,
         "product_types": request.product_types,
         "class_business_ids": request.class_business_ids,
@@ -1756,6 +1757,15 @@ def create_reschedule_event(
     request: RescheduleCreate, db: Db, user: AdminOrScheduler
 ) -> RescheduleEvent:
     parent = get_or_404(db, ScheduleVersion, request.parent_schedule_id)
+    if request.event_type == "teacher_leave" and not (
+        request.slot_business_ids or request.date_from
+    ):
+        # 不限定时段也不限定日期的请假等于「该教师全程不可用」，只会产出必然无解的任务。
+        raise HTTPException(
+            status_code=422, detail="教师请假必须至少指定时段或日期范围"
+        )
+    if request.date_from and request.date_to and request.date_from > request.date_to:
+        raise HTTPException(status_code=422, detail="事件的开始日期不能晚于结束日期")
     parent_response = schedule_response(db, parent)
     event_payload = request.model_dump(
         exclude={"parent_schedule_id", "description", "time_limit_seconds"}

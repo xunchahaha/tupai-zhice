@@ -346,13 +346,26 @@ def _event_blocks_date(
     candidate: date,
     slots: dict[tuple[object, object, object], str],
 ) -> bool:
+    """判断请假事件是否挡住某个候选日期。
+
+    事件可以按时段、按日期，或两者同时限定范围。两者都没有时表示该教师
+    在整个求解窗口内都不可用——这必然无解，因此接口层不允许创建这种事件。
+    """
     if event.get("event_type") != "teacher_leave" or not _event_targets_session(event, session):
         return False
+    date_from = _parse_date(event.get("date_from"))
+    date_to = _parse_date(event.get("date_to"))
+    if date_from and candidate < date_from:
+        return False
+    if date_to and candidate > date_to:
+        return False
     slot_ids = set(event.get("slot_business_ids") or [])
+    if not slot_ids:
+        return True
     candidate_slot = _slot_for_date(
         slots, candidate, str(session["fixed_start_time"]), str(session["fixed_end_time"])
     )
-    return not slot_ids or candidate_slot in slot_ids
+    return candidate_slot in slot_ids
 
 
 def _selected_sessions(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -378,14 +391,17 @@ def _selected_sessions(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return selected
 
 
+def _has_date_information(session: dict[str, Any]) -> bool:
+    return bool(
+        _parse_date(session.get("lesson_date"))
+        and session.get("fixed_start_time")
+        and session.get("fixed_end_time")
+    )
+
+
 def _uses_date_aware_model(payload: dict[str, Any]) -> bool:
     sessions = _selected_sessions(payload)
-    return bool(sessions) and all(
-        _parse_date(item.get("lesson_date"))
-        and item.get("fixed_start_time")
-        and item.get("fixed_end_time")
-        for item in sessions
-    )
+    return bool(sessions) and all(_has_date_information(item) for item in sessions)
 
 
 def _empty_result(status: str = "INFEASIBLE", *, presolved: bool = False) -> dict[str, Any]:
@@ -602,6 +618,7 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         for item in payload.get("time_slots", [])
         if item.get("is_open")
     }
+    defines_time_slots = bool(payload.get("time_slots"))
     rules = _normalized_rules(payload)
     solver_rules = set(
         payload.get("solver_rules")
@@ -754,6 +771,16 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
             for item in allowed_dates
             if not _event_blocks_date(event, session, item, slots)
         ]
+        if defines_time_slots:
+            # 只保留该「星期 + 起止时刻」确实存在且开放的日期，否则会把课排到
+            # 未开放的日子，并回填一个星期对不上的时段标识。
+            # 守卫看的是「数据集有没有定义时段」，不能看 slots 是否为空——
+            # 时段全部关闭时 slots 正好是空的，那恰恰是必须拦住的情况。
+            allowed_dates = [
+                item
+                for item in allowed_dates
+                if _slot_for_date(slots, item, fixed_start, fixed_end)
+            ]
         if session.get("is_locked"):
             allowed_dates = [item for item in allowed_dates if item == original_date]
         if not allowed_dates:
@@ -931,7 +958,7 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(payload.get("time_limit_seconds", 30))
     solver.parameters.random_seed = int(payload.get("random_seed", 2026))
-    solver.parameters.num_search_workers = 1
+    solver.parameters.num_search_workers = max(1, int(payload.get("search_workers", 8)))
     status_code = solver.solve(model)
     result["model_status"] = STATUS_NAMES.get(status_code, "UNKNOWN")
     result["wall_time_seconds"] = solver.wall_time
@@ -984,17 +1011,49 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
     teachers = {item["business_id"]: item for item in payload["teachers"]}
     rooms = {item["business_id"]: item for item in payload["rooms"]}
     slots = {item["business_id"]: item for item in payload["time_slots"] if item["is_open"]}
-    sessions = payload["course_sessions"]
+    sessions = _selected_sessions(payload)
+    session_by_id = {item["business_id"]: item for item in sessions}
     event = payload.get("event") or {}
     variables: dict[tuple[str, str, str], cp_model.IntVar] = {}
 
+    # 范围外的已发布课次不重新决策，但它们占用的教室/教师/班级时段必须让出来，
+    # 否则「只调一个班」会把别的班排进已经占用的资源。
+    selected_ids = set(session_by_id)
+    all_sessions = {str(item["business_id"]): item for item in payload.get("course_sessions", [])}
+    busy_rooms: set[tuple[str, str]] = set()
+    busy_teachers: set[tuple[str, str]] = set()
+    busy_classes: set[tuple[tuple[str, str, str], str]] = set()
+    for previous in payload.get("previous_assignments", []):
+        course_id = str(previous.get("course_business_id") or "")
+        slot_id = str(previous.get("slot_business_id") or "")
+        if not course_id or course_id in selected_ids or not slot_id:
+            continue
+        course = all_sessions.get(course_id)
+        if course is None:
+            continue
+        room_id = str(previous.get("room_business_id") or "")
+        if room_id:
+            busy_rooms.add((room_id, slot_id))
+        teacher_id = str(course.get("teacher_business_id") or "")
+        if teacher_id and _is_person(teachers.get(teacher_id, {})):
+            busy_teachers.add((teacher_id, slot_id))
+        busy_classes.add((_class_scope_key(course), slot_id))
+
     for course in sessions:
         feasible: list[cp_model.IntVar] = []
+        course_teacher = str(course.get("teacher_business_id") or "")
+        course_class = _class_scope_key(course)
         for room_id, room in rooms.items():
             if not room["is_active"]:
                 continue
             for slot_id in slots:
                 if _event_blocks(event, course, room_id, slot_id):
+                    continue
+                if (room_id, slot_id) in busy_rooms:
+                    continue
+                if (course_teacher, slot_id) in busy_teachers:
+                    continue
+                if (course_class, slot_id) in busy_classes:
                     continue
                 variable = model.new_bool_var(f"x_{course['business_id']}_{room_id}_{slot_id}")
                 variables[(course["business_id"], room_id, slot_id)] = variable
@@ -1025,10 +1084,7 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
                 variable
                 for (course_id, room_id, current_slot), variable in variables.items()
                 if current_slot == slot_id
-                and next(item for item in sessions if item["business_id"] == course_id)[
-                    "teacher_business_id"
-                ]
-                == teacher_id
+                and session_by_id[course_id]["teacher_business_id"] == teacher_id
             )
     class_ids = {_class_scope_key(item) for item in sessions}
     for class_id in class_ids:
@@ -1037,10 +1093,7 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
                 variable
                 for (course_id, room_id, current_slot), variable in variables.items()
                 if current_slot == slot_id
-                and _class_scope_key(
-                    next(item for item in sessions if item["business_id"] == course_id)
-                )
-                == class_id
+                and _class_scope_key(session_by_id[course_id]) == class_id
             )
     for room_id in rooms:
         for slot_id in slots:
@@ -1064,7 +1117,7 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
         actor_ids = set(rule.get("actor_ids") or [])
         matching: list[cp_model.IntVar] = []
         for (course_id, room_id, slot_id), variable in variables.items():
-            course = next(item for item in sessions if item["business_id"] == course_id)
+            course = session_by_id[course_id]
             actor_matches = (
                 not actor_ids
                 or course_id in actor_ids
@@ -1109,7 +1162,7 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
         if scope.get("slot_id"):
             slot_ids.add(scope["slot_id"])
         for (course_id, room_id, slot_id), variable in variables.items():
-            course = next(item for item in sessions if item["business_id"] == course_id)
+            course = session_by_id[course_id]
             actor_matches = (
                 not actor_ids
                 or course_id in actor_ids
@@ -1201,7 +1254,7 @@ def _solve_once(
         time_limit or payload.get("time_limit_seconds", 30)
     )
     solver.parameters.random_seed = int(payload.get("random_seed", 2026))
-    solver.parameters.num_search_workers = 1
+    solver.parameters.num_search_workers = max(1, int(payload.get("search_workers", 8)))
     status_code = solver.solve(built.model)
     status_name = STATUS_NAMES.get(status_code, "UNKNOWN")
     result: dict[str, Any] = {
@@ -1244,7 +1297,16 @@ def solve_problem(payload: dict[str, Any]) -> dict[str, Any]:
     selected = _selected_sessions(payload)
     if not selected:
         return _empty_result("OPTIMAL", presolved=True)
-    if _uses_date_aware_model(payload):
+    dated = [item for item in selected if _has_date_information(item)]
+    if dated and len(dated) != len(selected):
+        # 混排会让整批退化成无日期模型，已有日期的课次会被静默清空并重排到别的星期。
+        missing = [str(item["business_id"]) for item in selected if not _has_date_information(item)]
+        raise ValueError(
+            "求解范围内混有缺少上课日期或固定起止时间的课次，无法确定使用哪种模型："
+            + "、".join(missing[:10])
+            + (f" 等 {len(missing)} 条" if len(missing) > 10 else "")
+        )
+    if dated:
         return _solve_date_aware(payload)
     result = _solve_once(payload)
     if result["model_status"] == "INFEASIBLE":

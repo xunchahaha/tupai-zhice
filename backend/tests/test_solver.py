@@ -758,3 +758,119 @@ def test_empty_scope_is_not_reported_as_a_proved_optimum() -> None:
     )
     assert result["model_status"] == "OPTIMAL"
     assert result["presolve_infeasible"] is True
+
+
+def test_slot_matrix_path_only_reschedules_the_requested_scope() -> None:
+    """时段矩阵路径此前直接读全库课次，「只调一个班」会把全库重排。"""
+    payload = {
+        "teachers": [{"business_id": "T1", "name": "教师一", "is_group": True}],
+        "rooms": [{"business_id": "R1", "name": "教室1", "is_active": True}],
+        "time_slots": [
+            {"business_id": "S1", "weekday": "周一", "sequence": 1, "is_open": True},
+            {"business_id": "S2", "weekday": "周一", "sequence": 2, "is_open": True},
+        ],
+        "course_sessions": [
+            {
+                "id": f"db-C{index}",
+                "business_id": f"C{index}",
+                "class_business_id": f"B{index}",
+                "teacher_business_id": "T1",
+            }
+            for index in range(3)
+        ],
+        "class_business_ids": ["B0"],
+        "rules": [],
+        "time_limit_seconds": 5,
+    }
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "OPTIMAL"
+    assert [item["course_business_id"] for item in result["assignments"]] == ["C0"]
+
+
+def test_slot_matrix_path_treats_out_of_scope_assignments_as_occupied() -> None:
+    """范围外的已发布课次必须让出它占用的教室时段，否则会被排进同一格。"""
+    payload = {
+        "teachers": [{"business_id": "T1", "name": "教师一", "is_group": True}],
+        "rooms": [{"business_id": "R1", "name": "教室1", "is_active": True}],
+        "time_slots": [{"business_id": "S1", "weekday": "周一", "sequence": 1, "is_open": True}],
+        "course_sessions": [
+            {
+                "id": "db-C0",
+                "business_id": "C0",
+                "class_business_id": "B0",
+                "teacher_business_id": "T1",
+            },
+            {
+                "id": "db-C1",
+                "business_id": "C1",
+                "class_business_id": "B1",
+                "teacher_business_id": "T1",
+            },
+        ],
+        "class_business_ids": ["B0"],
+        "previous_assignments": [
+            {"course_business_id": "C1", "room_business_id": "R1", "slot_business_id": "S1"}
+        ],
+        "rules": [],
+        "time_limit_seconds": 5,
+    }
+
+    assert solve_problem(payload)["model_status"] == "INFEASIBLE"
+
+
+def test_mixing_dated_and_undated_sessions_fails_loudly() -> None:
+    """混排会让整批退化成无日期模型并清空已有日期，必须报错而不是静默降级。"""
+    payload = _date_payload(
+        [
+            _course("C1", class_id="B1", room="R1"),
+            {
+                "id": "db-LEGACY",
+                "business_id": "LEGACY",
+                "class_business_id": "B2",
+                "teacher_business_id": "郑州考研英语教研组",
+            },
+        ],
+        teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+    )
+
+    try:
+        solve_problem(payload)
+    except ValueError as exc:
+        assert "LEGACY" in str(exc)
+    else:
+        raise AssertionError("混合数据集必须抛错")
+
+
+def test_date_model_respects_closed_time_slots() -> None:
+    """时段全部关闭时不能照排，也不能回填一个星期对不上的时段标识。"""
+    payload = _date_payload(
+        [_course("C1", class_id="B1", room="R1")],
+        teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+        date_window_days=3,
+    )
+    for slot in payload["time_slots"]:
+        slot["is_open"] = False
+
+    assert solve_problem(payload)["model_status"] == "INFEASIBLE"
+
+
+def test_teacher_leave_without_any_window_no_longer_blocks_every_date() -> None:
+    """按日期限定的请假只挡住那几天，其余候选日期照常可用。"""
+    payload = _date_payload(
+        [_course("C1", class_id="B1", room="R1")],
+        teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+        date_window_days=5,
+        event={
+            "event_type": "teacher_leave",
+            "teacher_business_id": "郑州考研英语教研组",
+            "date_from": "2026-09-07",
+            "date_to": "2026-09-07",
+        },
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "OPTIMAL"
+    assert result["assignments"][0]["lesson_date"] != "2026-09-07"

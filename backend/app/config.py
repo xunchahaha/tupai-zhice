@@ -68,6 +68,7 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"]
     )
     solver_workers: int = 1
+    solver_search_workers: int = 8
     solver_time_limit_seconds: float = 30.0
     solver_random_seed: int = 2026
 

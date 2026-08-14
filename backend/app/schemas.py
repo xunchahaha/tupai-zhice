@@ -419,6 +419,8 @@ class RescheduleCreate(BaseModel):
     teacher_business_id: str | None = None
     room_business_id: str | None = None
     slot_business_ids: list[str] = Field(default_factory=list)
+    date_from: date | None = None
+    date_to: date | None = None
     course_business_id: str | None = None
     time_limit_seconds: float = Field(default=30, ge=1, le=900)
 
