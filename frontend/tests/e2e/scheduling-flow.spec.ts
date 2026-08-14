@@ -84,8 +84,25 @@ test("管理员完成排课、调课、回滚和飞书生产接入引导流程",
   await expect(page.getByText(/已显示 \d+ 个课次/)).toBeVisible();
   await expect(page.getByText("B01-1", { exact: true })).toBeVisible();
 
+  // 请假事件必须命中该教师真实占用的时段，否则它不与任何课冲突，零变更才是最优解。
+  // 原来写死的 S03 只在求解器单线程时成立：36e55d0 起 num_search_workers=8，
+  // 目标值相同的最优解之间会随机换一个，T01 不一定还落在 S03 上，断言随机失败。
+  const scheduleSummaries = await (await api.get("/api/v1/schedules")).json();
+  const parentSummary = scheduleSummaries.find(
+    (item: { solver_run_id: string }) => item.solver_run_id === solverRun.id,
+  );
+  expect(parentSummary).toBeTruthy();
+  const parentDetail = await (await api.get(`/api/v1/schedules/${parentSummary.id}`)).json();
+  // 行序没有 ORDER BY，按业务标识排序取第一条，保证同一份课表每次选中同一个课次。
+  const [blocked] = [...parentDetail.assignments].sort(
+    (left: { course_business_id: string }, right: { course_business_id: string }) =>
+      left.course_business_id.localeCompare(right.course_business_id),
+  );
+  expect(blocked).toBeTruthy();
+
   await page.getByRole("link", { name: "局部调课" }).click();
-  await page.getByLabel("影响时段").selectOption("S03");
+  await page.getByLabel("教师").selectOption(blocked.teacher_business_id);
+  await page.getByLabel("影响时段").selectOption(blocked.slot_business_id);
   await page.getByLabel("说明").fill("E2E 教师请假");
   const adjustmentResponse = page.waitForResponse((response) =>
     response.url().endsWith("/api/v1/reschedule-events") && response.request().method() === "POST",
@@ -112,13 +129,22 @@ test("管理员完成排课、调课、回滚和飞书生产接入引导流程",
     `/api/v1/schedules/${event.parent_schedule_id}/diff/${candidateScheduleId}`,
   );
   const diff = await diffResponse.json();
+  // 聚合计数只是必要条件，真正要证明的是被请假挡住的那节课自己挪走了。
   expect(diff.changed_count).toBeGreaterThan(0);
+  const movedItem = diff.items.find(
+    (item: { course_business_id: string }) =>
+      item.course_business_id === blocked.course_business_id,
+  );
+  expect(movedItem.change_kind).toBe("moved");
+  expect(movedItem.before_slot_id).toBe(blocked.slot_business_id);
+  expect(movedItem.after_slot_id).not.toBe(blocked.slot_business_id);
 
   await page.getByRole("link", { name: "版本与回滚" }).click();
   await page.getByLabel("基准版本").selectOption(event.parent_schedule_id);
   await page.getByLabel("目标版本").selectOption(candidateScheduleId);
   await expect(page.getByText("变更课次")).toBeVisible();
-  await expect(page.getByText(String(diff.changed_count), { exact: true })).toBeVisible();
+  // 变更课次现在稳定是个位数，全页搜 "1" 会撞上别的文本，改成只在这块指标里断言。
+  await expect(page.getByText("变更课次").locator("..")).toContainText(String(diff.changed_count));
 
   const candidateCard = page.getByTestId(`version-card-${candidate.id}`);
   await candidateCard.locator("button").click();
