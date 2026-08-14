@@ -72,11 +72,12 @@ export function statusLabel(value?: string | null): string {
   return labels[value] ?? value;
 }
 
-export function modelStatusLabel(value?: string | null): string {
+export function modelStatusLabel(value?: string | null, presolved = false): string {
   if (!value) return "未返回";
-  if (value === "OPTIMAL") return "最优解";
+  if (value === "OPTIMAL") return presolved ? "范围内无课次" : "已证明最优";
   if (value === "FEASIBLE") return "可行解";
-  if (value === "INFEASIBLE") return "无解";
+  if (value === "INFEASIBLE") return presolved ? "预检判定无解" : "已证明无解";
+  if (value === "UNKNOWN") return "超时未定";
   return labels[value] ?? "未知";
 }
 

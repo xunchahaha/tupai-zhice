@@ -19,8 +19,6 @@ def solve(client: TestClient, headers: dict[str, str]) -> dict:
         json={
             "wait": True,
             "time_limit_seconds": 10,
-            "preference_weight": 100,
-            "seat_waste_weight": 1,
             "change_weight": 100000,
         },
     )

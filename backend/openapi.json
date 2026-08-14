@@ -5983,20 +5983,6 @@
             "title": "Time Limit Seconds",
             "default": 30
           },
-          "preference_weight": {
-            "type": "integer",
-            "maximum": 10000.0,
-            "minimum": 0.0,
-            "title": "Preference Weight",
-            "default": 100
-          },
-          "seat_waste_weight": {
-            "type": "integer",
-            "maximum": 1000.0,
-            "minimum": 0.0,
-            "title": "Seat Waste Weight",
-            "default": 1
-          },
           "change_weight": {
             "type": "integer",
             "maximum": 1000000.0,

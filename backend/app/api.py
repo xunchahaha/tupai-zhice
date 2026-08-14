@@ -1158,8 +1158,6 @@ def create_solver_run(
     snapshot = create_snapshot(db, user_id)
     payload = {
         "time_limit_seconds": request.time_limit_seconds,
-        "preference_weight": getattr(request, "preference_weight", 100),
-        "seat_waste_weight": getattr(request, "seat_waste_weight", 1),
         "change_weight": getattr(request, "change_weight", 100000),
         "random_seed": settings.solver_random_seed,
         "business_lines": request.business_lines,

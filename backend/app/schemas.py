@@ -315,8 +315,6 @@ class RuleTransition(BaseModel):
 
 class SolveRequest(BaseModel):
     time_limit_seconds: float = Field(default=30, ge=1, le=900)
-    preference_weight: int = Field(default=100, ge=0, le=10000)
-    seat_waste_weight: int = Field(default=1, ge=0, le=1000)
     change_weight: int = Field(default=100000, ge=0, le=1000000)
     business_lines: list[str] = Field(default_factory=list)
     product_types: list[str] = Field(default_factory=list)
