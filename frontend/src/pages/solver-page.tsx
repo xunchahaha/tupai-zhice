@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
-import { getListSchedulesApiV1SchedulesGetQueryKey, getListSolverRunsApiV1SolverRunsGetQueryKey, getOverviewApiV1OverviewGetQueryKey, useGetSolverRunApiV1SolverRunsRunIdGet, useListRulesApiV1RulesGet, useListSchedulesApiV1SchedulesGet, useListSolverRunsApiV1SolverRunsGet, useSubmitSolverRunApiV1SolverRunsPost } from "@/api/generated/client";
+import { getListSchedulesApiV1SchedulesGetQueryKey, getListSolverRunsApiV1SolverRunsGetQueryKey, getOverviewApiV1OverviewGetQueryKey, useGetSolverRunApiV1SolverRunsRunIdGet, useListCourseSessionsApiV1CourseSessionsGet, useListRulesApiV1RulesGet, useListSchedulesApiV1SchedulesGet, useListSolverRunsApiV1SolverRunsGet, useSubmitSolverRunApiV1SolverRunsPost } from "@/api/generated/client";
 import { type SolveRequest, type SolverRunResponse } from "@/api/generated/models";
 import { http } from "@/api/http";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
@@ -38,6 +38,10 @@ interface SolverParamValues {
   date_window_days: number;
   change_weight: number;
   solver_rules: SolverRule[];
+  business_lines: string[];
+  class_business_ids: string[];
+  date_from: string | null;
+  date_to: string | null;
 }
 
 /** 只列出求解器真正会读取的参数。教师偏好与座位浪费在当前数据模型下无法建模，故不再提供。 */
@@ -54,6 +58,10 @@ const defaultParams: SolverParamValues = {
   date_window_days: 7,
   change_weight: 100000,
   solver_rules: SOLVER_RULES.map((item) => item.key),
+  business_lines: [],
+  class_business_ids: [],
+  date_from: null,
+  date_to: null,
 };
 
 interface CalendarConflict { course_session_id: string; calendar_user_id: string; lesson_date: string; start_time: string; end_time: string; source: string }
@@ -73,6 +81,7 @@ export function SolverPage() {
   const [assistantReady, setAssistantReady] = useState<boolean | null>(null);
   const [assistantEngine, setAssistantEngine] = useState("AI 模型");
   const rules = useListRulesApiV1RulesGet({ status: "active" });
+  const courses = useListCourseSessionsApiV1CourseSessionsGet();
   const runs = useListSolverRunsApiV1SolverRunsGet({ query: { refetchInterval: 5000 } });
   const schedules = useListSchedulesApiV1SchedulesGet();
   const [assistantProbeError, setAssistantProbeError] = useState("");
@@ -99,6 +108,18 @@ export function SolverPage() {
   useEffect(() => { if (progress.data) { setCurrent(progress.data); if (progress.data.status === "completed" || progress.data.status === "failed") { void Promise.all([client.invalidateQueries({ queryKey: getListSchedulesApiV1SchedulesGetQueryKey() }), client.invalidateQueries({ queryKey: getListSolverRunsApiV1SolverRunsGetQueryKey() }), client.invalidateQueries({ queryKey: getOverviewApiV1OverviewGetQueryKey() })]); } } }, [client, progress.data]);
   if (rules.isPending || runs.isPending || schedules.isPending) return <LoadingState />;
   if (rules.isError || runs.isError || schedules.isError) return <ErrorState retry={() => { void rules.refetch(); void runs.refetch(); void schedules.refetch(); }} />;
+  const courseRows = courses.data ?? [];
+  const scopeOptions = {
+    businessLines: [...new Set(courseRows.map((item) => item.business_line ?? "").filter(Boolean))].sort(),
+    classes: [...new Set(courseRows.map((item) => item.class_business_id))].sort(),
+  };
+  const selectedCount = courseRows.filter((item) => {
+    if (params.business_lines.length && !params.business_lines.includes(item.business_line ?? "")) return false;
+    if (params.class_business_ids.length && !params.class_business_ids.includes(item.class_business_id)) return false;
+    if (params.date_from && (item.lesson_date ?? "") < params.date_from) return false;
+    if (params.date_to && (item.lesson_date ?? "") > params.date_to) return false;
+    return true;
+  }).length;
   const activeRun = current ?? runs.data?.[0] ?? null;
   const schedule = activeRun?.status === "completed"
     ? (latestDraftSchedule(schedules.data) ?? preferredSchedule(schedules.data))
@@ -127,6 +148,8 @@ export function SolverPage() {
       <SolverParams
         params={params}
         setParams={setParams}
+        scope={scopeOptions}
+        selectedCount={selectedCount}
         pending={submit.isPending || activeRun?.status === "running"}
         onSubmit={() => submit.mutate({ data: { ...params, wait: false } })}
       />
@@ -160,7 +183,7 @@ function NumberField({ label, hint, value, min, max, step, onChange }: { label: 
   );
 }
 
-function SolverParams({ params, setParams, pending, onSubmit }: { params: SolverParamValues; setParams: React.Dispatch<React.SetStateAction<SolverParamValues>>; pending: boolean; onSubmit: () => void }) {
+function SolverParams({ params, setParams, scope, selectedCount, pending, onSubmit }: { params: SolverParamValues; setParams: React.Dispatch<React.SetStateAction<SolverParamValues>>; scope: { businessLines: string[]; classes: string[] }; selectedCount: number; pending: boolean; onSubmit: () => void }) {
   const toggleRule = (key: SolverRule) =>
     setParams((current) => ({
       ...current,
@@ -174,7 +197,66 @@ function SolverParams({ params, setParams, pending, onSubmit }: { params: Solver
         <SlidersHorizontal className="size-4 text-blue-600" />
         <h2 className="font-semibold">手动求解参数</h2>
       </div>
-      <div className="mt-5 grid gap-4">
+      <fieldset className="mt-5 grid gap-3 border-b border-zinc-100 pb-4">
+        <legend className="sr-only">求解范围</legend>
+        <div className="text-xs font-medium text-zinc-500">求解范围</div>
+        <label className="block text-sm text-zinc-700">
+          业务线
+          <select
+            className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm"
+            value={params.business_lines[0] ?? ""}
+            onChange={(event) =>
+              setParams((current) => ({
+                ...current,
+                business_lines: event.target.value ? [event.target.value] : [],
+              }))
+            }
+          >
+            <option value="">全部业务线</option>
+            {scope.businessLines.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block text-sm text-zinc-700">
+          班级
+          <select
+            className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm"
+            value={params.class_business_ids[0] ?? ""}
+            onChange={(event) =>
+              setParams((current) => ({
+                ...current,
+                class_business_ids: event.target.value ? [event.target.value] : [],
+              }))
+            }
+          >
+            <option value="">全部班级</option>
+            {scope.classes.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <div className="grid grid-cols-2 gap-3">
+          {(["date_from", "date_to"] as const).map((key) => (
+            <label key={key} className="block text-sm text-zinc-700">
+              {key === "date_from" ? "起始日期" : "结束日期"}
+              <input
+                className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm"
+                type="date"
+                value={params[key] ?? ""}
+                onChange={(event) =>
+                  setParams((current) => ({ ...current, [key]: event.target.value || null }))
+                }
+              />
+            </label>
+          ))}
+        </div>
+        <p className={"text-xs leading-5 " + (selectedCount > 1500 ? "text-amber-700" : "text-zinc-400")}>
+          当前范围命中 <span className="font-mono tabular-nums">{selectedCount}</span> 个课次。
+          {selectedCount > 1500 ? "课次过多时求解会超时，建议按班级或按周分批。" : ""}
+        </p>
+      </fieldset>
+      <div className="mt-4 grid gap-4">
         <NumberField label="求解时限（秒）" hint="超时返回 UNKNOWN，课次越多需要越长" value={params.time_limit_seconds} min={1} max={900} step={5} onChange={(value) => setParams((current) => ({ ...current, time_limit_seconds: value }))} />
         <NumberField label="日期调整窗口（天）" hint="每节课最多可以前后挪动的天数" value={params.date_window_days} min={0} max={31} step={1} onChange={(value) => setParams((current) => ({ ...current, date_window_days: value }))} />
         <NumberField label="变更权重" hint="每挪动一天的代价，越大越倾向保持原课表" value={params.change_weight} min={0} max={1000000} step={1000} onChange={(value) => setParams((current) => ({ ...current, change_weight: value }))} />

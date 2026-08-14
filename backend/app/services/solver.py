@@ -372,11 +372,15 @@ def _selected_sessions(payload: dict[str, Any]) -> list[dict[str, Any]]:
     business_lines = set(payload.get("business_lines") or [])
     product_types = set(payload.get("product_types") or [])
     class_ids = set(payload.get("class_business_ids") or [])
+    # 增量调课用它把求解范围收敛到受影响的局部邻域，邻域外的课次作为固定占用。
+    course_ids = {str(item) for item in payload.get("course_business_ids") or []}
     date_from = _parse_date(payload.get("date_from"))
     date_to = _parse_date(payload.get("date_to"))
     selected: list[dict[str, Any]] = []
     for session in payload.get("course_sessions", []):
         lesson_date = _parse_date(session.get("lesson_date"))
+        if course_ids and str(session.get("business_id")) not in course_ids:
+            continue
         if business_lines and session.get("business_line") not in business_lines:
             continue
         if product_types and session.get("product_type") not in product_types:

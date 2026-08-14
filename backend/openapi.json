@@ -5436,6 +5436,13 @@
             ],
             "title": "Course Business Id"
           },
+          "neighborhood_days": {
+            "type": "integer",
+            "maximum": 31.0,
+            "minimum": 0.0,
+            "title": "Neighborhood Days",
+            "default": 7
+          },
           "time_limit_seconds": {
             "type": "number",
             "maximum": 900.0,
@@ -6244,6 +6251,13 @@
             "minimum": 1.0,
             "title": "Time Limit Seconds",
             "default": 30
+          },
+          "course_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Course Business Ids"
           },
           "change_weight": {
             "type": "integer",

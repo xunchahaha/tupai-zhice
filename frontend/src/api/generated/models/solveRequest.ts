@@ -15,6 +15,7 @@ export interface SolveRequest {
    * @maximum 900
    */
   time_limit_seconds?: number;
+  course_business_ids?: string[];
   /**
    * @minimum 0
    * @maximum 1000000

@@ -874,3 +874,53 @@ def test_teacher_leave_without_any_window_no_longer_blocks_every_date() -> None:
 
     assert result["model_status"] == "OPTIMAL"
     assert result["assignments"][0]["lesson_date"] != "2026-09-07"
+
+
+def test_course_scope_limits_the_date_model_to_a_local_neighbourhood() -> None:
+    """增量调课只在受影响的邻域内决策，邻域外的课次作为固定占用不被重排。"""
+    payload = _date_payload(
+        [
+            _course("C1", class_id="B1", room="R1"),
+            _course("C2", class_id="B2", room="R2"),
+        ],
+        teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+        course_business_ids=["C1"],
+        previous_assignments=[
+            {
+                "course_business_id": "C2",
+                "room_business_id": "R2",
+                "slot_business_id": "S-周一-0830",
+                "lesson_date": "2026-09-07",
+            }
+        ],
+        date_window_days=2,
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] in {"OPTIMAL", "FEASIBLE"}
+    assert [item["course_business_id"] for item in result["assignments"]] == ["C1"]
+
+
+def test_course_scope_still_respects_frozen_neighbours() -> None:
+    """邻域外课次占用的教室必须让出来，不能被邻域内的课排进同一格。"""
+    payload = _date_payload(
+        [
+            _course("C1", class_id="B1", room="R1"),
+            _course("C2", class_id="B2", room="R1"),
+        ],
+        rooms=[{"business_id": "R1", "name": "教室1", "is_active": True}],
+        teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+        course_business_ids=["C1"],
+        previous_assignments=[
+            {
+                "course_business_id": "C2",
+                "room_business_id": "R1",
+                "slot_business_id": "S-周一-0830",
+                "lesson_date": "2026-09-07",
+            }
+        ],
+        date_window_days=0,
+    )
+
+    assert solve_problem(payload)["model_status"] == "INFEASIBLE"

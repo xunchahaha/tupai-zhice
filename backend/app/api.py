@@ -1282,6 +1282,7 @@ def create_solver_run(
         "business_lines": request.business_lines,
         "product_types": request.product_types,
         "class_business_ids": request.class_business_ids,
+        "course_business_ids": getattr(request, "course_business_ids", []),
         "date_from": request.date_from.isoformat() if request.date_from else None,
         "date_to": request.date_to.isoformat() if request.date_to else None,
         "date_window_days": request.date_window_days,
@@ -1812,6 +1813,78 @@ def publish_schedule_to_calendar(
     )
 
 
+def reschedule_neighborhood(
+    db: Session, request: RescheduleCreate, parent: ScheduleResponse
+) -> set[str]:
+    """把调课求解收敛到受影响的局部邻域。
+
+    文档要求「冻结邻域外变量、只在局部求解」。种子是被事件直接命中的课次；
+    邻域再纳入同一时间窗口内共用班级或教室的课次——它们是腾挪空间的来源。
+    邻域外的课次不参与决策，但会作为固定占用进入模型，不会被别的课占掉。
+    返回空集表示不限定范围（求解器按全量处理）。
+    """
+    teachers = {item.business_id: item for item in db.scalars(select(Teacher))}
+    courses = {item.id: item for item in db.scalars(select(CourseSession))}
+
+    def targets(assignment: AssignmentResponse) -> bool:
+        course = courses.get(assignment.course_session_id)
+        if course is None:
+            return False
+        if request.course_business_id and course.business_id == request.course_business_id:
+            return True
+        if request.event_type == "room_outage":
+            return bool(
+                request.room_business_id
+                and assignment.room_business_id == request.room_business_id
+            )
+        if request.event_type == "teacher_leave":
+            teacher = teachers.get(assignment.teacher_business_id)
+            calendar_user_id = course.calendar_user_id or (
+                teacher.calendar_user_id if teacher else None
+            )
+            return bool(
+                (
+                    request.teacher_business_id
+                    and assignment.teacher_business_id == request.teacher_business_id
+                )
+                or (
+                    request.teacher_business_id
+                    and calendar_user_id
+                    and calendar_user_id == request.teacher_business_id
+                )
+            )
+        return False
+
+    seeds = [item for item in parent.assignments if targets(item)]
+    if not seeds:
+        return set()
+    seed_dates = [item.lesson_date for item in seeds if item.lesson_date]
+    if not seed_dates:
+        return {
+            courses[item.course_session_id].business_id
+            for item in seeds
+            if item.course_session_id in courses
+        }
+    window = timedelta(days=request.neighborhood_days)
+    lower, upper = min(seed_dates) - window, max(seed_dates) + window
+    seed_classes = {item.class_business_id for item in seeds}
+    seed_rooms = {item.room_business_id for item in seeds}
+    neighborhood: set[str] = set()
+    for item in parent.assignments:
+        course = courses.get(item.course_session_id)
+        if course is None:
+            continue
+        if item.lesson_date and not (lower <= item.lesson_date <= upper):
+            continue
+        if (
+            item in seeds
+            or item.class_business_id in seed_classes
+            or item.room_business_id in seed_rooms
+        ):
+            neighborhood.add(course.business_id)
+    return neighborhood
+
+
 @router.get("/reschedule-events", response_model=list[RescheduleResponse], tags=["reschedule"])
 def list_reschedule_events(db: Db, user: CurrentUser) -> list[RescheduleEvent]:
     return list(db.scalars(select(RescheduleEvent).order_by(RescheduleEvent.created_at.desc())))
@@ -1847,6 +1920,7 @@ def create_reschedule_event(
     )
     db.add(event)
     db.flush()
+    neighborhood = reschedule_neighborhood(db, request, parent_response)
     run = create_solver_run(
         db,
         user.id,
@@ -1857,6 +1931,7 @@ def create_reschedule_event(
             "event": event_payload,
             "previous_assignments": [item.model_dump() for item in parent_response.assignments],
             "change_weight": 100000,
+            "course_business_ids": sorted(neighborhood),
         },
     )
     event.solver_run_id = run.id

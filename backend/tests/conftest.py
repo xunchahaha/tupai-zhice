@@ -7,8 +7,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 TEST_DB = Path(__file__).resolve().parents[2] / "data" / "test.db"
-if TEST_DB.exists():
-    TEST_DB.unlink()
+# 连 WAL/SHM 一起删：只删主库文件时，上一次跑子集测试留下的 WAL 会被重放，
+# 下一次全量跑就会出现与改动无关的假失败。
+for _artifact in (TEST_DB, Path(f"{TEST_DB}-wal"), Path(f"{TEST_DB}-shm")):
+    if _artifact.exists():
+        _artifact.unlink()
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB.as_posix()}"
 os.environ["JWT_SECRET"] = "test-secret-with-at-least-32-characters"
 # 示例密钥在生产会被拒绝，测试也必须用真实值走同一条鉴权路径。

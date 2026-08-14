@@ -332,6 +332,7 @@ class RuleTransition(BaseModel):
 
 class SolveRequest(BaseModel):
     time_limit_seconds: float = Field(default=30, ge=1, le=900)
+    course_business_ids: list[str] = Field(default_factory=list)
     change_weight: int = Field(default=100000, ge=0, le=1000000)
     business_lines: list[str] = Field(default_factory=list)
     product_types: list[str] = Field(default_factory=list)
@@ -438,6 +439,7 @@ class RescheduleCreate(BaseModel):
     date_from: date | None = None
     date_to: date | None = None
     course_business_id: str | None = None
+    neighborhood_days: int = Field(default=7, ge=0, le=31)
     time_limit_seconds: float = Field(default=30, ge=1, le=900)
 
 
