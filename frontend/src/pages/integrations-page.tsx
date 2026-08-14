@@ -30,6 +30,7 @@ import {
 } from "@/api/generated/client";
 import type { FeishuConnectionResponse } from "@/api/generated/models";
 import { API_BASE_URL } from "@/api/http";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -86,6 +87,7 @@ export function IntegrationsPage() {
   const [frontendUrl, setFrontendUrl] = useState(window.location.origin);
   const [editingApp, setEditingApp] = useState(false);
   const [copiedCallback, setCopiedCallback] = useState(false);
+  const [disconnectConfirmOpen, setDisconnectConfirmOpen] = useState(false);
 
   const refresh = async () => {
     await Promise.all([connection.refetch(), syncs.refetch()]);
@@ -127,6 +129,7 @@ export function IntegrationsPage() {
   const disconnect = useDisconnectFeishuApiV1IntegrationsFeishuConnectionDelete({
     mutation: {
       onSuccess: async () => {
+        setDisconnectConfirmOpen(false);
         toast.success("飞书账号连接已解除");
         await refreshConnection();
       },
@@ -334,11 +337,7 @@ export function IntegrationsPage() {
                   <Button
                     size="sm"
                     variant="ghost"
-                    onClick={() => {
-                      if (window.confirm("解除后需要重新授权，已创建的飞书表格仍会保留。确认解除？")) {
-                        disconnect.mutate();
-                      }
-                    }}
+                    onClick={() => setDisconnectConfirmOpen(true)}
                     disabled={disconnect.isPending}
                   >
                     <LogOut className="size-3.5" />解除连接
@@ -501,6 +500,16 @@ export function IntegrationsPage() {
           else setGuideStep((value) => value + 1);
         }}
         onOpenChange={(open) => (open ? setGuideOpen(true) : closeGuide())}
+      />
+      <ConfirmDialog
+        open={disconnectConfirmOpen}
+        title="解除飞书连接"
+        description="解除后需要重新授权；已创建的飞书多维表格和其中的数据仍会保留。"
+        confirmLabel="确认解除"
+        danger
+        pending={disconnect.isPending}
+        onOpenChange={setDisconnectConfirmOpen}
+        onConfirm={() => disconnect.mutate()}
       />
     </div>
   );
