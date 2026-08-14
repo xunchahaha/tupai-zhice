@@ -125,6 +125,20 @@ def _session_matches_rule(session: dict[str, Any], room_id: str, rule: dict[str,
     )
 
 
+def _class_scope_key(session: dict[str, Any]) -> tuple[str, str, str]:
+    """Identify a real class within its product scenario.
+
+    Official data reuses labels such as “走读SMART班” across different
+    product types. Those are parallel business scenarios, not one physical
+    class, so the label alone must not create a class-overlap constraint.
+    """
+    return (
+        str(session.get("business_line") or ""),
+        str(session.get("product_type") or ""),
+        str(session.get("class_business_id") or ""),
+    )
+
+
 def _rule_items(value: object) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for entry in value for item in _rule_items(entry)]
@@ -383,6 +397,146 @@ def _empty_result(status: str = "INFEASIBLE") -> dict[str, Any]:
     }
 
 
+def _date_infeasible_diagnostics(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Return traceable IDs for date-aware hard constraints.
+
+    The date-aware model uses built-in constraints instead of CP-SAT
+    assumptions, so OR-Tools has no assumption core to return. Expose stable
+    system rule IDs and any active dynamic rule IDs instead of leaving the UI
+    with an empty conflict list.
+    """
+    ids: list[str] = []
+    dynamic_ids = [
+        str(rule.get("business_id"))
+        for rule in _normalized_rules(payload)
+        if rule.get("hardness") == "hard" and rule.get("business_id")
+    ]
+    ids.extend(dynamic_ids)
+    ids.append("SYSTEM-FIXED-TIME")
+    capacity_explanations = _date_capacity_explanations(payload)
+    if any(item.startswith("SYSTEM-CLASS-NO-OVERLAP") for item in capacity_explanations):
+        ids.append("SYSTEM-CLASS-NO-OVERLAP")
+    solver_rules = set(
+        payload.get("solver_rules")
+        or {"fixed_time", "room_no_overlap", "calendar_no_overlap", "minimize_changes"}
+    )
+    if "room_no_overlap" in solver_rules and any(
+        item.startswith("SYSTEM-ROOM-NO-OVERLAP") for item in capacity_explanations
+    ):
+        ids.append("SYSTEM-ROOM-NO-OVERLAP")
+    if "calendar_no_overlap" in solver_rules and any(
+        item.startswith("SYSTEM-CALENDAR-NO-OVERLAP") for item in capacity_explanations
+    ):
+        ids.append("SYSTEM-CALENDAR-NO-OVERLAP")
+    if len(ids) == len(dynamic_ids) + 1:
+        ids.extend(
+            [
+                "SYSTEM-CLASS-NO-OVERLAP",
+                *(
+                    ["SYSTEM-ROOM-NO-OVERLAP"]
+                    if "room_no_overlap" in solver_rules
+                    else []
+                ),
+                *(
+                    ["SYSTEM-CALENDAR-NO-OVERLAP"]
+                    if "calendar_no_overlap" in solver_rules
+                    else []
+                ),
+            ]
+        )
+    ids = list(dict.fromkeys(ids))
+    dynamic_text = "、".join(dynamic_ids) if dynamic_ids else "当前请求未携带动态规则 ID"
+    detail_text = " ".join(capacity_explanations)
+    explanations = [
+        "日期感知模型未使用可供 CP-SAT 提取的假设文字；本次无解按内置硬约束标记。",
+        f"约束范围：{dynamic_text}；系统约束：{'、'.join(ids[len(dynamic_ids):])}。",
+        detail_text
+        or "优先检查同一业务场景的班级重叠、固定上课时段、教室容量和具体日程账号占用。",
+    ]
+    return ids, explanations
+
+
+def _date_capacity_explanations(payload: dict[str, Any]) -> list[str]:
+    """Find simple Hall-style overloads in the date-aware candidate windows."""
+    from collections import defaultdict
+
+    sessions = _selected_sessions(payload)
+    window = max(0, int(payload.get("date_window_days", 7)))
+    request_from = _parse_date(payload.get("date_from"))
+    request_to = _parse_date(payload.get("date_to"))
+    teachers = {str(item.get("business_id")): item for item in payload.get("teachers", [])}
+    active_rooms = sum(1 for item in payload.get("rooms", []) if item.get("is_active"))
+    groups: dict[tuple[str, Any], list[tuple[date, date, str]]] = defaultdict(list)
+    calendar_groups: dict[tuple[str, Any], list[tuple[date, date, str]]] = defaultdict(list)
+    room_groups: dict[Any, list[tuple[date, date, str]]] = defaultdict(list)
+    for session in sessions:
+        original = _parse_date(session.get("lesson_date"))
+        if original is None:
+            continue
+        lower = original - timedelta(days=window)
+        upper = original + timedelta(days=window)
+        if request_from:
+            lower = max(lower, request_from)
+        if request_to:
+            upper = min(upper, request_to)
+        if session.get("is_locked"):
+            lower = upper = original
+        interval = (lower, upper, str(session.get("business_id")))
+        clock = (session.get("fixed_start_time"), session.get("fixed_end_time"))
+        groups[(_class_scope_key(session), clock)].append(interval)
+        room_groups[clock].append(interval)
+        teacher = teachers.get(str(session.get("teacher_business_id")), {})
+        calendar_user_id = str(
+            session.get("calendar_user_id") or teacher.get("calendar_user_id") or ""
+        ).strip()
+        if calendar_user_id:
+            calendar_groups[(calendar_user_id, clock)].append(interval)
+
+    explanations: list[str] = []
+
+    def scan(
+        grouped: dict[Any, list[tuple[date, date, str]]],
+        capacity: int,
+        rule_id: str,
+        label: str,
+    ) -> None:
+        if capacity <= 0:
+            return
+        for key, intervals in grouped.items():
+            if len(intervals) <= capacity:
+                continue
+            boundaries = sorted(
+                {point for lower, upper, _ in intervals for point in (lower, upper)}
+            )
+            for start in boundaries:
+                for end in boundaries:
+                    if end < start:
+                        continue
+                    contained = [
+                        item for item in intervals if item[0] >= start and item[1] <= end
+                    ]
+                    available = (end - start).days + 1
+                    if len(contained) <= capacity * available:
+                        continue
+                    sample = "、".join(item[2] for item in contained[:3])
+                    scope = (
+                        " / ".join(str(item) for item in key)
+                        if isinstance(key, tuple)
+                        else str(key)
+                    )
+                    explanations.append(
+                        f"{rule_id}：{label} {scope} 在 {start.isoformat()} 至 "
+                        f"{end.isoformat()} 的候选窗口内有 {len(contained)} 场，"
+                        f"最多容纳 {capacity * available} 场；示例课次：{sample}。"
+                    )
+                    return
+
+    scan(groups, 1, "SYSTEM-CLASS-NO-OVERLAP", "班级场景")
+    scan(room_groups, active_rooms, "SYSTEM-ROOM-NO-OVERLAP", "教室")
+    scan(calendar_groups, 1, "SYSTEM-CALENDAR-NO-OVERLAP", "具体日程账号")
+    return explanations[:3]
+
+
 def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
     model = cp_model.CpModel()
     sessions = _selected_sessions(payload)
@@ -410,6 +564,10 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
 
     result = _empty_result()
     if not sessions or not rooms:
+        result["conflict_rule_ids"], result["priority_explanations"] = (
+            _date_infeasible_diagnostics(payload)
+        )
+        result["priority_rule_ids"] = list(result["conflict_rule_ids"])
         return result
 
     date_vars: dict[str, cp_model.IntVar] = {}
@@ -417,7 +575,7 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
     intervals: dict[str, cp_model.IntervalVar] = {}
     room_choices: dict[tuple[str, str], cp_model.IntVar] = {}
     room_intervals: dict[str, list[cp_model.IntervalVar]] = {room_id: [] for room_id in rooms}
-    class_intervals: dict[str, list[cp_model.IntervalVar]] = {}
+    class_intervals: dict[tuple[str, str, str], list[cp_model.IntervalVar]] = {}
     teacher_intervals: dict[str, list[cp_model.IntervalVar]] = {}
     objective_terms: list[Any] = []
 
@@ -447,7 +605,7 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         room_id = str(previous.get("room_business_id") or "")
         if room_id in room_intervals:
             room_intervals[room_id].append(fixed_interval)
-        class_intervals.setdefault(str(course["class_business_id"]), []).append(fixed_interval)
+        class_intervals.setdefault(_class_scope_key(course), []).append(fixed_interval)
         teacher = teachers.get(str(course["teacher_business_id"]), {})
         calendar_user_id = str(
             course.get("calendar_user_id") or teacher.get("calendar_user_id") or ""
@@ -668,7 +826,7 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
     for session in sessions:
         class_interval = intervals.get(session["business_id"])
         if class_interval is not None:
-            class_intervals.setdefault(session["class_business_id"], []).append(class_interval)
+            class_intervals.setdefault(_class_scope_key(session), []).append(class_interval)
     for grouped in class_intervals.values():
         if grouped:
             model.add_no_overlap(grouped)
@@ -696,6 +854,11 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
     result["model_status"] = STATUS_NAMES.get(status_code, "UNKNOWN")
     result["wall_time_seconds"] = solver.wall_time
     if status_code not in {cp_model.OPTIMAL, cp_model.FEASIBLE}:
+        if status_code == cp_model.INFEASIBLE:
+            result["conflict_rule_ids"], result["priority_explanations"] = (
+                _date_infeasible_diagnostics(payload)
+            )
+            result["priority_rule_ids"] = list(result["conflict_rule_ids"])
         return result
     result["objective_value"] = solver.objective_value
     result["best_bound"] = solver.best_objective_bound
@@ -766,16 +929,16 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
                 ]
                 == teacher_id
             )
-    class_ids = {item["class_business_id"] for item in sessions}
+    class_ids = {_class_scope_key(item) for item in sessions}
     for class_id in class_ids:
         for slot_id in slots:
             model.add_at_most_one(
                 variable
                 for (course_id, room_id, current_slot), variable in variables.items()
                 if current_slot == slot_id
-                and next(item for item in sessions if item["business_id"] == course_id)[
-                    "class_business_id"
-                ]
+                and _class_scope_key(
+                    next(item for item in sessions if item["business_id"] == course_id)
+                )
                 == class_id
             )
     for room_id in rooms:

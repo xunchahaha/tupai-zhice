@@ -217,6 +217,28 @@ def test_date_solver_prevents_overlapping_sessions_for_same_class() -> None:
     result = solve_problem(payload)
 
     assert result["model_status"] == "INFEASIBLE"
+    assert "SYSTEM-CLASS-NO-OVERLAP" in result["conflict_rule_ids"]
+    assert result["priority_explanations"]
+
+
+def test_date_solver_allows_reused_class_label_across_product_types() -> None:
+    payload = _date_payload(
+        [
+            _course("C1", class_id="走读SMART班", room="R1"),
+            _course(
+                "C2",
+                class_id="走读SMART班",
+                room="R2",
+                product_type="考研·走读SMART春季（无数学）",
+            ),
+        ],
+        date_window_days=0,
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "OPTIMAL"
+    assert len(result["assignments"]) == 2
 
 
 def test_teacher_group_text_does_not_create_personal_calendar_conflict() -> None:
