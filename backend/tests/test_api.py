@@ -217,7 +217,6 @@ def test_infeasible_rules_return_traceable_core(
                 "constraint_type": "fixed_slot",
                 "scope": {"slot_id": "S01"},
                 "hardness": "hard",
-                "status": "awaiting_confirmation",
             },
         )
         assert created.status_code == 201
@@ -268,7 +267,7 @@ def test_feishu_requires_production_configuration(
 def test_aily_context_proposal_confirmation_and_solve(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
-    aily_headers = {"X-Aily-Key": "aily-demo-key"}
+    aily_headers = {"X-Aily-Key": "test-aily-key-not-the-repo-default"}
     context = client.get("/api/v1/aily/context", headers=aily_headers)
     assert context.status_code == 200
     assert len(context.json()["entities"]["teachers"]) == 6
@@ -388,7 +387,10 @@ def test_product_loop_calendar_assistant_export_and_public_summary(
         "具体日程账号",
     } <= set(headers)
 
-    context = client.get("/api/v1/aily/context", headers={"X-Aily-Key": "aily-demo-key"})
+    context = client.get(
+        "/api/v1/aily/context",
+        headers={"X-Aily-Key": "test-aily-key-not-the-repo-default"},
+    )
     mapped = [
         item
         for item in context.json()["entities"]["courses"]
@@ -526,3 +528,111 @@ def test_assistant_rejects_unknown_scope(
     )
     assert response.status_code == 422
     assert "未知业务实体" in response.text
+
+
+def test_rule_status_cannot_be_forced_to_active_on_create(client, auth_headers) -> None:
+    """状态只能由 transition 推进：创建接口收到 status 字段应当直接拒绝。"""
+    response = client.post(
+        "/api/v1/rules",
+        headers=auth_headers,
+        json={
+            "source_text": "越权直接生效",
+            "actor_type": "system",
+            "actor_ids": [],
+            "constraint_type": "declared_constraint",
+            "scope": {},
+            "hardness": "hard",
+            "status": "active",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_aily_endpoints_reject_a_wrong_key(client) -> None:
+    response = client.get("/api/v1/aily/context", headers={"X-Aily-Key": "wrong-key"})
+    assert response.status_code == 401
+
+
+def test_audit_logs_are_admin_only(client, auth_headers) -> None:
+    created = client.post(
+        "/api/v1/users",
+        headers=auth_headers,
+        json={"username": "audit_viewer", "password": "viewer-password-1"},
+    )
+    assert created.status_code == 201
+    assert created.json()["role"] == "viewer"
+    token = client.post(
+        "/api/v1/auth/token",
+        data={"username": "audit_viewer", "password": "viewer-password-1"},
+    ).json()["access_token"]
+
+    response = client.get("/api/v1/audit-logs", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 403
+
+
+def test_admin_can_assign_roles(client, auth_headers) -> None:
+    created = client.post(
+        "/api/v1/users",
+        headers=auth_headers,
+        json={"username": "new_scheduler", "password": "scheduler-password-1", "role": "scheduler"},
+    )
+    assert created.status_code == 201
+    assert created.json()["role"] == "scheduler"
+
+    changed = client.patch(
+        f"/api/v1/users/{created.json()['id']}/role",
+        headers=auth_headers,
+        json={"role": "approver"},
+    )
+    assert changed.status_code == 200
+    assert changed.json()["role"] == "approver"
+
+
+def test_password_change_revokes_previously_issued_tokens(client, auth_headers) -> None:
+    client.post(
+        "/api/v1/users",
+        headers=auth_headers,
+        json={"username": "rotating_user", "password": "old-password-123"},
+    )
+    old_token = client.post(
+        "/api/v1/auth/token",
+        data={"username": "rotating_user", "password": "old-password-123"},
+    ).json()["access_token"]
+    old_headers = {"Authorization": f"Bearer {old_token}"}
+    assert client.get("/api/v1/auth/me", headers=old_headers).status_code == 200
+
+    changed = client.post(
+        "/api/v1/auth/change-password",
+        headers=old_headers,
+        json={"current_password": "old-password-123", "new_password": "brand-new-password-1"},
+    )
+    assert changed.status_code == 204
+    assert client.get("/api/v1/auth/me", headers=old_headers).status_code == 401
+    assert (
+        client.post(
+            "/api/v1/auth/token",
+            data={"username": "rotating_user", "password": "brand-new-password-1"},
+        ).status_code
+        == 200
+    )
+
+
+def test_repeated_login_failures_lock_the_account(client, auth_headers) -> None:
+    client.post(
+        "/api/v1/users",
+        headers=auth_headers,
+        json={"username": "brute_target", "password": "correct-password-1"},
+    )
+    for _ in range(8):
+        assert (
+            client.post(
+                "/api/v1/auth/token",
+                data={"username": "brute_target", "password": "wrong"},
+            ).status_code
+            == 401
+        )
+    locked = client.post(
+        "/api/v1/auth/token",
+        data={"username": "brute_target", "password": "correct-password-1"},
+    )
+    assert locked.status_code == 429

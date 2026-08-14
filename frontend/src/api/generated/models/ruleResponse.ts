@@ -26,8 +26,8 @@ export interface RuleResponse {
   structured_expression?: RuleResponseStructuredExpression;
   source_doc?: RuleResponseSourceDoc;
   confidence?: RuleResponseConfidence;
-  status?: RuleResponseStatus;
   id: string;
+  status: RuleResponseStatus;
   version: number;
   approved_by: RuleResponseApprovedBy;
   created_at: string;

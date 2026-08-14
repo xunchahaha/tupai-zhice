@@ -17,22 +17,22 @@ import { type RuleResponse } from "@/api/generated/models";
 import { isReadOnlyMember, useAppUser } from "@/app/user-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { actorTypeLabel, constraintLabel, hardnessLabel, statusLabel } from "@/lib/labels";
 import { errorMessage } from "@/lib/format";
 import { statusTone } from "@/lib/status";
 
 const editSchema = z.object({
-  source_text: z.string().min(2),
+  source_text: z.string().min(2, "请输入至少 2 个字的规则"),
   hardness: z.enum(["hard", "soft"]),
-  weight: z.number().int().positive().optional(),
+  weight: z.number().int("权重必须是整数").positive("权重必须大于 0").optional(),
 });
 const intakeSchema = z.object({
   source_text: z.string().min(2, "请输入至少 2 个字的规则"),
   source_doc: z.string().optional(),
   hardness: z.enum(["hard", "soft"]),
-  weight: z.number().int().positive(),
+  weight: z.number().int("权重必须是整数").positive("权重必须大于 0"),
 });
 type EditValues = z.infer<typeof editSchema>;
 type IntakeValues = z.infer<typeof intakeSchema>;
@@ -87,18 +87,80 @@ export function RulesPage() {
   </div>;
 }
 
+function FieldError({ message }: { message?: string }) {
+  if (!message) return null;
+  return <span className="mt-1 block text-xs text-red-600" role="alert">{message}</span>;
+}
+
 function RuleIntakeForm({ create }: { create: ReturnType<typeof useCreateRuleApiV1RulesPost> }) {
   const form = useForm<IntakeValues>({ resolver: zodResolver(intakeSchema), defaultValues: { hardness: "soft", weight: 10, source_doc: "管理端录入" } });
-  return <section className="border border-blue-200 bg-blue-50/40 p-5">
-    <div className="flex items-center gap-2"><Plus className="size-4 text-blue-600" /><h2 className="font-semibold">输入规则</h2><Badge tone="blue">先确认后求解</Badge></div>
-    <p className="mt-2 text-sm text-zinc-600">可直接输入自然语言规则。人工录入和 Aily 提交的规则都会先进入“待确认”，确认后才参与排课。</p>
-    <form className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_180px_auto]" onSubmit={form.handleSubmit((value) => create.mutate({ data: { source_text: value.source_text, actor_type: "system", actor_ids: [], constraint_type: "declared_constraint", scope: {}, hardness: value.hardness, weight: value.hardness === "soft" ? value.weight : null, structured_expression: { natural_language: value.source_text }, source_doc: value.source_doc || "管理端录入", confidence: 1, status: "awaiting_confirmation" } }))}>
-      <label className="text-sm text-zinc-700">规则原文<textarea className="mt-1.5 min-h-20 w-full rounded-md border border-zinc-300 bg-white p-2.5" placeholder="例如：教师甲周三不排晚课" {...form.register("source_text")} /></label>
-      <label className="text-sm text-zinc-700">约束级别<select className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2" {...form.register("hardness")}><option value="soft">软约束</option><option value="hard">硬约束</option></select></label>
-      <label className="text-sm text-zinc-700">软约束权重<input className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2" type="number" min="1" {...form.register("weight", { valueAsNumber: true })} /></label>
-      <Button className="self-end" type="submit" disabled={create.isPending}><Plus className="size-3.5" />提交待确认</Button>
-    </form>
-  </section>;
+  const errors = form.formState.errors;
+  const hardness = form.watch("hardness");
+  return (
+    <section className="border border-blue-200 bg-blue-50/40 p-5">
+      <div className="flex items-center gap-2">
+        <Plus className="size-4 text-blue-600" />
+        <h2 className="font-semibold">输入规则</h2>
+        <Badge tone="blue">先确认后求解</Badge>
+      </div>
+      <p className="mt-2 text-sm text-zinc-600">
+        可直接输入自然语言规则。人工录入和 Aily 提交的规则都会先进入“待确认”，确认后才参与排课。
+      </p>
+      <form
+        className="mt-4 grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_180px_180px_auto]"
+        onSubmit={form.handleSubmit((value) =>
+          create.mutate({
+            data: {
+              source_text: value.source_text,
+              actor_type: "system",
+              actor_ids: [],
+              constraint_type: "declared_constraint",
+              scope: {},
+              hardness: value.hardness,
+              weight: value.hardness === "soft" ? value.weight : null,
+              structured_expression: { natural_language: value.source_text },
+              source_doc: value.source_doc || "管理端录入",
+              confidence: 1,
+            },
+          }),
+        )}
+      >
+        <label className="text-sm text-zinc-700">
+          规则原文
+          <textarea
+            className="mt-1.5 min-h-20 w-full rounded-md border border-zinc-300 bg-white p-2.5"
+            placeholder="例如：教师甲周三不排晚课"
+            aria-invalid={Boolean(errors.source_text)}
+            {...form.register("source_text")}
+          />
+          <FieldError message={errors.source_text?.message} />
+        </label>
+        <label className="text-sm text-zinc-700">
+          约束级别
+          <select className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2" {...form.register("hardness")}>
+            <option value="soft">软约束</option>
+            <option value="hard">硬约束</option>
+          </select>
+        </label>
+        <label className="text-sm text-zinc-700">
+          软约束权重
+          <input
+            className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2 disabled:bg-zinc-100 disabled:text-zinc-400"
+            type="number"
+            min="1"
+            disabled={hardness === "hard"}
+            aria-invalid={Boolean(errors.weight)}
+            {...form.register("weight", { valueAsNumber: true })}
+          />
+          <FieldError message={hardness === "soft" ? errors.weight?.message : undefined} />
+        </label>
+        <Button className="self-start xl:mt-6" type="submit" disabled={create.isPending}>
+          <Plus className="size-3.5" />
+          提交待确认
+        </Button>
+      </form>
+    </section>
+  );
 }
 
 function RuleDetail({ readOnly, rule, onEdit, onTransition }: { readOnly: boolean; rule: RuleResponse | null; onEdit: (rule: RuleResponse) => void; onTransition: (rule: RuleResponse, status: "active" | "rejected") => void }) {
@@ -112,5 +174,5 @@ function RuleEditor({ rule, close, afterSave }: { rule: RuleResponse | null; clo
   const form = useForm<EditValues>({ resolver: zodResolver(editSchema) });
   const update = useUpdateRuleApiV1RulesRuleIdPut({ mutation: { onSuccess: () => { toast.success("规则已保存"); afterSave(); }, onError: (error) => toast.error(errorMessage(error)) } });
   useEffect(() => { if (rule) form.reset({ source_text: rule.source_text, hardness: rule.hardness, weight: rule.weight ?? undefined }); }, [form, rule]);
-  return <Dialog open={Boolean(rule)} onOpenChange={(open) => { if (!open) close(); }}><DialogContent><DialogTitle className="text-base font-semibold">编辑候选规则</DialogTitle><form className="mt-5 space-y-4" onSubmit={form.handleSubmit((value) => { if (!rule) return; update.mutate({ ruleId: rule.id, data: { source_text: value.source_text, actor_type: rule.actor_type, actor_ids: rule.actor_ids ?? [], constraint_type: rule.constraint_type, scope: rule.scope ?? {}, hardness: value.hardness, weight: value.hardness === "soft" ? value.weight : null, structured_expression: rule.structured_expression ?? {}, source_doc: rule.source_doc, confidence: rule.confidence } }); })}><label className="block text-sm text-zinc-700">规则原文<textarea className="mt-1.5 min-h-24 w-full rounded-md border border-zinc-300 p-2.5 outline-none focus:border-blue-500" {...form.register("source_text")} /></label><div className="grid grid-cols-2 gap-3"><label className="text-sm text-zinc-700">约束级别<select className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-2" {...form.register("hardness")}><option value="hard">硬约束</option><option value="soft">软约束</option></select></label><label className="text-sm text-zinc-700">权重<input className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-2" type="number" min="1" {...form.register("weight", { valueAsNumber: true })} /></label></div><div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={close}>取消</Button><Button type="submit" disabled={update.isPending}>保存</Button></div></form></DialogContent></Dialog>;
+  return <Dialog open={Boolean(rule)} onOpenChange={(open) => { if (!open) close(); }}><DialogContent><DialogTitle className="text-base font-semibold">编辑候选规则</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">只有待确认的规则可以编辑，保存后仍需人工确认才会参与排课。</DialogDescription><form className="mt-5 space-y-4" onSubmit={form.handleSubmit((value) => { if (!rule) return; update.mutate({ ruleId: rule.id, data: { source_text: value.source_text, actor_type: rule.actor_type, actor_ids: rule.actor_ids ?? [], constraint_type: rule.constraint_type, scope: rule.scope ?? {}, hardness: value.hardness, weight: value.hardness === "soft" ? value.weight : null, structured_expression: rule.structured_expression ?? {}, source_doc: rule.source_doc, confidence: rule.confidence } }); })}><label className="block text-sm text-zinc-700">规则原文<textarea className="mt-1.5 min-h-24 w-full rounded-md border border-zinc-300 p-2.5 outline-none focus:border-blue-500" aria-invalid={Boolean(form.formState.errors.source_text)} {...form.register("source_text")} /><FieldError message={form.formState.errors.source_text?.message} /></label><div className="grid grid-cols-2 gap-3"><label className="text-sm text-zinc-700">约束级别<select className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-2" {...form.register("hardness")}><option value="hard">硬约束</option><option value="soft">软约束</option></select></label><label className="text-sm text-zinc-700">权重<input className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-2" type="number" min="1" aria-invalid={Boolean(form.formState.errors.weight)} {...form.register("weight", { valueAsNumber: true })} /><FieldError message={form.formState.errors.weight?.message} /></label></div><div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={close}>取消</Button><Button type="submit" disabled={update.isPending}>保存</Button></div></form></DialogContent></Dialog>;
 }

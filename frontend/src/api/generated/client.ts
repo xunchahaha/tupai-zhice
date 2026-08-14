@@ -67,6 +67,7 @@ import type {
   ListRulesApiV1RulesGetParams,
   MasterDataBatchDelete,
   OverviewResponse,
+  PasswordChange,
   RescheduleCreate,
   RescheduleResponse,
   RoomBatchUpdate,
@@ -90,6 +91,7 @@ import type {
   UserCreate,
   UserPasswordReset,
   UserResponse,
+  UserRoleUpdate,
   UserStatusUpdate
 } from './models';
 
@@ -491,6 +493,71 @@ export const useUpdateUserStatusApiV1UsersUserIdStatusPatch = <TError = HTTPVali
     }
     
 /**
+ * @summary Update User Role
+ */
+export const updateUserRoleApiV1UsersUserIdRolePatch = (
+    userId: string,
+    userRoleUpdate: UserRoleUpdate,
+ ) => {
+      
+      
+      return customInstance<UserResponse>(
+      {url: `/api/v1/users/${userId}/role`, method: 'PATCH',
+      headers: {'Content-Type': 'application/json', },
+      data: userRoleUpdate
+    },
+      );
+    }
+  
+
+
+export const getUpdateUserRoleApiV1UsersUserIdRolePatchMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateUserRoleApiV1UsersUserIdRolePatch>>, TError,{userId: string;data: UserRoleUpdate}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof updateUserRoleApiV1UsersUserIdRolePatch>>, TError,{userId: string;data: UserRoleUpdate}, TContext> => {
+
+const mutationKey = ['updateUserRoleApiV1UsersUserIdRolePatch'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateUserRoleApiV1UsersUserIdRolePatch>>, {userId: string;data: UserRoleUpdate}> = (props) => {
+          const {userId,data} = props ?? {};
+
+          return  updateUserRoleApiV1UsersUserIdRolePatch(userId,data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateUserRoleApiV1UsersUserIdRolePatchMutationResult = NonNullable<Awaited<ReturnType<typeof updateUserRoleApiV1UsersUserIdRolePatch>>>
+    export type UpdateUserRoleApiV1UsersUserIdRolePatchMutationBody = UserRoleUpdate
+    export type UpdateUserRoleApiV1UsersUserIdRolePatchMutationError = HTTPValidationError
+
+    /**
+ * @summary Update User Role
+ */
+export const useUpdateUserRoleApiV1UsersUserIdRolePatch = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateUserRoleApiV1UsersUserIdRolePatch>>, TError,{userId: string;data: UserRoleUpdate}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof updateUserRoleApiV1UsersUserIdRolePatch>>,
+        TError,
+        {userId: string;data: UserRoleUpdate},
+        TContext
+      > => {
+
+      const mutationOptions = getUpdateUserRoleApiV1UsersUserIdRolePatchMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
  * @summary Reset User Password
  */
 export const resetUserPasswordApiV1UsersUserIdResetPasswordPost = (
@@ -552,6 +619,72 @@ export const useResetUserPasswordApiV1UsersUserIdResetPasswordPost = <TError = H
       > => {
 
       const mutationOptions = getResetUserPasswordApiV1UsersUserIdResetPasswordPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * 用户自助改密。此前只能由管理员重置，临时口令只能线下传达。
+ * @summary Change Own Password
+ */
+export const changeOwnPasswordApiV1AuthChangePasswordPost = (
+    passwordChange: PasswordChange,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<void>(
+      {url: `/api/v1/auth/change-password`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: passwordChange, signal
+    },
+      );
+    }
+  
+
+
+export const getChangeOwnPasswordApiV1AuthChangePasswordPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof changeOwnPasswordApiV1AuthChangePasswordPost>>, TError,{data: PasswordChange}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof changeOwnPasswordApiV1AuthChangePasswordPost>>, TError,{data: PasswordChange}, TContext> => {
+
+const mutationKey = ['changeOwnPasswordApiV1AuthChangePasswordPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof changeOwnPasswordApiV1AuthChangePasswordPost>>, {data: PasswordChange}> = (props) => {
+          const {data} = props ?? {};
+
+          return  changeOwnPasswordApiV1AuthChangePasswordPost(data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ChangeOwnPasswordApiV1AuthChangePasswordPostMutationResult = NonNullable<Awaited<ReturnType<typeof changeOwnPasswordApiV1AuthChangePasswordPost>>>
+    export type ChangeOwnPasswordApiV1AuthChangePasswordPostMutationBody = PasswordChange
+    export type ChangeOwnPasswordApiV1AuthChangePasswordPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Change Own Password
+ */
+export const useChangeOwnPasswordApiV1AuthChangePasswordPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof changeOwnPasswordApiV1AuthChangePasswordPost>>, TError,{data: PasswordChange}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof changeOwnPasswordApiV1AuthChangePasswordPost>>,
+        TError,
+        {data: PasswordChange},
+        TContext
+      > => {
+
+      const mutationOptions = getChangeOwnPasswordApiV1AuthChangePasswordPostMutationOptions(options);
 
       return useMutation(mutationOptions, queryClient);
     }

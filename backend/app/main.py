@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -14,8 +15,18 @@ from .services.seed import bootstrap_admin
 settings = get_settings()
 
 
+logger = logging.getLogger("tupai.startup")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    issues = settings.insecure_defaults
+    if issues:
+        message = "；".join(issues)
+        if settings.is_production:
+            # 示例密钥公开在仓库里，生产环境带着它启动等于没有鉴权。
+            raise RuntimeError(f"生产环境不允许使用示例密钥：{message}")
+        logger.warning("当前使用示例密钥，部署前必须更换：%s", message)
     create_all()
     with SessionLocal() as db:
         bootstrap_admin(db, settings.bootstrap_admin_username, settings.bootstrap_admin_password)

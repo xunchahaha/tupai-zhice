@@ -5,18 +5,16 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
-import type { UserCreateRole } from './userCreateRole';
 
-export interface UserCreate {
+export interface PasswordChange {
   /**
-   * @minLength 3
-   * @maxLength 80
+   * @minLength 1
+   * @maxLength 128
    */
-  username: string;
+  current_password: string;
   /**
    * @minLength 8
    * @maxLength 128
    */
-  password: string;
-  role?: UserCreateRole;
+  new_password: string;
 }

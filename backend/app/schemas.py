@@ -51,12 +51,26 @@ class UserCreate(BaseModel):
 
     username: str = Field(min_length=3, max_length=80)
     password: str = Field(min_length=8, max_length=128)
+    role: Role = "viewer"
+
+
+class UserRoleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: Role
 
 
 class UserStatusUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     is_active: bool
+
+
+class PasswordChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class UserPasswordReset(BaseModel):
@@ -273,6 +287,8 @@ class CourseSessionResponse(CourseSessionPayload, ORMModel):
 
 
 class RuleCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     business_id: str | None = None
     source_text: str
     actor_type: str
@@ -284,7 +300,6 @@ class RuleCreate(BaseModel):
     structured_expression: dict[str, Any] = Field(default_factory=dict)
     source_doc: str | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
-    status: RuleStatus = "awaiting_confirmation"
 
 
 class RuleUpdate(BaseModel):
@@ -303,6 +318,8 @@ class RuleUpdate(BaseModel):
 class RuleResponse(RuleCreate, ORMModel):
     id: str
     business_id: str
+    # 状态只读：创建接口不接受，但响应必须带上，前端靠它驱动确认流程。
+    status: RuleStatus
     version: int
     approved_by: str | None
     created_at: datetime

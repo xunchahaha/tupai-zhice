@@ -344,7 +344,7 @@ def _event_blocks_date(
     event: dict[str, Any],
     session: dict[str, Any],
     candidate: date,
-    slots: dict[tuple[object, object], str],
+    slots: dict[tuple[object, object, object], str],
 ) -> bool:
     if event.get("event_type") != "teacher_leave" or not _event_targets_session(event, session):
         return False
@@ -501,9 +501,9 @@ def _date_capacity_explanations(payload: dict[str, Any]) -> list[str]:
             "minimize_changes",
         }
     )
-    groups: dict[tuple[str, Any], list[tuple[date, date, str]]] = defaultdict(list)
-    calendar_groups: dict[tuple[str, Any], list[tuple[date, date, str]]] = defaultdict(list)
-    person_groups: dict[tuple[str, Any], list[tuple[date, date, str]]] = defaultdict(list)
+    groups: dict[tuple[Any, Any], list[tuple[date, date, str]]] = defaultdict(list)
+    calendar_groups: dict[tuple[Any, Any], list[tuple[date, date, str]]] = defaultdict(list)
+    person_groups: dict[tuple[Any, Any], list[tuple[date, date, str]]] = defaultdict(list)
     room_groups: dict[Any, list[tuple[date, date, str]]] = defaultdict(list)
     for session in sessions:
         original = _parse_date(session.get("lesson_date"))

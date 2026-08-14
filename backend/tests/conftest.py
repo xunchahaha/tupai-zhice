@@ -11,6 +11,8 @@ if TEST_DB.exists():
     TEST_DB.unlink()
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB.as_posix()}"
 os.environ["JWT_SECRET"] = "test-secret-with-at-least-32-characters"
+# 示例密钥在生产会被拒绝，测试也必须用真实值走同一条鉴权路径。
+os.environ["AILY_SKILL_API_KEY"] = "test-aily-key-not-the-repo-default"
 
 from app.db import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402

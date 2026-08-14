@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 from collections import Counter
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -82,6 +83,7 @@ from .schemas import (
     IntegrationSyncResponse,
     MasterDataBatchDelete,
     OverviewResponse,
+    PasswordChange,
     PublicScheduleSummary,
     RescheduleCreate,
     RescheduleResponse,
@@ -107,6 +109,7 @@ from .schemas import (
     UserCreate,
     UserPasswordReset,
     UserResponse,
+    UserRoleUpdate,
     UserStatusUpdate,
 )
 from .security import (
@@ -124,6 +127,14 @@ from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_so
 from .services.xlsx_io import export_schedule_xlsx
 
 logger = logging.getLogger("tupai.feishu")
+
+LOGIN_FAILURE_LIMIT = 8
+LOGIN_LOCKOUT_MINUTES = 15
+DEMO_AILY_KEY = "aily-demo-key"
+
+
+def _aware_utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 settings = get_settings()
 router = APIRouter(prefix=settings.api_prefix)
@@ -204,9 +215,24 @@ def schedule_response(db: Session, schedule: ScheduleVersion) -> ScheduleRespons
 @router.post("/auth/token", response_model=TokenResponse, tags=["auth"])
 def login(form: Annotated[OAuth2PasswordRequestForm, Depends()], db: Db) -> TokenResponse:
     user = db.scalar(select(User).where(User.username == form.username))
+    now = utcnow()
+    if user and user.locked_until and _aware_utc(user.locked_until) > now:
+        remaining = int((_aware_utc(user.locked_until) - now).total_seconds() // 60) + 1
+        raise HTTPException(
+            status_code=429, detail=f"登录失败次数过多，请在 {remaining} 分钟后重试"
+        )
     if not user or not user.is_active or not verify_password(form.password, user.password_hash):
+        if user is not None:
+            # 逐次累加失败次数，达到阈值后锁定，避免公开默认口令被直接爆破。
+            user.failed_login_count += 1
+            if user.failed_login_count >= LOGIN_FAILURE_LIMIT:
+                user.failed_login_count = 0
+                user.locked_until = now + timedelta(minutes=LOGIN_LOCKOUT_MINUTES)
+            db.commit()
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    user.last_login_at = utcnow()
+    user.failed_login_count = 0
+    user.locked_until = None
+    user.last_login_at = now
     db.commit()
     return TokenResponse(
         access_token=create_access_token(user), user=UserResponse.model_validate(user)
@@ -228,7 +254,7 @@ def create_user(payload: UserCreate, db: Db, user: Admin) -> User:
     instance = User(
         username=payload.username,
         password_hash=hash_password(payload.password),
-        role="viewer",
+        role=payload.role,
         is_active=True,
         created_by=user.id,
     )
@@ -281,13 +307,62 @@ def update_user_status(
     return target
 
 
+@router.patch("/users/{user_id}/role", response_model=UserResponse, tags=["accounts"])
+def update_user_role(user_id: str, payload: UserRoleUpdate, db: Db, user: Admin) -> User:
+    target = get_or_404(db, User, user_id)
+    if target.role == payload.role:
+        return target
+    if target.role == "admin":
+        active_admins = int(
+            db.scalar(
+                select(func.count(User.id)).where(User.role == "admin", User.is_active.is_(True))
+            )
+            or 0
+        )
+        if active_admins <= 1:
+            raise HTTPException(status_code=409, detail="至少需要保留一个启用中的管理员")
+    previous = target.role
+    target.role = payload.role
+    audit(
+        db,
+        user,
+        "update_role",
+        "user",
+        target.id,
+        {"username": target.username, "from": previous, "to": payload.role},
+    )
+    db.commit()
+    db.refresh(target)
+    return target
+
+
 @router.post("/users/{user_id}/reset-password", status_code=204, tags=["accounts"])
 def reset_user_password(
     user_id: str, payload: UserPasswordReset, db: Db, user: Admin
 ) -> Response:
     target = get_or_404(db, User, user_id)
     target.password_hash = hash_password(payload.password)
+    # 重置密码必须让该账号手里的旧令牌立即失效。
+    target.password_changed_at = utcnow()
+    target.token_version += 1
+    target.failed_login_count = 0
+    target.locked_until = None
     audit(db, user, "reset_password", "user", target.id, {"username": target.username})
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.post("/auth/change-password", status_code=204, tags=["auth"])
+def change_own_password(payload: PasswordChange, db: Db, user: CurrentUser) -> Response:
+    """用户自助改密。此前只能由管理员重置，临时口令只能线下传达。"""
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="当前密码不正确")
+    if payload.current_password == payload.new_password:
+        raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
+    user.password_hash = hash_password(payload.new_password)
+    user.password_changed_at = utcnow()
+    user.token_version += 1
+    audit(db, user, "change_password", "user", user.id, {"username": user.username})
     db.commit()
     return Response(status_code=204)
 
@@ -1103,7 +1178,8 @@ def create_rule(payload: RuleCreate, db: Db, user: AdminOrScheduler) -> Rule:
         payload.business_id or f"RL-{int(db.scalar(select(func.count(Rule.id))) or 0) + 1:04d}"
     )
     data = payload.model_dump(exclude={"business_id"})
-    instance = Rule(business_id=business_id, **data)
+    # 状态只能由 transition 端点推进，接口不接受调用方直接写 active。
+    instance = Rule(business_id=business_id, status="awaiting_confirmation", **data)
     db.add(instance)
     audit(db, user, "create", "rule", business_id, data)
     db.commit()
@@ -1716,7 +1792,7 @@ def create_reschedule_event(
 
 @router.get("/audit-logs", response_model=list[AuditLogResponse], tags=["audit"])
 def list_audit_logs(
-    db: Db, user: CurrentUser, limit: int = Query(100, ge=1, le=500)
+    db: Db, user: Admin, limit: int = Query(100, ge=1, le=500)
 ) -> list[AuditLogResponse]:
     rows = list(db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)))
     return [
@@ -2241,7 +2317,13 @@ def list_feishu_syncs(db: Db, user: CurrentUser) -> list[IntegrationSync]:
 
 
 def require_aily_key(x_aily_key: Annotated[str, Header()]) -> None:
-    if x_aily_key != settings.aily_skill_api_key:
+    expected = settings.aily_skill_api_key or ""
+    if not expected or expected == DEMO_AILY_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="尚未配置 Aily 集成密钥，该接口已禁用",
+        )
+    if not secrets.compare_digest(x_aily_key, expected):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Aily 集成密钥无效")
 
 

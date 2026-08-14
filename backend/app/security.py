@@ -29,8 +29,17 @@ def verify_password(password: str, encoded: str) -> bool:
 
 def create_access_token(user: User) -> str:
     expires = datetime.now(UTC) + timedelta(minutes=settings.access_token_minutes)
-    payload = {"sub": user.id, "username": user.username, "role": user.role, "exp": expires}
+    payload = {
+        "sub": user.id,
+        "username": user.username,
+        "role": user.role,
+        "ver": user.token_version,
+        "exp": expires,
+    }
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+
 
 
 def get_current_user(
@@ -50,6 +59,9 @@ def get_current_user(
         raise credentials_error from exc
     user = db.scalar(select(User).where(User.id == user_id))
     if not user or not user.is_active:
+        raise credentials_error
+    # 改密后旧令牌立即失效，否则管理员重置密码后攻击者仍能用满整个有效期。
+    if int(payload.get("ver", 0)) != user.token_version:
         raise credentials_error
     return user
 

@@ -204,6 +204,63 @@
         }
       }
     },
+    "/api/v1/users/{user_id}/role": {
+      "patch": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Update User Role",
+        "operationId": "update_user_role_api_v1_users__user_id__role_patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserRoleUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/users/{user_id}/reset-password": {
       "post": {
         "tags": [
@@ -252,6 +309,46 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/auth/change-password": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Change Own Password",
+        "description": "用户自助改密。此前只能由管理员重置，临时口令只能线下传达。",
+        "operationId": "change_own_password_api_v1_auth_change_password_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
       }
     },
     "/api/v1/health/live": {
@@ -5181,6 +5278,29 @@
         ],
         "title": "OverviewResponse"
       },
+      "PasswordChange": {
+        "properties": {
+          "current_password": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Current Password"
+          },
+          "new_password": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 8,
+            "title": "New Password"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "title": "PasswordChange"
+      },
       "RescheduleCreate": {
         "properties": {
           "event_type": {
@@ -5494,20 +5614,9 @@
               }
             ],
             "title": "Confidence"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "draft",
-              "awaiting_confirmation",
-              "active",
-              "rejected",
-              "retired"
-            ],
-            "title": "Status",
-            "default": "awaiting_confirmation"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "source_text",
@@ -5595,6 +5704,10 @@
             ],
             "title": "Confidence"
           },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -5604,12 +5717,7 @@
               "rejected",
               "retired"
             ],
-            "title": "Status",
-            "default": "awaiting_confirmation"
-          },
-          "id": {
-            "type": "string",
-            "title": "Id"
+            "title": "Status"
           },
           "version": {
             "type": "integer",
@@ -5632,6 +5740,7 @@
             "title": "Created At"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "business_id",
@@ -5640,6 +5749,7 @@
           "constraint_type",
           "hardness",
           "id",
+          "status",
           "version",
           "approved_by",
           "created_at"
@@ -6472,6 +6582,17 @@
             "maxLength": 128,
             "minLength": 8,
             "title": "Password"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "scheduler",
+              "approver",
+              "viewer"
+            ],
+            "title": "Role",
+            "default": "viewer"
           }
         },
         "additionalProperties": false,
@@ -6560,6 +6681,26 @@
           "created_at"
         ],
         "title": "UserResponse"
+      },
+      "UserRoleUpdate": {
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "scheduler",
+              "approver",
+              "viewer"
+            ],
+            "title": "Role"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "title": "UserRoleUpdate"
       },
       "UserStatusUpdate": {
         "properties": {

@@ -36,12 +36,24 @@ def upgrade() -> None:
     with op.batch_alter_table("course_sessions") as batch_op:
         batch_op.drop_column("student_count")
         batch_op.drop_column("required_devices")
-        batch_op.add_column(sa.Column("lesson_name", sa.String(length=120), nullable=False, server_default=""))
-        batch_op.add_column(sa.Column("schedule_source", sa.String(length=80), nullable=False, server_default=""))
-        batch_op.add_column(sa.Column("stage", sa.String(length=40), nullable=False, server_default=""))
-        batch_op.add_column(sa.Column("planned_sessions", sa.Integer(), nullable=False, server_default="0"))
-        batch_op.add_column(sa.Column("planned_hours", sa.Float(), nullable=False, server_default="0"))
-        batch_op.add_column(sa.Column("session_no", sa.Integer(), nullable=False, server_default="0"))
+        batch_op.add_column(
+            sa.Column("lesson_name", sa.String(length=120), nullable=False, server_default="")
+        )
+        batch_op.add_column(
+            sa.Column("schedule_source", sa.String(length=80), nullable=False, server_default="")
+        )
+        batch_op.add_column(
+            sa.Column("stage", sa.String(length=40), nullable=False, server_default="")
+        )
+        batch_op.add_column(
+            sa.Column("planned_sessions", sa.Integer(), nullable=False, server_default="0")
+        )
+        batch_op.add_column(
+            sa.Column("planned_hours", sa.Float(), nullable=False, server_default="0")
+        )
+        batch_op.add_column(
+            sa.Column("session_no", sa.Integer(), nullable=False, server_default="0")
+        )
         batch_op.add_column(sa.Column("lesson_date", sa.Date(), nullable=True))
 
 

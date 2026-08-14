@@ -12,7 +12,6 @@ import type { RuleCreateWeight } from './ruleCreateWeight';
 import type { RuleCreateStructuredExpression } from './ruleCreateStructuredExpression';
 import type { RuleCreateSourceDoc } from './ruleCreateSourceDoc';
 import type { RuleCreateConfidence } from './ruleCreateConfidence';
-import type { RuleCreateStatus } from './ruleCreateStatus';
 
 export interface RuleCreate {
   business_id?: RuleCreateBusinessId;
@@ -26,5 +25,4 @@ export interface RuleCreate {
   structured_expression?: RuleCreateStructuredExpression;
   source_doc?: RuleCreateSourceDoc;
   confidence?: RuleCreateConfidence;
-  status?: RuleCreateStatus;
 }

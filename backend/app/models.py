@@ -46,6 +46,16 @@ class User(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    password_changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    # 令牌版本用于吊销：改密时自增，旧 JWT 携带的版本不再匹配即失效。
+    # 不用签发时间做判断——JWT 的 iat 只有秒级精度，同一秒内会误伤新令牌。
+    token_version: Mapped[int] = mapped_column(Integer, default=0)
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class FeishuAppConfiguration(TimestampMixin, Base):

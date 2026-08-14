@@ -17,16 +17,6 @@ export interface SolveRequest {
   time_limit_seconds?: number;
   /**
    * @minimum 0
-   * @maximum 10000
-   */
-  preference_weight?: number;
-  /**
-   * @minimum 0
-   * @maximum 1000
-   */
-  seat_waste_weight?: number;
-  /**
-   * @minimum 0
    * @maximum 1000000
    */
   change_weight?: number;

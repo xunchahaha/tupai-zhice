@@ -37,6 +37,10 @@ FEISHU_REQUIRED_SCOPES = (
 
 AILY_OPTIONAL_SCOPES = ("aily:skill:write",)
 
+DEFAULT_JWT_SECRET = "dev-secret-change-before-deployment"
+DEFAULT_ADMIN_PASSWORD = "tupai-demo"
+DEFAULT_AILY_KEY = "aily-demo-key"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -82,6 +86,24 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.strip().lower() in {"production", "prod"}
+
+    @property
+    def insecure_defaults(self) -> list[str]:
+        """仍在使用示例值的密钥。生产环境必须为空，否则拒绝启动。"""
+        issues: list[str] = []
+        if self.jwt_secret == DEFAULT_JWT_SECRET:
+            issues.append("JWT_SECRET 仍是示例值")
+        if len(self.jwt_secret) < 32:
+            issues.append("JWT_SECRET 长度不足 32 位")
+        if self.bootstrap_admin_password == DEFAULT_ADMIN_PASSWORD:
+            issues.append("BOOTSTRAP_ADMIN_PASSWORD 仍是示例值")
+        if self.aily_skill_api_key == DEFAULT_AILY_KEY:
+            issues.append("AILY_SKILL_API_KEY 仍是示例值")
+        return issues
 
     @property
     def feishu_environment_configured(self) -> bool:

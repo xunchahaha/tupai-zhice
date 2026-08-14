@@ -233,7 +233,7 @@ def _collect_lesson_rows(
             {
                 "业务标识": business_id,
                 "班级标签": ordered[0]["班级标签"],
-                "课次序号": ordered[0]["课次序号"],
+                "课次序号": int(str(ordered[0]["课次序号"])),
                 "上课日期": ordered[0]["上课日期"].isoformat(),
                 "上课时段": ordered[0]["上课时段"],
                 "冲突行数": len(ordered),
@@ -247,7 +247,7 @@ def _collect_lesson_rows(
     conflicts.sort(key=lambda item: str(item["业务标识"]))
     return session_rows, {
         "conflicting_lessons": len(conflicts),
-        "discarded_rows": sum(int(item["冲突行数"]) - 1 for item in conflicts),
+        "discarded_rows": sum(int(str(item["冲突行数"])) - 1 for item in conflicts),
         "examples": conflicts[:20],
     }
 
@@ -292,7 +292,7 @@ def _class_slot_conflicts(session_rows: dict[str, dict[str, Any]]) -> dict[str, 
     return {
         "lesson_groups": len(grouped),
         "conflicting_groups": len(conflicts),
-        "extra_lessons": sum(int(item["课节数"]) - 1 for item in conflicts),
+        "extra_lessons": sum(int(str(item["课节数"])) - 1 for item in conflicts),
         "examples": conflicts[:20],
     }
 
