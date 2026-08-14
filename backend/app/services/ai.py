@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -191,6 +192,69 @@ class AIService:
             return normalized
         return f"{normalized}/chat/completions"
 
+    @staticmethod
+    def _content_text(content: Any) -> str:
+        """Normalize the content shapes returned by OpenAI-compatible APIs.
+
+        Most providers return a string, while newer APIs may return a list of
+        typed content blocks. Keeping this normalization here prevents the
+        scheduling parser from depending on one provider's response shape.
+        """
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts)
+        if isinstance(content, dict):
+            text = content.get("text") or content.get("content")
+            return text if isinstance(text, str) else ""
+        return ""
+
+    @staticmethod
+    def _parse_json_object(content: Any) -> dict[str, Any]:
+        """Parse JSON even when a model adds reasoning or Markdown fences.
+
+        ``response_format=json_object`` is advisory for several compatible
+        gateways. The parser therefore removes common reasoning blocks and
+        extracts the first valid JSON object from the response while still
+        rejecting genuinely malformed output.
+        """
+        if isinstance(content, dict):
+            return content
+        text = AIService._content_text(content).strip()
+        if not text:
+            raise AIServiceError("AI 模型返回了空内容")
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+        fenced = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+        candidates = [*fenced, text]
+        decoder = json.JSONDecoder()
+        for candidate in candidates:
+            candidate = candidate.strip()
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+            for index, char in enumerate(candidate):
+                if char != "{":
+                    continue
+                try:
+                    parsed, _ = decoder.raw_decode(candidate[index:])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    return parsed
+        preview = re.sub(r"\s+", " ", text)[:240]
+        raise AIServiceError(f"AI 模型输出不是合法 JSON，收到内容：{preview}")
+
     def interpret_instruction(
         self,
         instruction: str,
@@ -257,15 +321,10 @@ class AIService:
         try:
             payload = response.json()
             choices = payload["choices"]
-            content = choices[0]["message"]["content"]
+            message = choices[0]["message"]
+            content = message.get("content")
+            if content in (None, ""):
+                content = message.get("reasoning_content")
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise AIServiceError("AI 模型响应缺少 choices[0].message.content") from exc
-        if not isinstance(content, str) or not content.strip():
-            raise AIServiceError("AI 模型返回了空内容")
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise AIServiceError("AI 模型输出不是合法 JSON") from exc
-        if not isinstance(parsed, dict):
-            raise AIServiceError("AI 模型输出必须是 JSON 对象")
-        return parsed
+        return self._parse_json_object(content)

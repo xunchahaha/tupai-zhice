@@ -106,6 +106,41 @@ def test_ai_service_sends_business_context_and_parses_json(monkeypatch: Any) -> 
     assert parsed["date_from"] == "2026-08-17"
 
 
+def test_ai_service_parses_fenced_json_and_typed_content(monkeypatch: Any) -> None:
+    monkeypatch.setattr(settings, "ai_base_url", "https://model.example/v1")
+    monkeypatch.setattr(settings, "ai_api_key", "environment-ai-key")
+    monkeypatch.setattr(settings, "ai_model", "scheduling-model")
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": [
+                                {"type": "text", "text": "<think>先分析规则</think>\n"},
+                                {
+                                    "type": "text",
+                                    "text": '```json\n{"business_lines":["考研"]}\n```\n已完成。',
+                                },
+                            ]
+                        }
+                    }
+                ]
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.services.ai.httpx.post", fake_post)
+    with SessionLocal() as db:
+        parsed = AIService(settings, db).interpret_instruction(
+            "解析考研课程",
+            context={"business_lines": ["考研"]},
+        )
+    assert parsed == {"business_lines": ["考研"]}
+
+
 def test_assistant_interpret_uses_configured_ai_provider(
     client: TestClient,
     auth_headers: dict[str, str],
