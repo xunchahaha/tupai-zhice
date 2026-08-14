@@ -46,10 +46,17 @@ uv run python scripts/export_openapi.py
 `FEISHU_TOKEN_ENCRYPTION_KEY`、`FEISHU_OAUTH_REDIRECT_URI` 和 `FRONTEND_URL`
 覆盖前端配置。该模式面向部署平台或 KMS，不属于管理员首次接入步骤。
 
+一句话排课 AI 在前端单独配置 `Base URL`、`API Key` 和模型名称，后端使用
+OpenAI-compatible `/chat/completions` 接口解析指令，并对 API Key 加密保存。集中部署也可使用
+`AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL` 和 `AI_TOKEN_ENCRYPTION_KEY`。Aily 的
+`spring_...__c` 与 `skill_...` 已调整为可选高级接入项。
+
 ## API 约定
 
 - API 前缀：`/api/v1`
 - 用户鉴权：OAuth2 password flow + JWT Bearer
 - Aily 鉴权：`X-Aily-Key`
+- AI 配置：`GET/POST /api/v1/integrations/ai/configuration`
+- 一句话解析：`POST /api/v1/assistant/interpret`
 - 求解进度：`GET /api/v1/solver-runs/{id}/events`
 - OpenAPI：`openapi.json`

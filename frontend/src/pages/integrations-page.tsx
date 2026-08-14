@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
   Clipboard,
@@ -29,7 +29,7 @@ import {
   useStartFeishuOauthApiV1IntegrationsFeishuOauthStartPost,
 } from "@/api/generated/client";
 import type { FeishuConnectionResponse } from "@/api/generated/models";
-import { API_BASE_URL } from "@/api/http";
+import { API_BASE_URL, http } from "@/api/http";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
@@ -57,6 +57,15 @@ const resources = [
 
 const AILY_SKILL_DOC_URL = "https://open.feishu.cn/document/aily-v1/app-skill/start?lang=zh-CN";
 
+interface AIConfiguration {
+  configured: boolean;
+  source: "environment" | "frontend" | "none";
+  provider: string | null;
+  base_url: string | null;
+  api_key_configured: boolean;
+  model: string | null;
+}
+
 const permissionLabels: Record<string, string> = {
   offline_access: "持续访问已授权的数据",
   "base:app:create": "创建多维表格",
@@ -73,6 +82,10 @@ export function IntegrationsPage() {
   const queryClient = useQueryClient();
   const connection = useFeishuConnectionApiV1IntegrationsFeishuConnectionGet();
   const syncs = useListFeishuSyncsApiV1IntegrationsFeishuSyncsGet();
+  const aiConfiguration = useQuery({
+    queryKey: ["ai-provider-configuration"],
+    queryFn: async () => (await http.get<AIConfiguration>("/api/v1/integrations/ai/configuration")).data,
+  });
   const [resource, setResource] = useState<(typeof resources)[number]>("schedule");
   const [workspaceName, setWorkspaceName] = useState("途排智策 - 排课空间");
   const [guideOpen, setGuideOpen] = useState(false);
@@ -88,9 +101,13 @@ export function IntegrationsPage() {
   const [editingApp, setEditingApp] = useState(false);
   const [copiedCallback, setCopiedCallback] = useState(false);
   const [disconnectConfirmOpen, setDisconnectConfirmOpen] = useState(false);
+  const [aiBaseUrl, setAiBaseUrl] = useState("");
+  const [aiApiKey, setAiApiKey] = useState("");
+  const [aiModel, setAiModel] = useState("");
+  const [editingAI, setEditingAI] = useState(false);
 
   const refresh = async () => {
-    await Promise.all([connection.refetch(), syncs.refetch()]);
+    await Promise.all([connection.refetch(), syncs.refetch(), aiConfiguration.refetch()]);
   };
   const refreshConnection = useCallback(async () => {
     await queryClient.invalidateQueries({
@@ -152,6 +169,23 @@ export function IntegrationsPage() {
       },
     },
   });
+  const configureAI = useMutation({
+    mutationFn: async () => (await http.post<AIConfiguration>("/api/v1/integrations/ai/configuration", {
+      provider: "openai_compatible",
+      base_url: aiBaseUrl.trim(),
+      api_key: aiApiKey || null,
+      model: aiModel.trim(),
+    })).data,
+    onSuccess: (configured) => {
+      setAiApiKey("");
+      setEditingAI(false);
+      setAiBaseUrl(configured.base_url ?? "");
+      setAiModel(configured.model ?? "");
+      void queryClient.invalidateQueries({ queryKey: ["ai-provider-configuration"] });
+      toast.success("一句话排课 AI 已配置");
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -194,8 +228,20 @@ export function IntegrationsPage() {
     setFrontendUrl(window.location.origin);
   }, [connection.data]);
 
-  if (connection.isPending || syncs.isPending) return <LoadingState />;
-  if (connection.isError || syncs.isError || !connection.data) return <ErrorState retry={() => void refresh()} />;
+  useEffect(() => {
+    if (!aiConfiguration.data) return;
+    setAiBaseUrl(aiConfiguration.data.base_url ?? "");
+    setAiModel(aiConfiguration.data.model ?? "");
+    if (new URLSearchParams(window.location.search).get("section") === "ai") {
+      setEditingAI(true);
+      window.requestAnimationFrame(() => {
+        document.getElementById("ai-configuration")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  }, [aiConfiguration.data]);
+
+  if (connection.isPending || syncs.isPending || aiConfiguration.isPending) return <LoadingState />;
+  if (connection.isError || syncs.isError || aiConfiguration.isError || !connection.data || !aiConfiguration.data) return <ErrorState retry={() => void refresh()} />;
 
   const status = connection.data;
   const workspaceReady = Boolean(
@@ -209,7 +255,7 @@ export function IntegrationsPage() {
   );
   const currentStep = !status.app_configured
     ? 0
-    : !status.app_configuration.aily_configured
+    : !aiConfiguration.data.configured
       ? 1
     : !status.authorized
       ? 2
@@ -255,7 +301,7 @@ export function IntegrationsPage() {
         </p>
       </PageHeader>
 
-      <ConnectionSummary status={status} ready={ready} />
+      <ConnectionSummary status={status} ready={ready} ai={aiConfiguration.data} />
 
       <section className="border-y border-zinc-200 bg-white">
         <div className="border-b border-zinc-200 px-5 py-4">
@@ -303,21 +349,24 @@ export function IntegrationsPage() {
 
           <FlowStep
             number={2}
-            title="配置飞书 Aily"
-            description="排课指令只通过飞书 Aily 解析，需要配置 Aily 应用和技能标识。"
-            state={status.app_configuration.aily_configured ? "completed" : "current"}
+            title="配置一句话排课 AI"
+            description="AI 负责理解教务人员的自然语言，CP-SAT 负责执行确定性排课。"
+            state={aiConfiguration.data.configured ? "completed" : "current"}
             icon={Settings2}
           >
-            <div id="aily-configuration" className="space-y-4 text-sm text-zinc-700">
-              <AilyConfigurationGuide compact />
-              <div className="grid gap-2 sm:grid-cols-2">
-                <div className="border border-zinc-200 bg-zinc-50 px-3 py-2">Aily 应用标识：<code>{status.app_configuration.aily_app_id ?? "待配置"}</code></div>
-                <div className="border border-zinc-200 bg-zinc-50 px-3 py-2">Aily 技能标识：<code>{status.app_configuration.aily_skill_id ?? "待配置"}</code></div>
-              </div>
-              <Button size="sm" variant="outline" onClick={() => setEditingApp(true)}>
-                编辑飞书应用与 Aily 配置
-              </Button>
-            </div>
+            <AIConfigurationPanel
+              configuration={aiConfiguration.data}
+              baseUrl={aiBaseUrl}
+              setBaseUrl={setAiBaseUrl}
+              apiKey={aiApiKey}
+              setApiKey={setAiApiKey}
+              model={aiModel}
+              setModel={setAiModel}
+              editing={editingAI}
+              setEditing={setEditingAI}
+              saving={configureAI.isPending}
+              save={() => configureAI.mutate()}
+            />
           </FlowStep>
 
           <FlowStep
@@ -515,12 +564,46 @@ export function IntegrationsPage() {
   );
 }
 
+function AIConfigurationPanel({
+  configuration,
+  baseUrl,
+  setBaseUrl,
+  apiKey,
+  setApiKey,
+  model,
+  setModel,
+  editing,
+  setEditing,
+  saving,
+  save,
+}: {
+  configuration: AIConfiguration;
+  baseUrl: string;
+  setBaseUrl: (value: string) => void;
+  apiKey: string;
+  setApiKey: (value: string) => void;
+  model: string;
+  setModel: (value: string) => void;
+  editing: boolean;
+  setEditing: (value: boolean) => void;
+  saving: boolean;
+  save: () => void;
+}) {
+  const environmentManaged = configuration.source === "environment";
+  if (configuration.configured && !editing) {
+    return <div id="ai-configuration" className="space-y-3"><div className="flex flex-wrap items-center gap-3"><span className="text-sm font-medium text-emerald-700">自然语言 AI 已接入</span><Badge tone="green">API Key 已加密</Badge><span className="font-mono text-xs text-zinc-500">{configuration.model}</span></div><div className="break-all text-xs leading-5 text-zinc-500">OpenAI-compatible 接口：{configuration.base_url}</div><p className="text-xs leading-5 text-zinc-500">前端的一句话会先交给该模型解析为业务范围、日期窗口和约束，再由教务确认并启动 CP-SAT；普通飞书应用继续负责多维表格、日历和妙搭数据链路。</p>{environmentManaged ? <p className="text-xs text-zinc-500">当前配置由部署环境统一管理。</p> : <Button size="sm" variant="outline" onClick={() => setEditing(true)}><Settings2 className="size-3.5" />更新 AI 配置</Button>}</div>;
+  }
+  return <div id="ai-configuration" className="space-y-4"><div className="border border-blue-200 bg-blue-50/60 p-4 text-sm text-blue-950"><div className="font-semibold">Aily 标识已从必填项移除</div><p className="mt-2 text-xs leading-5 text-blue-900/75">这里使用标准 OpenAI-compatible 模型接口，可接入豆包 Ark、DeepSeek 或企业已有模型网关。仅需要接口地址、API Key 和模型名称；飞书自建应用的 <code>cli_...</code> 继续用于飞书数据和日历授权。</p></div><div className="grid gap-4 sm:grid-cols-2"><label className="text-sm text-zinc-700 sm:col-span-2">接口地址<input aria-label="AI 接口地址" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" /><span className="mt-1 block text-xs leading-5 text-zinc-500">填写到版本根路径，系统会调用其 <code>/chat/completions</code>。</span></label><label className="text-sm text-zinc-700">模型名称或接入点 ID<input aria-label="AI 模型名称" value={model} onChange={(event) => setModel(event.target.value)} placeholder="例如：deepseek-chat 或 ep-..." className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" /></label><label className="text-sm text-zinc-700">API Key<input aria-label="AI API Key" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={configuration.api_key_configured ? "留空则继续使用已保存密钥" : "填写模型平台 API Key"} autoComplete="new-password" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-blue-500" /></label></div><div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-4"><Button onClick={save} disabled={saving || !/^https?:\/\//.test(baseUrl.trim()) || !model.trim() || (!configuration.api_key_configured && apiKey.length < 8) || (apiKey.length > 0 && apiKey.length < 8)}><ShieldCheck className="size-4" />{saving ? "正在加密保存" : "保存 AI 配置"}</Button>{configuration.configured ? <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>取消</Button> : null}<span className="text-xs text-zinc-500">API Key 只提交给本地后端并加密保存，页面不会回显。</span></div></div>;
+}
+
 function ConnectionSummary({
   status,
   ready,
+  ai,
 }: {
   status: FeishuConnectionResponse;
   ready: boolean;
+  ai: AIConfiguration;
 }) {
   const tone: BadgeTone = ready ? "green" : status.status === "reauthorization_required" ? "red" : "yellow";
   const label = ready
@@ -548,7 +631,7 @@ function ConnectionSummary({
       </div>
       <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <SummaryItem label="应用配置" value={status.app_configured ? "已就绪" : "待完成"} />
-        <SummaryItem label="飞书 Aily" value={status.app_configuration.aily_configured ? "已配置" : "待配置"} />
+        <SummaryItem label="一句话排课 AI" value={ai.configured ? ai.model ?? "已配置" : "待配置"} />
         <SummaryItem label="管理员账号" value={status.authorized ? "已授权" : "待授权"} />
         <SummaryItem
           label="排课多维表格"
@@ -648,9 +731,9 @@ function ApplicationConfiguration({
           授权回调地址：{status.app_configuration.oauth_redirect_uri}
         </div>
         <div className="text-xs leading-5 text-zinc-500">
-          飞书 Aily：{status.app_configuration.aily_configured
+          Aily Workflow 高级通道：{status.app_configuration.aily_configured
             ? `${status.app_configuration.aily_app_id} / ${status.app_configuration.aily_skill_id}`
-            : "待配置"}
+            : "未启用（不影响一句话排课）"}
         </div>
         {environmentManaged ? (
           <p className="text-xs text-zinc-500">当前配置由部署环境统一管理。</p>
@@ -678,7 +761,7 @@ function ApplicationConfiguration({
         <li className="border border-zinc-200 p-3"><strong>三、申请并发布</strong><p className="mt-1 text-zinc-500">申请下列用户身份权限，发布版本并覆盖管理员。</p></li>
       </ol>
       <p className="text-sm text-zinc-700">
-        在途排智策填写飞书应用凭据和 Aily 标识。回调地址由系统生成。
+        在途排智策填写普通飞书企业自建应用凭据。该应用负责多维表格、日历和 OAuth 授权；AI 模型在下一步单独配置。
       </p>
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="text-sm text-zinc-700">
@@ -705,19 +788,14 @@ function ApplicationConfiguration({
           />
         </label>
       </div>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <label className="text-sm text-zinc-700">
-          Aily 应用标识
-          <input aria-label="飞书 Aily 应用标识" value={ailyAppId} onChange={(event) => setAilyAppId(event.target.value)} placeholder="spring_xxxxxxxxxx" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" />
-          <span className="mt-1 block text-xs leading-5 text-zinc-500">从 Aily 应用详情复制，以 <code>spring_</code> 开头；这里不是飞书自建应用的 <code>cli_</code> 编号。</span>
-        </label>
-        <label className="text-sm text-zinc-700">
-          Aily 技能标识
-          <input aria-label="飞书 Aily 技能标识" value={ailySkillId} onChange={(event) => setAilySkillId(event.target.value)} placeholder="skill_xxxxxxxxxx" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" />
-          <span className="mt-1 block text-xs leading-5 text-zinc-500">从该 Aily 应用内已发布的技能详情复制，以 <code>skill_</code> 开头。</span>
-        </label>
-      </div>
-      <AilyConfigurationGuide />
+      <details className="border border-zinc-200 bg-zinc-50 p-4">
+        <summary className="cursor-pointer text-sm font-medium text-zinc-700">Aily Workflow 高级接入（可选）</summary>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <label className="text-sm text-zinc-700">Aily 应用标识<input aria-label="飞书 Aily 应用标识" value={ailyAppId} onChange={(event) => setAilyAppId(event.target.value)} placeholder="spring_xxxxxxxxxx" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" /></label>
+          <label className="text-sm text-zinc-700">Aily 技能标识<input aria-label="飞书 Aily 技能标识" value={ailySkillId} onChange={(event) => setAilySkillId(event.target.value)} placeholder="skill_xxxxxxxxxx" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" /></label>
+        </div>
+        <AilyConfigurationGuide />
+      </details>
       <label className="block text-sm text-zinc-700">
         授权回调地址
         <div className="mt-1.5 flex gap-2">
@@ -741,8 +819,8 @@ function ApplicationConfiguration({
             !appId.trim().startsWith("cli_") ||
             (!configured && appSecret.length < 8) ||
             (configured && appSecret.length > 0 && appSecret.length < 8) ||
-            !ailyAppId.trim().startsWith("spring_") ||
-            !ailySkillId.trim().startsWith("skill_") ||
+            (Boolean(ailyAppId.trim() || ailySkillId.trim()) &&
+              (!ailyAppId.trim().startsWith("spring_") || !ailySkillId.trim().startsWith("skill_"))) ||
             !redirectUri.trim()
           }
         >
@@ -762,21 +840,16 @@ function ApplicationConfiguration({
   );
 }
 
-function AilyConfigurationGuide({ compact = false }: { compact?: boolean }) {
+function AilyConfigurationGuide() {
   return (
-    <div className="border border-blue-200 bg-blue-50/60 p-4 text-sm text-blue-950">
+    <div className="mt-4 border border-blue-200 bg-blue-50/60 p-4 text-sm text-blue-950">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="font-semibold">Aily 两个标识从哪里获取</div>
+        <div className="font-semibold">普通应用 ID 与 Aily App ID 的区别</div>
         <a href={AILY_SKILL_DOC_URL} target="_blank" rel="noreferrer">
           <Button size="sm" variant="outline"><ExternalLink className="size-3.5" />打开 Aily 技能调用官方文档</Button>
         </a>
       </div>
-      <ol className={`mt-3 grid gap-2 text-xs leading-5 ${compact ? "md:grid-cols-3" : ""}`}>
-        <li className="border border-blue-100 bg-white/80 p-3"><strong>1. 创建 Aily 应用</strong><p className="mt-1 text-blue-900/70">进入飞书 Aily，创建或打开用于排课指令解析的应用，在应用详情复制 <code>spring_...</code> 应用标识。</p></li>
-        <li className="border border-blue-100 bg-white/80 p-3"><strong>2. 创建并发布技能</strong><p className="mt-1 text-blue-900/70">在该应用中创建排课解析技能，完成调试并发布，在技能详情复制 <code>skill_...</code> 技能标识。</p></li>
-        <li className="border border-blue-100 bg-white/80 p-3"><strong>3. 配置调用权限</strong><p className="mt-1 text-blue-900/70">在同一飞书企业自建应用中申请 <code>aily:skill:write</code>，发布应用版本后回到这里保存配置。</p></li>
-      </ol>
-      {!compact ? <div className="mt-3 border-l-2 border-blue-500 pl-3 text-xs leading-5 text-blue-900">保存后返回“排课求解”，点击“解析排课指令”验证；应用编号 <code>cli_...</code>、Aily 应用标识 <code>spring_...</code>、技能标识 <code>skill_...</code> 是三项不同配置。</div> : null}
+      <div className="mt-3 space-y-2 text-xs leading-5 text-blue-900/80"><p><code>cli_...</code> 是飞书开放平台自建应用，用来换取访问凭证。用户提供的 Session / Message / Run 文档里，真正触发 AI 的 Run 仍要绑定 Aily App，文档中的 <code>app_id</code> 指 <code>spring_...__c</code>，并非 <code>cli_...</code>。</p><p>该文档允许省略 <code>skill_id</code>，由 Aily 自己选择技能；它并未省略 Aily App ID。本项目现在用独立 AI 模型完成一句话理解，因此这里可以保持为空。</p></div>
     </div>
   );
 }

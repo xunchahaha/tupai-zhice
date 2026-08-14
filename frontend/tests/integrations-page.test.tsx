@@ -12,8 +12,18 @@ const mocks = vi.hoisted(() => ({
   disconnect: vi.fn(),
   startAuthorization: vi.fn(),
   sync: vi.fn(),
+  aiGet: vi.fn(),
+  aiPost: vi.fn(),
   refetchConnection: vi.fn(),
   refetchSyncs: vi.fn(),
+}));
+
+vi.mock("@/api/http", () => ({
+  API_BASE_URL: "http://127.0.0.1:8000",
+  http: {
+    get: mocks.aiGet,
+    post: mocks.aiPost,
+  },
 }));
 
 vi.mock("@/api/generated/client", () => ({
@@ -71,9 +81,9 @@ const baseConnection = {
     secret_configured: true,
     oauth_redirect_uri: "http://127.0.0.1:8002/api/v1/integrations/feishu/oauth/callback",
     frontend_url: "http://127.0.0.1:5175",
-    aily_configured: true,
-    aily_app_id: "spring_test",
-    aily_skill_id: "skill_test",
+    aily_configured: false,
+    aily_app_id: null,
+    aily_skill_id: null,
   },
   workspace: null,
 };
@@ -100,9 +110,13 @@ describe("飞书生产接入页", () => {
       mocks.sync,
       mocks.refetchConnection,
       mocks.refetchSyncs,
+      mocks.aiGet,
+      mocks.aiPost,
     ]) {
       mock.mockReset();
     }
+    mocks.aiGet.mockResolvedValue({ data: { configured: true, source: "frontend", provider: "openai_compatible", base_url: "https://model.example/v1", api_key_configured: true, model: "scheduling-model" } });
+    mocks.aiPost.mockResolvedValue({ data: { configured: true, source: "frontend", provider: "openai_compatible", base_url: "https://model.example/v1", api_key_configured: true, model: "scheduling-model" } });
     mocks.connection.current = { ...baseConnection };
   });
 
@@ -125,28 +139,43 @@ describe("飞书生产接入页", () => {
     const user = userEvent.setup();
     renderPage();
 
-    expect(screen.getByText("需要申请的用户身份权限")).toBeVisible();
+    expect(await screen.findByText("需要申请的用户身份权限")).toBeVisible();
     await user.clear(screen.getByLabelText("飞书应用编号"));
     await user.type(screen.getByLabelText("飞书应用编号"), "cli_frontend_test");
     await user.clear(screen.getByLabelText("飞书应用密钥"));
     await user.type(screen.getByLabelText("飞书应用密钥"), "frontend-secret");
-    await user.clear(screen.getByLabelText("飞书 Aily 应用标识"));
-    await user.type(screen.getByLabelText("飞书 Aily 应用标识"), "spring_frontend_test");
-    await user.clear(screen.getByLabelText("飞书 Aily 技能标识"));
-    await user.type(screen.getByLabelText("飞书 Aily 技能标识"), "skill_frontend_test");
     await user.click(screen.getByRole("button", { name: "保存应用配置" }));
     expect(mocks.configureApp).toHaveBeenCalledWith({
       data: expect.objectContaining({
         app_id: "cli_frontend_test",
         app_secret: "frontend-secret",
-        aily_app_id: "spring_frontend_test",
-        aily_skill_id: "skill_frontend_test",
+        aily_app_id: "",
+        aily_skill_id: "",
         oauth_redirect_uri:
           "http://127.0.0.1:8000/api/v1/integrations/feishu/oauth/callback",
       }),
     });
     expect(screen.queryByText("FEISHU_BITABLE_APP_TOKEN", { exact: false })).not.toBeInTheDocument();
     expect(screen.queryByText("FEISHU_TABLE_MAP", { exact: false })).not.toBeInTheDocument();
+  });
+
+  it("可配置独立 AI 模型完成一句话排课解析", async () => {
+    mocks.aiGet.mockResolvedValueOnce({ data: { configured: false, source: "none", provider: null, base_url: null, api_key_configured: false, model: null } });
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("Aily 标识已从必填项移除");
+    await user.type(screen.getByLabelText("AI 接口地址"), "https://model.example/v1");
+    await user.type(screen.getByLabelText("AI 模型名称"), "scheduling-model");
+    await user.type(screen.getByLabelText("AI API Key"), "secret-ai-key");
+    await user.click(screen.getByRole("button", { name: "保存 AI 配置" }));
+
+    expect(mocks.aiPost).toHaveBeenCalledWith("/api/v1/integrations/ai/configuration", {
+      provider: "openai_compatible",
+      base_url: "https://model.example/v1",
+      api_key: "secret-ai-key",
+      model: "scheduling-model",
+    });
   });
 
   it("管理员授权后可以直接创建排课多维表格", async () => {
@@ -166,7 +195,7 @@ describe("飞书生产接入页", () => {
     const user = userEvent.setup();
     renderPage();
 
-    const input = screen.getByLabelText("排课空间名称");
+    const input = await screen.findByLabelText("排课空间名称");
     await user.clear(input);
     await user.type(input, "途排智策 - 2026 秋季学期");
     await user.click(screen.getByRole("button", { name: "自动创建排课表格" }));
@@ -207,7 +236,7 @@ describe("飞书生产接入页", () => {
     const user = userEvent.setup();
     renderPage();
 
-    expect(screen.getByRole("link", { name: "打开多维表格" })).toHaveAttribute(
+    expect(await screen.findByRole("link", { name: "打开多维表格" })).toHaveAttribute(
       "href",
       "https://example.feishu.cn/base/test",
     );
