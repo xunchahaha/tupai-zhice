@@ -4,8 +4,10 @@ import asyncio
 import json
 import logging
 import secrets
+import tempfile
 from collections import Counter
 from datetime import UTC, date, datetime, time, timedelta
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -120,7 +122,12 @@ from .security import (
     verify_password,
 )
 from .services.ai import AIService, AIServiceError
-from .services.converter_zhengzhou import import_schedule_workbook
+from .services.converter_zhengzhou import (
+    CAMPUS_BUSINESS_ID,
+    CAMPUS_NAME,
+    WorkbookFormatError,
+    import_schedule_workbook,
+)
 from .services.feishu import FeishuService, FeishuServiceError, json_text
 from .services.snapshot import create_snapshot
 from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
@@ -423,15 +430,44 @@ def download_sample_workbook(user: CurrentUser) -> FileResponse:
     )
 
 
+MAX_IMPORT_BYTES = 64 * 1024 * 1024
+
+
 @router.post("/imports/xlsx", response_model=ImportResult, tags=["imports"])
 def import_xlsx(
-    db: Db, user: AdminOrScheduler, file: Annotated[UploadFile, File(...)]
+    db: Db,
+    user: AdminOrScheduler,
+    file: Annotated[UploadFile, File(...)],
+    campus_business_id: Annotated[str, Query(max_length=40)] = CAMPUS_BUSINESS_ID,
+    campus_name: Annotated[str, Query(max_length=120)] = CAMPUS_NAME,
 ) -> ImportResult:
     if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="只接受 .xlsx 工作簿")
-    target = PROJECT_ROOT / "data" / "imports" / "uploaded.xlsx"
-    target.write_bytes(file.file.read())
-    result = import_schedule_workbook(db, target)
+    payload = file.file.read(MAX_IMPORT_BYTES + 1)
+    if len(payload) > MAX_IMPORT_BYTES:
+        raise HTTPException(
+            status_code=413, detail=f"工作簿超过 {MAX_IMPORT_BYTES // (1024 * 1024)} MB 上限"
+        )
+    if not payload:
+        raise HTTPException(status_code=400, detail="上传的工作簿是空文件")
+    # 每次上传写到独立临时文件：此前所有用户共用 data/imports/uploaded.xlsx，
+    # 并发导入会互相覆盖，而且把用户数据写进了代码仓库目录。
+    with tempfile.TemporaryDirectory(prefix="tupai-import-") as directory:
+        target = Path(directory) / "uploaded.xlsx"
+        target.write_bytes(payload)
+        try:
+            result = import_schedule_workbook(
+                db,
+                target,
+                campus_business_id=campus_business_id.strip() or CAMPUS_BUSINESS_ID,
+                campus_name=campus_name.strip() or CAMPUS_NAME,
+            )
+        except WorkbookFormatError as exc:
+            db.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            db.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     audit(db, user, "import_xlsx", "workbook", file.filename, result)
     db.commit()
     dropped = result["warnings"]["dropped_placeholder_room"]
@@ -450,6 +486,11 @@ def import_xlsx(
         dropped_classes=dropped["affected_classes"],
         rows_kept=result["rows_kept"],
         rows_deduped=result["rows_deduped"],
+        rows_skipped=result["rows_skipped"],
+        skipped_examples=result["skipped_examples"],
+        duplicate_lessons=result["duplicate_lessons"]["conflicting_lessons"],
+        class_slot_conflicts=result["class_slot_conflicts"]["conflicting_groups"],
+        orphans_deleted=result["orphans"]["deleted"],
     )
 
 

@@ -458,15 +458,44 @@
         ],
         "summary": "Import Xlsx",
         "operationId": "import_xlsx_api_v1_imports_xlsx_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campus_business_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 40,
+              "default": "CAMPUS-ZZ",
+              "title": "Campus Business Id"
+            }
+          },
+          {
+            "name": "campus_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 120,
+              "default": "郑州校区",
+              "title": "Campus Name"
+            }
+          }
+        ],
         "requestBody": {
+          "required": true,
           "content": {
             "multipart/form-data": {
               "schema": {
                 "$ref": "#/components/schemas/Body_import_xlsx_api_v1_imports_xlsx_post"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -489,12 +518,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/campuses": {
@@ -5124,6 +5148,34 @@
             "type": "integer",
             "title": "Rows Deduped",
             "default": 0
+          },
+          "rows_skipped": {
+            "type": "integer",
+            "title": "Rows Skipped",
+            "default": 0
+          },
+          "skipped_examples": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Skipped Examples"
+          },
+          "duplicate_lessons": {
+            "type": "integer",
+            "title": "Duplicate Lessons",
+            "default": 0
+          },
+          "class_slot_conflicts": {
+            "type": "integer",
+            "title": "Class Slot Conflicts",
+            "default": 0
+          },
+          "orphans_deleted": {
+            "type": "integer",
+            "title": "Orphans Deleted",
+            "default": 0
           }
         },
         "type": "object",
@@ -5348,6 +5400,30 @@
             },
             "type": "array",
             "title": "Slot Business Ids"
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
           },
           "course_business_id": {
             "anyOf": [

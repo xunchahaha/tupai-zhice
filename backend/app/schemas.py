@@ -452,6 +452,11 @@ class ImportResult(BaseModel):
     dropped_classes: list[str] = Field(default_factory=list)
     rows_kept: int = 0
     rows_deduped: int = 0
+    rows_skipped: int = 0
+    skipped_examples: list[dict[str, Any]] = Field(default_factory=list)
+    duplicate_lessons: int = 0
+    class_slot_conflicts: int = 0
+    orphans_deleted: int = 0
 
 
 class OverviewResponse(BaseModel):

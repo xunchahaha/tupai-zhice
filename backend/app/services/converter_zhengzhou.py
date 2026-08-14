@@ -32,7 +32,32 @@ PLACEHOLDER_ROOM = "教室-待校区确认"
 CAMPUS_BUSINESS_ID = "CAMPUS-ZZ"
 CAMPUS_NAME = "郑州校区"
 SHEET_NAME = "课表数据源"
-OFFICIAL_VERSION_NAME = "郑州官方原始课表（完全重复行已去重）"
+# 模板即导入契约：列名和列序变了，按下标取值的逻辑就会静默错位。
+TEMPLATE_HEADERS = (
+    "标准业务线",
+    "标准产品班型",
+    "集训营班级标签",
+    "教室标签",
+    "课表编排来源",
+    "编排阶段",
+    "计划课次",
+    "计划课时",
+    "课次序号",
+    "课节名称",
+    "上课日期",
+    "上课时段",
+    "课节时长(小时)",
+    "授课教师",
+)
+OFFICIAL_VERSION_SUFFIX = "官方原始课表"
+
+
+class WorkbookFormatError(RuntimeError):
+    """工作簿不符合官方模板。调用方应当转成 4xx 而不是 500。"""
+
+
+def official_version_name(campus_name: str) -> str:
+    return f"{campus_name}{OFFICIAL_VERSION_SUFFIX}"
 
 
 def _parse_date(value: Any) -> date | None:
@@ -71,24 +96,70 @@ def _lesson_subject(lesson_name: str) -> str:
     return ""
 
 
-def _read_rows(workbook_path: Path) -> list[dict[str, Any]]:
+def _validate_headers(sheet: Any) -> None:
+    header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
+    header = tuple(
+        (str(value).strip() if value is not None else "") for value in (header_row or ())
+    )
+    if header[: len(TEMPLATE_HEADERS)] == TEMPLATE_HEADERS:
+        return
+    mismatches: list[str] = []
+    for index, expected in enumerate(TEMPLATE_HEADERS):
+        actual = header[index] if index < len(header) else ""
+        if actual != expected:
+            mismatches.append(f"第 {index + 1} 列应为「{expected}」，实际为「{actual}」")
+    raise WorkbookFormatError(
+        "工作簿列名与官方模板不一致，请下载模板后按列填写：" + "；".join(mismatches[:5])
+    )
+
+
+def _read_rows(workbook_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     workbook = load_workbook(workbook_path, data_only=True, read_only=True)
     if SHEET_NAME not in workbook.sheetnames:
-        raise RuntimeError(f"工作簿缺少「{SHEET_NAME}」工作表，实际为：{workbook.sheetnames}")
+        raise WorkbookFormatError(
+            f"工作簿缺少「{SHEET_NAME}」工作表，实际为：{workbook.sheetnames}"
+        )
     rows: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     sheet = workbook[SHEET_NAME]
-    for values in sheet.iter_rows(min_row=2, values_only=True):
-        if not values or values[2] is None or values[10] is None or values[11] is None:
+    _validate_headers(sheet)
+
+    def skip(number: int, reason: str) -> None:
+        # 跳过的行必须带行号报出来，否则用户只会看到「导入了 N 条」而不知道少了什么。
+        if len(skipped) < 50:
+            skipped.append({"行号": number, "原因": reason})
+
+    for number, values in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+        if not values or all(value is None for value in values):
+            continue
+        if values[2] is None:
+            skip(number, "缺少班级标签")
+            continue
+        if values[10] is None or values[11] is None:
+            skip(number, "缺少上课日期或上课时段")
             continue
         lesson_date = _parse_date(values[10])
         time_text = str(values[11]).strip()
-        if lesson_date is None or "-" not in time_text:
+        if lesson_date is None:
+            skip(number, f"上课日期无法解析：{values[10]}")
+            continue
+        if "-" not in time_text:
+            skip(number, f"上课时段格式应为 08:30-11:30，实际为：{time_text}")
             continue
         start_text, end_text = (part.strip() for part in time_text.split("-", 1))
         try:
             start = _normalize_clock(start_text)
             end = _normalize_clock(end_text)
         except (ValueError, TypeError):
+            skip(number, f"上课时段无法解析：{time_text}")
+            continue
+        try:
+            planned_sessions = int(float(str(values[6]))) if values[6] is not None else 0
+            planned_hours = float(str(values[7])) if values[7] is not None else 0
+            session_no = int(float(str(values[8]))) if values[8] is not None else 0
+            duration_hours = float(str(values[12])) if values[12] is not None else 0
+        except (TypeError, ValueError):
+            skip(number, "计划课次/计划课时/课次序号/课节时长必须是数字")
             continue
         rows.append(
             {
@@ -98,21 +169,21 @@ def _read_rows(workbook_path: Path) -> list[dict[str, Any]]:
                 "教室标签": str(values[3] or "").strip(),
                 "编排来源": str(values[4] or "").strip(),
                 "编排阶段": str(values[5] or "").strip(),
-                "计划课次": int(float(str(values[6]))) if values[6] is not None else 0,
-                "计划课时": float(str(values[7])) if values[7] is not None else 0,
-                "课次序号": int(float(str(values[8]))) if values[8] is not None else 0,
+                "计划课次": planned_sessions,
+                "计划课时": planned_hours,
+                "课次序号": session_no,
                 "课节名称": str(values[9] or "").strip(),
                 "上课日期": lesson_date,
                 "上课时段": f"{start}-{end}",
                 "开始时间": start,
                 "结束时间": end,
                 "星期": WEEKDAYS[lesson_date.weekday()],
-                "课节时长小时": float(str(values[12])) if values[12] is not None else 0,
+                "课节时长小时": duration_hours,
                 "授课教师": str(values[13] or "").strip(),
             }
         )
     workbook.close()
-    return rows
+    return rows, skipped
 
 
 def _lesson_group(row: dict[str, Any]) -> tuple[str, str, str]:
@@ -298,7 +369,7 @@ def _class_slot_conflicts(session_rows: dict[str, dict[str, Any]]) -> dict[str, 
 
 
 def _remove_orphan_sessions(
-    db: Session, campus_id: str, keep_business_ids: set[str]
+    db: Session, campus_id: str, keep_business_ids: set[str], official_version_name: str
 ) -> dict[str, Any]:
     """删除源表里已经不存在的课次，让导入收敛到工作簿的当前状态。
 
@@ -314,7 +385,7 @@ def _remove_orphan_sessions(
         return {"deleted": 0, "retained_by_schedule": 0, "retained_examples": []}
 
     official_version_id = db.scalar(
-        select(ScheduleVersion.id).where(ScheduleVersion.name == OFFICIAL_VERSION_NAME)
+        select(ScheduleVersion.id).where(ScheduleVersion.name == official_version_name)
     )
     orphan_ids = {item.id for item in orphans}
     referenced_elsewhere = set(
@@ -356,7 +427,7 @@ def import_schedule_workbook(
     campus_business_id: str = CAMPUS_BUSINESS_ID,
     campus_name: str = CAMPUS_NAME,
 ) -> dict[str, Any]:
-    source_rows = _read_rows(workbook_path)
+    source_rows, skipped_rows = _read_rows(workbook_path)
     if not source_rows:
         raise RuntimeError(f"未从 {workbook_path.name} 解析到任何数据行")
     rows, placeholder_report = _split_placeholder_rows(source_rows)
@@ -504,7 +575,9 @@ def import_schedule_workbook(
         )
         db.flush()
 
-    orphan_report = _remove_orphan_sessions(db, campus.id, set(session_rows))
+    orphan_report = _remove_orphan_sessions(
+        db, campus.id, set(session_rows), official_version_name(campus_name)
+    )
 
     session_ids: dict[str, str] = {
         business_id: session_id
@@ -523,6 +596,7 @@ def import_schedule_workbook(
         payload={
             "source": workbook_path.name,
             "rows_total": len(source_rows),
+            "rows_skipped": len(skipped_rows),
             "rows_dropped_placeholder_room": placeholder_report["dropped_rows"],
             "rows_kept": len(rows),
             "rows_deduped": len(deduped),
@@ -533,8 +607,9 @@ def import_schedule_workbook(
 
     version_stats: list[dict[str, Any]] = []
     now = datetime.now(UTC)
+    version_name = official_version_name(campus_name)
     version = db.scalar(
-        select(ScheduleVersion).where(ScheduleVersion.name == OFFICIAL_VERSION_NAME)
+        select(ScheduleVersion).where(ScheduleVersion.name == version_name)
     )
     if version is None:
         run = SolverRun(
@@ -549,7 +624,7 @@ def import_schedule_workbook(
         version_no = (db.scalar(select(func.max(ScheduleVersion.version_no))) or 0) + 1
         version = ScheduleVersion(
             version_no=version_no,
-            name=OFFICIAL_VERSION_NAME,
+            name=version_name,
             status="published",
             solver_run_id=run.id,
             published_at=now,
@@ -575,29 +650,35 @@ def import_schedule_workbook(
             )
         )
     db.flush()
-    version_stats.append({"name": OFFICIAL_VERSION_NAME, "rows": len(session_rows)})
+    version_stats.append({"name": version_name, "rows": len(session_rows)})
 
+    # 计划课时是否自洽，按该班型自己的实际课节时长核对，不假定每课次固定 3 小时。
     hour_warnings: list[dict[str, Any]] = []
-    for 班型 in sorted({row["产品班型"] for row in rows}):
-        plans = {
-            (row["计划课次"], row["计划课时"])
-            for row in rows
-            if row["产品班型"] == 班型
-        }
-        for planned_sessions, planned_hours in plans:
-            if planned_sessions and abs(planned_sessions * 3 - planned_hours) > 0.01:
+    for product_type in sorted({row["产品班型"] for row in rows}):
+        product_rows = [row for row in rows if row["产品班型"] == product_type]
+        durations = {row["课节时长小时"] for row in product_rows if row["课节时长小时"]}
+        if len(durations) != 1:
+            continue
+        duration = next(iter(durations))
+        for planned_sessions, planned_hours in {
+            (row["计划课次"], row["计划课时"]) for row in product_rows
+        }:
+            if planned_sessions and abs(planned_sessions * duration - planned_hours) > 0.01:
                 hour_warnings.append(
                     {
-                        "产品班型": 班型,
+                        "产品班型": product_type,
                         "计划课次": planned_sessions,
                         "计划课时": planned_hours,
-                        "按课次×3小时": planned_sessions * 3,
+                        "课节时长小时": duration,
+                        "按课次×课节时长": round(planned_sessions * duration, 2),
                     }
                 )
 
     return {
         "campus": campus_business_id,
         "rows_total": len(source_rows),
+        "rows_skipped": len(skipped_rows),
+        "skipped_examples": skipped_rows[:20],
         "rows_dropped_placeholder_room": placeholder_report["dropped_rows"],
         "rows_kept": len(rows),
         "rows_deduped": len(deduped),

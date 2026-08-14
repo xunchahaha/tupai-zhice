@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from sqlalchemy import Table, text
+from sqlalchemy import Table
 
 from app.db import Base, SessionLocal, engine
 from app.models import (
@@ -64,10 +64,6 @@ def main() -> None:
     with SessionLocal() as db:
         result = import_schedule_workbook(db, workbook_path)
         db.commit()
-        with engine.begin() as connection:
-            connection.execute(
-                text("UPDATE alembic_version SET version_num = 'e3b1c7a9d420'")
-            )
 
     print("已清空示范数据并仅导入官方数据：")
     for key, value in result.items():

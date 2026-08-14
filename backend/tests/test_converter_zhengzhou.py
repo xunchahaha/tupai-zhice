@@ -15,6 +15,7 @@ from app.models import ClassGroup, CourseSession, Room, ScheduleAssignment, Teac
 from app.services.converter_zhengzhou import (
     PLACEHOLDER_ROOM,
     SHEET_NAME,
+    WorkbookFormatError,
     _read_rows,
     _row_identity,
     _split_placeholder_rows,
@@ -126,7 +127,7 @@ def test_workbook_with_only_placeholder_rooms_is_rejected(tmp_path: Path) -> Non
     rows = [row for row in _sample_rows() if row[3] == PLACEHOLDER_ROOM]
     path = tmp_path / "all-placeholder.xlsx"
     _write_workbook(path, rows)
-    assert _split_placeholder_rows(_read_rows(path))[0] == []
+    assert _split_placeholder_rows(_read_rows(path)[0])[0] == []
 
 
 def test_exact_duplicate_rows_are_deduplicated_at_import(db: Session, tmp_path: Path) -> None:
@@ -249,7 +250,8 @@ def test_official_workbook_import_counts() -> None:
     if not OFFICIAL_WORKBOOK.exists():
         pytest.skip("郑州官方数据文件不在工作区")
 
-    source_rows = _read_rows(OFFICIAL_WORKBOOK)
+    source_rows, skipped = _read_rows(OFFICIAL_WORKBOOK)
+    assert skipped == []
     kept, dropped = _split_placeholder_rows(source_rows)
     deduped = {_row_identity(row): row for row in kept}
 
@@ -395,3 +397,66 @@ def test_same_class_twice_in_one_slot_is_reported_as_a_data_conflict(
     assert report["conflicting_groups"] == 1
     assert report["extra_lessons"] == 1
     assert len(report["examples"][0]["课节名称"]) == 2
+
+
+def test_header_mismatch_is_rejected_instead_of_silently_misreading(tmp_path: Path) -> None:
+    """模板即契约：列顺序变了必须报错，而不是把教室当成班级读进去。"""
+    rows = [row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM]
+    path = tmp_path / "wrong-order.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = SHEET_NAME
+    swapped = list(HEADERS)
+    swapped[2], swapped[3] = swapped[3], swapped[2]
+    sheet.append(swapped)
+    for row in rows:
+        sheet.append(row)
+    workbook.save(path)
+
+    with pytest.raises(WorkbookFormatError) as error:
+        _read_rows(path)
+    assert "第 3 列" in str(error.value)
+
+
+def test_unparseable_rows_are_reported_with_line_numbers(tmp_path: Path) -> None:
+    """跳过的行必须带行号和原因，否则用户只知道导入了 N 条，不知道少了什么。"""
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    bad_date = _edit_cell(base, 10, "不是日期")
+    bad_span = _edit_cell(_edit_cell(base, 8, 2), 11, "上午")
+    path = tmp_path / "dirty.xlsx"
+    _write_workbook(path, [base, bad_date, bad_span])
+
+    rows, skipped = _read_rows(path)
+
+    assert len(rows) == 1
+    assert [item["行号"] for item in skipped] == [3, 4]
+    assert "上课日期无法解析" in skipped[0]["原因"]
+    assert "08:30-11:30" in skipped[1]["原因"]
+
+
+def test_version_name_follows_the_campus(db: Session, tmp_path: Path) -> None:
+    """版本名此前写死「郑州官方原始课表」，第二所学校会并进同一个版本。"""
+    rows = [row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM]
+    path = tmp_path / "tj.xlsx"
+    _write_workbook(path, rows)
+
+    result = import_schedule_workbook(
+        db, path, campus_business_id="CAMPUS-TJ", campus_name="天津校区"
+    )
+    db.commit()
+
+    assert result["schedule_versions"][0]["name"] == "天津校区官方原始课表"
+
+
+def test_planned_hours_check_uses_the_actual_lesson_duration(db: Session, tmp_path: Path) -> None:
+    """课时校验此前硬编码「每课次 3 小时」，1.5 小时的学校会刷满假告警。"""
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    consistent = _edit_cell(_edit_cell(_edit_cell(base, 6, 40), 7, 60), 12, 1.5)
+    consistent = _edit_cell(consistent, 11, "08:30-10:00")
+    path = tmp_path / "hours.xlsx"
+    _write_workbook(path, [consistent])
+
+    result = import_schedule_workbook(db, path)
+    db.commit()
+
+    assert result["warnings"]["planned_hours_mismatch"] == []
