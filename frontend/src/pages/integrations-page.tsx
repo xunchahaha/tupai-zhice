@@ -54,6 +54,8 @@ const resources = [
   "public_summary",
 ] as const;
 
+const AILY_SKILL_DOC_URL = "https://open.feishu.cn/document/aily-v1/app-skill/start?lang=zh-CN";
+
 const permissionLabels: Record<string, string> = {
   offline_access: "持续访问已授权的数据",
   "base:app:create": "创建多维表格",
@@ -177,6 +179,9 @@ export function IntegrationsPage() {
       setFrontendUrl(configured.frontend_url);
       if (new URLSearchParams(window.location.search).get("section") === "aily") {
         setEditingApp(true);
+        window.requestAnimationFrame(() => {
+          document.getElementById("aily-configuration")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
       }
       return;
     }
@@ -300,9 +305,12 @@ export function IntegrationsPage() {
             state={status.app_configuration.aily_configured ? "completed" : "current"}
             icon={Settings2}
           >
-            <div id="aily-configuration" className="space-y-3 text-sm text-zinc-700">
-              <div>Aily 应用：<code>{status.app_configuration.aily_app_id ?? "待配置"}</code></div>
-              <div>Aily 技能：<code>{status.app_configuration.aily_skill_id ?? "待配置"}</code></div>
+            <div id="aily-configuration" className="space-y-4 text-sm text-zinc-700">
+              <AilyConfigurationGuide compact />
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div className="border border-zinc-200 bg-zinc-50 px-3 py-2">Aily 应用标识：<code>{status.app_configuration.aily_app_id ?? "待配置"}</code></div>
+                <div className="border border-zinc-200 bg-zinc-50 px-3 py-2">Aily 技能标识：<code>{status.app_configuration.aily_skill_id ?? "待配置"}</code></div>
+              </div>
               <Button size="sm" variant="outline" onClick={() => setEditingApp(true)}>
                 编辑飞书应用与 Aily 配置
               </Button>
@@ -692,12 +700,15 @@ function ApplicationConfiguration({
         <label className="text-sm text-zinc-700">
           Aily 应用标识
           <input aria-label="飞书 Aily 应用标识" value={ailyAppId} onChange={(event) => setAilyAppId(event.target.value)} placeholder="spring_xxxxxxxxxx" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" />
+          <span className="mt-1 block text-xs leading-5 text-zinc-500">从 Aily 应用详情复制，以 <code>spring_</code> 开头；这里不是飞书自建应用的 <code>cli_</code> 编号。</span>
         </label>
         <label className="text-sm text-zinc-700">
           Aily 技能标识
           <input aria-label="飞书 Aily 技能标识" value={ailySkillId} onChange={(event) => setAilySkillId(event.target.value)} placeholder="skill_xxxxxxxxxx" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" />
+          <span className="mt-1 block text-xs leading-5 text-zinc-500">从该 Aily 应用内已发布的技能详情复制，以 <code>skill_</code> 开头。</span>
         </label>
       </div>
+      <AilyConfigurationGuide />
       <label className="block text-sm text-zinc-700">
         授权回调地址
         <div className="mt-1.5 flex gap-2">
@@ -738,6 +749,25 @@ function ApplicationConfiguration({
           应用密钥与用户令牌由后端自动加密，保存后页面不再显示明文。
         </span>
       </div>
+    </div>
+  );
+}
+
+function AilyConfigurationGuide({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className="border border-blue-200 bg-blue-50/60 p-4 text-sm text-blue-950">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="font-semibold">Aily 两个标识从哪里获取</div>
+        <a href={AILY_SKILL_DOC_URL} target="_blank" rel="noreferrer">
+          <Button size="sm" variant="outline"><ExternalLink className="size-3.5" />打开 Aily 技能调用官方文档</Button>
+        </a>
+      </div>
+      <ol className={`mt-3 grid gap-2 text-xs leading-5 ${compact ? "md:grid-cols-3" : ""}`}>
+        <li className="border border-blue-100 bg-white/80 p-3"><strong>1. 创建 Aily 应用</strong><p className="mt-1 text-blue-900/70">进入飞书 Aily，创建或打开用于排课指令解析的应用，在应用详情复制 <code>spring_...</code> 应用标识。</p></li>
+        <li className="border border-blue-100 bg-white/80 p-3"><strong>2. 创建并发布技能</strong><p className="mt-1 text-blue-900/70">在该应用中创建排课解析技能，完成调试并发布，在技能详情复制 <code>skill_...</code> 技能标识。</p></li>
+        <li className="border border-blue-100 bg-white/80 p-3"><strong>3. 配置调用权限</strong><p className="mt-1 text-blue-900/70">在同一飞书企业自建应用中申请 <code>aily:skill:write</code>，发布应用版本后回到这里保存配置。</p></li>
+      </ol>
+      {!compact ? <div className="mt-3 border-l-2 border-blue-500 pl-3 text-xs leading-5 text-blue-900">保存后返回“排课求解”，点击“解析排课指令”验证；应用编号 <code>cli_...</code>、Aily 应用标识 <code>spring_...</code>、技能标识 <code>skill_...</code> 是三项不同配置。</div> : null}
     </div>
   );
 }
