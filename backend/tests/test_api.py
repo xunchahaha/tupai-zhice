@@ -640,3 +640,148 @@ def test_repeated_login_failures_lock_the_account(client, auth_headers) -> None:
         data={"username": "brute_target", "password": "correct-password-1"},
     )
     assert locked.status_code == 429
+
+
+def test_constraint_catalog_covers_the_types_the_solver_implements(client, auth_headers) -> None:
+    """目录曾经漏掉求解器已实现的日期/教室类型，导致这些规则根本建不出来。"""
+    response = client.get("/api/v1/rules/constraint-catalog", headers=auth_headers)
+    assert response.status_code == 200
+    catalog = {item["type"]: item for item in response.json()}
+
+    for constraint_type in (
+        "fixed_date",
+        "preferred_date",
+        "date_range",
+        "date_window",
+        "allowed_date_range",
+        "preferred_room",
+        "forbidden_room",
+        "unavailable_room",
+    ):
+        assert constraint_type in catalog, f"{constraint_type} 求解器已实现，目录必须收录"
+        assert catalog[constraint_type]["solver_paths"], f"{constraint_type} 必须声明生效路径"
+
+    # 只登记留痕的类型要如实标注为不进入模型，前端靠这个字段提示教务。
+    assert catalog["declared_constraint"]["solver_paths"] == {"hard": [], "soft": []}
+    # 声明的生效路径不能超出该类型允许的硬软属性。
+    for entry in catalog.values():
+        assert set(entry["solver_paths"]) <= set(entry["hardness"])
+
+
+def test_date_rules_can_now_be_created_through_the_api(client, auth_headers) -> None:
+    response = client.post(
+        "/api/v1/rules",
+        headers=auth_headers,
+        json={
+            "business_id": "TEST-FIXED-DATE",
+            "source_text": "B01-1 必须排在 2026-09-09",
+            "actor_type": "course",
+            "actor_ids": ["B01-1"],
+            "constraint_type": "fixed_date",
+            "scope": {"date": "2026-09-09"},
+            "hardness": "hard",
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["status"] == "awaiting_confirmation"
+
+
+def test_rule_scope_rejects_a_malformed_date(client, auth_headers) -> None:
+    response = client.post(
+        "/api/v1/rules",
+        headers=auth_headers,
+        json={
+            "source_text": "日期写错了",
+            "actor_type": "system",
+            "actor_ids": [],
+            "constraint_type": "fixed_date",
+            "scope": {"date": "2026-13-45"},
+            "hardness": "hard",
+        },
+    )
+    assert response.status_code == 422
+    assert "不是合法日期" in response.text
+
+
+def test_rule_scope_rejects_an_inverted_date_range(client, auth_headers) -> None:
+    response = client.post(
+        "/api/v1/rules",
+        headers=auth_headers,
+        json={
+            "source_text": "区间反了",
+            "actor_type": "system",
+            "actor_ids": [],
+            "constraint_type": "date_range",
+            "scope": {"date_from": "2026-09-20", "date_to": "2026-09-10"},
+            "hardness": "hard",
+        },
+    )
+    assert response.status_code == 422
+    assert "date_from 必须早于或等于 date_to" in response.text
+
+
+def test_rule_scope_rejects_a_negative_day_count(client, auth_headers) -> None:
+    response = client.post(
+        "/api/v1/rules",
+        headers=auth_headers,
+        json={
+            "source_text": "浮动天数为负",
+            "actor_type": "system",
+            "actor_ids": [],
+            "constraint_type": "date_range",
+            "scope": {"date_window_days": -3},
+            "hardness": "hard",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_global_rule_scope_entities_are_validated(client, auth_headers) -> None:
+    """actor_ids 为空的全局规则以前会跳过 scope 实体校验，让不存在的时段进入求解。"""
+    response = client.post(
+        "/api/v1/rules",
+        headers=auth_headers,
+        json={
+            "source_text": "全局禁排一个不存在的时段",
+            "actor_type": "system",
+            "actor_ids": [],
+            "constraint_type": "forbidden_slot",
+            "scope": {"slot_ids": ["S-DOES-NOT-EXIST"]},
+            "hardness": "hard",
+        },
+    )
+    assert response.status_code == 422
+    assert "不存在的时段" in response.text
+
+
+def test_global_rule_scope_rejects_a_missing_room(client, auth_headers) -> None:
+    response = client.post(
+        "/api/v1/rules",
+        headers=auth_headers,
+        json={
+            "source_text": "全局禁用一个不存在的教室",
+            "actor_type": "system",
+            "actor_ids": [],
+            "constraint_type": "forbidden_room",
+            "scope": {"room_ids": ["R-DOES-NOT-EXIST"]},
+            "hardness": "hard",
+        },
+    )
+    assert response.status_code == 422
+    assert "不存在的教室" in response.text
+
+
+def test_rule_rejects_a_hardness_the_type_does_not_support(client, auth_headers) -> None:
+    response = client.post(
+        "/api/v1/rules",
+        headers=auth_headers,
+        json={
+            "source_text": "偏好日期只能是软约束",
+            "actor_type": "system",
+            "actor_ids": [],
+            "constraint_type": "preferred_date",
+            "scope": {"date": "2026-09-09"},
+            "hardness": "hard",
+        },
+    )
+    assert response.status_code == 422

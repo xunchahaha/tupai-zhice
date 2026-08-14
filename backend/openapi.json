@@ -1759,6 +1759,37 @@
         }
       }
     },
+    "/api/v1/rules/constraint-catalog": {
+      "get": {
+        "tags": [
+          "rules"
+        ],
+        "summary": "List Constraint Catalog",
+        "description": "约束类型目录：可选类型、各自的范围字段、以及在哪条求解路径下真正生效。",
+        "operationId": "list_constraint_catalog_api_v1_rules_constraint_catalog_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ConstraintCatalogEntry"
+                  },
+                  "type": "array",
+                  "title": "Response List Constraint Catalog Api V1 Rules Constraint Catalog Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/rules": {
       "get": {
         "tags": [
@@ -4292,6 +4323,148 @@
           "id"
         ],
         "title": "ClassGroupResponse"
+      },
+      "ConstraintCatalogEntry": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "default": ""
+          },
+          "scope": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scope"
+          },
+          "scope_fields": {
+            "items": {
+              "$ref": "#/components/schemas/ConstraintScopeField"
+            },
+            "type": "array",
+            "title": "Scope Fields"
+          },
+          "hardness": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "hard",
+                "soft"
+              ]
+            },
+            "type": "array",
+            "title": "Hardness"
+          },
+          "solver_paths": {
+            "additionalProperties": {
+              "items": {
+                "type": "string",
+                "enum": [
+                  "date",
+                  "slot"
+                ]
+              },
+              "type": "array"
+            },
+            "propertyNames": {
+              "enum": [
+                "hard",
+                "soft"
+              ]
+            },
+            "type": "object",
+            "title": "Solver Paths"
+          },
+          "soft_weight_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Soft Weight Hint"
+          },
+          "alias_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alias Of"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "label",
+          "hardness"
+        ],
+        "title": "ConstraintCatalogEntry"
+      },
+      "ConstraintScopeField": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "slot",
+              "room",
+              "date",
+              "integer"
+            ],
+            "title": "Kind"
+          },
+          "multiple": {
+            "type": "boolean",
+            "title": "Multiple",
+            "default": false
+          },
+          "required": {
+            "type": "boolean",
+            "title": "Required",
+            "default": true
+          },
+          "minimum": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "label",
+          "kind"
+        ],
+        "title": "ConstraintScopeField",
+        "description": "规则范围里的一个可填字段，前端据此渲染对应控件。"
       },
       "CourseSessionBatchDelete": {
         "properties": {

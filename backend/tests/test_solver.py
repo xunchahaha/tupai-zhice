@@ -924,3 +924,105 @@ def test_course_scope_still_respects_frozen_neighbours() -> None:
     )
 
     assert solve_problem(payload)["model_status"] == "INFEASIBLE"
+
+
+def _rule(constraint_type: str, scope: dict, *, hardness: str = "hard", weight: int = 1) -> dict:
+    return {
+        "business_id": f"RL-{constraint_type}",
+        "actor_type": "system",
+        "actor_ids": [],
+        "constraint_type": constraint_type,
+        "scope": scope,
+        "hardness": hardness,
+        "weight": weight,
+    }
+
+
+def test_date_solver_applies_hard_fixed_date_rule() -> None:
+    """fixed_date 是求解器早就实现、目录里却查不到的类型，补目录后必须真的把课钉住。"""
+    payload = _date_payload(
+        [_course("C1", class_id="B1", room="R1")],
+        teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+        date_window_days=3,
+        rules=[_rule("fixed_date", {"date": "2026-09-09"})],
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "OPTIMAL"
+    assert [item["lesson_date"] for item in result["assignments"]] == ["2026-09-09"]
+
+
+def test_date_solver_applies_hard_date_range_rule() -> None:
+    payload = _date_payload(
+        [_course("C1", class_id="B1", room="R1")],
+        teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+        date_window_days=5,
+        rules=[_rule("date_range", {"date_from": "2026-09-10", "date_to": "2026-09-11"})],
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "OPTIMAL"
+    assert result["assignments"][0]["lesson_date"] in {"2026-09-10", "2026-09-11"}
+
+
+def test_date_solver_applies_hard_forbidden_room_rule() -> None:
+    payload = _date_payload(
+        [_course("C1", class_id="B1", room="R1")],
+        teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+        rules=[_rule("forbidden_room", {"room_ids": ["R1"]})],
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "OPTIMAL"
+    assert result["assignments"][0]["room_business_id"] == "R2"
+
+
+def test_date_solver_applies_soft_preferred_room_rule() -> None:
+    """软规则的权重要压过“少改动”的默认倾向，否则等于没生效。"""
+    payload = _date_payload(
+        [_course("C1", class_id="B1", room="R1")],
+        teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+        rules=[_rule("preferred_room", {"room_ids": ["R2"]}, hardness="soft", weight=5)],
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "OPTIMAL"
+    assert result["assignments"][0]["room_business_id"] == "R2"
+
+
+def test_date_solver_applies_soft_preferred_date_rule() -> None:
+    payload = _date_payload(
+        [_course("C1", class_id="B1", room="R1")],
+        teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+        date_window_days=3,
+        change_weight=1,
+        rules=[_rule("preferred_date", {"date": "2026-09-09"}, hardness="soft", weight=50)],
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "OPTIMAL"
+    assert result["assignments"][0]["lesson_date"] == "2026-09-09"
+
+
+def test_soft_date_rule_loses_to_default_change_weight() -> None:
+    """日期类软规则要和「减少改动」竞争：每移动一天扣 change_weight（默认 100000）。
+
+    权重低于它时日期不会变，这是既定取舍而不是规则没生效。目录的 soft_weight_hint
+    就是为了让教务在录入界面上先看到这一条。
+    """
+    payload = _date_payload(
+        [_course("C1", class_id="B1", room="R1")],
+        teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+        date_window_days=3,
+        rules=[_rule("preferred_date", {"date": "2026-09-09"}, hardness="soft", weight=50)],
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "OPTIMAL"
+    assert result["assignments"][0]["lesson_date"] == "2026-09-07"

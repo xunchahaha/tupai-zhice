@@ -69,6 +69,7 @@ from .schemas import (
     ClassGroupBatchUpdate,
     ClassGroupPayload,
     ClassGroupResponse,
+    ConstraintCatalogEntry,
     CourseSessionBatchDelete,
     CourseSessionBatchUpdate,
     CourseSessionPayload,
@@ -1126,39 +1127,243 @@ def delete_master_data(resource: str, object_id: str, db: Db, user: AdminOrSched
     return Response(status_code=204)
 
 
+# 求解器有两条路径，能力并不对等，目录必须如实标注每个类型在哪条路径下真正生效：
+#   date —— 日期感知路径（_solve_date_aware），课次自带日期与固定起止时间时走，郑州真实数据用它；
+#   slot —— 时段矩阵路径（_build_model），经典排课模型，种子演示数据用它。
+# solver_paths 为空表示该组合只登记留痕、不进入任何模型，前端据此提示教务。
+DATE_PATH = "date"
+SLOT_PATH = "slot"
+
+_SLOT_ONE = {"name": "slot_id", "label": "时段", "kind": "slot"}
+_SLOT_MANY = {"name": "slot_ids", "label": "时段", "kind": "slot", "multiple": True}
+_ROOM_ONE = {"name": "room_id", "label": "教室", "kind": "room"}
+_ROOM_MANY = {"name": "room_ids", "label": "教室", "kind": "room", "multiple": True}
+_DATE_ONE = {"name": "date", "label": "日期", "kind": "date"}
+_DATE_RANGE_FIELDS = [
+    {"name": "date_from", "label": "最早日期", "kind": "date", "required": False},
+    {"name": "date_to", "label": "最晚日期", "kind": "date", "required": False},
+    {
+        "name": "date_window_days",
+        "label": "相对原日期可浮动天数",
+        "kind": "integer",
+        "required": False,
+        "minimum": 0,
+    },
+]
+_DATE_RANGE_SCOPE = ["date_from", "date_to", "date_window_days", "before_days", "after_days"]
+_DATE_RANGE_HINT = "填绝对区间（最早/最晚日期）或相对浮动天数，两者可同时给出，取交集。"
+# 日期路径里每移动一天要扣 change_weight（求解请求默认 100000），
+# 软的日期规则权重低于它时不会真的改日期，录入界面必须先讲清楚这个取舍。
+_DATE_SOFT_WEIGHT_HINT = (
+    "日期类软约束要和「减少改动」竞争：每移动一天扣一份 change_weight"
+    "（求解请求默认 100000）。权重低于它时日期不会变，只有调高权重或调低求解页的"
+    "改动权重才会生效。"
+)
+
 RULE_CONSTRAINTS: dict[str, dict[str, Any]] = {
-    "declared_constraint": {"label": "制度声明", "scope": [], "hardness": ["hard", "soft"]},
-    "不重叠": {"label": "不重叠", "scope": [], "hardness": ["hard", "soft"]},
-    "容量": {"label": "容量", "scope": [], "hardness": ["hard", "soft"]},
-    "设备": {"label": "设备", "scope": [], "hardness": ["hard", "soft"]},
-    "可用性": {"label": "可用性", "scope": [], "hardness": ["hard", "soft"]},
-    "偏好": {"label": "偏好", "scope": [], "hardness": ["soft"]},
-    "稳定性": {"label": "稳定性", "scope": [], "hardness": ["soft"]},
-    "fixed_slot": {"label": "固定时段", "scope": ["slot_id"], "hardness": ["hard", "soft"]},
+    "declared_constraint": {
+        "label": "制度声明",
+        "description": "尚未结构化的自然语言规则，只登记留痕，不进入求解模型。",
+        "scope": [],
+        "scope_fields": [],
+        "hardness": ["hard", "soft"],
+        "solver_paths": {"hard": [], "soft": []},
+    },
+    "fixed_slot": {
+        "label": "固定时段",
+        "description": "课次必须排在指定时段。",
+        "scope": ["slot_id"],
+        "scope_fields": [_SLOT_ONE],
+        "hardness": ["hard", "soft"],
+        "solver_paths": {"hard": [DATE_PATH, SLOT_PATH], "soft": [SLOT_PATH]},
+    },
     "forbidden_slot": {
         "label": "禁排时段",
+        "description": "课次不得排在这些时段。",
         "scope": ["slot_ids"],
+        "scope_fields": [_SLOT_MANY],
         "hardness": ["hard", "soft"],
+        "solver_paths": {"hard": [DATE_PATH, SLOT_PATH], "soft": [SLOT_PATH]},
     },
     "unavailable_slot": {
         "label": "不可用时段",
+        "description": "与禁排时段等价，用于表达对象本身不可用（如教师请假时段）。",
         "scope": ["slot_ids"],
+        "scope_fields": [_SLOT_MANY],
         "hardness": ["hard", "soft"],
+        "solver_paths": {"hard": [DATE_PATH, SLOT_PATH], "soft": [SLOT_PATH]},
     },
-    "fixed_room": {"label": "固定教室", "scope": ["room_id"], "hardness": ["hard", "soft"]},
-    "preferred_slot": {"label": "偏好时段", "scope": ["slot_ids"], "hardness": ["soft"]},
+    "preferred_slot": {
+        "label": "偏好时段",
+        "description": "尽量排在这些时段，排不下时按权重扣分。",
+        "scope": ["slot_ids"],
+        "scope_fields": [_SLOT_MANY],
+        "hardness": ["soft"],
+        "solver_paths": {"soft": [SLOT_PATH]},
+    },
     "consecutive_sessions": {
         "label": "连续课次",
+        "description": (
+            "同一对象的课次尽量连排。"
+            "当前模型按两两相邻计分，尚未按 minimum_consecutive 精确建模。"
+        ),
         "scope": ["minimum_consecutive"],
+        "scope_fields": [
+            {
+                "name": "minimum_consecutive",
+                "label": "最少连排节数",
+                "kind": "integer",
+                "minimum": 2,
+            }
+        ],
         "hardness": ["soft"],
+        "solver_paths": {"soft": [SLOT_PATH]},
+    },
+    "fixed_room": {
+        "label": "固定教室",
+        "description": "课次必须安排在指定教室。",
+        "scope": ["room_id"],
+        "scope_fields": [_ROOM_ONE],
+        "hardness": ["hard", "soft"],
+        "solver_paths": {"hard": [DATE_PATH, SLOT_PATH], "soft": [DATE_PATH, SLOT_PATH]},
+    },
+    "preferred_room": {
+        "label": "偏好教室",
+        "description": "尽量安排在这些教室，用别的教室按权重扣分。",
+        "scope": ["room_ids"],
+        "scope_fields": [_ROOM_MANY],
+        "hardness": ["soft"],
+        "solver_paths": {"soft": [DATE_PATH]},
+    },
+    "forbidden_room": {
+        "label": "禁用教室",
+        "description": "课次不得安排在这些教室。",
+        "scope": ["room_ids"],
+        "scope_fields": [_ROOM_MANY],
+        "hardness": ["hard", "soft"],
+        "solver_paths": {"hard": [DATE_PATH], "soft": [DATE_PATH]},
+    },
+    "unavailable_room": {
+        "label": "不可用教室",
+        "description": "与禁用教室等价，用于表达教室本身不可用（如场地维修）。",
+        "scope": ["room_ids"],
+        "scope_fields": [_ROOM_MANY],
+        "hardness": ["hard", "soft"],
+        "solver_paths": {"hard": [DATE_PATH], "soft": [DATE_PATH]},
+    },
+    "fixed_date": {
+        "label": "固定日期",
+        "description": "课次必须落在指定日期。",
+        "scope": ["date", "date_from"],
+        "scope_fields": [_DATE_ONE],
+        "hardness": ["hard", "soft"],
+        "solver_paths": {"hard": [DATE_PATH], "soft": [DATE_PATH]},
+        "soft_weight_hint": _DATE_SOFT_WEIGHT_HINT,
+    },
+    "preferred_date": {
+        "label": "偏好日期",
+        "description": "尽量落在指定日期，排到别的日期按权重扣分。",
+        "scope": ["date", "date_from"],
+        "scope_fields": [_DATE_ONE],
+        "hardness": ["soft"],
+        "solver_paths": {"soft": [DATE_PATH]},
+        "soft_weight_hint": _DATE_SOFT_WEIGHT_HINT,
+    },
+    "date_range": {
+        "label": "日期范围",
+        "description": f"课次只能落在给定的日期范围内。{_DATE_RANGE_HINT}",
+        "scope": _DATE_RANGE_SCOPE,
+        "scope_fields": _DATE_RANGE_FIELDS,
+        "hardness": ["hard", "soft"],
+        "solver_paths": {"hard": [DATE_PATH], "soft": [DATE_PATH]},
+        "soft_weight_hint": _DATE_SOFT_WEIGHT_HINT,
+    },
+    "date_window": {
+        "label": "日期范围（别名：浮动窗口）",
+        "description": f"与「日期范围」完全等价，保留给助手与 Aily 已有的表达。{_DATE_RANGE_HINT}",
+        "scope": _DATE_RANGE_SCOPE,
+        "scope_fields": _DATE_RANGE_FIELDS,
+        "hardness": ["hard", "soft"],
+        "solver_paths": {"hard": [DATE_PATH], "soft": [DATE_PATH]},
+        "soft_weight_hint": _DATE_SOFT_WEIGHT_HINT,
+        "alias_of": "date_range",
+    },
+    "allowed_date_range": {
+        "label": "日期范围（别名：允许区间）",
+        "description": f"与「日期范围」完全等价，保留给助手与 Aily 已有的表达。{_DATE_RANGE_HINT}",
+        "scope": _DATE_RANGE_SCOPE,
+        "scope_fields": _DATE_RANGE_FIELDS,
+        "hardness": ["hard", "soft"],
+        "solver_paths": {"hard": [DATE_PATH], "soft": [DATE_PATH]},
+        "soft_weight_hint": _DATE_SOFT_WEIGHT_HINT,
+        "alias_of": "date_range",
     },
 }
+
+DATE_SCOPE_KEYS = ("date", "date_from", "date_to")
+DAY_COUNT_SCOPE_KEYS = ("date_window_days", "window_days", "before_days", "after_days", "days")
+
+
+def _scope_id_set(scope: dict[str, Any], single_key: str, plural_key: str) -> set[str]:
+    values = scope.get(plural_key) or []
+    if not isinstance(values, (list, tuple, set)):
+        values = [values]
+    collected = {str(item) for item in values if item not in (None, "")}
+    if scope.get(single_key) not in (None, ""):
+        collected.add(str(scope[single_key]))
+    return collected
+
+
+def _validate_scope_dates(scope: dict[str, Any]) -> None:
+    parsed: dict[str, date] = {}
+    for key in DATE_SCOPE_KEYS:
+        raw = scope.get(key)
+        if raw in (None, ""):
+            continue
+        if isinstance(raw, date) and not isinstance(raw, datetime):
+            parsed[key] = raw
+            continue
+        try:
+            parsed[key] = date.fromisoformat(str(raw)[:10])
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"规则范围的 {key} 不是合法日期，需要 YYYY-MM-DD 格式：{raw}",
+            ) from None
+    if "date_from" in parsed and "date_to" in parsed and parsed["date_from"] > parsed["date_to"]:
+        raise HTTPException(status_code=422, detail="规则范围的 date_from 必须早于或等于 date_to")
+
+
+def _validate_scope_integers(catalog: dict[str, Any], scope: dict[str, Any]) -> None:
+    minimums = {key: 0 for key in DAY_COUNT_SCOPE_KEYS}
+    for field in catalog.get("scope_fields") or []:
+        if field.get("kind") == "integer":
+            minimums[str(field["name"])] = int(field.get("minimum", 0))
+    for key, minimum in minimums.items():
+        raw = scope.get(key)
+        if raw is None or raw == "":
+            continue
+        if isinstance(raw, bool):
+            value = None
+        else:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                value = None
+        if value is None or value < minimum:
+            raise HTTPException(
+                status_code=422, detail=f"规则范围的 {key} 必须是不小于 {minimum} 的整数：{raw}"
+            )
 
 
 def validate_rule_entities(db: Session, payload: RuleCreate | RuleUpdate) -> None:
     catalog = RULE_CONSTRAINTS.get(payload.constraint_type)
     if catalog is None:
-        raise HTTPException(status_code=422, detail="不支持的约束类型")
+        supported = "、".join(sorted(RULE_CONSTRAINTS))
+        raise HTTPException(
+            status_code=422,
+            detail=f"不支持的约束类型：{payload.constraint_type}。可用类型：{supported}",
+        )
     if payload.hardness not in catalog["hardness"]:
         raise HTTPException(status_code=422, detail="该约束类型不支持当前硬软属性")
     if payload.hardness == "soft" and (payload.weight is None or payload.weight <= 0):
@@ -1170,6 +1375,9 @@ def validate_rule_entities(db: Session, payload: RuleCreate | RuleUpdate) -> Non
         raise HTTPException(
             status_code=422, detail=f"规则范围缺少字段: {', '.join(required_scope)}"
         )
+    _validate_scope_dates(payload.scope)
+    _validate_scope_integers(catalog, payload.scope)
+
     model_by_actor = {
         "teacher": Teacher,
         "class": ClassGroup,
@@ -1177,18 +1385,21 @@ def validate_rule_entities(db: Session, payload: RuleCreate | RuleUpdate) -> Non
         "course": CourseSession,
     }
     model: Any = model_by_actor.get(payload.actor_type)
-    if model is None or not payload.actor_ids:
-        return
-    existing = set(
-        db.scalars(select(model.business_id).where(model.business_id.in_(payload.actor_ids))).all()
-    )
-    missing = sorted(set(payload.actor_ids) - existing)
-    if missing:
-        raise HTTPException(status_code=422, detail=f"规则引用了不存在的实体: {', '.join(missing)}")
+    if model is not None and payload.actor_ids:
+        existing = set(
+            db.scalars(
+                select(model.business_id).where(model.business_id.in_(payload.actor_ids))
+            ).all()
+        )
+        missing = sorted(set(payload.actor_ids) - existing)
+        if missing:
+            raise HTTPException(
+                status_code=422, detail=f"规则引用了不存在的实体: {', '.join(missing)}"
+            )
 
-    slot_ids = set(payload.scope.get("slot_ids") or [])
-    if payload.scope.get("slot_id"):
-        slot_ids.add(str(payload.scope["slot_id"]))
+    # scope 里的业务 ID 与 actor_ids 无关：全局规则（actor_ids 为空）同样会把
+    # slot/room 交给求解器，早退会让不存在的时段悄悄进入模型。
+    slot_ids = _scope_id_set(payload.scope, "slot_id", "slot_ids")
     if slot_ids:
         existing_slots = set(
             db.scalars(select(TimeSlot.business_id).where(TimeSlot.business_id.in_(slot_ids))).all()
@@ -1198,9 +1409,24 @@ def validate_rule_entities(db: Session, payload: RuleCreate | RuleUpdate) -> Non
             raise HTTPException(
                 status_code=422, detail=f"规则引用了不存在的时段: {', '.join(missing_slots)}"
             )
-    room_id = payload.scope.get("room_id")
-    if room_id and db.scalar(select(Room.id).where(Room.business_id == room_id)) is None:
-        raise HTTPException(status_code=422, detail=f"规则引用了不存在的教室: {room_id}")
+    room_ids = _scope_id_set(payload.scope, "room_id", "room_ids")
+    if room_ids:
+        existing_rooms = set(
+            db.scalars(select(Room.business_id).where(Room.business_id.in_(room_ids))).all()
+        )
+        missing_rooms = sorted(room_ids - existing_rooms)
+        if missing_rooms:
+            raise HTTPException(
+                status_code=422, detail=f"规则引用了不存在的教室: {', '.join(missing_rooms)}"
+            )
+
+
+@router.get(
+    "/rules/constraint-catalog", response_model=list[ConstraintCatalogEntry], tags=["rules"]
+)
+def list_constraint_catalog(user: CurrentUser) -> list[dict[str, Any]]:
+    """约束类型目录：可选类型、各自的范围字段、以及在哪条求解路径下真正生效。"""
+    return [{"type": key, **value} for key, value in RULE_CONSTRAINTS.items()]
 
 
 @router.get("/rules", response_model=list[RuleResponse], tags=["rules"])

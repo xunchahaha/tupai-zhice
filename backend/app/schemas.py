@@ -286,6 +286,34 @@ class CourseSessionResponse(CourseSessionPayload, ORMModel):
     id: str
 
 
+class ConstraintScopeField(BaseModel):
+    """规则范围里的一个可填字段，前端据此渲染对应控件。"""
+
+    name: str
+    label: str
+    kind: Literal["slot", "room", "date", "integer"]
+    multiple: bool = False
+    required: bool = True
+    minimum: int | None = None
+
+
+class ConstraintCatalogEntry(BaseModel):
+    type: str
+    label: str
+    description: str = ""
+    # scope 里任意一个字段有值即视为范围完整。
+    scope: list[str] = Field(default_factory=list)
+    scope_fields: list[ConstraintScopeField] = Field(default_factory=list)
+    hardness: list[Literal["hard", "soft"]]
+    # 硬软属性 → 真正生效的求解路径（date=日期感知，slot=时段矩阵）。空表示只登记不建模。
+    solver_paths: dict[Literal["hard", "soft"], list[Literal["date", "slot"]]] = Field(
+        default_factory=dict
+    )
+    # 选软约束时额外提示的权衡口径，例如权重要压过「减少改动」才会真的改日期。
+    soft_weight_hint: str | None = None
+    alias_of: str | None = None
+
+
 class RuleCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

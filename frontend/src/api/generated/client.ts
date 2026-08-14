@@ -46,6 +46,7 @@ import type {
   ClassGroupPayload,
   ClassGroupResponse,
   CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams,
+  ConstraintCatalogEntry,
   CourseSessionBatchDelete,
   CourseSessionBatchUpdate,
   CourseSessionPayload,
@@ -3118,6 +3119,100 @@ export const useDeleteMasterDataApiV1MasterDataResourceObjectIdDelete = <TError 
       return useMutation(mutationOptions, queryClient);
     }
     
+/**
+ * 约束类型目录：可选类型、各自的范围字段、以及在哪条求解路径下真正生效。
+ * @summary List Constraint Catalog
+ */
+export const listConstraintCatalogApiV1RulesConstraintCatalogGet = (
+    
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<ConstraintCatalogEntry[]>(
+      {url: `/api/v1/rules/constraint-catalog`, method: 'GET', signal
+    },
+      );
+    }
+  
+
+
+
+export const getListConstraintCatalogApiV1RulesConstraintCatalogGetQueryKey = () => {
+    return [
+    `/api/v1/rules/constraint-catalog`
+    ] as const;
+    }
+
+    
+export const getListConstraintCatalogApiV1RulesConstraintCatalogGetQueryOptions = <TData = Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListConstraintCatalogApiV1RulesConstraintCatalogGetQueryKey();
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>> = ({ signal }) => listConstraintCatalogApiV1RulesConstraintCatalogGet(signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ListConstraintCatalogApiV1RulesConstraintCatalogGetQueryResult = NonNullable<Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>>
+export type ListConstraintCatalogApiV1RulesConstraintCatalogGetQueryError = unknown
+
+
+export function useListConstraintCatalogApiV1RulesConstraintCatalogGet<TData = Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>,
+          TError,
+          Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListConstraintCatalogApiV1RulesConstraintCatalogGet<TData = Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>,
+          TError,
+          Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListConstraintCatalogApiV1RulesConstraintCatalogGet<TData = Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List Constraint Catalog
+ */
+
+export function useListConstraintCatalogApiV1RulesConstraintCatalogGet<TData = Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listConstraintCatalogApiV1RulesConstraintCatalogGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getListConstraintCatalogApiV1RulesConstraintCatalogGetQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
 /**
  * @summary List Rules
  */
