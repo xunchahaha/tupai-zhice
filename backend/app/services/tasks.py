@@ -126,6 +126,32 @@ def count_hard_conflicts(db: Any, assignments: list[dict[str, Any]]) -> dict[str
     return breakdown
 
 
+def _room_slot_capacity(
+    rooms: dict[str, Any], open_slots: list[Any], occupied: set[tuple[str, str | None, str]]
+) -> int:
+    """可用的「教室 × 时间格」总数。
+
+    分母必须和分子用同一种格子定义，否则占用率会算出 200% 这种没有意义的数。
+    经典时段课表的一个格子就是一个时段标识；日期感知课表的一个格子是
+    「日期 + 固定起止时刻」，同一时刻落在不同星期上共用一个时钟窗口，
+    所以只有后者才按起止时刻去重。两种课次混在一份课表里时分别算再相加。
+    """
+    active_rooms = sum(1 for room in rooms.values() if room.is_active)
+    if not active_rooms:
+        return 0
+    scheduled_dates = {lesson_date for _room, lesson_date, _slot in occupied if lesson_date}
+    capacity = 0
+    if any(lesson_date is None for _room, lesson_date, _slot in occupied):
+        capacity += active_rooms * len({slot.business_id for slot in open_slots})
+    if scheduled_dates:
+        capacity += (
+            active_rooms
+            * len(scheduled_dates)
+            * len({(slot.start_time, slot.end_time) for slot in open_slots})
+        )
+    return capacity
+
+
 def calculate_metrics(db: Any, assignments: list[dict[str, Any]]) -> dict[str, Any]:
     rooms = {item.business_id: item for item in db.scalars(select(Room)).all()}
     open_slots = list(db.scalars(select(TimeSlot).where(TimeSlot.is_open.is_(True))))
@@ -137,12 +163,7 @@ def calculate_metrics(db: Any, assignments: list[dict[str, Any]]) -> dict[str, A
             unknown_rooms.add(str(item["room_business_id"]))
             continue
         room_slots.add((room.business_id, item.get("lesson_date"), item["slot_business_id"]))
-    scheduled_dates = {item.get("lesson_date") for item in assignments if item.get("lesson_date")}
-    available_room_slots = (
-        sum(1 for room in rooms.values() if room.is_active)
-        * max(len(scheduled_dates), 1)
-        * max(len({(slot.start_time, slot.end_time) for slot in open_slots}), 1)
-    )
+    available_room_slots = _room_slot_capacity(rooms, open_slots, room_slots)
     conflicts = count_hard_conflicts(db, assignments)
     return {
         "assignment_count": len(assignments),

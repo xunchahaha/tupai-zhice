@@ -18,6 +18,7 @@ from app.models import (
     TimeSlot,
 )
 from app.services import tasks
+from app.services.seed import seed_demo_data
 
 
 def test_persist_result_writes_final_lesson_date(monkeypatch, tmp_path) -> None:
@@ -292,6 +293,50 @@ def test_metrics_report_real_conflicts_instead_of_a_hardcoded_zero(tmp_path) -> 
 
     assert metrics["hard_conflicts"] == 6
     assert metrics["hard_conflicts_by_dimension"]["teacher"] == 2
+
+
+def test_occupancy_stays_a_ratio_on_the_classic_slot_model(tmp_path) -> None:
+    """经典时段课表的格子是时段标识本身，不能按起止时刻去重。
+
+    示范数据的 10 个时段只有 18:30-20:00 和 20:10-21:40 两种时刻，按时刻去重会把
+    分母从 60 压到 12，占用率算成 200%——一个比例值不可能大于 1。
+    """
+    engine = create_engine(f"sqlite:///{(tmp_path / 'occupancy.db').as_posix()}")
+    testing_session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    Base.metadata.create_all(engine)
+    with testing_session() as db:
+        seed_demo_data(db)
+        courses = db.query(CourseSession).order_by(CourseSession.business_id).all()
+        rooms = db.query(Room).order_by(Room.business_id).all()
+        slots = db.query(TimeSlot).order_by(TimeSlot.sequence).all()
+        # 6 间教室 × 10 个时段 = 60 个格子，24 个课次各占一个互不相同的格子。
+        assignments = [
+            {
+                "course_session_id": course.id,
+                "course_business_id": course.business_id,
+                "class_business_id": course.class_business_id,
+                "teacher_business_id": course.teacher_business_id,
+                "lesson_date": None,
+                "room_business_id": rooms[index % len(rooms)].business_id,
+                "slot_business_id": slots[index % len(slots)].business_id,
+            }
+            for index, course in enumerate(courses)
+        ]
+        metrics = tasks.calculate_metrics(db, assignments)
+
+    assert len(assignments) == 24
+    assert 0 <= metrics["room_slot_occupancy"] <= 1
+    assert metrics["room_slot_occupancy"] == 0.4
+
+
+def test_occupancy_dedupes_clock_windows_only_for_dated_schedules(tmp_path) -> None:
+    """日期感知课表的格子是「日期 + 起止时刻」，那里才该按时刻去重。"""
+    testing_session, assignments = _conflict_fixture(tmp_path, is_group=False, same_room=False)
+    with testing_session() as db:
+        metrics = tasks.calculate_metrics(db, assignments)
+
+    # 2 间教室 × 1 天 × 1 个时钟窗口 = 2 个格子，两节课分别占了 R1 和 R2。
+    assert metrics["room_slot_occupancy"] == 1.0
 
 
 def test_metrics_survive_assignments_pointing_at_unknown_rooms(tmp_path) -> None:
