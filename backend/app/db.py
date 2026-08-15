@@ -3,11 +3,12 @@ from __future__ import annotations
 from collections.abc import Generator
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -16,6 +17,10 @@ from .config import get_settings
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_COMMAND = "uv run alembic upgrade head"
+# Keep an interactive write from waiting behind a long-running background
+# integration transaction for SQLite's default five seconds.  The API retries
+# brief conflicts and returns a readable 409 if the writer remains busy.
+SQLITE_BUSY_TIMEOUT_MS = 750
 
 
 class DatabaseMigrationRequiredError(RuntimeError):
@@ -31,11 +36,37 @@ if settings.database_url.startswith("sqlite:///"):
     database_path = settings.database_url.removeprefix("sqlite:///")
     Path(database_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
 
-engine = create_engine(
-    settings.database_url,
-    connect_args={"check_same_thread": False} if settings.database_url.startswith("sqlite") else {},
-    pool_pre_ping=True,
-)
+sqlite_connect_args: dict[str, Any] = {}
+if settings.database_url.startswith("sqlite"):
+    sqlite_connect_args = {
+        "check_same_thread": False,
+        "timeout": SQLITE_BUSY_TIMEOUT_MS / 1000,
+    }
+
+engine = create_engine(settings.database_url, connect_args=sqlite_connect_args, pool_pre_ping=True)
+
+
+if settings.database_url.startswith("sqlite"):
+
+    @event.listens_for(engine, "first_connect")
+    def _enable_sqlite_wal(dbapi_connection: Any, _connection_record: Any) -> None:
+        """Persist WAL mode once, so readers do not block behind a writer."""
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+        finally:
+            cursor.close()
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_busy_timeout(dbapi_connection: Any, _connection_record: Any) -> None:
+        """Bound each connection's wait for SQLite's single writer lock."""
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        finally:
+            cursor.close()
+
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 

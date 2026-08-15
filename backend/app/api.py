@@ -6,11 +6,12 @@ import json
 import logging
 import secrets
 import tempfile
+import time as time_module
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 from typing import cast as type_cast
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -40,7 +41,7 @@ from sqlalchemy import (
     select,
     update,
 )
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from .config import PROJECT_ROOT, get_settings
@@ -173,6 +174,10 @@ logger = logging.getLogger("tupai.feishu")
 LOGIN_FAILURE_LIMIT = 8
 LOGIN_LOCKOUT_MINUTES = 15
 DEMO_AILY_KEY = "aily-demo-key"
+SQLITE_WRITE_RETRY_DELAYS_SECONDS = (0.05, 0.15)
+DATABASE_BUSY_DETAIL = "数据正在同步或被其他操作占用，请稍后重试"
+
+WriteResult = TypeVar("WriteResult")
 
 
 def _aware_utc(value: datetime) -> datetime:
@@ -387,6 +392,39 @@ def audit(
             detail=detail or {},
         )
     )
+
+
+def _is_transient_sqlite_lock(db: Session, exc: OperationalError) -> bool:
+    """Recognize only SQLite's single-writer conflict, not arbitrary DB errors."""
+    if db.get_bind().dialect.name != "sqlite":
+        return False
+    message = str(exc.orig or exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+def _commit_write_with_sqlite_retry(
+    db: Session, write: Callable[[], WriteResult]
+) -> WriteResult:
+    """Retry a short SQLite writer collision without splitting audit/state commits.
+
+    A retry reruns the whole mutation after a rollback. That keeps the audit row
+    and the state change in one transaction, so successful role changes retain
+    their audit trail.
+    """
+    for attempt in range(len(SQLITE_WRITE_RETRY_DELAYS_SECONDS) + 1):
+        try:
+            result = write()
+            db.commit()
+            return result
+        except OperationalError as exc:
+            db.rollback()
+            if not _is_transient_sqlite_lock(db, exc):
+                raise
+            if attempt == len(SQLITE_WRITE_RETRY_DELAYS_SECONDS):
+                raise HTTPException(status_code=409, detail=DATABASE_BUSY_DETAIL) from exc
+            time_module.sleep(SQLITE_WRITE_RETRY_DELAYS_SECONDS[attempt])
+
+    raise AssertionError("unreachable")
 
 
 def get_or_404(db: Session, model: type[Any], object_id: str) -> Any:
@@ -772,70 +810,86 @@ def update_user_role(user_id: str, payload: UserRoleUpdate, db: Db, user: Admin)
     target = get_or_404(db, User, user_id)
     if target.role == payload.role:
         return target
-    if target.role == "admin":
-        active_admins = int(
-            db.scalar(
-                select(func.count(User.id)).where(User.role == "admin", User.is_active.is_(True))
-            )
-            or 0
-        )
-        if active_admins <= 1:
-            raise HTTPException(status_code=409, detail="至少需要保留一个启用中的管理员")
-    previous = target.role
-    target.role = payload.role
-    access_ceiling = payload.role if payload.role in ACCESS_ORDER else None
-    adjusted_memberships = 0
-    restored_default_membership = False
-    if access_ceiling is not None:
-        default_set = _ensure_default_schedule_set(db)
-        memberships = list(
-            db.scalars(
-                select(ScheduleSetMember).where(
-                    ScheduleSetMember.user_id == target.id,
-                )
-            )
-        )
-        default_membership = next(
-            (item for item in memberships if item.schedule_set_id == default_set.id),
-            None,
-        )
-        if default_membership is None:
-            db.add(
-                ScheduleSetMember(
-                    schedule_set_id=default_set.id,
-                    user_id=target.id,
-                    access_role=access_ceiling,
-                    granted_by=user.id,
-                )
-            )
-            restored_default_membership = True
-        elif not default_membership.is_active or default_membership.access_role != access_ceiling:
-            default_membership.access_role = access_ceiling
-            default_membership.is_active = True
-            default_membership.granted_by = user.id
-            restored_default_membership = True
+    actor_id = user.id
 
-        for membership in memberships:
-            if membership.schedule_set_id == default_set.id or not membership.is_active:
-                continue
-            if not _role_allows_access(target, membership.access_role):
-                membership.access_role = access_ceiling
-                adjusted_memberships += 1
-    audit(
-        db,
-        user,
-        "update_role",
-        "user",
-        target.id,
-        {
-            "username": target.username,
-            "from": previous,
-            "to": payload.role,
-            "adjusted_schedule_memberships": adjusted_memberships,
-            "restored_default_schedule_membership": restored_default_membership,
-        },
-    )
-    db.commit()
+    def apply_role_change() -> User:
+        # Re-read every retry: rollback discards both the membership changes and
+        # the pending audit entry from the failed transaction.
+        actor = get_or_404(db, User, actor_id)
+        target = get_or_404(db, User, user_id)
+        if target.role == payload.role:
+            return target
+        if target.role == "admin":
+            active_admins = int(
+                db.scalar(
+                    select(func.count(User.id)).where(
+                        User.role == "admin", User.is_active.is_(True)
+                    )
+                )
+                or 0
+            )
+            if active_admins <= 1:
+                raise HTTPException(status_code=409, detail="至少需要保留一个启用中的管理员")
+        previous = target.role
+        target.role = payload.role
+        access_ceiling = payload.role if payload.role in ACCESS_ORDER else None
+        adjusted_memberships = 0
+        restored_default_membership = False
+        if access_ceiling is not None:
+            default_set = _ensure_default_schedule_set(db)
+            memberships = list(
+                db.scalars(
+                    select(ScheduleSetMember).where(
+                        ScheduleSetMember.user_id == target.id,
+                    )
+                )
+            )
+            default_membership = next(
+                (item for item in memberships if item.schedule_set_id == default_set.id),
+                None,
+            )
+            if default_membership is None:
+                db.add(
+                    ScheduleSetMember(
+                        schedule_set_id=default_set.id,
+                        user_id=target.id,
+                        access_role=access_ceiling,
+                        granted_by=actor.id,
+                    )
+                )
+                restored_default_membership = True
+            elif (
+                not default_membership.is_active
+                or default_membership.access_role != access_ceiling
+            ):
+                default_membership.access_role = access_ceiling
+                default_membership.is_active = True
+                default_membership.granted_by = actor.id
+                restored_default_membership = True
+
+            for membership in memberships:
+                if membership.schedule_set_id == default_set.id or not membership.is_active:
+                    continue
+                if not _role_allows_access(target, membership.access_role):
+                    membership.access_role = access_ceiling
+                    adjusted_memberships += 1
+        audit(
+            db,
+            actor,
+            "update_role",
+            "user",
+            target.id,
+            {
+                "username": target.username,
+                "from": previous,
+                "to": payload.role,
+                "adjusted_schedule_memberships": adjusted_memberships,
+                "restored_default_schedule_membership": restored_default_membership,
+            },
+        )
+        return target
+
+    target = _commit_write_with_sqlite_retry(db, apply_role_change)
     db.refresh(target)
     return target
 

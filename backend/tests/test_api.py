@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, date, datetime
 from io import BytesIO
 from typing import Any
@@ -7,7 +8,10 @@ from typing import Any
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
+import app.api as api_module
 from app.db import SessionLocal
 from app.models import (
     AuditLog,
@@ -20,6 +24,7 @@ from app.models import (
     SolverRun,
     Teacher,
     TimeSlot,
+    User,
 )
 
 
@@ -904,6 +909,101 @@ def test_admin_can_assign_roles(client, auth_headers) -> None:
     )
     assert changed.status_code == 200
     assert changed.json()["role"] == "approver"
+
+
+def test_role_change_retries_transient_sqlite_write_lock_and_keeps_audit(
+    client, auth_headers, monkeypatch
+) -> None:
+    created = client.post(
+        "/api/v1/users",
+        headers=auth_headers,
+        json={"username": "retry_role_member", "password": "retry-role-member-2026"},
+    )
+    assert created.status_code == 201
+    target_id = created.json()["id"]
+
+    original_commit = Session.commit
+    attempts = 0
+
+    def lock_once(session: Session) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OperationalError("COMMIT", {}, sqlite3.OperationalError("database is locked"))
+        original_commit(session)
+
+    monkeypatch.setattr(Session, "commit", lock_once)
+    monkeypatch.setattr(api_module.time_module, "sleep", lambda _seconds: None)
+
+    changed = client.patch(
+        f"/api/v1/users/{target_id}/role",
+        headers=auth_headers,
+        json={"role": "scheduler"},
+    )
+
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["role"] == "scheduler"
+    assert attempts == 2
+    with SessionLocal() as db:
+        updated = db.get(User, target_id)
+        assert updated is not None
+        assert updated.role == "scheduler"
+        audit_rows = list(
+            db.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "update_role",
+                    AuditLog.resource_type == "user",
+                    AuditLog.resource_id == target_id,
+                )
+            )
+        )
+    assert len(audit_rows) == 1
+    assert audit_rows[0].detail["to"] == "scheduler"
+
+
+def test_role_change_returns_conflict_after_persistent_sqlite_write_lock(
+    client, auth_headers, monkeypatch
+) -> None:
+    created = client.post(
+        "/api/v1/users",
+        headers=auth_headers,
+        json={"username": "busy_role_member", "password": "busy-role-member-2026"},
+    )
+    assert created.status_code == 201
+    target_id = created.json()["id"]
+    attempts = 0
+
+    def always_locked(_session: Session) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise OperationalError("COMMIT", {}, sqlite3.OperationalError("database is locked"))
+
+    monkeypatch.setattr(Session, "commit", always_locked)
+    monkeypatch.setattr(api_module.time_module, "sleep", lambda _seconds: None)
+
+    changed = client.patch(
+        f"/api/v1/users/{target_id}/role",
+        headers=auth_headers,
+        json={"role": "scheduler"},
+    )
+
+    assert changed.status_code == 409
+    assert changed.json() == {"detail": api_module.DATABASE_BUSY_DETAIL}
+    assert attempts == len(api_module.SQLITE_WRITE_RETRY_DELAYS_SECONDS) + 1
+    with SessionLocal() as db:
+        updated = db.get(User, target_id)
+        assert updated is not None
+        assert updated.role == "viewer"
+        audit_rows = list(
+            db.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "update_role",
+                    AuditLog.resource_type == "user",
+                    AuditLog.resource_id == target_id,
+                )
+            )
+        )
+    assert audit_rows == []
 
 
 def test_password_change_revokes_previously_issued_tokens(client, auth_headers) -> None:
