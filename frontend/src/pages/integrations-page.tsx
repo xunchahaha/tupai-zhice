@@ -23,12 +23,13 @@ import {
   useConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost,
   useCreateFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost,
   useDisconnectFeishuApiV1IntegrationsFeishuConnectionDelete,
+  useFeishuSyncBatchApiV1IntegrationsFeishuSyncBatchPost,
   useFeishuConnectionApiV1IntegrationsFeishuConnectionGet,
   useFeishuSyncApiV1IntegrationsFeishuSyncPost,
   useListFeishuSyncsApiV1IntegrationsFeishuSyncsGet,
   useStartFeishuOauthApiV1IntegrationsFeishuOauthStartPost,
 } from "@/api/generated/client";
-import type { FeishuConnectionResponse } from "@/api/generated/models";
+import type { FeishuBatchSyncResponse, FeishuConnectionResponse } from "@/api/generated/models";
 import { API_BASE_URL, http } from "@/api/http";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
@@ -53,6 +54,13 @@ const resources = [
   "rules",
   "schedule",
   "public_summary",
+] as const;
+
+// 第 5 步只写飞书多维表格；日历和 Aily 权限缺失不应把同步按钮置灰。
+const bitableSyncScopes = [
+  "base:record:create",
+  "base:record:retrieve",
+  "base:record:update",
 ] as const;
 
 const AILY_SKILL_DOC_URL = "https://open.feishu.cn/document/aily-v1/app-skill/start?lang=zh-CN";
@@ -105,6 +113,7 @@ export function IntegrationsPage() {
   const [aiApiKey, setAiApiKey] = useState("");
   const [aiModel, setAiModel] = useState("");
   const [editingAI, setEditingAI] = useState(false);
+  const [batchResult, setBatchResult] = useState<FeishuBatchSyncResponse | null>(null);
 
   const refresh = async () => {
     await Promise.all([connection.refetch(), syncs.refetch(), aiConfiguration.refetch()]);
@@ -157,6 +166,27 @@ export function IntegrationsPage() {
     mutation: {
       onSuccess: async (data) => {
         toast.success(`已同步 ${data.records_written} 条记录到飞书`);
+        await queryClient.invalidateQueries({
+          queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey(),
+        });
+      },
+      onError: async (error) => {
+        toast.error(errorMessage(error));
+        await queryClient.invalidateQueries({
+          queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey(),
+        });
+      },
+    },
+  });
+  const batchSync = useFeishuSyncBatchApiV1IntegrationsFeishuSyncBatchPost({
+    mutation: {
+      onSuccess: async (data) => {
+        setBatchResult(data);
+        if (data.failed_count === 0) {
+          toast.success(`当前方案的 ${data.completed_count} 类数据已同步（${data.records_written} 条）`);
+        } else {
+          toast.warning(`一键同步完成：${data.completed_count} 类成功，${data.failed_count} 类待重试`);
+        }
         await queryClient.invalidateQueries({
           queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey(),
         });
@@ -228,6 +258,11 @@ export function IntegrationsPage() {
     setFrontendUrl(window.location.origin);
   }, [connection.data]);
 
+  // 顶栏切换课表方案会重新获取连接状态；不要把上一套方案的一键结果留在当前页。
+  useEffect(() => {
+    setBatchResult(null);
+  }, [connection.data?.workspace?.id]);
+
   useEffect(() => {
     if (!aiConfiguration.data) return;
     setAiBaseUrl(aiConfiguration.data.base_url ?? "");
@@ -247,16 +282,19 @@ export function IntegrationsPage() {
   const workspaceReady = Boolean(
     status.workspace?.status === "active" && status.workspace.tables?.length === resources.length,
   );
+  const missingBitableSyncScopes = bitableSyncScopes.filter(
+    (scope) => !status.granted_scopes.includes(scope),
+  );
   const ready = Boolean(
     status.app_configured &&
       status.authorized &&
-      status.missing_scopes.length === 0 &&
+      missingBitableSyncScopes.length === 0 &&
       workspaceReady,
   );
   const syncBlockers = [
     !status.app_configured ? "还没有保存企业自建应用配置" : null,
     !status.authorized ? "还没有授权飞书管理员账号" : null,
-    status.missing_scopes.length > 0 ? `还缺少 ${status.missing_scopes.length} 项飞书权限（请在第 3 步查看）` : null,
+    missingBitableSyncScopes.length > 0 ? `还缺少 ${missingBitableSyncScopes.length} 项多维表格写入权限（请在第 3 步查看）` : null,
     !workspaceReady
       ? status.workspace?.status === "error"
         ? `排课多维表格创建失败：${status.workspace.last_error ?? "请重试第 4 步"}`
@@ -457,17 +495,24 @@ export function IntegrationsPage() {
           <FlowStep
             number={5}
             title="同步业务数据"
-            description="发布不会自动写入飞书；在这里选择资源后，按业务标识新增或更新，重复执行不会产生重复记录。"
+            description="一键同步当前课表方案的 8 类数据；发布或回滚后会自动同步课表和公开展示汇总。单表仍可单独重试，全部按业务标识新增或更新。"
             state={ready ? "current" : "pending"}
             icon={CloudUpload}
           >
-            <div className="flex max-w-xl flex-col gap-2 sm:flex-row">
+            <div className="flex max-w-3xl flex-col gap-2 sm:flex-row">
+              <Button
+                onClick={() => batchSync.mutate({ data: {} })}
+                disabled={!ready || batchSync.isPending || sync.isPending}
+              >
+                <CloudUpload className="size-4" />
+                {batchSync.isPending ? `正在同步 ${resources.length} 类数据` : "一键同步当前方案"}
+              </Button>
               <select
                 aria-label="同步资源"
                 value={resource}
                 onChange={(event) => setResource(event.target.value as typeof resource)}
                 className="h-9 min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-3 text-sm"
-                disabled={!ready}
+                disabled={!ready || batchSync.isPending}
               >
                 {resources.map((item) => (
                   <option key={item} value={item}>
@@ -477,10 +522,10 @@ export function IntegrationsPage() {
               </select>
               <Button
                 onClick={() => sync.mutate({ data: { resource } })}
-                disabled={!ready || sync.isPending}
+                disabled={!ready || sync.isPending || batchSync.isPending}
               >
                 <SendHorizontal className="size-4" />
-                {sync.isPending ? "正在同步" : "同步到飞书"}
+                {sync.isPending ? "正在同步单表" : "重试单表"}
               </Button>
               {status.workspace?.url ? <a href={status.workspace.url} target="_blank" rel="noreferrer"><Button type="button" variant="outline"><ExternalLink className="size-4" />打开当前多维表格</Button></a> : null}
             </div>
@@ -489,18 +534,19 @@ export function IntegrationsPage() {
                 <div className="font-medium">同步暂不可用，原因是：</div>
                 <ul className="mt-1 list-disc pl-4">{syncBlockers.map((item) => <li key={item}>{item}</li>)}</ul>
               </div>
-            ) : <p className="mt-2 text-xs text-emerald-700">连接已就绪，可以同步课表、主数据和规则。</p>}
+            ) : <p className="mt-2 text-xs text-emerald-700">连接已就绪：一键同步只写入顶栏当前所选方案绑定的独立多维表格。</p>}
+            {batchResult ? <BatchSyncResult result={batchResult} /> : null}
           </FlowStep>
 
           <FlowStep
             number={6}
             title="在飞书内创建妙搭应用"
-            description="先同步脱敏公开汇总，再打开飞书多维表格，在飞书内部使用妙搭搭建和发布页面。"
+            description="公开展示汇总会随一键同步及版本发布/回滚写入当前方案；在飞书内将妙搭的数据源绑定到这张表，搭建并发布展示页。"
             state={workspaceReady ? "current" : "pending"}
             icon={ExternalLink}
           >
             <div className="space-y-3 text-sm text-zinc-700">
-              <p>此处只负责把“公开展示汇总”写入飞书多维表格；妙搭的创建、搭建和公网发布均在飞书内部完成。</p>
+              <p>每套课表方案都有独立的飞书多维表格，因此也应分别绑定对应的“公开展示汇总”表创建妙搭展示页。系统只同步脱敏汇总数据；妙搭的搭建和发布在飞书内完成。</p>
               <div className="flex flex-wrap gap-2">
                 <Button
                   variant="outline"
@@ -508,9 +554,9 @@ export function IntegrationsPage() {
                     setResource("public_summary");
                     sync.mutate({ data: { resource: "public_summary" } });
                   }}
-                  disabled={!ready || sync.isPending}
+                  disabled={!ready || sync.isPending || batchSync.isPending}
                 >
-                  同步公开展示汇总
+                  重试公开展示汇总
                 </Button>
                 {status.workspace?.url ? <a href={status.workspace.url} target="_blank" rel="noreferrer"><Button variant="outline"><ExternalLink className="size-4" />打开飞书多维表格</Button></a> : null}
               </div>
@@ -918,14 +964,15 @@ function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string;
     <section className="border border-zinc-200 bg-white">
       <div className="border-b border-zinc-200 px-4 py-3 text-sm font-semibold">飞书同步记录</div>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[760px] text-left text-sm">
-          <thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="h-9 px-4">时间</th><th>业务数据</th><th>结果</th><th>飞书已有</th><th>新增</th><th>更新</th><th>本次写入</th></tr></thead>
+        <table className="w-full min-w-[860px] text-left text-sm">
+          <thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="h-9 px-4">时间</th><th>来源</th><th>业务数据</th><th>结果</th><th>飞书已有</th><th>新增</th><th>更新</th><th>本次写入</th></tr></thead>
           <tbody>
             {syncs.map((item) => (
               <tr key={item.id} className="border-t border-zinc-100">
                 <td className="h-10 px-4 text-zinc-500">{datetime(item.created_at)}</td>
+                <td className="text-xs text-zinc-500">{syncTriggerLabel(item.detail.trigger)}</td>
                 <td>{resourceLabel(item.resource)}</td>
-                <td><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge></td>
+                <td><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge>{detailError(item.detail) ? <div className="mt-1 max-w-60 truncate text-xs text-red-600" title={detailError(item.detail) ?? undefined}>{detailError(item.detail)}</div> : null}</td>
                 <td>{item.records_read}</td>
                 <td>{detailNumber(item.detail, "records_created")}</td>
                 <td>{detailNumber(item.detail, "records_updated")}</td>
@@ -937,6 +984,26 @@ function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string;
       </div>
       {syncs.length === 0 ? <div className="p-6 text-center text-sm text-zinc-400">暂无飞书同步记录</div> : null}
     </section>
+  );
+}
+
+function BatchSyncResult({ result }: { result: FeishuBatchSyncResponse }) {
+  const summary = result.failed_count === 0
+    ? `已完成 ${result.completed_count} 类数据同步，共写入 ${result.records_written} 条记录。`
+    : `${result.completed_count} 类已完成，${result.failed_count} 类待处理；可用下方“重试单表”处理失败项。`;
+  return (
+    <div aria-live="polite" className="mt-3 border border-zinc-200 bg-zinc-50 p-3 text-sm">
+      <div className="flex flex-wrap items-center gap-2"><span className="font-medium">本次一键同步</span><Badge tone={statusTone(result.status)}>{statusLabel(result.status)}</Badge><span className="text-xs text-zinc-500">{summary}</span></div>
+      <div className="mt-2 grid gap-1 sm:grid-cols-2 xl:grid-cols-4">
+        {result.results.map((item) => (
+          <div key={item.id} className="border border-zinc-200 bg-white px-2.5 py-2 text-xs">
+            <div className="flex items-center justify-between gap-2"><span className="font-medium">{resourceLabel(item.resource)}</span><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge></div>
+            <div className="mt-1 text-zinc-500">写入 {item.records_written} 条</div>
+            {detailError(item.detail) ? <div className="mt-1 text-red-600">{detailError(item.detail)}</div> : null}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -1154,4 +1221,17 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
 function detailNumber(detail: Record<string, unknown>, key: string): number | string {
   const value = detail[key];
   return typeof value === "number" ? value : "-";
+}
+
+function detailError(detail: Record<string, unknown>): string | null {
+  const value = detail.error;
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function syncTriggerLabel(value: unknown): string {
+  if (value === "manual_batch") return "一键同步";
+  if (value === "single_resource") return "单表重试";
+  if (value === "version_publish") return "发布后自动";
+  if (value === "version_rollback") return "回滚后自动";
+  return "单表同步";
 }

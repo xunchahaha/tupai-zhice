@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   disconnect: vi.fn(),
   startAuthorization: vi.fn(),
   sync: vi.fn(),
+  batchSync: vi.fn(),
   aiGet: vi.fn(),
   aiPost: vi.fn(),
   refetchConnection: vi.fn(),
@@ -61,6 +62,10 @@ vi.mock("@/api/generated/client", () => ({
     mutate: mocks.sync,
     isPending: false,
   }),
+  useFeishuSyncBatchApiV1IntegrationsFeishuSyncBatchPost: () => ({
+    mutate: mocks.batchSync,
+    isPending: false,
+  }),
 }));
 
 const baseConnection = {
@@ -108,6 +113,7 @@ describe("飞书生产接入页", () => {
       mocks.disconnect,
       mocks.startAuthorization,
       mocks.sync,
+      mocks.batchSync,
       mocks.refetchConnection,
       mocks.refetchSyncs,
       mocks.aiGet,
@@ -205,7 +211,7 @@ describe("飞书生产接入页", () => {
     });
   });
 
-  it("建表完成后按中文资源执行真实幂等同步", async () => {
+  it("建表完成后可一键同步当前方案，失败时仍能重试单表", async () => {
     const tables = [
       ["teachers", "教师"],
       ["class_groups", "班级"],
@@ -220,7 +226,13 @@ describe("飞书生产接入页", () => {
       ...baseConnection,
       status: "connected",
       authorized: true,
-      granted_scopes: Object.keys({ offline_access: true }),
+      granted_scopes: [
+        "offline_access",
+        "base:record:create",
+        "base:record:retrieve",
+        "base:record:update",
+      ],
+      missing_scopes: ["calendar:calendar.event:create"],
       access_expires_at: "2026-08-10T12:00:00Z",
       message: "飞书管理员账号已授权。",
       workspace: {
@@ -240,8 +252,10 @@ describe("飞书生产接入页", () => {
       "href",
       "https://example.feishu.cn/base/test",
     );
+    await user.click(screen.getByRole("button", { name: "一键同步当前方案" }));
+    expect(mocks.batchSync).toHaveBeenCalledWith({ data: {} });
     await user.selectOptions(screen.getByLabelText("同步资源"), "teachers");
-    await user.click(screen.getByRole("button", { name: "同步到飞书" }));
+    await user.click(screen.getByRole("button", { name: "重试单表" }));
     expect(mocks.sync).toHaveBeenCalledWith({ data: { resource: "teachers" } });
   });
 });

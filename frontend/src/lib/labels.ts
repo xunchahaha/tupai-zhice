@@ -34,6 +34,7 @@ const labels: Record<string, string> = {
   moved: "已移动",
   not_authorized: "待授权",
   pending: "待处理",
+  partial: "部分完成",
   preferred_slot: "偏好时段",
   propose: "提交候选规则",
   published: "已发布",
