@@ -1664,6 +1664,13 @@ class FeishuService:
         # so a user can add a local display/formula column without every sync
         # trying to erase it.
         for field_name, local_value in local_fields.items():
+            # ``更新时间`` is a display timestamp produced when a projection is
+            # exported.  It must not turn an otherwise identical row into a
+            # write on every manual retry.  When another business field does
+            # change, the caller still sends this latest timestamp as part of
+            # that one update.
+            if field_name == "更新时间":
+                continue
             field_type = field_types.get(field_name, 1)
             if cls._comparable_field_value(field_type, local_value) != cls._comparable_field_value(
                 field_type,

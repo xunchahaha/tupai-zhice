@@ -594,6 +594,26 @@ def test_sync_request_retries_a_transient_transport_failure(monkeypatch: Any) ->
     assert calls == 2
 
 
+def test_field_comparison_ignores_volatile_projection_update_time() -> None:
+    field_types = dict(TABLE_SCHEMAS["public_summary"][1])
+    remote = {
+        "业务标识": [{"type": "text", "text": "total_sessions"}],
+        "指标名称": [{"type": "text", "text": "总课次"}],
+        "指标值": [{"type": "text", "text": "12"}],
+        "更新时间": [{"type": "text", "text": "2026-08-15T08:00:00+00:00"}],
+    }
+    local = {
+        "业务标识": "total_sessions",
+        "指标名称": "总课次",
+        "指标值": "12",
+        "更新时间": "2026-08-15T08:05:00+00:00",
+    }
+
+    assert FeishuService._fields_match(local, remote, field_types)
+    local["指标值"] = "13"
+    assert not FeishuService._fields_match(local, remote, field_types)
+
+
 def test_public_sync_normalizes_rich_text_and_repairs_historical_duplicate(
     monkeypatch: Any,
 ) -> None:
