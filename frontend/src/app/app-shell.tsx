@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { NavLink, Outlet, useNavigate, useOutletContext } from "react-router-dom";
 
 import { type UserResponse } from "@/api/generated/models";
-import { scheduleSetApi, type ScheduleSet } from "@/api/schedule-sets";
+import { scheduleSetApi, type ScheduleAccessRole, type ScheduleSet } from "@/api/schedule-sets";
 import { authStore, scheduleSetStore } from "@/api/http";
 import { type AppOutletContext, isReadOnlyMember } from "@/app/user-context";
 import { Button } from "@/components/ui/button";
@@ -18,20 +18,21 @@ const navigation = [
   { to: "/overview", label: "总览", group: "工作台", memberVisible: true },
   { to: "/master-data", label: "主数据", group: "工作台", memberVisible: true },
   { to: "/rules", label: "规则工作台", group: "排课", memberVisible: true },
-  { to: "/solver", label: "排课求解", group: "排课", memberVisible: false },
+  { to: "/solver", label: "排课求解", group: "排课", memberVisible: false, roles: ["admin", "scheduler"] },
   { to: "/schedule", label: "课表视图", group: "排课", memberVisible: true },
   { to: "/diagnostics", label: "无解诊断", group: "排课", memberVisible: true },
-  { to: "/reschedule", label: "局部调课", group: "变更", memberVisible: false },
+  { to: "/reschedule", label: "局部调课", group: "变更", memberVisible: false, roles: ["admin", "scheduler"] },
   { to: "/versions", label: "版本与回滚", group: "变更", memberVisible: true },
-  { to: "/integrations", label: "飞书集成", group: "集成", memberVisible: false },
+  { to: "/integrations", label: "飞书集成", group: "集成", memberVisible: false, roles: ["admin", "scheduler"] },
   { to: "/accounts", label: "账号管理", group: "账号", memberVisible: false, adminOnly: true },
 ];
 
-function Nav({ user, close, collapsed }: { user: UserResponse; close?: () => void; collapsed?: boolean }) {
+function Nav({ user, scheduleAccessRole, close, collapsed }: { user: UserResponse; scheduleAccessRole?: ScheduleAccessRole; close?: () => void; collapsed?: boolean }) {
   let currentGroup = "";
   const visibleNavigation = navigation.filter((item) => {
     if (item.adminOnly && user.role !== "admin") return false;
-    return !isReadOnlyMember(user) || item.memberVisible;
+    if (item.roles && !item.roles.includes(user.role)) return false;
+    return !isReadOnlyMember(user, scheduleAccessRole) || item.memberVisible;
   });
   return <nav className={cn("flex-1 overflow-y-auto pr-1", collapsed ? "mt-5" : "mt-8")}>
     {visibleNavigation.map((item) => {
@@ -96,7 +97,7 @@ export function AppShell() {
     } finally {
       setScheduleSetsLoading(false);
     }
-  }, []);
+  }, [queryClient]);
 
   useEffect(() => {
     void refreshScheduleSets();
@@ -160,12 +161,12 @@ export function AppShell() {
         <NavLink to="/overview" title="途排智策" className="flex items-center gap-2 text-base font-semibold text-zinc-950"><ShieldCheck className="size-4 text-blue-600" />{sidebarCollapsed ? null : "途排智策"}</NavLink>
         <Button size="icon" variant="ghost" title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} onClick={() => { setAccountMenuOpen(false); setSidebarCollapsed((value) => !value); }}>{sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}</Button>
       </div>
-      <Nav user={user} collapsed={sidebarCollapsed} />{identity}
+      <Nav user={user} scheduleAccessRole={selectedScheduleSet?.access_role} collapsed={sidebarCollapsed} />{identity}
     </aside>
     <header className="sticky top-0 z-20 flex h-12 items-center justify-between border-b border-zinc-200 bg-white px-4 lg:hidden"><Button size="icon" variant="ghost" title="打开导航" onClick={() => setMobileOpen(true)}><Menu className="size-4" /></Button><div className="flex min-w-0 items-center gap-2"><span className="font-semibold">途排智策</span>{scheduleSets.length ? <select aria-label="当前课表方案" className="h-8 max-w-36 rounded-md border border-zinc-300 bg-white px-2 text-xs" value={scheduleSetId ?? ""} onChange={(event) => selectScheduleSet(event.target.value)} disabled={scheduleSetsLoading}><option value="" disabled>选择课表</option>{scheduleSets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select> : null}</div><span className="w-8" /></header>
-    {mobileOpen ? <div className="fixed inset-0 z-40 bg-zinc-950/25 lg:hidden" onClick={() => setMobileOpen(false)}><aside className="h-full w-72 bg-white px-3 py-5 shadow-xl" onClick={(event) => event.stopPropagation()}><div className="flex h-8 items-center px-2.5 font-semibold">途排智策</div><Nav user={user} close={() => setMobileOpen(false)} />{identity}</aside></div> : null}
-    <div className={cn("min-h-screen transition-[padding]", sidebarCollapsed ? "lg:pl-16" : "lg:pl-64")}><div className="sticky top-0 z-10 hidden h-12 items-center justify-between border-b border-zinc-200 bg-white px-6 lg:flex"><div className="flex min-w-0 items-center gap-2"><span className="text-xs text-zinc-400">当前课表</span>{scheduleSets.length ? <select aria-label="当前课表方案" className="h-8 max-w-64 rounded-md border border-zinc-300 bg-white px-2 text-xs text-zinc-700" value={scheduleSetId ?? ""} onChange={(event) => selectScheduleSet(event.target.value)} disabled={scheduleSetsLoading}><option value="" disabled>选择课表</option>{scheduleSets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select> : <span className="text-xs text-zinc-500">{scheduleSetsLoading ? "加载中…" : scheduleSetsError ? "课表方案加载失败" : "暂无可见课表"}</span>}{user.role === "admin" ? <><Button size="sm" variant="ghost" onClick={() => { setScheduleSetName(""); setScheduleSetDialog("create"); }}>新建</Button><Button size="sm" variant="ghost" disabled={!selectedScheduleSet} onClick={() => { setScheduleSetName(selectedScheduleSet?.name ?? ""); setScheduleSetDialog("rename"); }}>重命名</Button></> : null}</div><span className="text-xs text-zinc-500">当前角色：{roleLabel(user.role)}</span></div><main className="mx-auto w-full max-w-[1500px] px-4 py-5 sm:px-6 lg:px-8"><Outlet context={{ user }} /></main></div>
-    <Dialog open={scheduleSetDialog !== null} onOpenChange={(open) => { if (!scheduleSetSaving && !open) setScheduleSetDialog(null); }}><DialogContent className="max-w-md"><DialogTitle className="text-base font-semibold">{scheduleSetDialog === "create" ? "新建课表方案" : "重命名课表方案"}</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">每套课表方案拥有独立的数据、版本和飞书同步目标。</DialogDescription><form className="mt-5 space-y-4" onSubmit={submitScheduleSetDialog}><label className="block text-sm text-zinc-700">课表名称<input autoFocus className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2.5 text-sm outline-none focus:border-blue-500" value={scheduleSetName} onChange={(event) => setScheduleSetName(event.target.value)} placeholder="例如：郑州校区师范课表" /></label><div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setScheduleSetDialog(null)} disabled={scheduleSetSaving}>取消</Button><Button type="submit" disabled={scheduleSetSaving}>{scheduleSetSaving ? "保存中" : "保存"}</Button></div></form></DialogContent></Dialog>
+    {mobileOpen ? <div className="fixed inset-0 z-40 bg-zinc-950/25 lg:hidden" onClick={() => setMobileOpen(false)}><aside className="h-full w-72 bg-white px-3 py-5 shadow-xl" onClick={(event) => event.stopPropagation()}><div className="flex h-8 items-center px-2.5 font-semibold">途排智策</div><Nav user={user} scheduleAccessRole={selectedScheduleSet?.access_role} close={() => setMobileOpen(false)} />{identity}</aside></div> : null}
+    <div className={cn("min-h-screen transition-[padding]", sidebarCollapsed ? "lg:pl-16" : "lg:pl-64")}><div className="sticky top-0 z-10 hidden h-12 items-center justify-between border-b border-zinc-200 bg-white px-6 lg:flex"><div className="flex min-w-0 items-center gap-2"><span className="text-xs text-zinc-400">当前课表</span>{scheduleSets.length ? <select aria-label="当前课表方案" className="h-8 max-w-64 rounded-md border border-zinc-300 bg-white px-2 text-xs text-zinc-700" value={scheduleSetId ?? ""} onChange={(event) => selectScheduleSet(event.target.value)} disabled={scheduleSetsLoading}><option value="" disabled>选择课表</option>{scheduleSets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select> : <span className="text-xs text-zinc-500">{scheduleSetsLoading ? "加载中…" : scheduleSetsError ? "课表方案加载失败" : "暂无可见课表"}</span>}{user.role === "admin" ? <><Button size="sm" variant="ghost" onClick={() => { setScheduleSetName(""); setScheduleSetDialog("create"); }}>新建</Button><Button size="sm" variant="ghost" disabled={!selectedScheduleSet} onClick={() => { setScheduleSetName(selectedScheduleSet?.name ?? ""); setScheduleSetDialog("rename"); }}>重命名</Button></> : null}</div><span className="text-xs text-zinc-500">当前角色：{roleLabel(user.role)}{selectedScheduleSet ? ` · 本课表${selectedScheduleSet.access_role === "viewer" ? "只读" : selectedScheduleSet.access_role === "scheduler" ? "排课" : "审批"}` : ""}</span></div><main className="mx-auto w-full max-w-[1500px] px-4 py-5 sm:px-6 lg:px-8"><Outlet context={{ user, scheduleAccessRole: selectedScheduleSet?.access_role, scheduleSet: selectedScheduleSet }} /></main></div>
+    <Dialog open={scheduleSetDialog !== null} onOpenChange={(open) => { if (!scheduleSetSaving && !open) setScheduleSetDialog(null); }}><DialogContent className="max-w-md"><DialogTitle className="text-base font-semibold">{scheduleSetDialog === "create" ? "新建课表方案" : "重命名课表方案"}</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">每套课表方案拥有独立的规则、求解、版本和飞书同步目标；基础主数据可复用。</DialogDescription><form className="mt-5 space-y-4" onSubmit={submitScheduleSetDialog}><label className="block text-sm text-zinc-700">课表名称<input autoFocus className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2.5 text-sm outline-none focus:border-blue-500" value={scheduleSetName} onChange={(event) => setScheduleSetName(event.target.value)} placeholder="例如：郑州校区师范课表" /></label><div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setScheduleSetDialog(null)} disabled={scheduleSetSaving}>取消</Button><Button type="submit" disabled={scheduleSetSaving}>{scheduleSetSaving ? "保存中" : "保存"}</Button></div></form></DialogContent></Dialog>
     <Dialog open={accountDialogOpen} onOpenChange={setAccountDialogOpen}><DialogContent><DialogTitle className="text-base font-semibold">账户信息</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">当前登录账户与权限身份。</DialogDescription><div className="mt-5 divide-y divide-zinc-100 border-y border-zinc-200 text-sm"><AccountField label="用户名" value={user.username} /><AccountField label="角色" value={roleLabel(user.role)} /><AccountField label="账户 ID" value={user.id} mono /></div><div className="mt-5 flex justify-end"><Button variant="outline" onClick={() => setAccountDialogOpen(false)}>关闭</Button></div></DialogContent></Dialog>
   </div>;
 }

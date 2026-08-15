@@ -40,9 +40,9 @@ import {
   type RoomResponse,
   type TeacherResponse,
   type TimeSlotResponse,
-  type UserResponse,
 } from "@/api/generated/models";
 import { http } from "@/api/http";
+import { type AppOutletContext } from "@/app/user-context";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DataTable } from "@/components/data-table";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
@@ -242,8 +242,11 @@ function courseRooms(course: CourseSessionResponse): string[] {
 }
 
 export function MasterDataPage() {
-  const { user } = useOutletContext<{ user: UserResponse }>();
-  const readOnly = user.role === "viewer";
+  const { user } = useOutletContext<AppOutletContext>();
+  // Teachers, classes, rooms and sessions are shared source data for every
+  // timetable.  Restrict edits to administrators so a scheduler assigned to
+  // only one plan cannot change another plan's future inputs.
+  const readOnly = user.role !== "admin";
   const client = useQueryClient();
   const file = useRef<HTMLInputElement>(null);
   const [importReport, setImportReport] = useState<ImportResult | null>(null);
@@ -701,6 +704,7 @@ export function MasterDataPage() {
     <div className="space-y-5">
       <input ref={file} className="hidden" type="file" accept=".xlsx" onChange={(event) => { const selected = event.target.files?.[0]; if (selected) upload.mutate({ data: { file: selected as unknown as string } }); event.target.value = ""; }} />
       <PageHeader title="主数据" actions={<><Button size="sm" variant="outline" onClick={refresh}><RefreshCw className="size-3.5" />刷新</Button><Button size="sm" variant="outline" onClick={() => void downloadSample()}><Download className="size-3.5" />下载官方模板</Button>{!readOnly ? <Button size="sm" variant="secondary" onClick={() => file.current?.click()} disabled={upload.isPending}><FileUp className="size-3.5" />导入 XLSX</Button> : null}</>} />
+      {readOnly ? <section className="border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">教师、班级、教室和课程场次在所有课表方案中复用；为避免影响其他方案，只有管理员可以修改或导入。</section> : null}
       {importReport ? <ImportReportPanel report={importReport} onDismiss={() => setImportReport(null)} /> : null}
       {loading ? <LoadingState /> : failed ? <ErrorState retry={refresh} /> : (
         <Tabs defaultValue="teachers">
@@ -788,7 +792,7 @@ function CourseToolbar({ total, filtered, selected, allFiltered, blocked, offFil
         <span className="tabular-nums">筛选 {filtered} / {total} 条</span>
         {!readOnly ? <SelectionControls selected={selected} filtered={filtered} allFiltered={allFiltered} offFilter={offFilter} onSelectAll={onSelectAll} onClear={onClearSelection} /> : null}
       </div>
-      {!readOnly ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("date")}><CalendarDays className="size-3.5" />批量改日期</Button><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("room")}>批量改教室</Button><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd}><Plus className="size-3.5" />新增课程</Button></div> : <span className="text-xs text-zinc-400">成员账号为只读视图</span>}
+      {!readOnly ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("date")}><CalendarDays className="size-3.5" />批量改日期</Button><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("room")}>批量改教室</Button><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd}><Plus className="size-3.5" />新增课程</Button></div> : <span className="text-xs text-zinc-400">共享主数据由管理员维护</span>}
     </div>
     {blocked ? <CourseBatchBlockedNotice selected={selected} /> : null}
     <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
@@ -952,7 +956,7 @@ function EntityToolbar({ label, total, filtered, selected, offFilter, onSelectAl
         <span className="tabular-nums">筛选 {filtered} / {total} 条</span>
         {!readOnly ? <SelectionControls selected={selected} filtered={filtered} allFiltered={filtered > 0 && selected === filtered && offFilter === 0} offFilter={offFilter} onSelectAll={onSelectAll} onClear={onClearSelection} /> : null}
       </div>
-      {readOnly ? <span className="text-xs text-zinc-400">成员账号为只读视图</span> : <div className="flex flex-wrap gap-2">{actions.map((item) => <Button key={item.action} size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch(item.action)}>{item.label}</Button>)}<Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd} disabled={disabled}><Plus className="size-3.5" />新增{label}</Button></div>}
+      {readOnly ? <span className="text-xs text-zinc-400">共享主数据由管理员维护</span> : <div className="flex flex-wrap gap-2">{actions.map((item) => <Button key={item.action} size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch(item.action)}>{item.label}</Button>)}<Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd} disabled={disabled}><Plus className="size-3.5" />新增{label}</Button></div>}
     </div>
     {note ? <p className="text-xs leading-5 text-zinc-500">{note}</p> : null}
     {overLimit ? <BatchLimitNotice selected={selected} /> : null}

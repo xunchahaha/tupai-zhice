@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
-import { useAppUser } from "@/app/user-context";
+import { useAppUser, useScheduleAccessRole } from "@/app/user-context";
 import { auditActionLabel, diffKindLabel, resourceLabel, statusLabel } from "@/lib/labels";
 import { datetime, errorMessage } from "@/lib/format";
 import { preferredSchedule } from "@/lib/schedule";
@@ -26,8 +26,10 @@ const localActionLabels: Record<string, string> = { delete: "删除" };
 
 export function VersionsPage() {
   const user = useAppUser();
+  const scheduleAccessRole = useScheduleAccessRole();
   const navigate = useNavigate();
-  const canManageVersions = VERSION_WRITE_ROLES.includes(user.role);
+  const canManageVersions = VERSION_WRITE_ROLES.includes(user.role)
+    && scheduleAccessRole === "approver";
   const canViewAudit = user.role === UserResponseRole.admin;
   const client = useQueryClient();
   const schedules = useListSchedulesApiV1SchedulesGet();

@@ -44,6 +44,11 @@ let deleted: Set<string>;
 let deleteRejection: unknown;
 
 function renderPage(user: typeof admin | typeof viewer | typeof scheduler = admin) {
+  const scheduleAccessRole = user.role === "viewer"
+    ? "viewer"
+    : user.role === "scheduler"
+      ? "scheduler"
+      : "approver";
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -51,7 +56,7 @@ function renderPage(user: typeof admin | typeof viewer | typeof scheduler = admi
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={["/versions"]}>
         <Routes>
-          <Route element={<Outlet context={{ user }} />}>
+          <Route element={<Outlet context={{ user, scheduleAccessRole }} />}>
             <Route path="/versions" element={<VersionsPage />} />
           </Route>
         </Routes>

@@ -8,11 +8,11 @@ import { RoleRoute } from "@/app/role-route";
 import { AccountsPage } from "@/pages/accounts-page";
 
 // 页面走 orval 生成的客户端，统一经过 customInstance，因此在这一层拦截。
-const mocks = vi.hoisted(() => ({ request: vi.fn() }));
+const mocks = vi.hoisted(() => ({ request: vi.fn(), httpGet: vi.fn() }));
 
 vi.mock("@/api/http", () => ({
   customInstance: mocks.request,
-  http: { get: vi.fn(), post: vi.fn(), patch: vi.fn() },
+  http: { get: mocks.httpGet, post: vi.fn(), patch: vi.fn(), put: vi.fn(), delete: vi.fn() },
   authStore: { get: vi.fn(), set: vi.fn(), clear: vi.fn() },
   API_BASE_URL: "http://127.0.0.1:8000",
 }));
@@ -37,7 +37,25 @@ const accounts = [
     last_login_at: null,
     created_by: "admin-id",
   },
+  {
+    id: "approver-id",
+    username: "approver_demo",
+    role: "approver",
+    is_active: true,
+    created_at: "2026-08-03T08:00:00Z",
+    last_login_at: null,
+    created_by: "admin-id",
+  },
 ];
+
+const scheduleSet = {
+  id: "set-one",
+  code: "SET001",
+  name: "第一套课表",
+  display_order: 0,
+  is_active: true,
+  access_role: "approver" as const,
+};
 
 function renderPage() {
   const client = new QueryClient({
@@ -61,6 +79,7 @@ describe("AccountsPage", () => {
 
   beforeEach(() => {
     mocks.request.mockReset();
+    mocks.httpGet.mockReset();
     mocks.request.mockImplementation(async (config: { url: string; method: string }) => {
       const method = config.method.toUpperCase();
       if (method === "GET" && config.url === "/api/v1/users") return accounts;
@@ -68,11 +87,43 @@ describe("AccountsPage", () => {
       if (config.url === "/api/v1/users/member-id/role") return { ...accounts[1], role: "scheduler" };
       return {};
     });
+    mocks.httpGet.mockImplementation(async (url: string) => {
+      if (url === "/api/v1/schedule-sets") return { data: [scheduleSet] };
+      if (url === "/api/v1/schedule-sets/set-one/members") {
+        return {
+          data: [
+            {
+              id: "member-access",
+              schedule_set_id: "set-one",
+              user_id: "member-id",
+              username: "member_demo",
+              user_role: "viewer",
+              access_role: "viewer",
+              is_active: true,
+              granted_by: "admin-id",
+              created_at: "2026-08-02T08:00:00Z",
+            },
+            {
+              id: "approver-access",
+              schedule_set_id: "set-one",
+              user_id: "approver-id",
+              username: "approver_demo",
+              user_role: "approver",
+              access_role: "approver",
+              is_active: true,
+              granted_by: "admin-id",
+              created_at: "2026-08-03T08:00:00Z",
+            },
+          ],
+        };
+      }
+      return { data: [] };
+    });
   });
 
   it("lists administrator and member accounts", async () => {
     renderPage();
-    expect(await screen.findByText("member_demo")).toBeVisible();
+    expect((await screen.findAllByText("member_demo")).length).toBeGreaterThan(0);
     expect(screen.getByText("当前账号")).toBeVisible();
   });
 
@@ -80,7 +131,7 @@ describe("AccountsPage", () => {
     const user = userEvent.setup();
     renderPage();
 
-    await user.click(await screen.findByRole("button", { name: "停用" }));
+    await user.click((await screen.findAllByRole("button", { name: "停用" }))[0]);
     expect(screen.getByRole("dialog")).toHaveTextContent("停用成员账号");
     expect(
       mocks.request.mock.calls.filter(([config]) => config.method.toUpperCase() === "PATCH"),
@@ -120,8 +171,20 @@ describe("AccountsPage", () => {
 
   it("never offers a role selector for the signed-in administrator", async () => {
     renderPage();
-    await screen.findByText("member_demo");
+    await screen.findAllByText("member_demo");
     expect(screen.queryByRole("combobox", { name: "admin 的角色" })).not.toBeInTheDocument();
+  });
+
+  it("does not grant a global approver the scheduler-only timetable role", async () => {
+    renderPage();
+    const selector = await screen.findByRole("combobox", {
+      name: "approver_demo 在 第一套课表 的课表权限",
+    });
+    const schedulerOption = Array.from((selector as HTMLSelectElement).options).find(
+      (option) => option.value === "scheduler",
+    );
+    expect(schedulerOption).toBeDefined();
+    expect(schedulerOption).toBeDisabled();
   });
 
   it("redirects a member away from an administrator route", async () => {

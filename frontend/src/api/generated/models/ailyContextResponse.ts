@@ -10,6 +10,7 @@ import type { AilyContextResponseConstraintCatalogItem } from './ailyContextResp
 import type { AilyContextResponseOutputContract } from './ailyContextResponseOutputContract';
 
 export interface AilyContextResponse {
+  schedule_set_id: string;
   entities: AilyContextResponseEntities;
   constraint_catalog: AilyContextResponseConstraintCatalogItem[];
   output_contract: AilyContextResponseOutputContract;

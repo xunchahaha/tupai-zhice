@@ -425,7 +425,7 @@ export function IntegrationsPage() {
           <FlowStep
             number={4}
             title="创建排课多维表格"
-            description="系统自动创建内部业务表和脱敏公开汇总表，并保存全部表格标识。"
+            description="系统会为当前课表方案创建独立的内部业务表和脱敏公开汇总表，并保存全部表格标识。"
             state={workspaceReady ? "completed" : status.authorized ? "current" : "pending"}
             icon={Database}
           >
@@ -434,11 +434,11 @@ export function IntegrationsPage() {
             ) : (
               <div className="flex max-w-xl flex-col gap-2 sm:flex-row">
                 <input
-                  aria-label="排课空间名称"
+                  aria-label="多维表格基础名称"
                   value={workspaceName}
                   onChange={(event) => setWorkspaceName(event.target.value)}
                   className="h-9 min-w-0 flex-1 rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-blue-500"
-                  placeholder="例如：途排智策 - 2026 秋季学期"
+                  placeholder="例如：排课协同"
                 />
                 <Button
                   onClick={() => createWorkspace.mutate({ data: { name: workspaceName.trim() } })}
@@ -449,6 +449,7 @@ export function IntegrationsPage() {
                   <TableProperties className="size-4" />
                   {createWorkspace.isPending ? `正在创建 ${resources.length} 张表` : "自动创建排课表格"}
                 </Button>
+                <p className="text-xs leading-5 text-zinc-500 sm:col-span-2">创建时会自动加上当前课表方案名称，因此第 1、2、3……N 套课表会绑定到不同的飞书多维表格。</p>
               </div>
             )}
           </FlowStep>

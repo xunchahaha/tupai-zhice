@@ -20,7 +20,7 @@ import {
   useUpdateRuleApiV1RulesRuleIdPut,
 } from "@/api/generated/client";
 import { type ConstraintCatalogEntry, type ConstraintScopeField, type RuleResponse } from "@/api/generated/models";
-import { isReadOnlyMember, useAppUser } from "@/app/user-context";
+import { canScheduleCurrentSet, useAppUser, useScheduleAccessRole } from "@/app/user-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -110,7 +110,8 @@ type IntakeValues = z.infer<typeof intakeSchema>;
 
 export function RulesPage() {
   const user = useAppUser();
-  const readOnly = isReadOnlyMember(user);
+  const scheduleAccessRole = useScheduleAccessRole();
+  const readOnly = !canScheduleCurrentSet(user, scheduleAccessRole);
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState("all");
   const [selected, setSelected] = useState<RuleResponse | null>(null);
@@ -144,7 +145,7 @@ export function RulesPage() {
         {[["all", "全部"], ["awaiting_confirmation", "待确认"], ["active", "已生效"]].map(([value, label]) => <button key={value} className={`h-6 rounded px-2 text-xs ${filter === value ? "bg-zinc-900 text-white" : "text-zinc-500 hover:bg-zinc-100"}`} onClick={() => setFilter(value)}>{label}</button>)}
       </div>}
     />
-    {readOnly ? <section className="border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">当前账号为成员，只能查看规则及其生效状态。</section> : <RuleIntakeForm create={create} entries={entries} />}
+    {readOnly ? <section className="border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">当前角色在这套课表中仅可查看规则及其生效状态。</section> : <RuleIntakeForm create={create} entries={entries} />}
     <div className="grid gap-2 xl:grid-cols-[minmax(340px,0.9fr)_minmax(0,1.6fr)]">
       <section className="border border-zinc-200 bg-white">
         <div className="border-b border-zinc-200 px-4 py-3 text-sm font-semibold">候选与正式规则 <span className="ml-1 text-xs font-normal text-zinc-400">{visible.length}</span></div>

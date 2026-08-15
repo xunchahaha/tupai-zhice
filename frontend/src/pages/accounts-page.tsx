@@ -29,8 +29,8 @@ import { roleLabel } from "@/lib/labels";
 
 const ROLES: Array<{ value: UserResponseRole; hint: string }> = [
   { value: "admin", hint: "全部权限，含账号与集成配置" },
-  { value: "scheduler", hint: "维护主数据、录入规则、发起求解" },
-  { value: "approver", hint: "审批发布与回滚课表" },
+  { value: "scheduler", hint: "在获授权课表中录入规则、发起求解和局部调课" },
+  { value: "approver", hint: "在获审批权限的课表中发布、回滚与删除版本" },
   { value: "viewer", hint: "只读查看业务数据" },
 ];
 
@@ -44,17 +44,12 @@ const ACCESS_OPTIONS: Array<{ value: "none" | ScheduleAccessRole; label: string 
   { value: "approver", label: "审批" },
 ];
 
-function maxScheduleAccess(role: UserResponseRole): ScheduleAccessRole | "none" {
-  if (role === "admin") return "approver";
-  if (role === "approver") return "approver";
-  if (role === "scheduler") return "scheduler";
-  return "viewer";
-}
-
 function accessAllowed(role: UserResponseRole, access: "none" | ScheduleAccessRole): boolean {
   if (access === "none") return true;
-  const order = { none: 0, viewer: 1, scheduler: 2, approver: 3 } as const;
-  return order[access] <= order[maxScheduleAccess(role)];
+  if (role === "admin") return true;
+  if (role === "scheduler") return access === "viewer" || access === "scheduler";
+  if (role === "approver") return access === "viewer" || access === "approver";
+  return access === "viewer";
 }
 
 export function AccountsPage() {
@@ -368,6 +363,13 @@ export function AccountsPage() {
                       <div className="mt-0.5 text-[11px] text-zinc-400">全局角色：{roleLabel(account.role)}</div>
                     </td>
                     {scheduleSets.map((scheduleSet) => {
+                      if (account.role === "admin") {
+                        return (
+                          <td key={scheduleSet.id} className="px-4 py-3">
+                            <Badge tone="blue">全部管理</Badge>
+                          </td>
+                        );
+                      }
                       const member = membersBySet[scheduleSet.id]?.find(
                         (item) => item.user_id === account.id && item.is_active,
                       );

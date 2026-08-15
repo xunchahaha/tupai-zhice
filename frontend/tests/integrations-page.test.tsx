@@ -195,7 +195,7 @@ describe("飞书生产接入页", () => {
     const user = userEvent.setup();
     renderPage();
 
-    const input = await screen.findByLabelText("排课空间名称");
+    const input = await screen.findByLabelText("多维表格基础名称");
     await user.clear(input);
     await user.type(input, "途排智策 - 2026 秋季学期");
     await user.click(screen.getByRole("button", { name: "自动创建排课表格" }));
