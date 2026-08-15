@@ -278,7 +278,8 @@ function ConstraintFields({ entries, draft, hardness, onChange }: {
   );
   const actorOptions: PickerOption[] = useMemo(() => {
     if (draft.actor_type === "teacher") return (teachers.data ?? []).map((item) => ({ value: item.business_id, label: item.name, hint: item.subject }));
-    if (draft.actor_type === "class") return (classes.data ?? []).map((item) => ({ value: item.business_id, label: item.name, hint: item.grade }));
+    // 班型是多值（走班制下一个班同时有含数学/无数学），提示行里拼串显示。
+    if (draft.actor_type === "class") return (classes.data ?? []).map((item) => ({ value: item.business_id, label: item.name, hint: item.product_types.join(" / ") }));
     if (draft.actor_type === "room") return roomOptions;
     if (draft.actor_type === "course") return (courses.data ?? []).map((item) => ({ value: item.business_id, label: item.lesson_name || item.business_id, hint: [item.class_business_id, item.lesson_date].filter(Boolean).join(" · ") }));
     return [];

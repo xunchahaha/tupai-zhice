@@ -33,6 +33,7 @@ import {
 } from "@/api/generated/client";
 import {
   type ClassGroupResponse,
+  type CourseSessionFilter,
   type CourseSessionPayload,
   type CourseSessionResponse,
   type ImportResult,
@@ -45,7 +46,7 @@ import { http } from "@/api/http";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DataTable } from "@/components/data-table";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
-import { ColumnHeader, CopyableId, TableText } from "@/components/table-cell";
+import { ColumnHeader, CopyableId, TableText, TagList } from "@/components/table-cell";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -53,11 +54,16 @@ import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/format";
 
 /**
- * 后端全部批量端点都只收 object_ids 列表，且 schema 上限是 1000 条
- * （backend/app/schemas.py 的 CourseSessionBatchUpdate / BatchDelete 等）。
- * 没有「按筛选条件批量」的入口，所以前端的「全选筛选结果」也只能选到这个上限为止。
+ * 逐条选择（object_ids）的单次上限，来自后端 schema 的 max_length=1000。
+ *
+ * 课程场次不再受它约束：选中的正好是「当前筛选结果的全部」时，走后端的
+ * filter + expected_count 入参，一条 id 都不用传，两万条也是一次请求。
+ * 其余主数据（教师/班级/教室/时段）体量小，仍然走 object_ids。
  */
 const BATCH_LIMIT = 1000;
+
+/** 超过这个条数的批量删除要求再打一次勾——一次点击就能清空全库的操作不该只有一层确认。 */
+const DELETE_DOUBLE_CONFIRM_THRESHOLD = 100;
 
 type MasterResource = "teachers" | "class-groups" | "rooms" | "time-slots" | "course-sessions";
 type EntityKind = "teacher" | "class" | "room" | "slot";
@@ -65,7 +71,7 @@ type CourseColumnKey = "business_id" | "business_line" | "product_type" | "lesso
 type EntityDialogMode = "create" | "edit";
 type CourseDialogMode = "create" | "edit";
 type CourseBatchAction = "date" | "room" | "delete";
-type EntityBatchAction = "teacher-subject" | "teacher-calendar" | "class-line" | "class-type" | "class-teacher" | "room-status" | "slot-status" | "delete";
+type EntityBatchAction = "teacher-subject" | "teacher-calendar" | "room-status" | "slot-status" | "delete";
 
 interface DeleteTarget {
   id: string;
@@ -113,11 +119,19 @@ interface BatchOperationResult {
   affected_count: number;
 }
 
-interface CourseBatchUpdatePayload {
-  object_ids: string[];
+/**
+ * 后端要求 object_ids 与 filter 二选一：都传或都不传都是 422。
+ * expected_count 是防呆——服务端命中数和前端算出来的条数对不上就整批拒绝，
+ * 避免「列表已经变了，用户却按着旧的条数点了删除」。
+ */
+type CourseBatchScope =
+  | { object_ids: string[]; expected_count: number }
+  | { filter: CourseSessionFilter; expected_count: number };
+
+type CourseBatchUpdatePayload = CourseBatchScope & {
   lesson_date?: string;
   original_room_business_id?: string;
-}
+};
 
 interface SlotDraft {
   businessId: string;
@@ -235,7 +249,8 @@ export function MasterDataPage() {
   const [deletingKey, setDeletingKey] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [teacherDraft, setTeacherDraft] = useState({ businessId: "", name: "", subject: "", calendarUserId: "" });
-  const [classDraft, setClassDraft] = useState({ businessId: "", name: "", businessLine: "", productType: "", teacherBusinessId: "" });
+  const [classDraft, setClassDraft] = useState({ businessId: "", name: "" });
+  const [tracksTarget, setTracksTarget] = useState<ClassGroupResponse | null>(null);
   const [roomDraft, setRoomDraft] = useState({ businessId: "", name: "", isActive: true });
   const [slotDraft, setSlotDraft] = useState<SlotDraft>({ businessId: "", weekday: "", startTime: "09:00", endTime: "12:00", kind: "", sequence: "0", isOpen: true });
 
@@ -278,7 +293,7 @@ export function MasterDataPage() {
     onError: createError,
   });
   const batchDeleteCourses = useMutation({
-    mutationFn: async (objectIds: string[]) => (await http.post<BatchOperationResult>("/api/v1/course-sessions/batch-delete", { object_ids: objectIds })).data,
+    mutationFn: async (payload: CourseBatchScope) => (await http.post<BatchOperationResult>("/api/v1/course-sessions/batch-delete", payload)).data,
     onSuccess: (result) => { invalidateCourses(); setCourseSelection({}); setBatchAction(null); toast.success(`已批量删除 ${result.affected_count} 条课程`); },
     onError: createError,
   });
@@ -372,7 +387,7 @@ export function MasterDataPage() {
   }, [businessLineFilter, classFilter, courseQuery.data, courseSearch, dateFilter, productTypeFilter, teacherFilter]);
 
   const filteredTeachers = useMemo(() => filterBySearch(teacherQuery.data ?? [], teacherSearch, (item) => [item.business_id, item.name, item.subject ?? "", item.calendar_user_id ?? ""]), [teacherQuery.data, teacherSearch]);
-  const filteredClasses = useMemo(() => filterBySearch(classQuery.data ?? [], classSearch, (item) => [item.business_id, item.name, item.subject ?? "", item.grade ?? "", item.teacher_business_id]), [classQuery.data, classSearch]);
+  const filteredClasses = useMemo(() => filterBySearch(classQuery.data ?? [], classSearch, (item) => [item.business_id, item.name, ...item.business_lines, ...item.product_types, ...item.subjects, ...item.teacher_business_ids]), [classQuery.data, classSearch]);
   const filteredRooms = useMemo(() => filterBySearch(roomQuery.data ?? [], roomSearch, (item) => [item.business_id, item.name, item.is_active ? "启用" : "停用"]), [roomQuery.data, roomSearch]);
   const filteredSlots = useMemo(() => filterBySearch(slotQuery.data ?? [], slotSearch, (item) => [item.business_id, item.weekday, item.start_time, item.end_time, item.kind ?? "", item.is_open ? "开放" : "关闭"]), [slotQuery.data, slotSearch]);
 
@@ -381,14 +396,43 @@ export function MasterDataPage() {
   const selectedRoomIds = selectedIds(roomSelection);
   const selectedSlotIds = selectedIds(slotSelection);
   // 课程量级大（真实数据近两万条），选中集合与筛选结果的比对放在 memo 里算一次。
+  // allFiltered = 「选中的正好是当前筛选结果的全部」，这是能走 filter 入参、不受 1000 条限制的唯一条件。
   const courseSelectionStats = useMemo(() => {
     const ids = selectedIds(courseSelection);
     const visible = new Set(filteredCourses.map((course) => course.id));
-    return { ids, offFilter: ids.filter((id) => !visible.has(id)).length };
+    let inFilter = 0;
+    for (const id of ids) if (visible.has(id)) inFilter += 1;
+    return { ids, offFilter: ids.length - inFilter, allFiltered: filteredCourses.length > 0 && ids.length === filteredCourses.length && inFilter === filteredCourses.length };
   }, [courseSelection, filteredCourses]);
   const selectedCourseIds = courseSelectionStats.ids;
   const clearCourseFilters = () => { setCourseSearch(""); setBusinessLineFilter(""); setProductTypeFilter(""); setClassFilter(""); setTeacherFilter(""); setDateFilter(""); };
   const hasCourseFilters = Boolean(courseSearch || businessLineFilter || productTypeFilter || classFilter || teacherFilter || dateFilter);
+
+  /**
+   * 把页面上的 5 个下拉 + 搜索框原样翻译成后端的 CourseSessionFilter。
+   * 字段与 filteredCourses 逐条同源，两边命中同一批行；服务端的 search 也是
+   * 同样 8 个字段同样顺序拼接后做子串匹配。这里少传一个条件就会多删一批课。
+   */
+  const courseFilterPayload = useMemo<CourseSessionFilter>(() => {
+    const search = courseSearch.trim();
+    return {
+      ...(search ? { search } : {}),
+      ...(businessLineFilter ? { business_line: businessLineFilter } : {}),
+      ...(productTypeFilter ? { product_type: productTypeFilter } : {}),
+      ...(classFilter ? { class_business_id: classFilter } : {}),
+      ...(teacherFilter ? { teacher_business_id: teacherFilter } : {}),
+      ...(dateFilter ? { lesson_date: dateFilter } : {}),
+    };
+  }, [businessLineFilter, classFilter, courseSearch, dateFilter, productTypeFilter, teacherFilter]);
+
+  const courseBatchCount = courseSelectionStats.allFiltered ? filteredCourses.length : selectedCourseIds.length;
+  // 逐条选择超过 1000 条时没法提交：后端 object_ids 上限如此，而这批 id 又不等于整个筛选结果。
+  const courseBatchBlocked = !courseSelectionStats.allFiltered && selectedCourseIds.length > BATCH_LIMIT;
+  const courseBatchScope = (): CourseBatchScope | null => {
+    if (courseSelectionStats.allFiltered) return { filter: courseFilterPayload, expected_count: filteredCourses.length };
+    if (!selectedCourseIds.length || courseBatchBlocked) return null;
+    return { object_ids: selectedCourseIds, expected_count: selectedCourseIds.length };
+  };
 
   const downloadSample = async () => {
     try {
@@ -416,7 +460,7 @@ export function MasterDataPage() {
 
   const openCreateEntity = (kind: EntityKind) => {
     if (kind === "teacher") setTeacherDraft({ businessId: "", name: "", subject: "", calendarUserId: "" });
-    if (kind === "class") setClassDraft({ businessId: "", name: "", businessLine: "", productType: "", teacherBusinessId: "" });
+    if (kind === "class") setClassDraft({ businessId: "", name: "" });
     if (kind === "room") setRoomDraft({ businessId: "", name: "", isActive: true });
     if (kind === "slot") setSlotDraft({ businessId: "", weekday: "", startTime: "09:00", endTime: "12:00", kind: "", sequence: "0", isOpen: true });
     setEntityDialog({ kind, mode: "create" });
@@ -429,7 +473,7 @@ export function MasterDataPage() {
       setTeacherDraft({ businessId: teacher.business_id, name: teacher.name, subject: teacher.subject ?? "", calendarUserId: teacher.calendar_user_id ?? "" });
     } else if (kind === "class") {
       const classGroup = item as ClassGroupResponse;
-      setClassDraft({ businessId: classGroup.business_id, name: classGroup.name, businessLine: classGroup.subject ?? "", productType: classGroup.grade ?? "", teacherBusinessId: classGroup.teacher_business_id });
+      setClassDraft({ businessId: classGroup.business_id, name: classGroup.name });
     } else if (kind === "room") {
       const room = item as RoomResponse;
       setRoomDraft({ businessId: room.business_id, name: room.name, isActive: Boolean(room.is_active) });
@@ -450,7 +494,8 @@ export function MasterDataPage() {
       if (editing && entityDialog.id) updateTeacher.mutate({ objectId: entityDialog.id, data }); else createTeacher.mutate({ data });
     } else if (entityDialog.kind === "class") {
       const businessId = classDraft.businessId.trim();
-      const data = { campus_id: campusId, business_id: businessId, name: classDraft.name.trim() || businessId, subject: classDraft.businessLine.trim(), grade: classDraft.productType.trim(), teacher_business_id: classDraft.teacherBusinessId };
+      // 班级只写身份：班型/业务线/教师是课次的属性，由后端从 course_sessions 聚合。
+      const data = { campus_id: campusId, business_id: businessId, name: classDraft.name.trim() || businessId };
       if (editing && entityDialog.id) updateClass.mutate({ objectId: entityDialog.id, data }); else createClass.mutate({ data });
     } else if (entityDialog.kind === "room") {
       const businessId = roomDraft.businessId.trim();
@@ -496,13 +541,14 @@ export function MasterDataPage() {
   };
 
   const runBatchAction = () => {
-    if (!batchAction || selectedCourseIds.length === 0 || selectedCourseIds.length > BATCH_LIMIT) return;
+    const scope = courseBatchScope();
+    if (!batchAction || !scope) return;
     if (batchAction === "delete") {
-      batchDeleteCourses.mutate(selectedCourseIds);
+      batchDeleteCourses.mutate(scope);
     } else if (batchAction === "date" && batchDate) {
-      batchUpdateCourses.mutate({ object_ids: selectedCourseIds, lesson_date: batchDate });
+      batchUpdateCourses.mutate({ ...scope, lesson_date: batchDate });
     } else if (batchAction === "room" && batchRoom) {
-      batchUpdateCourses.mutate({ object_ids: selectedCourseIds, original_room_business_id: batchRoom });
+      batchUpdateCourses.mutate({ ...scope, original_room_business_id: batchRoom });
     }
   };
 
@@ -514,9 +560,10 @@ export function MasterDataPage() {
   };
 
   const selectAllFiltered = (items: Array<{ id: string }>, apply: (selection: RowSelectionState) => void) => {
-    // 整份替换而不是合并：结果就是「当前筛选结果的前 BATCH_LIMIT 条」，
-    // 顺带把其它页、其它筛选条件下残留的勾选清掉。
-    apply(Object.fromEntries(items.slice(0, BATCH_LIMIT).map((item) => [item.id, true])));
+    // 整份替换而不是合并：结果就是「当前筛选结果的全部」，
+    // 顺带把其它页、其它筛选条件下残留的勾选清掉。不再截断——课程走 filter 入参没有上限，
+    // 且与表头复选框（getIsAllRowsSelected）保持同一个语义。
+    apply(Object.fromEntries(items.map((item) => [item.id, true])));
   };
 
   const selectAllForEntity = (kind: EntityKind) => {
@@ -556,9 +603,6 @@ export function MasterDataPage() {
     const changes: Record<string, string | boolean | null> = {};
     if (entityBatch.action === "teacher-subject") changes.subject = entityBatchValue.trim();
     if (entityBatch.action === "teacher-calendar") changes.calendar_user_id = entityBatchValue.trim() || null;
-    if (entityBatch.action === "class-line") changes.subject = entityBatchValue.trim();
-    if (entityBatch.action === "class-type") changes.grade = entityBatchValue.trim();
-    if (entityBatch.action === "class-teacher") changes.teacher_business_id = entityBatchValue;
     if (entityBatch.action === "room-status") changes.is_active = entityBatchValue === "true";
     if (entityBatch.action === "slot-status") changes.is_open = entityBatchValue === "true";
     batchUpdateEntities.mutate({ resource, objectIds, changes });
@@ -572,16 +616,20 @@ export function MasterDataPage() {
   });
 
   const teacherColumns: ColumnDef<TeacherResponse>[] = [
-    { id: "teacher", header: () => <ColumnHeader>教师（教研组）</ColumnHeader>, cell: ({ row }) => <IdentityValue item={row.original} className="w-48" /> },
+    { id: "teacher", header: () => <ColumnHeader>教师</ColumnHeader>, cell: ({ row }) => <IdentityValue item={row.original} className="w-48" /> },
     { accessorKey: "subject", header: () => <ColumnHeader>学科</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.subject} className="w-24" /> },
     { accessorKey: "calendar_user_id", header: () => <ColumnHeader>飞书日程账号</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.calendar_user_id} className="w-40" /> },
     ...(!readOnly ? [actionsColumn<TeacherResponse>((item) => <RowActions editLabel="编辑教师" onEdit={() => openEditEntity("teacher", item)} deleting={deletingKey === `teachers:${item.id}`} onDelete={() => confirmDelete({ id: item.id, label: identityLabel(item), resource: "teachers", resourceLabel: "教师" })} />)] : []),
   ];
+  // 走班制下一个班同时有多个班型、多个教师（暑期集训营OMO4班 就同时有 含数学 / 无数学）。
+  // 这几列全是多值：显示前 2 个 +「+N」展开，列宽固定，展开只增加行高、不撑宽表格。
   const classColumns: ColumnDef<ClassGroupResponse>[] = [
-    { id: "class", header: () => <ColumnHeader>班级</ColumnHeader>, cell: ({ row }) => <IdentityValue item={row.original} className="w-56" /> },
-    { accessorKey: "subject", header: () => <ColumnHeader>业务线</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.subject} className="w-20" /> },
-    { accessorKey: "grade", header: () => <ColumnHeader>班型</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.grade} className="w-40" /> },
-    { accessorKey: "teacher_business_id", header: () => <ColumnHeader>教师（教研组）</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.teacher_business_id} className="w-36" /> },
+    { id: "class", header: () => <ColumnHeader>班级</ColumnHeader>, cell: ({ row }) => <IdentityValue item={row.original} className="w-44" /> },
+    { id: "business_lines", header: () => <ColumnHeader>业务线</ColumnHeader>, enableSorting: false, cell: ({ row }) => <TagList values={row.original.business_lines} className="w-16" empty={emptyClassHint(row.original)} /> },
+    { id: "product_types", header: () => <ColumnHeader>班型</ColumnHeader>, enableSorting: false, cell: ({ row }) => <TagList values={row.original.product_types} className="w-40" empty={emptyClassHint(row.original)} /> },
+    { id: "teacher_business_ids", header: () => <ColumnHeader>教师</ColumnHeader>, enableSorting: false, cell: ({ row }) => <TagList values={row.original.teacher_business_ids} className="w-36" empty={emptyClassHint(row.original)} /> },
+    { accessorKey: "session_count", header: () => <ColumnHeader>课次数</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.session_count} className="w-12 tabular-nums" /> },
+    { id: "tracks", header: () => <ColumnHeader>走班明细</ColumnHeader>, enableSorting: false, cell: ({ row }) => <TracksButton item={row.original} onOpen={() => setTracksTarget(row.original)} /> },
     ...(!readOnly ? [actionsColumn<ClassGroupResponse>((item) => <RowActions editLabel="编辑班级" onEdit={() => openEditEntity("class", item)} deleting={deletingKey === `class-groups:${item.id}`} onDelete={() => confirmDelete({ id: item.id, label: identityLabel(item), resource: "class-groups", resourceLabel: "班级" })} />)] : []),
   ];
   const roomColumns: ColumnDef<RoomResponse>[] = [
@@ -605,7 +653,7 @@ export function MasterDataPage() {
     ...(visibleCourseColumns.business_line ? [{ accessorKey: "business_line", header: () => <ColumnHeader>业务线</ColumnHeader>, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TableText value={row.original.business_line} className="w-16" /> } as ColumnDef<CourseSessionResponse>] : []),
     ...(visibleCourseColumns.product_type ? [{ accessorKey: "product_type", header: () => <ColumnHeader>班型</ColumnHeader>, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TableText value={row.original.product_type} className="w-36" /> } as ColumnDef<CourseSessionResponse>] : []),
     { accessorKey: "class_business_id", header: () => <ColumnHeader>班级标签</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.class_business_id} className="w-32" /> },
-    { accessorKey: "teacher_business_id", header: () => <ColumnHeader>教师（教研组）</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.teacher_business_id} className="w-32" /> },
+    { accessorKey: "teacher_business_id", header: () => <ColumnHeader>教师</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.teacher_business_id} className="w-32" /> },
     ...(visibleCourseColumns.lesson_name ? [{ accessorKey: "lesson_name", header: () => <ColumnHeader>课节名称</ColumnHeader>, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TableText value={row.original.lesson_name} className="w-40" /> } as ColumnDef<CourseSessionResponse>] : []),
     { accessorKey: "session_no", header: () => <ColumnHeader>课次序号</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.session_no} className="w-12 tabular-nums" /> },
     { accessorKey: "lesson_date", header: () => <ColumnHeader>上课日期</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.lesson_date} className="w-24 tabular-nums" /> },
@@ -630,7 +678,7 @@ export function MasterDataPage() {
         <Tabs defaultValue="teachers">
           <TabsList><TabsTrigger value="teachers">教师</TabsTrigger><TabsTrigger value="classes">班级</TabsTrigger><TabsTrigger value="rooms">教室</TabsTrigger><TabsTrigger value="slots">时段</TabsTrigger><TabsTrigger value="courses">课程场次</TabsTrigger></TabsList>
           <TabsContent value="teachers" className="pt-4"><EntityToolbar label="教师" total={teacherQuery.data?.length ?? 0} filtered={filteredTeachers.length} selected={selectedTeacherIds.length} offFilter={offFilterCount(teacherSelection, filteredTeachers)} onSelectAll={() => selectAllForEntity("teacher")} onClearSelection={() => clearEntitySelection("teacher")} search={teacherSearch} setSearch={setTeacherSearch} readOnly={readOnly} onAdd={() => openCreateEntity("teacher")} disabled={!campusId} actions={[{ label: "批量改学科", action: "teacher-subject" }, { label: "批量改日程账号", action: "teacher-calendar" }]} onBatch={(action) => openEntityBatch("teacher", action)} /><DataTable columns={teacherColumns} data={filteredTeachers} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={teacherSelection} onSelectionChange={setTeacherSelection} /></TabsContent>
-          <TabsContent value="classes" className="pt-4"><EntityToolbar label="班级" total={classQuery.data?.length ?? 0} filtered={filteredClasses.length} selected={selectedClassIds.length} offFilter={offFilterCount(classSelection, filteredClasses)} onSelectAll={() => selectAllForEntity("class")} onClearSelection={() => clearEntitySelection("class")} search={classSearch} setSearch={setClassSearch} readOnly={readOnly} onAdd={() => openCreateEntity("class")} disabled={!campusId || !teacherQuery.data?.length} actions={[{ label: "批量改业务线", action: "class-line" }, { label: "批量改班型", action: "class-type" }, { label: "批量改教师", action: "class-teacher" }]} onBatch={(action) => openEntityBatch("class", action)} /><DataTable columns={classColumns} data={filteredClasses} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={classSelection} onSelectionChange={setClassSelection} /></TabsContent>
+          <TabsContent value="classes" className="pt-4"><EntityToolbar label="班级" total={classQuery.data?.length ?? 0} filtered={filteredClasses.length} selected={selectedClassIds.length} offFilter={offFilterCount(classSelection, filteredClasses)} onSelectAll={() => selectAllForEntity("class")} onClearSelection={() => clearEntitySelection("class")} search={classSearch} setSearch={setClassSearch} readOnly={readOnly} onAdd={() => openCreateEntity("class")} disabled={!campusId} actions={[]} onBatch={(action) => openEntityBatch("class", action)} note="班型、教师、课次数由课程场次实时汇总，不能在班级上直接改；要改教师请到「课程场次」页签改对应课次。" /><DataTable columns={classColumns} data={filteredClasses} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={classSelection} onSelectionChange={setClassSelection} /></TabsContent>
           <TabsContent value="rooms" className="pt-4"><EntityToolbar label="教室" total={roomQuery.data?.length ?? 0} filtered={filteredRooms.length} selected={selectedRoomIds.length} offFilter={offFilterCount(roomSelection, filteredRooms)} onSelectAll={() => selectAllForEntity("room")} onClearSelection={() => clearEntitySelection("room")} search={roomSearch} setSearch={setRoomSearch} readOnly={readOnly} onAdd={() => openCreateEntity("room")} disabled={!campusId} actions={[{ label: "批量启用/停用", action: "room-status" }]} onBatch={(action) => openEntityBatch("room", action)} /><DataTable columns={roomColumns} data={filteredRooms} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={roomSelection} onSelectionChange={setRoomSelection} /></TabsContent>
           <TabsContent value="slots" className="pt-4"><EntityToolbar label="时段" total={slotQuery.data?.length ?? 0} filtered={filteredSlots.length} selected={selectedSlotIds.length} offFilter={offFilterCount(slotSelection, filteredSlots)} onSelectAll={() => selectAllForEntity("slot")} onClearSelection={() => clearEntitySelection("slot")} search={slotSearch} setSearch={setSlotSearch} readOnly={readOnly} onAdd={() => openCreateEntity("slot")} disabled={!campusId} actions={[{ label: "批量开放/关闭", action: "slot-status" }]} onBatch={(action) => openEntityBatch("slot", action)} /><DataTable columns={slotColumns} data={filteredSlots} paginated defaultPageSize={50} selectable={!readOnly} getRowId={(row) => row.id} selectedRowIds={slotSelection} onSelectionChange={setSlotSelection} /></TabsContent>
           <TabsContent value="courses" className="pt-4">
@@ -638,6 +686,8 @@ export function MasterDataPage() {
               total={courseQuery.data?.length ?? 0}
               filtered={filteredCourses.length}
               selected={selectedCourseIds.length}
+              allFiltered={courseSelectionStats.allFiltered}
+              blocked={courseBatchBlocked}
               offFilter={courseSelectionStats.offFilter}
               onSelectAll={() => selectAllFiltered(filteredCourses, setCourseSelection)}
               onClearSelection={() => setCourseSelection({})}
@@ -672,10 +722,10 @@ export function MasterDataPage() {
       <Dialog open={entityDialog !== null} onOpenChange={(open) => { if (!open) closeEntityDialog(); }}>
         <DialogContent>
           <DialogTitle className="text-base font-semibold">{entityDialog?.mode === "edit" ? "编辑" : "新增"}{entityLabel}</DialogTitle>
-          <DialogDescription className="mt-1 text-sm text-zinc-500">{entityDialog?.kind === "slot" ? "时段用于描述可排课时间窗口；课程自身的固定开始、结束时间仍以课程数据为准。" : "名称与业务标签一致时，名称可以留空，系统会自动复用标签。"}</DialogDescription>
+          <DialogDescription className="mt-1 text-sm text-zinc-500">{entityDialog?.kind === "slot" ? "时段用于描述可排课时间窗口；课程自身的固定开始、结束时间仍以课程数据为准。" : entityDialog?.kind === "class" ? "班级只登记身份。班型、业务线、教师由这个班的课程场次实时汇总，新建的班在排课次之前这几项都是空的。" : "名称与业务标签一致时，名称可以留空，系统会自动复用标签。"}</DialogDescription>
           <form className="mt-5 space-y-4" onSubmit={submitEntity}>
             <label className="block text-sm text-zinc-700">所属校区<select className={inputClass} value={campusId} onChange={(event) => setCampusId(event.target.value)} required>{campusQuery.data?.map((campus) => <option key={campus.id} value={campus.id}>{campus.name}</option>)}</select></label>
-            {entityDialog?.kind === "teacher" ? <><label className="block text-sm text-zinc-700">教师（教研组）标签<input className={inputClass} value={teacherDraft.businessId} onChange={(event) => setTeacherDraft({ ...teacherDraft, businessId: event.target.value })} required /></label><label className="block text-sm text-zinc-700">显示名称（选填）<input className={inputClass} value={teacherDraft.name} onChange={(event) => setTeacherDraft({ ...teacherDraft, name: event.target.value })} placeholder="留空则与标签一致" /></label><label className="block text-sm text-zinc-700">学科<input className={inputClass} value={teacherDraft.subject} onChange={(event) => setTeacherDraft({ ...teacherDraft, subject: event.target.value })} /></label><label className="block text-sm text-zinc-700">飞书日程账号（选填）<input className={inputClass} value={teacherDraft.calendarUserId} onChange={(event) => setTeacherDraft({ ...teacherDraft, calendarUserId: event.target.value })} /></label></> : entityDialog?.kind === "class" ? <><label className="block text-sm text-zinc-700">班级标签<input className={inputClass} value={classDraft.businessId} onChange={(event) => setClassDraft({ ...classDraft, businessId: event.target.value })} required /></label><label className="block text-sm text-zinc-700">显示名称（选填）<input className={inputClass} value={classDraft.name} onChange={(event) => setClassDraft({ ...classDraft, name: event.target.value })} placeholder="留空则与标签一致" /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block text-sm text-zinc-700">业务线<input className={inputClass} value={classDraft.businessLine} onChange={(event) => setClassDraft({ ...classDraft, businessLine: event.target.value })} /></label><label className="block text-sm text-zinc-700">班型<input className={inputClass} value={classDraft.productType} onChange={(event) => setClassDraft({ ...classDraft, productType: event.target.value })} /></label></div><label className="block text-sm text-zinc-700">教师（教研组）<select className={inputClass} value={classDraft.teacherBusinessId} onChange={(event) => setClassDraft({ ...classDraft, teacherBusinessId: event.target.value })} required><option value="">请选择</option>{teacherQuery.data?.map((teacher) => <option key={teacher.id} value={teacher.business_id}>{identityLabel(teacher)}</option>)}</select></label></> : entityDialog?.kind === "room" ? <><label className="block text-sm text-zinc-700">教室标签<input className={inputClass} value={roomDraft.businessId} onChange={(event) => setRoomDraft({ ...roomDraft, businessId: event.target.value })} required /></label><label className="block text-sm text-zinc-700">显示名称（选填）<input className={inputClass} value={roomDraft.name} onChange={(event) => setRoomDraft({ ...roomDraft, name: event.target.value })} placeholder="留空则与标签一致" /></label><label className="flex items-center gap-2 text-sm text-zinc-700"><input type="checkbox" checked={roomDraft.isActive} onChange={(event) => setRoomDraft({ ...roomDraft, isActive: event.target.checked })} />启用教室</label></> : <><label className="block text-sm text-zinc-700">时段标签<input className={inputClass} value={slotDraft.businessId} onChange={(event) => setSlotDraft({ ...slotDraft, businessId: event.target.value })} required /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block text-sm text-zinc-700">星期<input className={inputClass} value={slotDraft.weekday} onChange={(event) => setSlotDraft({ ...slotDraft, weekday: event.target.value })} placeholder="例如：周一" required /></label><label className="block text-sm text-zinc-700">类型<input className={inputClass} value={slotDraft.kind} onChange={(event) => setSlotDraft({ ...slotDraft, kind: event.target.value })} placeholder="例如：上午" /></label><label className="block text-sm text-zinc-700">开始时间<input className={inputClass} type="time" value={slotDraft.startTime} onChange={(event) => setSlotDraft({ ...slotDraft, startTime: event.target.value })} required /></label><label className="block text-sm text-zinc-700">结束时间<input className={inputClass} type="time" value={slotDraft.endTime} onChange={(event) => setSlotDraft({ ...slotDraft, endTime: event.target.value })} required /></label><label className="block text-sm text-zinc-700">排序序号<input className={inputClass} type="number" min="0" value={slotDraft.sequence} onChange={(event) => setSlotDraft({ ...slotDraft, sequence: event.target.value })} /></label></div><label className="flex items-center gap-2 text-sm text-zinc-700"><input type="checkbox" checked={slotDraft.isOpen} onChange={(event) => setSlotDraft({ ...slotDraft, isOpen: event.target.checked })} />开放时段</label></>}
+            {entityDialog?.kind === "teacher" ? <><label className="block text-sm text-zinc-700">教师标签<input className={inputClass} value={teacherDraft.businessId} onChange={(event) => setTeacherDraft({ ...teacherDraft, businessId: event.target.value })} required /></label><label className="block text-sm text-zinc-700">显示名称（选填）<input className={inputClass} value={teacherDraft.name} onChange={(event) => setTeacherDraft({ ...teacherDraft, name: event.target.value })} placeholder="留空则与标签一致" /></label><label className="block text-sm text-zinc-700">学科<input className={inputClass} value={teacherDraft.subject} onChange={(event) => setTeacherDraft({ ...teacherDraft, subject: event.target.value })} /></label><label className="block text-sm text-zinc-700">飞书日程账号（选填）<input className={inputClass} value={teacherDraft.calendarUserId} onChange={(event) => setTeacherDraft({ ...teacherDraft, calendarUserId: event.target.value })} /></label></> : entityDialog?.kind === "class" ? <><label className="block text-sm text-zinc-700">班级标签<input className={inputClass} value={classDraft.businessId} onChange={(event) => setClassDraft({ ...classDraft, businessId: event.target.value })} required /></label><label className="block text-sm text-zinc-700">显示名称（选填）<input className={inputClass} value={classDraft.name} onChange={(event) => setClassDraft({ ...classDraft, name: event.target.value })} placeholder="留空则与标签一致" /></label></> : entityDialog?.kind === "room" ? <><label className="block text-sm text-zinc-700">教室标签<input className={inputClass} value={roomDraft.businessId} onChange={(event) => setRoomDraft({ ...roomDraft, businessId: event.target.value })} required /></label><label className="block text-sm text-zinc-700">显示名称（选填）<input className={inputClass} value={roomDraft.name} onChange={(event) => setRoomDraft({ ...roomDraft, name: event.target.value })} placeholder="留空则与标签一致" /></label><label className="flex items-center gap-2 text-sm text-zinc-700"><input type="checkbox" checked={roomDraft.isActive} onChange={(event) => setRoomDraft({ ...roomDraft, isActive: event.target.checked })} />启用教室</label></> : <><label className="block text-sm text-zinc-700">时段标签<input className={inputClass} value={slotDraft.businessId} onChange={(event) => setSlotDraft({ ...slotDraft, businessId: event.target.value })} required /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block text-sm text-zinc-700">星期<input className={inputClass} value={slotDraft.weekday} onChange={(event) => setSlotDraft({ ...slotDraft, weekday: event.target.value })} placeholder="例如：周一" required /></label><label className="block text-sm text-zinc-700">类型<input className={inputClass} value={slotDraft.kind} onChange={(event) => setSlotDraft({ ...slotDraft, kind: event.target.value })} placeholder="例如：上午" /></label><label className="block text-sm text-zinc-700">开始时间<input className={inputClass} type="time" value={slotDraft.startTime} onChange={(event) => setSlotDraft({ ...slotDraft, startTime: event.target.value })} required /></label><label className="block text-sm text-zinc-700">结束时间<input className={inputClass} type="time" value={slotDraft.endTime} onChange={(event) => setSlotDraft({ ...slotDraft, endTime: event.target.value })} required /></label><label className="block text-sm text-zinc-700">排序序号<input className={inputClass} type="number" min="0" value={slotDraft.sequence} onChange={(event) => setSlotDraft({ ...slotDraft, sequence: event.target.value })} /></label></div><label className="flex items-center gap-2 text-sm text-zinc-700"><input type="checkbox" checked={slotDraft.isOpen} onChange={(event) => setSlotDraft({ ...slotDraft, isOpen: event.target.checked })} />开放时段</label></>}
             <div className="flex justify-end gap-2 border-t border-zinc-100 pt-4"><Button type="button" variant="outline" onClick={closeEntityDialog}>取消</Button><Button type="submit" disabled={isCreating || !campusId}>{isCreating ? "保存中" : "保存"}</Button></div>
           </form>
         </DialogContent>
@@ -694,26 +744,27 @@ export function MasterDataPage() {
         close={closeCourseDialog}
         submit={submitCourse}
       />
-      <BatchCourseDialog open={batchAction !== null} action={batchAction ?? "date"} selected={selectedCourseIds.length} date={batchDate} setDate={setBatchDate} room={batchRoom} setRoom={setBatchRoom} rooms={roomQuery.data ?? []} saving={isBatchSaving} close={() => setBatchAction(null)} submit={runBatchAction} />
-      <EntityBatchDialog open={entityBatch !== null} state={entityBatch} selected={entityBatch ? idsForEntityKind(entityBatch.kind).length : 0} value={entityBatchValue} setValue={setEntityBatchValue} teachers={teacherQuery.data ?? []} saving={batchUpdateEntities.isPending || batchDeleteEntities.isPending} close={() => setEntityBatch(null)} submit={runEntityBatch} />
+      <BatchCourseDialog open={batchAction !== null} action={batchAction ?? "date"} affected={courseBatchCount} allFiltered={courseSelectionStats.allFiltered} date={batchDate} setDate={setBatchDate} room={batchRoom} setRoom={setBatchRoom} rooms={roomQuery.data ?? []} saving={isBatchSaving} close={() => setBatchAction(null)} submit={runBatchAction} />
+      <EntityBatchDialog open={entityBatch !== null} state={entityBatch} selected={entityBatch ? idsForEntityKind(entityBatch.kind).length : 0} value={entityBatchValue} setValue={setEntityBatchValue} saving={batchUpdateEntities.isPending || batchDeleteEntities.isPending} close={() => setEntityBatch(null)} submit={runEntityBatch} />
+      <ClassTracksDialog item={tracksTarget} close={() => setTracksTarget(null)} />
       <ConfirmDialog open={deleteTarget !== null} title={deleteTarget ? `删除${deleteTarget.resourceLabel}` : "删除记录"} description={deleteTarget ? `确认删除“${deleteTarget.label}”？被课程、课表版本或飞书日程引用的记录会被系统拦截。` : ""} confirmLabel="确认删除" danger pending={remove.isPending} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }} onConfirm={executeDelete} />
     </div>
   );
 }
 
-function CourseToolbar({ total, filtered, selected, offFilter, onSelectAll, onClearSelection, columns, setColumns, columnPanelOpen, toggleColumnPanel, search, setSearch, businessLine, setBusinessLine, productType, setProductType, classBusinessId, setClassBusinessId, teacherBusinessId, setTeacherBusinessId, lessonDate, setLessonDate, options, hasFilters, clearFilters, readOnly, onAdd, onBatch }: { total: number; filtered: number; selected: number; offFilter: number; onSelectAll: () => void; onClearSelection: () => void; columns: Record<CourseColumnKey, boolean>; setColumns: Dispatch<SetStateAction<Record<CourseColumnKey, boolean>>>; columnPanelOpen: boolean; toggleColumnPanel: () => void; search: string; setSearch: (value: string) => void; businessLine: string; setBusinessLine: (value: string) => void; productType: string; setProductType: (value: string) => void; classBusinessId: string; setClassBusinessId: (value: string) => void; teacherBusinessId: string; setTeacherBusinessId: (value: string) => void; lessonDate: string; setLessonDate: (value: string) => void; options: { businessLines: string[]; productTypes: string[]; classes: string[]; teachers: string[] }; hasFilters: boolean; clearFilters: () => void; readOnly: boolean; onAdd: () => void; onBatch: (action: CourseBatchAction) => void }) {
-  const overLimit = selected > BATCH_LIMIT;
+function CourseToolbar({ total, filtered, selected, allFiltered, blocked, offFilter, onSelectAll, onClearSelection, columns, setColumns, columnPanelOpen, toggleColumnPanel, search, setSearch, businessLine, setBusinessLine, productType, setProductType, classBusinessId, setClassBusinessId, teacherBusinessId, setTeacherBusinessId, lessonDate, setLessonDate, options, hasFilters, clearFilters, readOnly, onAdd, onBatch }: { total: number; filtered: number; selected: number; allFiltered: boolean; blocked: boolean; offFilter: number; onSelectAll: () => void; onClearSelection: () => void; columns: Record<CourseColumnKey, boolean>; setColumns: Dispatch<SetStateAction<Record<CourseColumnKey, boolean>>>; columnPanelOpen: boolean; toggleColumnPanel: () => void; search: string; setSearch: (value: string) => void; businessLine: string; setBusinessLine: (value: string) => void; productType: string; setProductType: (value: string) => void; classBusinessId: string; setClassBusinessId: (value: string) => void; teacherBusinessId: string; setTeacherBusinessId: (value: string) => void; lessonDate: string; setLessonDate: (value: string) => void; options: { businessLines: string[]; productTypes: string[]; classes: string[]; teachers: string[] }; hasFilters: boolean; clearFilters: () => void; readOnly: boolean; onAdd: () => void; onBatch: (action: CourseBatchAction) => void }) {
+  const disabled = selected === 0 || blocked;
   return <div className="mb-3 space-y-3 border border-zinc-200 bg-white p-3">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-zinc-500">
         <span className="tabular-nums">筛选 {filtered} / {total} 条</span>
-        {!readOnly ? <SelectionControls selected={selected} filtered={filtered} offFilter={offFilter} onSelectAll={onSelectAll} onClear={onClearSelection} /> : null}
+        {!readOnly ? <SelectionControls selected={selected} filtered={filtered} allFiltered={allFiltered} offFilter={offFilter} onSelectAll={onSelectAll} onClear={onClearSelection} /> : null}
       </div>
-      {!readOnly ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("date")}><CalendarDays className="size-3.5" />批量改日期</Button><Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("room")}>批量改教室</Button><Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd}><Plus className="size-3.5" />新增课程</Button></div> : <span className="text-xs text-zinc-400">成员账号为只读视图</span>}
+      {!readOnly ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("date")}><CalendarDays className="size-3.5" />批量改日期</Button><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("room")}>批量改教室</Button><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd}><Plus className="size-3.5" />新增课程</Button></div> : <span className="text-xs text-zinc-400">成员账号为只读视图</span>}
     </div>
-    {overLimit ? <BatchLimitNotice selected={selected} /> : null}
+    {blocked ? <CourseBatchBlockedNotice selected={selected} /> : null}
     <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
-      <label className="relative min-w-0"><Search className="absolute left-2.5 top-2 size-3.5 text-zinc-400" /><input aria-label="搜索课程" className={`${compactInputClass} w-full min-w-0 pl-8`} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="课程、班级、教师、教室" /></label>
+      <label className="relative min-w-0"><Search className="absolute left-2.5 top-2 size-3.5 text-zinc-400" /><input aria-label="搜索课程" maxLength={200} className={`${compactInputClass} w-full min-w-0 pl-8`} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="课程、班级、教师、教室" /></label>
       <FilterSelect label="全部业务线" value={businessLine} setValue={setBusinessLine} options={options.businessLines} />
       <FilterSelect label="全部班型" value={productType} setValue={setProductType} options={options.productTypes} />
       <FilterSelect label="全部班级" value={classBusinessId} setValue={setClassBusinessId} options={options.classes} />
@@ -733,17 +784,27 @@ function CourseToolbar({ total, filtered, selected, offFilter, onSelectAll, onCl
   </div>;
 }
 
-/** 选中数量 + 全选筛选结果 + 一键清除（清的是整个选中集合，含其它分页、其它筛选条件下的残留）。 */
-function SelectionControls({ selected, filtered, offFilter, onSelectAll, onClear }: { selected: number; filtered: number; offFilter: number; onSelectAll: () => void; onClear: () => void }) {
-  const capped = filtered > BATCH_LIMIT;
+/**
+ * 选中数量 + 全选筛选结果 + 一键清除（清的是整个选中集合，含其它分页、其它筛选条件下的残留）。
+ * allFiltered 时文案说「全部 N 条」——课程走的是按条件整批处理，不是 N 个 id，说清楚这一点很重要。
+ */
+function SelectionControls({ selected, filtered, allFiltered, offFilter, onSelectAll, onClear }: { selected: number; filtered: number; allFiltered: boolean; offFilter: number; onSelectAll: () => void; onClear: () => void }) {
   return <>
-    <span className={cn("tabular-nums", selected > 0 ? "font-medium text-blue-700" : "text-zinc-400")}>已选 {selected} 条</span>
+    <span className={cn("tabular-nums", selected > 0 ? "font-medium text-blue-700" : "text-zinc-400")}>{allFiltered ? `已选 全部 ${filtered} 条` : `已选 ${selected} 条`}</span>
     {offFilter > 0 ? <span className="tabular-nums text-amber-700">其中 {offFilter} 条不在当前筛选内</span> : null}
-    <Button size="sm" variant="outline" disabled={filtered === 0} onClick={onSelectAll} title={capped ? `后端批量接口单次只收 ${BATCH_LIMIT} 条 id，这里会按数据原始顺序取筛选结果里的 ${BATCH_LIMIT} 条（与表头排序无关）；要精确控制范围请先收窄筛选条件` : `选中当前筛选出的 ${filtered} 条`}>
-      <ListChecks className="size-3.5" />全选筛选结果{capped ? `（上限 ${BATCH_LIMIT} 条）` : filtered > 0 ? `（${filtered} 条）` : ""}
+    <Button size="sm" variant="outline" disabled={filtered === 0 || allFiltered} onClick={onSelectAll} title={allFiltered ? `当前筛选出的 ${filtered} 条已全部选中` : `选中当前筛选出的 ${filtered} 条`}>
+      <ListChecks className="size-3.5" />全选筛选结果{filtered > 0 ? `（${filtered} 条）` : ""}
     </Button>
     <Button size="sm" variant="ghost" disabled={selected === 0} onClick={onClear}><Eraser className="size-3.5" />清除选择</Button>
   </>;
+}
+
+/**
+ * 课程逐条选择超过 1000 条、又不是「整个筛选结果」时的死角：
+ * 后端 object_ids 上限 1000，而 filter 入参只能表达完整的筛选结果，表达不了「全选后再排除几条」。
+ */
+function CourseBatchBlockedNotice({ selected }: { selected: number }) {
+  return <p className="border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">已选 {selected} 条，逐条选择单次上限 {BATCH_LIMIT} 条，批量操作已暂时禁用。点「全选筛选结果」按条件整批处理不受这个上限限制；如果要的就是这几条，请先收窄筛选条件再全选。</p>;
 }
 
 function BatchLimitNotice({ selected }: { selected: number }) {
@@ -758,24 +819,58 @@ function FilterSelect({ label, value, setValue, options }: { label: string; valu
 function CourseEditorDialog({ open, mode, draft, setDraft, campuses, teachers, classes, rooms, saving, close, submit }: { open: boolean; mode: CourseDialogMode; draft: CourseDraft; setDraft: (draft: CourseDraft) => void; campuses: Array<{ id: string; name: string }>; teachers: TeacherResponse[]; classes: ClassGroupResponse[]; rooms: RoomResponse[]; saving: boolean; close: () => void; submit: (event: FormEvent<HTMLFormElement>) => void }) {
   const editing = mode === "edit";
   const selectClass = (businessId: string) => {
-    const selected = classes.find((item) => item.business_id === businessId);
-    setDraft({ ...draft, classBusinessId: businessId, teacherBusinessId: selected?.teacher_business_id ?? draft.teacherBusinessId, businessLine: selected?.subject ?? draft.businessLine, productType: selected?.grade ?? draft.productType });
+    // 只有当这个班只有一条走班轨道时才敢预填：多轨道的班（走班制下是常态）猜哪一条都是错的，
+    // 交给用户在下面的教师/业务线/班型里自己选。
+    const track = classes.find((item) => item.business_id === businessId)?.tracks;
+    const only = track?.length === 1 ? track[0] : null;
+    setDraft({
+      ...draft,
+      classBusinessId: businessId,
+      teacherBusinessId: only?.teacher_business_id ?? draft.teacherBusinessId,
+      businessLine: only?.business_line ?? draft.businessLine,
+      productType: only?.product_type ?? draft.productType,
+      subject: only?.subject ?? draft.subject,
+    });
   };
-  return <Dialog open={open} onOpenChange={(next) => { if (!next) close(); }}><DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto"><DialogTitle className="text-base font-semibold">{editing ? `编辑课程 ${draft.businessId}` : "新增课程场次"}</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">{editing ? "现有课程只调整上课日期、授课教室和飞书日程账号；教师（教研组）与固定时段保持原数据。" : "新增时确定教师（教研组）和固定上课时段，保存后只允许调整日期与教室。"}</DialogDescription><form className="mt-5 space-y-5" onSubmit={submit}>{editing ? <div className="grid gap-3 border border-zinc-200 bg-zinc-50 p-4 text-sm sm:grid-cols-2 lg:grid-cols-4"><ReadOnlyField label="班级" value={draft.classBusinessId} /><ReadOnlyField label="教师（教研组）" value={draft.teacherBusinessId} /><ReadOnlyField label="固定时段" value={`${draft.fixedStartTime}-${draft.fixedEndTime}`} /><ReadOnlyField label="课次序号" value={draft.sessionNo} /></div> : <><div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"><FormSelect label="所属校区" value={draft.campusId} setValue={(value) => setDraft({ ...draft, campusId: value })} required options={campuses.map((item) => ({ value: item.id, label: item.name }))} /><FormInput label="课程业务 ID" value={draft.businessId} setValue={(value) => setDraft({ ...draft, businessId: value })} required /><FormSelect label="班级" value={draft.classBusinessId} setValue={selectClass} required options={classes.map((item) => ({ value: item.business_id, label: identityLabel(item) }))} /><FormSelect label="教师（教研组）" value={draft.teacherBusinessId} setValue={(value) => setDraft({ ...draft, teacherBusinessId: value })} required options={teachers.map((item) => ({ value: item.business_id, label: identityLabel(item) }))} /><FormInput label="业务线" value={draft.businessLine} setValue={(value) => setDraft({ ...draft, businessLine: value })} /><FormInput label="班型" value={draft.productType} setValue={(value) => setDraft({ ...draft, productType: value })} /><FormInput label="课节名称" value={draft.lessonName} setValue={(value) => setDraft({ ...draft, lessonName: value })} required /><FormInput label="学科" value={draft.subject} setValue={(value) => setDraft({ ...draft, subject: value })} /><FormInput label="课次序号" type="number" min="0" value={draft.sessionNo} setValue={(value) => setDraft({ ...draft, sessionNo: value })} required /><FormInput label="固定开始时间" type="time" value={draft.fixedStartTime} setValue={(value) => setDraft({ ...draft, fixedStartTime: value })} required /><FormInput label="固定结束时间" type="time" value={draft.fixedEndTime} setValue={(value) => setDraft({ ...draft, fixedEndTime: value })} required /><FormInput label="时长（分钟）" type="number" min="1" value={draft.durationMinutes} setValue={(value) => setDraft({ ...draft, durationMinutes: value })} required /><FormInput label="编排来源" value={draft.scheduleSource} setValue={(value) => setDraft({ ...draft, scheduleSource: value })} /><FormInput label="编排阶段" value={draft.stage} setValue={(value) => setDraft({ ...draft, stage: value })} /><FormInput label="计划课次" type="number" min="0" value={draft.plannedSessions} setValue={(value) => setDraft({ ...draft, plannedSessions: value })} /><FormInput label="计划课时" type="number" min="0" value={draft.plannedHours} setValue={(value) => setDraft({ ...draft, plannedHours: value })} /></div><label className="flex items-center gap-2 text-sm text-zinc-700"><input type="checkbox" checked={draft.isLocked} onChange={(event) => setDraft({ ...draft, isLocked: event.target.checked })} />创建为锁定课程（求解时保持原日期和教室）</label></>}<div className="grid gap-4 border-t border-zinc-100 pt-4 sm:grid-cols-3"><FormInput label="上课日期" type="date" value={draft.lessonDate} setValue={(value) => setDraft({ ...draft, lessonDate: value })} required /><FormSelect label="授课教室" value={draft.roomBusinessId} setValue={(value) => setDraft({ ...draft, roomBusinessId: value })} required options={rooms.filter((item) => item.is_active || item.business_id === draft.roomBusinessId).map((item) => ({ value: item.business_id, label: identityLabel(item) }))} /><FormInput label="飞书日程账号（选填）" value={draft.calendarUserId} setValue={(value) => setDraft({ ...draft, calendarUserId: value })} /></div><div className="flex justify-end gap-2 border-t border-zinc-100 pt-4"><Button type="button" variant="outline" onClick={close}>取消</Button><Button type="submit" disabled={saving}>{saving ? "保存中" : "保存课程"}</Button></div></form></DialogContent></Dialog>;
+  return <Dialog open={open} onOpenChange={(next) => { if (!next) close(); }}><DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto"><DialogTitle className="text-base font-semibold">{editing ? `编辑课程 ${draft.businessId}` : "新增课程场次"}</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">{editing ? "现有课程只调整上课日期、授课教室和飞书日程账号；教师与固定时段保持原数据。" : "新增时确定教师和固定上课时段，保存后只允许调整日期与教室。"}</DialogDescription><form className="mt-5 space-y-5" onSubmit={submit}>{editing ? <div className="grid gap-3 border border-zinc-200 bg-zinc-50 p-4 text-sm sm:grid-cols-2 lg:grid-cols-4"><ReadOnlyField label="班级" value={draft.classBusinessId} /><ReadOnlyField label="教师" value={draft.teacherBusinessId} /><ReadOnlyField label="固定时段" value={`${draft.fixedStartTime}-${draft.fixedEndTime}`} /><ReadOnlyField label="课次序号" value={draft.sessionNo} /></div> : <><div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"><FormSelect label="所属校区" value={draft.campusId} setValue={(value) => setDraft({ ...draft, campusId: value })} required options={campuses.map((item) => ({ value: item.id, label: item.name }))} /><FormInput label="课程业务 ID" value={draft.businessId} setValue={(value) => setDraft({ ...draft, businessId: value })} required /><FormSelect label="班级" value={draft.classBusinessId} setValue={selectClass} required options={classes.map((item) => ({ value: item.business_id, label: identityLabel(item) }))} /><FormSelect label="教师" value={draft.teacherBusinessId} setValue={(value) => setDraft({ ...draft, teacherBusinessId: value })} required options={teachers.map((item) => ({ value: item.business_id, label: identityLabel(item) }))} /><FormInput label="业务线" value={draft.businessLine} setValue={(value) => setDraft({ ...draft, businessLine: value })} /><FormInput label="班型" value={draft.productType} setValue={(value) => setDraft({ ...draft, productType: value })} /><FormInput label="课节名称" value={draft.lessonName} setValue={(value) => setDraft({ ...draft, lessonName: value })} required /><FormInput label="学科" value={draft.subject} setValue={(value) => setDraft({ ...draft, subject: value })} /><FormInput label="课次序号" type="number" min="0" value={draft.sessionNo} setValue={(value) => setDraft({ ...draft, sessionNo: value })} required /><FormInput label="固定开始时间" type="time" value={draft.fixedStartTime} setValue={(value) => setDraft({ ...draft, fixedStartTime: value })} required /><FormInput label="固定结束时间" type="time" value={draft.fixedEndTime} setValue={(value) => setDraft({ ...draft, fixedEndTime: value })} required /><FormInput label="时长（分钟）" type="number" min="1" value={draft.durationMinutes} setValue={(value) => setDraft({ ...draft, durationMinutes: value })} required /><FormInput label="编排来源" value={draft.scheduleSource} setValue={(value) => setDraft({ ...draft, scheduleSource: value })} /><FormInput label="编排阶段" value={draft.stage} setValue={(value) => setDraft({ ...draft, stage: value })} /><FormInput label="计划课次" type="number" min="0" value={draft.plannedSessions} setValue={(value) => setDraft({ ...draft, plannedSessions: value })} /><FormInput label="计划课时" type="number" min="0" value={draft.plannedHours} setValue={(value) => setDraft({ ...draft, plannedHours: value })} /></div><label className="flex items-center gap-2 text-sm text-zinc-700"><input type="checkbox" checked={draft.isLocked} onChange={(event) => setDraft({ ...draft, isLocked: event.target.checked })} />创建为锁定课程（求解时保持原日期和教室）</label></>}<div className="grid gap-4 border-t border-zinc-100 pt-4 sm:grid-cols-3"><FormInput label="上课日期" type="date" value={draft.lessonDate} setValue={(value) => setDraft({ ...draft, lessonDate: value })} required /><FormSelect label="授课教室" value={draft.roomBusinessId} setValue={(value) => setDraft({ ...draft, roomBusinessId: value })} required options={rooms.filter((item) => item.is_active || item.business_id === draft.roomBusinessId).map((item) => ({ value: item.business_id, label: identityLabel(item) }))} /><FormInput label="飞书日程账号（选填）" value={draft.calendarUserId} setValue={(value) => setDraft({ ...draft, calendarUserId: value })} /></div><div className="flex justify-end gap-2 border-t border-zinc-100 pt-4"><Button type="button" variant="outline" onClick={close}>取消</Button><Button type="submit" disabled={saving}>{saving ? "保存中" : "保存课程"}</Button></div></form></DialogContent></Dialog>;
 }
 
-function BatchCourseDialog({ open, action, selected, date, setDate, room, setRoom, rooms, saving, close, submit }: { open: boolean; action: CourseBatchAction; selected: number; date: string; setDate: (value: string) => void; room: string; setRoom: (value: string) => void; rooms: RoomResponse[]; saving: boolean; close: () => void; submit: () => void }) {
+function BatchCourseDialog({ open, action, affected, allFiltered, date, setDate, room, setRoom, rooms, saving, close, submit }: { open: boolean; action: CourseBatchAction; affected: number; allFiltered: boolean; date: string; setDate: (value: string) => void; room: string; setRoom: (value: string) => void; rooms: RoomResponse[]; saving: boolean; close: () => void; submit: () => void }) {
+  const deleting = action === "delete";
+  const [acknowledged, setAcknowledged] = useState(false);
+  // 每次重新打开都要求重新确认，不然「上次勾过」会一路带到下一次删除。
+  useEffect(() => { if (open) setAcknowledged(false); }, [open, action]);
   const title = action === "date" ? "批量修改上课日期" : action === "room" ? "批量修改授课教室" : "批量删除课程";
-  const valid = action === "delete" || action === "date" ? action === "delete" || Boolean(date) : Boolean(room);
-  return <Dialog open={open} onOpenChange={(next) => { if (!next) close(); }}><DialogContent><DialogTitle className="text-base font-semibold">{title}</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">本次将处理已选择的 {selected} 条课程。</DialogDescription><div className="mt-5">{action === "date" ? <FormInput label="新的上课日期" type="date" value={date} setValue={setDate} required /> : action === "room" ? <FormSelect label="新的授课教室" value={room} setValue={setRoom} required options={rooms.filter((item) => item.is_active).map((item) => ({ value: item.business_id, label: identityLabel(item) }))} /> : <div className="border border-red-200 bg-red-50 p-4 text-sm leading-6 text-red-900">已被课表版本或飞书日程引用的课程会被系统拦截，其余未引用课程才可以删除。</div>}</div><div className="mt-5 flex justify-end gap-2 border-t border-zinc-100 pt-4"><Button variant="outline" onClick={close}>取消</Button><Button variant={action === "delete" ? "danger" : "primary"} onClick={submit} disabled={saving || !valid}>{saving ? "处理中" : action === "delete" ? "确认批量删除" : "确认批量修改"}</Button></div></DialogContent></Dialog>;
+  const needsAck = deleting && affected > DELETE_DOUBLE_CONFIRM_THRESHOLD;
+  const valid = (deleting ? true : action === "date" ? Boolean(date) : Boolean(room)) && (!needsAck || acknowledged);
+  return <Dialog open={open} onOpenChange={(next) => { if (!next && !saving) close(); }}><DialogContent><DialogTitle className="text-base font-semibold">{title}</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">本次将{deleting ? "删除" : "修改"} <span className="font-semibold tabular-nums text-zinc-800">{affected}</span> 条课程{allFiltered ? "（当前筛选结果的全部）" : ""}。</DialogDescription><div className="mt-5 space-y-4">{action === "date" ? <FormInput label="新的上课日期" type="date" value={date} setValue={setDate} required /> : action === "room" ? <FormSelect label="新的授课教室" value={room} setValue={setRoom} required options={rooms.filter((item) => item.is_active).map((item) => ({ value: item.business_id, label: identityLabel(item) }))} /> : <div className="border border-red-200 bg-red-50 p-4 text-sm leading-6 text-red-900">将删除 {affected} 条课程，操作不可撤销。已被课表版本或飞书日程引用的课程会被系统整批拦截，其余未引用课程才可以删除。</div>}{needsAck ? <label className="flex items-start gap-2 text-sm text-red-900"><input type="checkbox" className="mt-1 size-3.5 accent-red-600" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} />我确认删除这 {affected} 条课程，且知道无法撤销。</label> : null}</div><div className="mt-5 flex justify-end gap-2 border-t border-zinc-100 pt-4"><Button variant="outline" disabled={saving} onClick={close}>取消</Button><Button variant={deleting ? "danger" : "primary"} onClick={submit} disabled={saving || !valid}>{saving ? "处理中" : deleting ? `确认删除 ${affected} 条` : `确认修改 ${affected} 条`}</Button></div></DialogContent></Dialog>;
 }
 
-function EntityBatchDialog({ open, state, selected, value, setValue, teachers, saving, close, submit }: { open: boolean; state: EntityBatchState | null; selected: number; value: string; setValue: (value: string) => void; teachers: TeacherResponse[]; saving: boolean; close: () => void; submit: () => void }) {
+function EntityBatchDialog({ open, state, selected, value, setValue, saving, close, submit }: { open: boolean; state: EntityBatchState | null; selected: number; value: string; setValue: (value: string) => void; saving: boolean; close: () => void; submit: () => void }) {
   if (!state) return null;
   const title = batchActionLabel(state.action);
   const deleting = state.action === "delete";
   const valid = deleting || state.action === "teacher-calendar" || Boolean(value);
-  return <Dialog open={open} onOpenChange={(next) => { if (!next && !saving) close(); }}><DialogContent><DialogTitle className="text-base font-semibold">{title}</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">本次将处理已选择的 {selected} 条{entityConfig(state.kind).label}记录。</DialogDescription><div className="mt-5">{deleting ? <div className="border border-red-200 bg-red-50 p-4 text-sm leading-6 text-red-900">删除前会检查课程、班级、课表版本与飞书日程引用；存在引用的记录会被拦截。</div> : state.action === "class-teacher" ? <FormSelect label="新的教师（教研组）" value={value} setValue={setValue} required options={teachers.map((item) => ({ value: item.business_id, label: identityLabel(item) }))} /> : state.action === "room-status" ? <FormSelect label="新的教室状态" value={value} setValue={setValue} required options={[{ value: "true", label: "启用" }, { value: "false", label: "停用" }]} /> : state.action === "slot-status" ? <FormSelect label="新的时段状态" value={value} setValue={setValue} required options={[{ value: "true", label: "开放" }, { value: "false", label: "关闭" }]} /> : <FormInput label={batchFieldLabel(state.action)} value={value} setValue={setValue} required={state.action !== "teacher-calendar"} />}</div><div className="mt-5 flex justify-end gap-2 border-t border-zinc-100 pt-4"><Button variant="outline" disabled={saving} onClick={close}>取消</Button><Button variant={deleting ? "danger" : "primary"} onClick={submit} disabled={saving || !valid}>{saving ? "处理中" : deleting ? "确认批量删除" : "确认批量修改"}</Button></div></DialogContent></Dialog>;
+  return <Dialog open={open} onOpenChange={(next) => { if (!next && !saving) close(); }}><DialogContent><DialogTitle className="text-base font-semibold">{title}</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">本次将{deleting ? "删除" : "修改"}已选择的 <span className="font-semibold tabular-nums text-zinc-800">{selected}</span> 条{entityConfig(state.kind).label}记录。</DialogDescription><div className="mt-5">{deleting ? <div className="border border-red-200 bg-red-50 p-4 text-sm leading-6 text-red-900">将删除 {selected} 条记录，操作不可撤销。删除前会检查课程、课表版本与飞书日程引用；存在引用的记录会被拦截。</div> : state.action === "room-status" ? <FormSelect label="新的教室状态" value={value} setValue={setValue} required options={[{ value: "true", label: "启用" }, { value: "false", label: "停用" }]} /> : state.action === "slot-status" ? <FormSelect label="新的时段状态" value={value} setValue={setValue} required options={[{ value: "true", label: "开放" }, { value: "false", label: "关闭" }]} /> : <FormInput label={batchFieldLabel(state.action)} value={value} setValue={setValue} required={state.action !== "teacher-calendar"} />}</div><div className="mt-5 flex justify-end gap-2 border-t border-zinc-100 pt-4"><Button variant="outline" disabled={saving} onClick={close}>取消</Button><Button variant={deleting ? "danger" : "primary"} onClick={submit} disabled={saving || !valid}>{saving ? "处理中" : deleting ? `确认删除 ${selected} 条` : `确认修改 ${selected} 条`}</Button></div></DialogContent></Dialog>;
+}
+
+/** 走班明细：一个班里「哪条业务线的哪种班型、上什么课、谁教、多少课次」，一行一条轨道。 */
+function ClassTracksDialog({ item, close }: { item: ClassGroupResponse | null; close: () => void }) {
+  return <Dialog open={item !== null} onOpenChange={(next) => { if (!next) close(); }}><DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
+    <DialogTitle className="text-base font-semibold">{item ? `${identityLabel(item)} · 走班明细` : "走班明细"}</DialogTitle>
+    <DialogDescription className="mt-1 text-sm text-zinc-500">同一个班里选不同课的学生走不同的轨道，教师也就不同。这里是按「业务线 × 班型 × 科目」拆开后的真实授课人。</DialogDescription>
+    <div className="mt-5">{item && item.tracks.length ? <div className="overflow-x-auto border border-zinc-200"><table className="w-full min-w-[560px] border-collapse text-left text-sm">
+      <thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="h-9 border-b border-zinc-200 px-3 font-medium">业务线</th><th className="h-9 border-b border-zinc-200 px-3 font-medium">班型</th><th className="h-9 border-b border-zinc-200 px-3 font-medium">科目</th><th className="h-9 border-b border-zinc-200 px-3 font-medium">教师</th><th className="h-9 border-b border-zinc-200 px-3 font-medium">课次数</th></tr></thead>
+      <tbody>{item.tracks.map((track) => <tr key={`${track.business_line}/${track.product_type}/${track.subject}/${track.teacher_business_id}`} className="border-b border-zinc-100 last:border-0">
+        <td className="h-10 px-3 align-middle text-zinc-700">{track.business_line || "—"}</td>
+        <td className="h-10 px-3 align-middle text-zinc-700">{track.product_type || "—"}</td>
+        <td className="h-10 px-3 align-middle text-zinc-700">{track.subject || "—"}</td>
+        <td className="h-10 px-3 align-middle text-zinc-700">{track.teacher_business_id || "—"}</td>
+        <td className="h-10 px-3 align-middle tabular-nums text-zinc-700">{track.session_count}</td>
+      </tr>)}</tbody>
+    </table></div> : <p className="border border-zinc-200 bg-zinc-50 p-4 text-sm leading-6 text-zinc-500">这个班暂无课次，所以没有班型、教师和走班轨道。导入课表或新增课程场次后会自动出现。</p>}</div>
+    <div className="mt-5 flex justify-end border-t border-zinc-100 pt-4"><Button variant="outline" onClick={close}>关闭</Button></div>
+  </DialogContent></Dialog>;
 }
 
 function FormInput({ label, value, setValue, type = "text", required = false, min }: { label: string; value: string; setValue: (value: string) => void; type?: string; required?: boolean; min?: string }) {
@@ -794,6 +889,19 @@ function identityLabel(item: { business_id: string; name: string }) {
   return item.name === item.business_id ? item.name : `${item.name}（${item.business_id}）`;
 }
 
+/**
+ * 没有任何课次的班级，聚合出来的班型/教师/科目全是空数组。这不是数据丢了，
+ * 是这个班还没排课——必须显式说出来，否则和「后端漏字段」长得一模一样。
+ */
+function emptyClassHint(item: ClassGroupResponse) {
+  return item.session_count === 0 ? <span className="text-zinc-400">暂无课次</span> : "—";
+}
+
+function TracksButton({ item, onOpen }: { item: ClassGroupResponse; onOpen: () => void }) {
+  if (!item.tracks.length) return <span className="block w-20 truncate text-zinc-300">—</span>;
+  return <button type="button" className="w-20 truncate text-left text-xs text-blue-600 hover:underline" onClick={onOpen} title="查看这个班每门课分别由谁上">{item.tracks.length} 条轨道</button>;
+}
+
 function IdentityValue({ item, className }: { item: { business_id: string; name: string }; className?: string }) {
   if (item.name === item.business_id) return <span className={cn("block truncate", className)} title={item.name}>{item.name}</span>;
   return <div className={cn("min-w-0", className)}><div className="truncate" title={item.name}>{item.name}</div><div className="truncate font-mono text-[11px] text-zinc-400" title={item.business_id}>{item.business_id}</div></div>;
@@ -807,17 +915,18 @@ function RowActions({ editLabel, editTitle, onEdit, deleting, onDelete }: { edit
   return <div className="flex items-center gap-1"><Button size="icon" variant="ghost" aria-label={editLabel} title={editTitle ?? editLabel} onClick={onEdit}><Pencil className="size-3.5 text-blue-600" /></Button><DeleteButton disabled={deleting} onClick={onDelete} /></div>;
 }
 
-function EntityToolbar({ label, total, filtered, selected, offFilter, onSelectAll, onClearSelection, search, setSearch, readOnly, onAdd, disabled, actions, onBatch }: { label: string; total: number; filtered: number; selected: number; offFilter: number; onSelectAll: () => void; onClearSelection: () => void; search: string; setSearch: (value: string) => void; readOnly: boolean; onAdd: () => void; disabled: boolean; actions: Array<{ label: string; action: EntityBatchAction }>; onBatch: (action: EntityBatchAction) => void }) {
+function EntityToolbar({ label, total, filtered, selected, offFilter, onSelectAll, onClearSelection, search, setSearch, readOnly, onAdd, disabled, actions, onBatch, note }: { label: string; total: number; filtered: number; selected: number; offFilter: number; onSelectAll: () => void; onClearSelection: () => void; search: string; setSearch: (value: string) => void; readOnly: boolean; onAdd: () => void; disabled: boolean; actions: Array<{ label: string; action: EntityBatchAction }>; onBatch: (action: EntityBatchAction) => void; note?: string }) {
   const overLimit = selected > BATCH_LIMIT;
   return <div className="mb-3 space-y-3 border border-zinc-200 bg-white p-3">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-zinc-500">
         <label className="relative"><Search className="absolute left-2.5 top-2 size-3.5 text-zinc-400" /><input aria-label={`搜索${label}`} className={`${compactInputClass} w-64 max-w-full pl-8`} value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`搜索${label}标签或属性`} /></label>
         <span className="tabular-nums">筛选 {filtered} / {total} 条</span>
-        {!readOnly ? <SelectionControls selected={selected} filtered={filtered} offFilter={offFilter} onSelectAll={onSelectAll} onClear={onClearSelection} /> : null}
+        {!readOnly ? <SelectionControls selected={selected} filtered={filtered} allFiltered={filtered > 0 && selected === filtered && offFilter === 0} offFilter={offFilter} onSelectAll={onSelectAll} onClear={onClearSelection} /> : null}
       </div>
       {readOnly ? <span className="text-xs text-zinc-400">成员账号为只读视图</span> : <div className="flex flex-wrap gap-2">{actions.map((item) => <Button key={item.action} size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch(item.action)}>{item.label}</Button>)}<Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd} disabled={disabled}><Plus className="size-3.5" />新增{label}</Button></div>}
     </div>
+    {note ? <p className="text-xs leading-5 text-zinc-500">{note}</p> : null}
     {overLimit ? <BatchLimitNotice selected={selected} /> : null}
   </div>;
 }
@@ -858,18 +967,13 @@ function batchActionLabel(action: EntityBatchAction) {
   if (action === "delete") return "批量删除";
   if (action === "teacher-subject") return "批量修改学科";
   if (action === "teacher-calendar") return "批量修改飞书日程账号";
-  if (action === "class-line") return "批量修改业务线";
-  if (action === "class-type") return "批量修改班型";
-  if (action === "class-teacher") return "批量修改教师（教研组）";
   if (action === "room-status") return "批量修改教室状态";
   return "批量修改时段状态";
 }
 
 function batchFieldLabel(action: EntityBatchAction) {
-  if (action === "teacher-subject") return "新的学科";
   if (action === "teacher-calendar") return "新的飞书日程账号（留空可清除）";
-  if (action === "class-line") return "新的业务线";
-  return "新的班型";
+  return "新的学科";
 }
 
 function ImportReportPanel({ report, onDismiss }: { report: ImportResult; onDismiss: () => void }) {

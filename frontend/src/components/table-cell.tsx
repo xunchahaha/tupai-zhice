@@ -4,6 +4,40 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "@/lib/cn";
 
 /**
+ * 多值单元格。一个班级会同时有多个班型、多个教师（走班制下这是常态，不是脏数据），
+ * 单值显示会直接丢信息。
+ *
+ * 列宽固定、展开也只在列内换行：展开靠增加行高而不是撑宽表格——表格外层是
+ * overflow-x-auto，绝对定位的浮层会被裁掉，所以不用弹层。
+ * 未展开时完整清单挂在 title 上，悬停即可看全。
+ */
+export function TagList({ values, className, visible = 2, empty = "—" }: { values: string[]; className?: string; visible?: number; empty?: ReactNode }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!values.length) return <span className={cn("block truncate text-zinc-300", className)}>{empty}</span>;
+  const shown = expanded ? values : values.slice(0, visible);
+  const hidden = values.length - shown.length;
+  const full = values.join("、");
+  return (
+    <div className={cn("flex flex-wrap items-center gap-1 whitespace-normal py-0.5", className)} title={full}>
+      {shown.map((value) => (
+        <span key={value} className="max-w-full truncate rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] leading-4 text-zinc-700">{value}</span>
+      ))}
+      {hidden > 0 || expanded ? (
+        <button
+          type="button"
+          className="shrink-0 rounded px-1 text-[11px] leading-4 text-blue-600 hover:bg-blue-50"
+          aria-expanded={expanded}
+          title={full}
+          onClick={() => setExpanded((open) => !open)}
+        >
+          {expanded ? "收起" : `+${hidden}`}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * 表头文字。表格用的是自动列宽，表头默认可换行，中文表头在窄列里会被挤成
  * 「一行一个字」的竖排；这里强制不换行，让列的最小宽度至少容纳完整表头。
  */

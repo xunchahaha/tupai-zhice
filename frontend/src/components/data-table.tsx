@@ -1,9 +1,22 @@
 import { type ColumnDef, flexRender, getCoreRowModel, getPaginationRowModel, getSortedRowModel, type RowSelectionState, useReactTable } from "@tanstack/react-table";
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsUpDown } from "lucide-react";
+import { useEffect, useRef } from "react";
 
 import { cn } from "@/lib/cn";
 
 const PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500];
+
+/**
+ * 表头三态复选框。原生 checkbox 的 indeterminate 只能用 DOM 属性设置，
+ * 没有它就分不清「全选了」和「选了一部分」。
+ */
+function HeaderCheckbox({ checked, indeterminate, onChange }: { checked: boolean; indeterminate: boolean; onChange: (event: React.ChangeEvent<HTMLInputElement>) => void }) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = indeterminate && !checked;
+  }, [checked, indeterminate]);
+  return <input ref={ref} aria-label="选择全部筛选结果" type="checkbox" className="size-3.5 align-middle accent-blue-600" checked={checked} onChange={onChange} />;
+}
 
 interface DataTableProps<T> {
   columns: ColumnDef<T>[];
@@ -31,7 +44,10 @@ export function DataTable<T>({
   const tableColumns: ColumnDef<T>[] = selectable ? [
     {
       id: "select",
-      header: ({ table }) => <input aria-label="选择当前页全部记录" type="checkbox" className="size-3.5 align-middle accent-blue-600" checked={table.getIsAllPageRowsSelected()} onChange={table.getToggleAllPageRowsSelectedHandler()} />,
+      // 刻意用 all rows 而不是 all page rows：传进来的 data 就是「当前筛选结果」，
+      // 所以表头复选框与工具栏的「全选筛选结果」按钮是同一个语义。
+      // 否则会出现「按钮选了两万条、点表头只取消当前页 50 条」这种对不上的行为。
+      header: ({ table }) => <HeaderCheckbox checked={table.getIsAllRowsSelected()} indeterminate={table.getIsSomeRowsSelected()} onChange={table.getToggleAllRowsSelectedHandler()} />,
       cell: ({ row }) => <input aria-label="选择记录" type="checkbox" className="size-3.5 align-middle accent-blue-600" checked={row.getIsSelected()} onChange={row.getToggleSelectedHandler()} />,
       enableSorting: false,
       size: 36,
