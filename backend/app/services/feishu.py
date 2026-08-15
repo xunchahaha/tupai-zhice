@@ -513,8 +513,10 @@ class FeishuService:
 
     @staticmethod
     def _needs_reauthorization(error_code: int | str | None) -> bool:
+        if error_code is None:
+            return False
         try:
-            return int(error_code) in _REAUTHORIZATION_REQUIRED_ERROR_CODES
+            return int(str(error_code)) in _REAUTHORIZATION_REQUIRED_ERROR_CODES
         except (TypeError, ValueError):
             return False
 
