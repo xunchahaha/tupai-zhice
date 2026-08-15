@@ -282,6 +282,71 @@ def test_refresh_rotates_refresh_token_atomically(
         assert cipher.decrypt(connection.refresh_token_encrypted) == "user-refresh-2"
 
 
+def test_connection_status_requires_reauthorization_when_scope_grant_is_stale(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: Any,
+) -> None:
+    configure_feishu(monkeypatch)
+    complete_authorization(client, auth_headers, monkeypatch)
+    with SessionLocal() as db:
+        connection = db.scalar(select(FeishuConnection))
+        assert connection is not None
+        connection.scopes = [
+            scope
+            for scope in connection.scopes
+            if scope not in {"base:field:read", "bitable:app:readonly"}
+        ]
+        db.commit()
+
+    status = client.get("/api/v1/integrations/feishu/connection", headers=auth_headers)
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["status"] == "reauthorization_required"
+    assert payload["authorized"] is False
+    assert {"base:field:read", "bitable:app:readonly"} <= set(payload["missing_scopes"])
+    assert "重新授权管理员账号" in payload["message"]
+
+
+def test_remote_99991679_marks_user_connection_for_reauthorization(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: Any,
+) -> None:
+    configure_feishu(monkeypatch)
+    complete_authorization(client, auth_headers, monkeypatch)
+    with SessionLocal() as db:
+        admin = db.scalar(select(User).where(User.username == "admin"))
+        assert admin is not None
+        service = FeishuService(settings, db)
+        connection, token = service.access_token(admin.id)
+
+        def unauthorized_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            del kwargs
+            return httpx.Response(
+                400,
+                json={
+                    "code": 99991679,
+                    "msg": "Unauthorized. Please request user re-authorization",
+                },
+                request=httpx.Request(method, url),
+            )
+
+        monkeypatch.setattr("app.services.feishu.httpx.request", unauthorized_request)
+        with pytest.raises(FeishuServiceError, match="99991679") as raised:
+            service._request(
+                "GET",
+                "https://open.feishu.cn/open-apis/bitable/v1/apps/app",
+                token=token,
+            )
+        assert raised.value.reauthorization_required is True
+        assert connection.status == "reauthorization_required"
+        db.refresh(connection)
+        assert connection.status == "reauthorization_required"
+        assert connection.last_error is not None
+        assert "99991679" in connection.last_error
+
+
 def test_auto_create_workspace_and_sync_idempotently(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -501,10 +566,12 @@ def test_sync_preflight_adopts_existing_table_and_adds_only_missing_fields(
             scopes=[
                 "base:record:create",
                 "base:record:retrieve",
-                "base:record:update",
-                "base:table:read",
-                "base:table:update",
-            ],
+                    "base:record:update",
+                    "base:table:read",
+                    "base:table:update",
+                    "base:field:read",
+                    "bitable:app:readonly",
+                ],
             status="active",
         )
         db.add(connection)

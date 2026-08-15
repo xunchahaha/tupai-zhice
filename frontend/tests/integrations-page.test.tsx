@@ -230,6 +230,9 @@ describe("飞书生产接入页", () => {
       authorized: true,
       granted_scopes: [
         "offline_access",
+        "base:table:read",
+        "base:field:read",
+        "bitable:app:readonly",
         "base:record:create",
         "base:record:retrieve",
         "base:record:update",
@@ -265,5 +268,23 @@ describe("飞书生产接入页", () => {
     await user.selectOptions(screen.getByLabelText("同步资源"), "teachers");
     await user.click(screen.getByRole("button", { name: "重试单表" }));
     expect(mocks.sync).toHaveBeenCalledWith({ data: { resource: "teachers" } });
+  });
+
+  it("旧用户令牌缺少新增权限时显示重新授权动作", async () => {
+    mocks.connection.current = {
+      ...baseConnection,
+      status: "reauthorization_required",
+      authorized: false,
+      missing_scopes: ["base:field:read", "bitable:app:readonly"],
+      message: "当前飞书用户令牌缺少同步所需权限，请重新授权管理员账号。",
+    };
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByText(/飞书用户授权已过期或缺少当前同步所需权限/)).toBeVisible();
+    const reauthorizeButtons = screen.getAllByRole("button", { name: "重新授权管理员账号" });
+    expect(reauthorizeButtons.length).toBeGreaterThanOrEqual(1);
+    await user.click(reauthorizeButtons[0]);
+    expect(mocks.startAuthorization).toHaveBeenCalledTimes(1);
   });
 });

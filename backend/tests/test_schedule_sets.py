@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.api import export_resource_rows, settings
+from app.config import FEISHU_REQUIRED_SCOPES
 from app.db import SessionLocal
 from app.models import (
     Campus,
@@ -315,8 +316,8 @@ def test_schedule_set_visibility_and_per_set_operation_permissions(
             user_id=user_a,
             access_token_encrypted="encrypted-access",
             refresh_token_encrypted="encrypted-refresh",
-            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
-            scopes=[],
+                access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+                scopes=list(FEISHU_REQUIRED_SCOPES),
             status="active",
         )
         db.add(connection)

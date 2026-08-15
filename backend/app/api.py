@@ -9,12 +9,11 @@ import tempfile
 import time as time_module
 from collections import Counter
 from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 from typing import cast as type_cast
 from urllib.parse import urlencode
-from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import (
@@ -65,7 +64,6 @@ from .models import (
     Teacher,
     TimeSlot,
     User,
-    utcnow,
 )
 from .schemas import (
     AilyContextResponse,
@@ -168,6 +166,7 @@ from .services.feishu import FeishuService, FeishuServiceError, json_text
 from .services.snapshot import create_snapshot
 from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
 from .services.xlsx_io import export_schedule_xlsx
+from .timezone import SHANGHAI_TZ, as_shanghai, as_utc, shanghai_now
 
 logger = logging.getLogger("tupai.feishu")
 
@@ -181,12 +180,13 @@ WriteResult = TypeVar("WriteResult")
 
 
 def _aware_utc(value: datetime) -> datetime:
-    return value if value.tzinfo else value.replace(tzinfo=UTC)
+    normalized = as_utc(value)
+    assert normalized is not None
+    return normalized
 
 
 settings = get_settings()
 router = APIRouter(prefix=settings.api_prefix)
-SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 Db = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminOrScheduler = Annotated[User, Depends(require_roles("admin", "scheduler"))]
@@ -494,7 +494,7 @@ def schedule_response(db: Session, schedule: ScheduleVersion) -> ScheduleRespons
 @router.post("/auth/token", response_model=TokenResponse, tags=["auth"])
 def login(form: Annotated[OAuth2PasswordRequestForm, Depends()], db: Db) -> TokenResponse:
     user = db.scalar(select(User).where(User.username == form.username))
-    now = utcnow()
+    now = shanghai_now()
     if user and user.locked_until and _aware_utc(user.locked_until) > now:
         remaining = int((_aware_utc(user.locked_until) - now).total_seconds() // 60) + 1
         raise HTTPException(
@@ -899,7 +899,7 @@ def reset_user_password(user_id: str, payload: UserPasswordReset, db: Db, user: 
     target = get_or_404(db, User, user_id)
     target.password_hash = hash_password(payload.password)
     # 重置密码必须让该账号手里的旧令牌立即失效。
-    target.password_changed_at = utcnow()
+    target.password_changed_at = shanghai_now()
     target.token_version += 1
     target.failed_login_count = 0
     target.locked_until = None
@@ -916,7 +916,7 @@ def change_own_password(payload: PasswordChange, db: Db, user: CurrentUser) -> R
     if payload.current_password == payload.new_password:
         raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
     user.password_hash = hash_password(payload.new_password)
-    user.password_changed_at = utcnow()
+    user.password_changed_at = shanghai_now()
     user.token_version += 1
     audit(db, user, "change_password", "user", user.id, {"username": user.username})
     db.commit()
@@ -1936,7 +1936,7 @@ def batch_update_course_sessions(
         db.execute(
             update(CourseSession)
             .where(*criteria)
-            .values(**changes, updated_at=utcnow())
+            .values(**changes, updated_at=shanghai_now())
             .execution_options(synchronize_session=False)
         )
     audit(
@@ -2789,7 +2789,7 @@ def publish_schedule(
         published.status = "archived"
     schedule.status = "published"
     schedule.approved_by = user.id
-    schedule.published_at = utcnow()
+    schedule.published_at = shanghai_now()
     audit(
         db,
         user,
@@ -2831,7 +2831,7 @@ def rollback_schedule(
         published.status = "rolled_back"
     target.status = "published"
     target.approved_by = user.id
-    target.published_at = utcnow()
+    target.published_at = shanghai_now()
     audit(
         db,
         user,
@@ -3542,7 +3542,9 @@ def complete_feishu_oauth(
     actor = db.get(User, connection.user_id)
     audit(db, actor, "connect", "feishu", connection.id)
     db.commit()
-    query = urlencode({"feishu": "connected"})
+    query = urlencode(
+        {"feishu": "connected" if connection.status == "active" else "reauthorization_required"}
+    )
     return RedirectResponse(f"{frontend}/integrations?{query}")
 
 
@@ -3733,7 +3735,8 @@ def _public_projection_updated_at(schedule: ScheduleVersion | None) -> str:
     visible update time should be stable for that release as well.
     """
 
-    return schedule.published_at.isoformat() if schedule and schedule.published_at else ""
+    published_at = as_shanghai(schedule.published_at) if schedule else None
+    return published_at.isoformat() if published_at else ""
 
 
 def _public_class_schedule_rows(
@@ -4138,9 +4141,7 @@ def export_resource_rows(
             {
                 "业务标识": "published_at",
                 "指标名称": "发布时间",
-                "指标值": published.published_at.isoformat()
-                if published and published.published_at
-                else "",
+                "指标值": _public_projection_updated_at(published),
                 "月份": "",
                 "产品线匿名标签": "",
                 "更新时间": updated_at,
@@ -4222,6 +4223,7 @@ def _sync_detail(
     trigger: str,
     schedule_set_id: str,
     error: str | None = None,
+    reauthorization_required: bool = False,
 ) -> dict[str, Any]:
     """Keep every resource result self-describing in the sync history."""
     detail = {
@@ -4231,6 +4233,8 @@ def _sync_detail(
     }
     if error:
         detail["error"] = error
+    if reauthorization_required:
+        detail["reauthorization_required"] = True
     return detail
 
 
@@ -4253,6 +4257,7 @@ def sync_feishu_resources(
     service = FeishuService(settings, db)
     syncs: list[IntegrationSync] = []
     preflight_error: str | None = None
+    preflight_reauthorization_required = False
     try:
         # Inspect the existing Base once for this batch.  It adopts matching
         # tables, adds only missing tables/fields, and caches the result for
@@ -4267,6 +4272,9 @@ def sync_feishu_resources(
         # Still persist one readable result per requested resource; a batch
         # should not vanish merely because its readiness check failed.
         preflight_error = str(exc)
+        preflight_reauthorization_required = (
+            isinstance(exc, FeishuServiceError) and exc.reauthorization_required
+        )
     for resource in resources:
         sync = IntegrationSync(
             schedule_set_id=schedule_set_id,
@@ -4281,7 +4289,10 @@ def sync_feishu_resources(
         db.commit()
         try:
             if preflight_error is not None:
-                raise FeishuServiceError(preflight_error)
+                raise FeishuServiceError(
+                    preflight_error,
+                    reauthorization_required=preflight_reauthorization_required,
+                )
             rows = export_resource_rows(db, resource, schedule_set_id)
             # Materialize rows before remote I/O and release the read
             # transaction as well; rollback/role changes can then commit while
@@ -4315,6 +4326,9 @@ def sync_feishu_resources(
                 trigger=trigger,
                 schedule_set_id=schedule_set_id,
                 error=str(exc),
+                reauthorization_required=(
+                    isinstance(exc, FeishuServiceError) and exc.reauthorization_required
+                ),
             )
         except Exception as exc:  # An unexpected failure must not discard other results.
             logger.exception(
@@ -4524,6 +4538,9 @@ def feishu_sync(
             trigger="single_resource",
             schedule_set_id=scope.id,
             error=str(exc),
+            reauthorization_required=(
+                isinstance(exc, FeishuServiceError) and exc.reauthorization_required
+            ),
         )
         audit(db, user, "sync", "feishu", sync.id, sync.detail)
         db.commit()

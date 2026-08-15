@@ -29,6 +29,13 @@ FEISHU_REQUIRED_SCOPES = (
     "base:table:create",
     "base:table:read",
     "base:table:update",
+    # The reconciliation preflight reads existing table columns before it
+    # decides whether a schema repair is necessary.  Feishu's user-identity
+    # error 99991679 names these grants (the endpoint accepts one of the
+    # Bitable read variants); requesting both lets the UI detect stale grants
+    # deterministically after an app version is published.
+    "base:field:read",
+    "bitable:app:readonly",
     "base:record:create",
     "base:record:retrieve",
     "base:record:update",

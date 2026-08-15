@@ -66,6 +66,9 @@ const publicDisplayResources = [
 
 // 第 5 步只写飞书多维表格；日历和 Aily 权限缺失不应把同步按钮置灰。
 const bitableSyncScopes = [
+  "base:table:read",
+  "base:field:read",
+  "bitable:app:readonly",
   "base:record:create",
   "base:record:retrieve",
   "base:record:update",
@@ -89,6 +92,8 @@ const permissionLabels: Record<string, string> = {
   "base:table:create": "新增数据表",
   "base:table:read": "获取数据表信息",
   "base:table:update": "更新数据表",
+  "base:field:read": "读取数据表字段",
+  "bitable:app:readonly": "读取多维表格应用与字段",
   "base:record:create": "新增记录",
   "base:record:retrieve": "根据条件搜索记录",
   "base:record:update": "更新记录",
@@ -123,6 +128,7 @@ export function IntegrationsPage() {
   const [aiModel, setAiModel] = useState("");
   const [editingAI, setEditingAI] = useState(false);
   const [batchResult, setBatchResult] = useState<FeishuBatchSyncResponse | null>(null);
+  const [syncReauthorizationPrompt, setSyncReauthorizationPrompt] = useState(false);
 
   const refresh = async () => {
     await Promise.all([connection.refetch(), syncs.refetch(), aiConfiguration.refetch()]);
@@ -132,6 +138,14 @@ export function IntegrationsPage() {
       queryKey: getFeishuConnectionApiV1IntegrationsFeishuConnectionGetQueryKey(),
     });
   }, [queryClient]);
+  const handleFeishuActionError = useCallback(async (error: unknown) => {
+    const message = errorMessage(error);
+    toast.error(message);
+    if (requiresFeishuReauthorization(message)) {
+      setSyncReauthorizationPrompt(true);
+    }
+    await refreshConnection();
+  }, [refreshConnection]);
 
   const authorize = useStartFeishuOauthApiV1IntegrationsFeishuOauthStartPost({
     mutation: {
@@ -158,7 +172,7 @@ export function IntegrationsPage() {
         await refreshConnection();
         setGuideStep(4);
       },
-      onError: (error) => toast.error(errorMessage(error)),
+      onError: handleFeishuActionError,
     },
   });
   const disconnect = useDisconnectFeishuApiV1IntegrationsFeishuConnectionDelete({
@@ -183,7 +197,7 @@ export function IntegrationsPage() {
         });
       },
       onError: async (error) => {
-        toast.error(errorMessage(error));
+        await handleFeishuActionError(error);
         await queryClient.invalidateQueries({
           queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey(),
         });
@@ -194,6 +208,9 @@ export function IntegrationsPage() {
     mutation: {
       onSuccess: async (data) => {
         setBatchResult(data);
+        if (batchRequiresFeishuReauthorization(data)) {
+          setSyncReauthorizationPrompt(true);
+        }
         const skipped = batchSkippedCount(data);
         if (data.failed_count === 0) {
           toast.success(skipped
@@ -205,9 +222,10 @@ export function IntegrationsPage() {
         await queryClient.invalidateQueries({
           queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey(),
         });
+        await refreshConnection();
       },
       onError: async (error) => {
-        toast.error(errorMessage(error));
+        await handleFeishuActionError(error);
         await queryClient.invalidateQueries({
           queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey(),
         });
@@ -236,6 +254,7 @@ export function IntegrationsPage() {
     const params = new URLSearchParams(window.location.search);
     const result = params.get("feishu");
     if (result === "connected") toast.success("飞书管理员账号授权成功");
+    if (result === "reauthorization_required") toast.warning("飞书授权未包含最新权限，请在开放平台发布版本后重新授权");
     if (result === "error") toast.error("飞书授权未完成，请重新发起授权");
     if (result === "cancelled") toast.info("已取消飞书授权");
     if (result) {
@@ -277,7 +296,14 @@ export function IntegrationsPage() {
   // 顶栏切换课表方案会重新获取连接状态；不要把上一套方案的一键结果留在当前页。
   useEffect(() => {
     setBatchResult(null);
+    setSyncReauthorizationPrompt(false);
   }, [connection.data?.workspace?.id]);
+
+  useEffect(() => {
+    if (connection.data?.status !== "reauthorization_required") {
+      setSyncReauthorizationPrompt(false);
+    }
+  }, [connection.data?.status]);
 
   useEffect(() => {
     if (!aiConfiguration.data) return;
@@ -478,12 +504,21 @@ export function IntegrationsPage() {
               </div>
             ) : (
               <div className="space-y-3">
+                {status.status === "reauthorization_required" ? (
+                  <div className="border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs leading-5 text-red-900">
+                    飞书用户授权已过期或缺少当前同步所需权限。请先在飞书开放平台发布最新权限版本，再点击下方按钮重新授权管理员账号。
+                  </div>
+                ) : null}
                 <Button
                   onClick={() => authorize.mutate()}
                   disabled={!status.app_configured || authorize.isPending}
                 >
                   <ShieldCheck className="size-4" />
-                  {authorize.isPending ? "正在跳转" : "授权飞书管理员账号"}
+                  {authorize.isPending
+                    ? "正在跳转"
+                    : status.status === "reauthorization_required"
+                      ? "重新授权管理员账号"
+                      : "授权飞书管理员账号"}
                 </Button>
                 {status.missing_scopes.length > 0 ? (
                   <PermissionWarning scopes={status.missing_scopes} />
@@ -571,7 +606,19 @@ export function IntegrationsPage() {
                 <ul className="mt-1 list-disc pl-4">{syncBlockers.map((item) => <li key={item}>{item}</li>)}</ul>
               </div>
             ) : <p className="mt-2 text-xs text-emerald-700">连接已就绪：一键同步只写入顶栏当前所选方案绑定的独立多维表格。</p>}
-            {batchResult ? <BatchSyncResult result={batchResult} /> : null}
+            {(syncReauthorizationPrompt || status.status === "reauthorization_required") ? (
+              <FeishuReauthorizationAction
+                authorize={() => authorize.mutate()}
+                authorizing={authorize.isPending}
+              />
+            ) : null}
+            {batchResult ? (
+              <BatchSyncResult
+                result={batchResult}
+                authorize={() => authorize.mutate()}
+                authorizing={authorize.isPending}
+              />
+            ) : null}
           </FlowStep>
 
           <FlowStep
@@ -971,7 +1018,7 @@ function PermissionList() {
 function PermissionWarning({ scopes }: { scopes: string[] }) {
   return (
     <div className="border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-      尚缺权限：{scopes.map((scope) => permissionLabels[scope] ?? scope).join("、")}。请在开放平台补充权限并重新发布应用版本。
+      尚缺权限：{scopes.map((scope) => permissionLabels[scope] ?? scope).join("、")}。请在开放平台补充权限、发布最新应用版本，再重新授权管理员账号。
     </div>
   );
 }
@@ -1026,11 +1073,39 @@ function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string;
   );
 }
 
-function BatchSyncResult({ result }: { result: FeishuBatchSyncResponse }) {
+function FeishuReauthorizationAction({
+  authorize,
+  authorizing,
+}: {
+  authorize: () => void;
+  authorizing: boolean;
+}) {
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-3 border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs leading-5 text-red-900">
+      <span>同步未开始或被飞书拒绝：当前用户授权已过期或缺少权限。发布应用权限后，请重新授权。</span>
+      <Button size="sm" variant="outline" onClick={authorize} disabled={authorizing}>
+        <ShieldCheck className="size-3.5" />{authorizing ? "正在跳转" : "重新授权管理员账号"}
+      </Button>
+    </div>
+  );
+}
+
+function BatchSyncResult({
+  result,
+  authorize,
+  authorizing,
+}: {
+  result: FeishuBatchSyncResponse;
+  authorize: () => void;
+  authorizing: boolean;
+}) {
   const skipped = batchSkippedCount(result);
+  const reauthorizationRequired = batchRequiresFeishuReauthorization(result);
   const summary = result.failed_count === 0
     ? `已完成 ${result.completed_count} 类数据同步，共写入 ${result.records_written} 条记录${skipped ? `，跳过 ${skipped} 条未变更记录` : ""}。`
-    : `${result.completed_count} 类已完成，${result.failed_count} 类待处理；可用下方“重试单表”处理失败项。`;
+    : reauthorizationRequired
+      ? `飞书拒绝了同步所需的用户授权；重新授权后再执行同步。`
+      : `${result.completed_count} 类已完成，${result.failed_count} 类待处理；可用下方“重试单表”处理失败项。`;
   return (
     <div aria-live="polite" className="mt-3 border border-zinc-200 bg-zinc-50 p-3 text-sm">
       <div className="flex flex-wrap items-center gap-2"><span className="font-medium">本次一键同步</span><Badge tone={statusTone(result.status)}>{statusLabel(result.status)}</Badge><span className="text-xs text-zinc-500">{summary}</span></div>
@@ -1044,6 +1119,7 @@ function BatchSyncResult({ result }: { result: FeishuBatchSyncResponse }) {
           </div>
         ))}
       </div>
+      {reauthorizationRequired ? <FeishuReauthorizationAction authorize={authorize} authorizing={authorizing} /> : null}
     </div>
   );
 }
@@ -1196,10 +1272,11 @@ function GuideAuthorize({ status, authorize, authorizing }: { status: FeishuConn
   if (status.authorized) return <GuideCompleted title="管理员账号已经授权" text="可以进入下一步创建排课多维表格。" />;
   return (
     <div className="space-y-4">
-      <p className="text-sm leading-6 text-zinc-700">点击后将前往飞书授权页。确认权限后，飞书会自动返回途排智策。</p>
+      <p className="text-sm leading-6 text-zinc-700">{status.status === "reauthorization_required" ? "当前用户授权已过期或缺少权限。请先在飞书开放平台发布最新权限版本，再重新授权。" : "点击后将前往飞书授权页。确认权限后，飞书会自动返回途排智策。"}</p>
       <Button onClick={authorize} disabled={!status.app_configured || authorizing}>
-        <ShieldCheck className="size-4" />{authorizing ? "正在跳转" : "授权飞书管理员账号"}
+        <ShieldCheck className="size-4" />{authorizing ? "正在跳转" : status.status === "reauthorization_required" ? "重新授权管理员账号" : "授权飞书管理员账号"}
       </Button>
+      {status.missing_scopes.length > 0 ? <PermissionWarning scopes={status.missing_scopes} /> : null}
       {!status.app_configured ? <p className="text-xs text-amber-700">请先完成上一页的应用配置。</p> : null}
     </div>
   );
@@ -1279,6 +1356,21 @@ function batchSkippedCount(result: FeishuBatchSyncResponse): number {
 function detailError(detail: Record<string, unknown>): string | null {
   const value = detail.error;
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function requiresFeishuReauthorization(message: string): boolean {
+  return message.includes("99991679")
+    || message.includes("重新授权")
+    || message.includes("授权缺少权限")
+    || message.includes("授权已经失效");
+}
+
+function batchRequiresFeishuReauthorization(result: FeishuBatchSyncResponse): boolean {
+  return result.results.some((item) => {
+    if (item.detail.reauthorization_required === true) return true;
+    const error = detailError(item.detail);
+    return error ? requiresFeishuReauthorization(error) : false;
+  });
 }
 
 function duplicateCleanupMessage(detail: Record<string, unknown>): string | null {

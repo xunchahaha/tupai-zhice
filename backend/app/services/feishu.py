@@ -33,6 +33,7 @@ from ..models import (
     FeishuTableBinding,
     FeishuWorkspace,
 )
+from ..timezone import as_shanghai
 
 AUTHORIZATION_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
 TOKEN_URL = "https://accounts.feishu.cn/oauth/v3/token"
@@ -47,6 +48,10 @@ SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
 SYNC_RETRY_ATTEMPTS = 2
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 _RETRYABLE_FEISHU_ERROR_CODES = frozenset({1254290, 1255001, 1255002})
+# Feishu returns this code when the user_access_token has not received a
+# newly published user-identity scope.  Refreshing the page/token cannot add
+# scopes; the account must go through OAuth again.
+_REAUTHORIZATION_REQUIRED_ERROR_CODES = frozenset({99991679})
 _refresh_locks: dict[str, threading.Lock] = {}
 _refresh_locks_guard = threading.Lock()
 logger = logging.getLogger(__name__)
@@ -211,7 +216,18 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
 
 
 class FeishuServiceError(RuntimeError):
-    pass
+    """A user-facing Feishu integration error with optional API metadata."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: int | str | None = None,
+        reauthorization_required: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.reauthorization_required = reauthorization_required
 
 
 _ZERO_WIDTH_KEY_CHARACTERS = "\ufeff\u200b\u200c\u200d\u2060"
@@ -314,6 +330,11 @@ class FeishuService:
             tuple[str, str, str | None], tuple[FeishuWorkspace, FeishuConnection, str]
         ] = {}
         self._ready_table_ids: dict[tuple[str, str], str] = {}
+        # ``_request`` is intentionally shared by OAuth, Bitable and calendar
+        # calls.  Keep the user connection for each request-local token so a
+        # remote 99991679 can immediately turn the visible connection state
+        # into "needs reauthorization" without special cases at every caller.
+        self._token_connections: dict[str, FeishuConnection] = {}
 
     def _cipher(self) -> TokenCipher:
         key = self.settings.feishu_token_encryption_key.strip()
@@ -490,6 +511,37 @@ class FeishuService:
     def _request_log_id(response: httpx.Response) -> str | None:
         return response.headers.get("x-tt-logid") or response.headers.get("x-request-id")
 
+    @staticmethod
+    def _needs_reauthorization(error_code: int | str | None) -> bool:
+        try:
+            return int(error_code) in _REAUTHORIZATION_REQUIRED_ERROR_CODES
+        except (TypeError, ValueError):
+            return False
+
+    def _remember_access_token(self, connection: FeishuConnection, token: str) -> str:
+        self._token_connections[token] = connection
+        return token
+
+    def _mark_reauthorization_required(self, connection: FeishuConnection, reason: str) -> None:
+        """Persist a recoverable OAuth state after expiry or scope rejection."""
+
+        connection.status = "reauthorization_required"
+        connection.last_error = reason
+        self.db.commit()
+
+    def _mark_token_reauthorization_if_needed(
+        self, token: str | None, error: FeishuServiceError
+    ) -> None:
+        if not token or not error.reauthorization_required:
+            return
+        connection = self._token_connections.get(token)
+        if connection is None:
+            return
+        self._mark_reauthorization_required(
+            connection,
+            "飞书返回 99991679：当前用户令牌没有所需权限，请重新授权管理员账号。",
+        )
+
     def _request(
         self,
         method: str,
@@ -547,9 +599,14 @@ class FeishuService:
                         or payload.get("error")
                         or "接口返回错误"
                     )
-                    raise FeishuServiceError(
-                        f"飞书接口请求失败（HTTP {response.status_code}，错误码 {code}）：{message}"
+                    error = FeishuServiceError(
+                        f"飞书接口请求失败（HTTP {response.status_code}，错误码 {code}）："
+                        f"{message}",
+                        error_code=code,
+                        reauthorization_required=self._needs_reauthorization(code),
                     )
+                    self._mark_token_reauthorization_if_needed(token, error)
+                    raise error
                 response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, dict):
@@ -560,7 +617,13 @@ class FeishuService:
                     self._retry_request(method, url, attempt + 1, attempts, f"错误码 {code}")
                     continue
                 message = payload.get("msg") or payload.get("error_description") or "接口返回错误"
-                raise FeishuServiceError(f"飞书接口请求失败（错误码 {code}）：{message}")
+                error = FeishuServiceError(
+                    f"飞书接口请求失败（错误码 {code}）：{message}",
+                    error_code=code,
+                    reauthorization_required=self._needs_reauthorization(code),
+                )
+                self._mark_token_reauthorization_if_needed(token, error)
+                raise error
             data = payload.get("data", payload)
             if not isinstance(data, dict):
                 raise FeishuServiceError("飞书接口响应缺少数据对象")
@@ -585,11 +648,15 @@ class FeishuService:
         )
         time.sleep(delay)
 
+    def _required_user_scopes(self) -> set[str]:
+        scopes = set(FEISHU_REQUIRED_SCOPES)
+        if self.configuration_view()["aily_configured"]:
+            scopes.update(AILY_OPTIONAL_SCOPES)
+        return scopes
+
     def create_oauth_start(self, user_id: str) -> dict[str, Any]:
         app = self._app_configuration()
-        scopes = [*FEISHU_REQUIRED_SCOPES, *FEISHU_OPTIONAL_CLEANUP_SCOPES]
-        if self.configuration_view()["aily_configured"]:
-            scopes.extend(AILY_OPTIONAL_SCOPES)
+        scopes = sorted(self._required_user_scopes() | set(FEISHU_OPTIONAL_CLEANUP_SCOPES))
         state = secrets.token_urlsafe(32)
         expires_at = _utcnow() + timedelta(minutes=10)
         self.db.add(
@@ -666,8 +733,16 @@ class FeishuService:
             else None
         )
         connection.scopes = _scope_list(data.get("scope"))
-        connection.status = "active"
-        connection.last_error = None
+        missing_scopes = sorted(self._required_user_scopes() - set(connection.scopes))
+        if missing_scopes:
+            connection.status = "reauthorization_required"
+            connection.last_error = (
+                "新授权仍缺少飞书用户权限："
+                f"{'、'.join(missing_scopes)}；请在开放平台发布权限后重新授权。"
+            )
+        else:
+            connection.status = "active"
+            connection.last_error = None
         self.db.commit()
         self.db.refresh(connection)
         return connection
@@ -687,12 +762,14 @@ class FeishuService:
             connection = self._connection(user_id)
             now = _utcnow()
             if _aware(connection.access_expires_at) > now + timedelta(minutes=2):
-                return connection, self._cipher().decrypt(connection.access_token_encrypted)
+                token = self._cipher().decrypt(connection.access_token_encrypted)
+                return connection, self._remember_access_token(connection, token)
             connection = self._connection(user_id, lock=True)
             self.db.refresh(connection)
             now = _utcnow()
             if _aware(connection.access_expires_at) > now + timedelta(minutes=2):
-                return connection, self._cipher().decrypt(connection.access_token_encrypted)
+                token = self._cipher().decrypt(connection.access_token_encrypted)
+                return connection, self._remember_access_token(connection, token)
             if connection.refresh_expires_at and _aware(connection.refresh_expires_at) <= now:
                 connection.status = "reauthorization_required"
                 connection.last_error = "刷新令牌已过期"
@@ -745,7 +822,7 @@ class FeishuService:
             connection.scopes = _scope_list(data.get("scope")) or connection.scopes
             connection.last_error = None
             self.db.commit()
-            return connection, access_token
+            return connection, self._remember_access_token(connection, access_token)
 
     def workspace_view(self, workspace: FeishuWorkspace) -> dict[str, Any]:
         tables = list(
@@ -762,7 +839,7 @@ class FeishuService:
             "status": workspace.status,
             "last_error": workspace.last_error,
             "tables": tables,
-            "created_at": _aware(workspace.created_at),
+            "created_at": as_shanghai(_aware(workspace.created_at)),
         }
 
     def connection_view(self, user_id: str, schedule_set_id: str | None = None) -> dict[str, Any]:
@@ -800,7 +877,17 @@ class FeishuService:
             workspace_connection = self.db.get(FeishuConnection, workspace.connection_id)
         connection = workspace_connection or personal_connection
         granted = connection.scopes if connection else []
-        missing_scopes = sorted(set(FEISHU_REQUIRED_SCOPES) - set(granted))
+        missing_scopes = sorted(self._required_user_scopes() - set(granted))
+        if (
+            connection is not None
+            and connection.status == "active"
+            and connection.refresh_expires_at is not None
+            and _aware(connection.refresh_expires_at) <= _utcnow()
+        ):
+            self._mark_reauthorization_required(
+                connection,
+                "飞书刷新令牌已过期，请重新授权管理员账号。",
+            )
         if not app_configuration["configured"]:
             status = "unconfigured"
             message = "请在当前页面填写飞书应用编号和应用密钥。"
@@ -809,7 +896,15 @@ class FeishuService:
             message = "应用配置已就绪，请授权飞书管理员账号。"
         elif connection.status != "active":
             status = "reauthorization_required"
-            message = "飞书授权已失效，请重新授权管理员账号。"
+            message = connection.last_error or "飞书授权已失效，请重新授权管理员账号。"
+            if "重新授权" not in message:
+                message += " 请重新授权管理员账号。"
+        elif missing_scopes:
+            status = "reauthorization_required"
+            message = (
+                "当前飞书用户令牌缺少同步所需权限，请在开放平台发布最新权限版本后，"
+                "重新授权管理员账号。"
+            )
         else:
             status = "connected"
             message = (
@@ -817,16 +912,21 @@ class FeishuService:
                 if workspace_connection is not None and workspace_connection.user_id != user_id
                 else "飞书管理员账号已授权。"
             )
-            if missing_scopes:
-                message += f" 仍缺少 {len(missing_scopes)} 项权限。"
         return {
             "status": status,
             "app_configured": bool(app_configuration["configured"]),
-            "authorized": bool(connection and connection.status == "active"),
+            # Keep this field about the stored user token itself.  The page
+            # still reports ``reauthorization_required`` when any required
+            # scope is missing; app configuration is a separate step.
+            "authorized": bool(
+                connection and connection.status == "active" and not missing_scopes
+            ),
             "missing_fields": missing_fields,
             "granted_scopes": granted,
             "missing_scopes": missing_scopes,
-            "access_expires_at": _aware(connection.access_expires_at) if connection else None,
+            "access_expires_at": (
+                as_shanghai(_aware(connection.access_expires_at)) if connection else None
+            ),
             "message": message,
             "console_url": "https://open.feishu.cn/app/",
             "docs_url": (
@@ -840,7 +940,9 @@ class FeishuService:
     def _require_scopes(self, connection: FeishuConnection, scopes: set[str]) -> None:
         missing = sorted(scopes - set(connection.scopes))
         if missing:
-            raise FeishuServiceError(f"飞书授权缺少权限：{'、'.join(missing)}")
+            reason = f"飞书授权缺少权限：{'、'.join(missing)}，请重新授权管理员账号。"
+            self._mark_reauthorization_required(connection, reason)
+            raise FeishuServiceError(reason, reauthorization_required=True)
 
     @staticmethod
     def _rfc3339_datetime(value: str, field_name: str) -> datetime:
@@ -1282,7 +1384,10 @@ class FeishuService:
         unknown = set(unique_resources) - set(TABLE_SCHEMAS)
         if unknown:
             raise FeishuServiceError(f"未知飞书同步资源：{sorted(unknown)[0]}")
-        self._require_scopes(connection, {"base:table:read"})
+        self._require_scopes(
+            connection,
+            {"base:table:read", "base:field:read", "bitable:app:readonly"},
+        )
         # Ensure no local write transaction remains open while the metadata
         # requests are in flight; SQLite otherwise blocks unrelated admin work.
         self.db.commit()
