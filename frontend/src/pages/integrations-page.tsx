@@ -174,7 +174,10 @@ export function IntegrationsPage() {
   const sync = useFeishuSyncApiV1IntegrationsFeishuSyncPost({
     mutation: {
       onSuccess: async (data) => {
-        toast.success(`已同步 ${data.records_written} 条记录到飞书`);
+        const skipped = detailNumberValue(data.detail, "records_skipped");
+        toast.success(skipped
+          ? `已写入 ${data.records_written} 条，跳过 ${skipped} 条未变更记录`
+          : `已同步 ${data.records_written} 条记录到飞书`);
         await queryClient.invalidateQueries({
           queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey(),
         });
@@ -191,8 +194,11 @@ export function IntegrationsPage() {
     mutation: {
       onSuccess: async (data) => {
         setBatchResult(data);
+        const skipped = batchSkippedCount(data);
         if (data.failed_count === 0) {
-          toast.success(`当前方案的 ${data.completed_count} 类数据已同步（${data.records_written} 条）`);
+          toast.success(skipped
+            ? `当前方案已写入 ${data.records_written} 条，跳过 ${skipped} 条未变更记录`
+            : `当前方案的 ${data.completed_count} 类数据已同步（${data.records_written} 条）`);
         } else {
           toast.warning(`一键同步完成：${data.completed_count} 类成功，${data.failed_count} 类待重试`);
         }
@@ -996,8 +1002,8 @@ function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string;
     <section className="border border-zinc-200 bg-white">
       <div className="border-b border-zinc-200 px-4 py-3 text-sm font-semibold">飞书同步记录</div>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[860px] text-left text-sm">
-          <thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="h-9 px-4">时间</th><th>来源</th><th>业务数据</th><th>结果</th><th>飞书已有</th><th>新增</th><th>更新</th><th>本次写入</th></tr></thead>
+        <table className="w-full min-w-[930px] text-left text-sm">
+          <thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="h-9 px-4">时间</th><th>来源</th><th>业务数据</th><th>结果</th><th>飞书已有</th><th>新增</th><th>更新</th><th>跳过</th><th>本次写入</th></tr></thead>
           <tbody>
             {syncs.map((item) => (
               <tr key={item.id} className="border-t border-zinc-100">
@@ -1008,6 +1014,7 @@ function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string;
                 <td>{item.records_read}</td>
                 <td>{detailNumber(item.detail, "records_created")}</td>
                 <td>{detailNumber(item.detail, "records_updated")}</td>
+                <td>{detailNumber(item.detail, "records_skipped")}</td>
                 <td>{item.records_written}</td>
               </tr>
             ))}
@@ -1020,8 +1027,9 @@ function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string;
 }
 
 function BatchSyncResult({ result }: { result: FeishuBatchSyncResponse }) {
+  const skipped = batchSkippedCount(result);
   const summary = result.failed_count === 0
-    ? `已完成 ${result.completed_count} 类数据同步，共写入 ${result.records_written} 条记录。`
+    ? `已完成 ${result.completed_count} 类数据同步，共写入 ${result.records_written} 条记录${skipped ? `，跳过 ${skipped} 条未变更记录` : ""}。`
     : `${result.completed_count} 类已完成，${result.failed_count} 类待处理；可用下方“重试单表”处理失败项。`;
   return (
     <div aria-live="polite" className="mt-3 border border-zinc-200 bg-zinc-50 p-3 text-sm">
@@ -1030,7 +1038,7 @@ function BatchSyncResult({ result }: { result: FeishuBatchSyncResponse }) {
         {result.results.map((item) => (
           <div key={item.id} className="border border-zinc-200 bg-white px-2.5 py-2 text-xs">
             <div className="flex items-center justify-between gap-2"><span className="font-medium">{resourceLabel(item.resource)}</span><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge></div>
-            <div className="mt-1 text-zinc-500">写入 {item.records_written} 条</div>
+            <div className="mt-1 text-zinc-500">写入 {item.records_written} 条{detailNumberValue(item.detail, "records_skipped") ? `，跳过 ${detailNumberValue(item.detail, "records_skipped")} 条` : ""}</div>
             {detailError(item.detail) ? <div className="mt-1 text-red-600">{detailError(item.detail)}</div> : null}
             {duplicateCleanupMessage(item.detail) ? <div className="mt-1 text-amber-700">{duplicateCleanupMessage(item.detail)}</div> : null}
           </div>
@@ -1254,6 +1262,18 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
 function detailNumber(detail: Record<string, unknown>, key: string): number | string {
   const value = detail[key];
   return typeof value === "number" ? value : "-";
+}
+
+function detailNumberValue(detail: Record<string, unknown>, key: string): number {
+  const value = detail[key];
+  return typeof value === "number" ? value : 0;
+}
+
+function batchSkippedCount(result: FeishuBatchSyncResponse): number {
+  return result.results.reduce(
+    (total, item) => total + detailNumberValue(item.detail, "records_skipped"),
+    0,
+  );
 }
 
 function detailError(detail: Record<string, unknown>): string | null {
