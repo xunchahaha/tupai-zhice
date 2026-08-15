@@ -618,23 +618,33 @@ class FeishuService:
     def connection_view(self, user_id: str, schedule_set_id: str | None = None) -> dict[str, Any]:
         app_configuration = self.configuration_view()
         missing_fields = [] if app_configuration["configured"] else ["应用编号", "应用密钥"]
-        connection = self.db.scalar(
+        personal_connection = self.db.scalar(
             select(FeishuConnection).where(FeishuConnection.user_id == user_id)
         )
         workspace = None
-        if connection is not None:
+        if schedule_set_id:
             workspace = self.db.scalar(
                 select(FeishuWorkspace)
                 .where(
-                    FeishuWorkspace.connection_id == connection.id,
-                    *(
-                        [FeishuWorkspace.schedule_set_id == schedule_set_id]
-                        if schedule_set_id
-                        else []
-                    ),
+                    FeishuWorkspace.schedule_set_id == schedule_set_id,
                 )
                 .order_by(FeishuWorkspace.created_at.desc())
             )
+        elif personal_connection is not None:
+            workspace = self.db.scalar(
+                select(FeishuWorkspace)
+                .where(FeishuWorkspace.connection_id == personal_connection.id)
+                .order_by(FeishuWorkspace.created_at.desc())
+            )
+
+        # The Bitable target is bound to the timetable, not to the operator who
+        # happens to open this page.  A scheduler granted plan A therefore sees
+        # the administrator-owned plan-A workspace as ready and can run the
+        # permitted sync action without re-authorizing a second Feishu account.
+        workspace_connection = None
+        if workspace is not None:
+            workspace_connection = self.db.get(FeishuConnection, workspace.connection_id)
+        connection = workspace_connection or personal_connection
         granted = connection.scopes if connection else []
         missing_scopes = sorted(set(FEISHU_REQUIRED_SCOPES) - set(granted))
         if not app_configuration["configured"]:
@@ -648,7 +658,11 @@ class FeishuService:
             message = "飞书授权已失效，请重新授权管理员账号。"
         else:
             status = "connected"
-            message = "飞书管理员账号已授权。"
+            message = (
+                "当前课表方案已绑定飞书管理员账号。"
+                if workspace_connection is not None and workspace_connection.user_id != user_id
+                else "飞书管理员账号已授权。"
+            )
             if missing_scopes:
                 message += f" 仍缺少 {len(missing_scopes)} 项权限。"
         return {

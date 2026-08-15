@@ -345,6 +345,12 @@ def test_schedule_set_visibility_and_per_set_operation_permissions(
         second_connection = FeishuService(settings, db).connection_view(user_a, second["id"])
         assert first_connection["workspace"]["id"] == workspace_one.id
         assert second_connection["workspace"]["id"] == workspace_two.id
+        # B has timetable access but did not OAuth-authorize a separate Feishu
+        # account.  The selected timetable's admin-owned workspace must still
+        # be reported as ready, otherwise the UI leaves B's sync controls grey.
+        shared_connection = FeishuService(settings, db).connection_view(user_b, first["id"])
+        assert shared_connection["authorized"] is True
+        assert shared_connection["workspace"]["id"] == workspace_one.id
 
         first_export = export_resource_rows(db, "schedule", first["id"])
         second_export = export_resource_rows(db, "schedule", second["id"])
