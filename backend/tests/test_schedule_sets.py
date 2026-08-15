@@ -382,6 +382,7 @@ def test_schedule_set_visibility_and_per_set_operation_permissions(
             }
 
         monkeypatch.setattr(FeishuService, "sync_rows", sync_rows)
+        monkeypatch.setattr(FeishuService, "prepare_sync_resources", lambda *_args, **_kwargs: {})
         batch = client.post(
             "/api/v1/integrations/feishu/sync-batch",
             headers=_headers(token_a, first["id"]),

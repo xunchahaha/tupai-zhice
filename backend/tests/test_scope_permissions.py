@@ -133,6 +133,9 @@ def test_role_boundaries_keep_approvers_out_of_scheduling_and_master_data(
             "records_updated": 0,
         },
     )
+    monkeypatch.setattr(
+        "app.api.FeishuService.prepare_sync_resources", lambda *args, **kwargs: {}
+    )
     published_data_retry = client.post(
         "/api/v1/integrations/feishu/sync-batch",
         headers=approver_headers,
