@@ -146,6 +146,58 @@ def test_sample_solve_publish_and_xlsx(client: TestClient, auth_headers: dict[st
     assert workbook["课表"].max_row == 25
 
 
+def test_publish_keeps_local_version_when_published_data_sync_partially_fails(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: Any,
+) -> None:
+    run = solve(client, auth_headers)
+    schedule = next(
+        item
+        for item in client.get("/api/v1/schedules", headers=auth_headers).json()
+        if item["solver_run_id"] == run["id"]
+    )
+    calls: list[tuple[str, str]] = []
+
+    def sync_rows(
+        self: object,
+        user_id: str,
+        resource: str,
+        rows: list[dict[str, Any]],
+        workspace_id: str | None = None,
+        schedule_set_id: str = "default",
+    ) -> dict[str, Any]:
+        del self, user_id, rows, workspace_id
+        calls.append((resource, schedule_set_id))
+        if resource == "public_summary":
+            raise RuntimeError("公开展示汇总暂时不可写入")
+        return {
+            "records_read": 4,
+            "records_written": 3,
+            "records_created": 2,
+            "records_updated": 1,
+        }
+
+    monkeypatch.setattr("app.api.FeishuService.sync_rows", sync_rows)
+    published = client.post(
+        f"/api/v1/schedules/{schedule['id']}/publish", headers=auth_headers
+    )
+    assert published.status_code == 200, published.text
+    assert published.json()["status"] == "published"
+    assert calls == [("schedule", "default"), ("public_summary", "default")]
+
+    syncs = client.get("/api/v1/integrations/feishu/syncs", headers=auth_headers)
+    assert syncs.status_code == 200
+    automatic = [
+        item
+        for item in syncs.json()
+        if item["detail"].get("trigger") == "version_publish"
+    ]
+    assert {item["resource"] for item in automatic} == {"schedule", "public_summary"}
+    assert {item["status"] for item in automatic} == {"completed", "failed"}
+    assert all(item["detail"]["schedule_set_id"] == "default" for item in automatic)
+
+
 def test_course_session_create_edit_batch_update_and_delete(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:

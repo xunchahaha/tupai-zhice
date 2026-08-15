@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from ..config import get_settings
 from ..db import SessionLocal
 from ..models import (
+    DEFAULT_SCHEDULE_SET_ID,
     CourseSession,
     DataSnapshot,
     RescheduleEvent,
@@ -77,15 +78,34 @@ def _windows_overlap(left: tuple[Any, ...], right: tuple[Any, ...]) -> bool:
     return left[2] < right[3] and right[2] < left[3]
 
 
-def count_hard_conflicts(db: Any, assignments: list[dict[str, Any]]) -> dict[str, int]:
+def count_hard_conflicts(
+    db: Any,
+    assignments: list[dict[str, Any]],
+    schedule_set_id: str = DEFAULT_SCHEDULE_SET_ID,
+) -> dict[str, int]:
     """按维度实算硬冲突记录数。
 
     此前该指标是写死的 0，等于用一个恒真值去证明正确性。这里独立于求解器重算一遍，
     既是发布门禁，也是求解器建模出错时的兜底。
     """
-    courses = {item.id: item for item in db.scalars(select(CourseSession)).all()}
-    teachers = {item.business_id: item for item in db.scalars(select(Teacher)).all()}
-    slots = {item.business_id: item for item in db.scalars(select(TimeSlot)).all()}
+    courses = {
+        item.id: item
+        for item in db.scalars(
+            select(CourseSession).where(CourseSession.schedule_set_id == schedule_set_id)
+        ).all()
+    }
+    teachers = {
+        item.business_id: item
+        for item in db.scalars(
+            select(Teacher).where(Teacher.schedule_set_id == schedule_set_id)
+        ).all()
+    }
+    slots = {
+        item.business_id: item
+        for item in db.scalars(
+            select(TimeSlot).where(TimeSlot.schedule_set_id == schedule_set_id)
+        ).all()
+    }
     entries: list[tuple[dict[str, Any], Any, tuple[Any, ...]]] = []
     for item in assignments:
         course = courses.get(item["course_session_id"])
@@ -178,9 +198,25 @@ def _room_slot_capacity(
     return capacity
 
 
-def calculate_metrics(db: Any, assignments: list[dict[str, Any]]) -> dict[str, Any]:
-    rooms = {item.business_id: item for item in db.scalars(select(Room)).all()}
-    open_slots = list(db.scalars(select(TimeSlot).where(TimeSlot.is_open.is_(True))))
+def calculate_metrics(
+    db: Any,
+    assignments: list[dict[str, Any]],
+    schedule_set_id: str = DEFAULT_SCHEDULE_SET_ID,
+) -> dict[str, Any]:
+    rooms = {
+        item.business_id: item
+        for item in db.scalars(
+            select(Room).where(Room.schedule_set_id == schedule_set_id)
+        ).all()
+    }
+    open_slots = list(
+        db.scalars(
+            select(TimeSlot).where(
+                TimeSlot.schedule_set_id == schedule_set_id,
+                TimeSlot.is_open.is_(True),
+            )
+        )
+    )
     room_slots: set[tuple[str, str | None, str]] = set()
     unknown_rooms: set[str] = set()
     for item in assignments:
@@ -190,7 +226,7 @@ def calculate_metrics(db: Any, assignments: list[dict[str, Any]]) -> dict[str, A
             continue
         room_slots.add((room.business_id, item.get("lesson_date"), item["slot_business_id"]))
     available_room_slots = _room_slot_capacity(rooms, open_slots, room_slots)
-    conflicts = count_hard_conflicts(db, assignments)
+    conflicts = count_hard_conflicts(db, assignments, schedule_set_id)
     return {
         "assignment_count": len(assignments),
         "hard_conflicts": conflicts["total"],
@@ -292,7 +328,7 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
                 )
                 for item in run.request_payload.get("previous_assignments", [])
             }
-            metrics = calculate_metrics(db, assignments)
+            metrics = calculate_metrics(db, assignments, run.schedule_set_id)
             metrics["changed_assignments"] = sum(
                 1
                 for item in assignments

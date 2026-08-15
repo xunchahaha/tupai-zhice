@@ -34,11 +34,39 @@ def _json_default(value: Any) -> str:
 
 
 def build_snapshot_payload(db: Session, schedule_set_id: str) -> dict[str, object]:
-    teachers = list(db.scalars(select(Teacher).order_by(Teacher.business_id)))
-    classes = list(db.scalars(select(ClassGroup).order_by(ClassGroup.business_id)))
-    rooms = list(db.scalars(select(Room).order_by(Room.business_id)))
-    slots = list(db.scalars(select(TimeSlot).order_by(TimeSlot.sequence)))
-    sessions = list(db.scalars(select(CourseSession).order_by(CourseSession.business_id)))
+    teachers = list(
+        db.scalars(
+            select(Teacher)
+            .where(Teacher.schedule_set_id == schedule_set_id)
+            .order_by(Teacher.business_id)
+        )
+    )
+    classes = list(
+        db.scalars(
+            select(ClassGroup)
+            .where(ClassGroup.schedule_set_id == schedule_set_id)
+            .order_by(ClassGroup.business_id)
+        )
+    )
+    rooms = list(
+        db.scalars(
+            select(Room).where(Room.schedule_set_id == schedule_set_id).order_by(Room.business_id)
+        )
+    )
+    slots = list(
+        db.scalars(
+            select(TimeSlot)
+            .where(TimeSlot.schedule_set_id == schedule_set_id)
+            .order_by(TimeSlot.sequence)
+        )
+    )
+    sessions = list(
+        db.scalars(
+            select(CourseSession)
+            .where(CourseSession.schedule_set_id == schedule_set_id)
+            .order_by(CourseSession.business_id)
+        )
+    )
     rules = list(
         db.scalars(
             select(Rule)
@@ -56,10 +84,7 @@ def build_snapshot_payload(db: Session, schedule_set_id: str) -> dict[str, objec
         ],
         # 班级只剩身份。班型/业务线/教师是课次的属性，course_sessions 那一段已经带着，
         # 不在这里再存一份聚合快照——存了就要跟着漂。
-        "class_groups": [
-            _model_dict(item, ["id", "business_id", "name"])
-            for item in classes
-        ],
+        "class_groups": [_model_dict(item, ["id", "business_id", "name"]) for item in classes],
         "rooms": [
             _model_dict(
                 item,
@@ -167,14 +192,17 @@ def create_snapshot(
     )
     if existing:
         return existing
-    revision = int(
-        db.scalar(
-            select(func.coalesce(func.max(DataSnapshot.revision), 0)).where(
-                DataSnapshot.schedule_set_id == schedule_set_id
+    revision = (
+        int(
+            db.scalar(
+                select(func.coalesce(func.max(DataSnapshot.revision), 0)).where(
+                    DataSnapshot.schedule_set_id == schedule_set_id
+                )
             )
+            or 0
         )
-        or 0
-    ) + 1
+        + 1
+    )
     snapshot = DataSnapshot(
         schedule_set_id=schedule_set_id,
         revision=revision,

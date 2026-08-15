@@ -72,12 +72,24 @@ def test_role_boundaries_keep_approvers_out_of_scheduling_and_master_data(
     )
     assert approver_grant.status_code == 200, approver_grant.text
 
+    # A new plan intentionally starts with independent, empty source data.
+    # Seed the one campus needed below *inside this plan* instead of borrowing
+    # the default-plan fixture data.
+    scoped_campus = client.post(
+        "/api/v1/campuses",
+        headers={**auth_headers, "X-Schedule-Set-Id": schedule_set_id},
+        json={"business_id": f"CAMPUS-{suffix}", "name": "权限测试校区"},
+    )
+    assert scoped_campus.status_code == 201, scoped_campus.text
+
     scheduler_token = _login(client, f"scheduler_{suffix}", "scope-policy-2026")
     approver_token = _login(client, f"approver_{suffix}", "scope-policy-2026")
     scheduler_headers = _schedule_headers(scheduler_token, schedule_set_id)
     approver_headers = _schedule_headers(approver_token, schedule_set_id)
 
-    campus = client.get("/api/v1/campuses", headers=scheduler_headers).json()[0]
+    campuses = client.get("/api/v1/campuses", headers=scheduler_headers)
+    assert campuses.status_code == 200, campuses.text
+    campus = campuses.json()[0]
     master_write = client.post(
         "/api/v1/rooms",
         headers=scheduler_headers,
@@ -111,6 +123,23 @@ def test_role_boundaries_keep_approvers_out_of_scheduling_and_master_data(
         ).status_code
         == 403
     )
+
+    monkeypatch.setattr(
+        "app.api.FeishuService.sync_rows",
+        lambda *args, **kwargs: {
+            "records_read": 0,
+            "records_written": 0,
+            "records_created": 0,
+            "records_updated": 0,
+        },
+    )
+    published_data_retry = client.post(
+        "/api/v1/integrations/feishu/sync-batch",
+        headers=approver_headers,
+        json={"resources": ["schedule", "public_summary"]},
+    )
+    assert published_data_retry.status_code == 200, published_data_retry.text
+    assert published_data_retry.json()["status"] == "completed"
 
     promoted_to_approver = client.patch(
         f"/api/v1/users/{users['scheduler']}/role",

@@ -48,16 +48,12 @@ class User(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    password_changed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow
-    )
+    password_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     # 令牌版本用于吊销：改密时自增，旧 JWT 携带的版本不再匹配即失效。
     # 不用签发时间做判断——JWT 的 iat 只有秒级精度，同一秒内会误伤新令牌。
     token_version: Mapped[int] = mapped_column(Integer, default=0)
     failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
-    locked_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ScheduleSet(TimestampMixin, Base):
@@ -198,17 +194,28 @@ class FeishuRecordBinding(TimestampMixin, Base):
 
 class Campus(TimestampMixin, Base):
     __tablename__ = "campuses"
+    __table_args__ = (UniqueConstraint("schedule_set_id", "business_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    business_id: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
+    business_id: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(120))
 
 
 class Teacher(TimestampMixin, Base):
     __tablename__ = "teachers"
-    __table_args__ = (UniqueConstraint("campus_id", "business_id"),)
+    __table_args__ = (UniqueConstraint("schedule_set_id", "campus_id", "business_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
     campus_id: Mapped[str] = mapped_column(ForeignKey("campuses.id"), index=True)
     business_id: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(120))
@@ -228,9 +235,14 @@ class ClassGroup(TimestampMixin, Base):
     """
 
     __tablename__ = "class_groups"
-    __table_args__ = (UniqueConstraint("campus_id", "business_id"),)
+    __table_args__ = (UniqueConstraint("schedule_set_id", "campus_id", "business_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
     campus_id: Mapped[str] = mapped_column(ForeignKey("campuses.id"), index=True)
     business_id: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(120))
@@ -238,9 +250,14 @@ class ClassGroup(TimestampMixin, Base):
 
 class Room(TimestampMixin, Base):
     __tablename__ = "rooms"
-    __table_args__ = (UniqueConstraint("campus_id", "business_id"),)
+    __table_args__ = (UniqueConstraint("schedule_set_id", "campus_id", "business_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
     campus_id: Mapped[str] = mapped_column(ForeignKey("campuses.id"), index=True)
     business_id: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(120))
@@ -249,9 +266,14 @@ class Room(TimestampMixin, Base):
 
 class TimeSlot(TimestampMixin, Base):
     __tablename__ = "time_slots"
-    __table_args__ = (UniqueConstraint("campus_id", "business_id"),)
+    __table_args__ = (UniqueConstraint("schedule_set_id", "campus_id", "business_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
     campus_id: Mapped[str] = mapped_column(ForeignKey("campuses.id"), index=True)
     business_id: Mapped[str] = mapped_column(String(40), index=True)
     weekday: Mapped[str] = mapped_column(String(20))
@@ -264,9 +286,14 @@ class TimeSlot(TimestampMixin, Base):
 
 class CourseSession(TimestampMixin, Base):
     __tablename__ = "course_sessions"
-    __table_args__ = (UniqueConstraint("campus_id", "business_id"),)
+    __table_args__ = (UniqueConstraint("schedule_set_id", "campus_id", "business_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
     campus_id: Mapped[str] = mapped_column(ForeignKey("campuses.id"), index=True)
     business_id: Mapped[str] = mapped_column(String(50), index=True)
     source_row_id: Mapped[str] = mapped_column(String(64), default="", index=True)
@@ -426,9 +453,7 @@ class CalendarEventBinding(TimestampMixin, Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    schedule_version_id: Mapped[str] = mapped_column(
-        ForeignKey("schedule_versions.id"), index=True
-    )
+    schedule_version_id: Mapped[str] = mapped_column(ForeignKey("schedule_versions.id"), index=True)
     course_session_id: Mapped[str] = mapped_column(ForeignKey("course_sessions.id"), index=True)
     calendar_id: Mapped[str] = mapped_column(String(120))
     event_id: Mapped[str] = mapped_column(String(120))

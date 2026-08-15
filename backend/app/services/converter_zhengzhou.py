@@ -570,7 +570,12 @@ def _remove_orphan_sessions(
     """
     orphans = [
         item
-        for item in db.scalars(select(CourseSession).where(CourseSession.campus_id == campus_id))
+        for item in db.scalars(
+            select(CourseSession).where(
+                CourseSession.schedule_set_id == schedule_set_id,
+                CourseSession.campus_id == campus_id,
+            )
+        )
         if item.business_id not in keep_business_ids
     ]
     if not orphans:
@@ -633,7 +638,12 @@ def import_schedule_workbook(
             f"「{PLACEHOLDER_ROOM}」，没有可排课的课次"
         )
 
-    campus = _upsert(db, Campus, {"business_id": campus_business_id}, {"name": campus_name})
+    campus = _upsert(
+        db,
+        Campus,
+        {"schedule_set_id": schedule_set_id, "business_id": campus_business_id},
+        {"name": campus_name},
+    )
     db.flush()
 
     teachers = sorted({row["授课教师"] for row in rows if row["授课教师"]})
@@ -646,7 +656,11 @@ def import_schedule_workbook(
         _upsert(
             db,
             Teacher,
-            {"campus_id": campus.id, "business_id": name},
+            {
+                "schedule_set_id": schedule_set_id,
+                "campus_id": campus.id,
+                "business_id": name,
+            },
             {
                 "name": name,
                 "subject": subjects.most_common(1)[0][0] if subjects else "",
@@ -663,7 +677,11 @@ def import_schedule_workbook(
         _upsert(
             db,
             ClassGroup,
-            {"campus_id": campus.id, "business_id": label},
+            {
+                "schedule_set_id": schedule_set_id,
+                "campus_id": campus.id,
+                "business_id": label,
+            },
             {"name": label},
         )
 
@@ -672,7 +690,11 @@ def import_schedule_workbook(
         _upsert(
             db,
             Room,
-            {"campus_id": campus.id, "business_id": label},
+            {
+                "schedule_set_id": schedule_set_id,
+                "campus_id": campus.id,
+                "business_id": label,
+            },
             {"name": label, "is_active": True},
         )
 
@@ -698,7 +720,11 @@ def import_schedule_workbook(
         _upsert(
             db,
             TimeSlot,
-            {"campus_id": campus.id, "business_id": business_id},
+            {
+                "schedule_set_id": schedule_set_id,
+                "campus_id": campus.id,
+                "business_id": business_id,
+            },
             {
                 "weekday": weekday,
                 "start_time": start,
@@ -718,7 +744,12 @@ def import_schedule_workbook(
 
     existing_sessions = {
         item.business_id: item
-        for item in db.scalars(select(CourseSession).where(CourseSession.campus_id == campus.id))
+        for item in db.scalars(
+            select(CourseSession).where(
+                CourseSession.schedule_set_id == schedule_set_id,
+                CourseSession.campus_id == campus.id,
+            )
+        )
     }
     new_rows = []
     for business_id, row in session_rows.items():
@@ -767,6 +798,7 @@ def import_schedule_workbook(
         db.add_all(
             [
                 CourseSession(
+                    schedule_set_id=schedule_set_id,
                     campus_id=campus.id,
                     business_id=business_id,
                     **values,
@@ -788,7 +820,8 @@ def import_schedule_workbook(
         business_id: session_id
         for business_id, session_id in db.execute(
             select(CourseSession.business_id, CourseSession.id).where(
-                CourseSession.campus_id == campus.id
+                CourseSession.schedule_set_id == schedule_set_id,
+                CourseSession.campus_id == campus.id,
             )
         )
     }

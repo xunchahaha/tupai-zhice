@@ -399,8 +399,27 @@ def test_auto_create_workspace_and_sync_idempotently(
     assert second.json()["detail"]["records_created"] == 0
     assert second.json()["detail"]["records_updated"] == 6
     assert len(remote_records["tbl-1"]) == 6
+
+    batch = client.post(
+        "/api/v1/integrations/feishu/sync-batch",
+        headers=auth_headers,
+        json={},
+    )
+    assert batch.status_code == 200, batch.text
+    payload = batch.json()
+    assert payload["schedule_set_id"] == "default"
+    assert payload["status"] == "completed"
+    assert payload["completed_count"] == len(TABLE_SCHEMAS)
+    assert payload["failed_count"] == 0
+    assert [item["resource"] for item in payload["results"]] == list(TABLE_SCHEMAS)
+    assert all(item["detail"]["trigger"] == "manual_batch" for item in payload["results"])
+    assert all(item["detail"]["schedule_set_id"] == "default" for item in payload["results"])
+
+    history = client.get("/api/v1/integrations/feishu/syncs", headers=auth_headers)
+    assert history.status_code == 200
+    assert {item["resource"] for item in history.json()} >= set(TABLE_SCHEMAS)
     with SessionLocal() as db:
-        assert db.scalar(select(func.count(FeishuRecordBinding.id))) == 6
+        assert db.scalar(select(func.count(FeishuRecordBinding.id))) >= 6
 
 
 def test_calendar_table_schemas_include_binding_and_fixed_time_fields() -> None:

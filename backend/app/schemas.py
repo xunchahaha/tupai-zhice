@@ -745,18 +745,21 @@ class FeishuWorkspaceResponse(ORMModel):
     created_at: datetime
 
 
+FeishuSyncResource = Literal[
+    "teachers",
+    "class_groups",
+    "rooms",
+    "time_slots",
+    "course_sessions",
+    "rules",
+    "schedule",
+    "public_summary",
+]
+
+
 class FeishuSyncRequest(BaseModel):
     direction: Literal["export"] = "export"
-    resource: Literal[
-        "teachers",
-        "class_groups",
-        "rooms",
-        "time_slots",
-        "course_sessions",
-        "rules",
-        "schedule",
-        "public_summary",
-    ]
+    resource: FeishuSyncResource
     workspace_id: str | None = None
 
 
@@ -771,6 +774,42 @@ class IntegrationSyncResponse(ORMModel):
     records_written: int
     detail: dict[str, Any]
     created_at: datetime
+
+
+class FeishuBatchSyncRequest(BaseModel):
+    """Batch-export selected data tables into the active timetable workspace."""
+
+    direction: Literal["export"] = "export"
+    resources: list[FeishuSyncResource] = Field(
+        default_factory=lambda: [
+            "teachers",
+            "class_groups",
+            "rooms",
+            "time_slots",
+            "course_sessions",
+            "rules",
+            "schedule",
+            "public_summary",
+        ],
+        min_length=1,
+    )
+    workspace_id: str | None = None
+
+    @model_validator(mode="after")
+    def ensure_unique_resources(self) -> FeishuBatchSyncRequest:
+        if len(set(self.resources)) != len(self.resources):
+            raise ValueError("resources 不能包含重复资源")
+        return self
+
+
+class FeishuBatchSyncResponse(BaseModel):
+    schedule_set_id: str
+    status: Literal["completed", "partial", "failed"]
+    completed_count: int
+    failed_count: int
+    records_read: int
+    records_written: int
+    results: list[IntegrationSyncResponse]
 
 
 class AuditLogResponse(ORMModel):

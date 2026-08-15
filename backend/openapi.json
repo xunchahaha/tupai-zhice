@@ -4386,6 +4386,71 @@
         }
       }
     },
+    "/api/v1/integrations/feishu/sync-batch": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Feishu Sync Batch",
+        "description": "One-click export for the currently selected schedule-set workspace.\n\nUnlike a single-table retry, this endpoint always returns every requested\nresource result.  A failed resource is logged but does not hide the\nsuccesses from the operator.",
+        "operationId": "feishu_sync_batch_api_v1_integrations_feishu_sync_batch_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeishuBatchSyncRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeishuBatchSyncResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/integrations/feishu/syncs": {
       "get": {
         "tags": [
@@ -6802,6 +6867,99 @@
           "aily_skill_id"
         ],
         "title": "FeishuAppConfigurationResponse"
+      },
+      "FeishuBatchSyncRequest": {
+        "properties": {
+          "direction": {
+            "type": "string",
+            "const": "export",
+            "title": "Direction",
+            "default": "export"
+          },
+          "resources": {
+            "items": {
+              "type": "string",
+              "enum": [
+                "teachers",
+                "class_groups",
+                "rooms",
+                "time_slots",
+                "course_sessions",
+                "rules",
+                "schedule",
+                "public_summary"
+              ]
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Resources"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
+          }
+        },
+        "type": "object",
+        "title": "FeishuBatchSyncRequest",
+        "description": "Batch-export selected data tables into the active timetable workspace."
+      },
+      "FeishuBatchSyncResponse": {
+        "properties": {
+          "schedule_set_id": {
+            "type": "string",
+            "title": "Schedule Set Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "partial",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "completed_count": {
+            "type": "integer",
+            "title": "Completed Count"
+          },
+          "failed_count": {
+            "type": "integer",
+            "title": "Failed Count"
+          },
+          "records_read": {
+            "type": "integer",
+            "title": "Records Read"
+          },
+          "records_written": {
+            "type": "integer",
+            "title": "Records Written"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/IntegrationSyncResponse"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "type": "object",
+        "required": [
+          "schedule_set_id",
+          "status",
+          "completed_count",
+          "failed_count",
+          "records_read",
+          "records_written",
+          "results"
+        ],
+        "title": "FeishuBatchSyncResponse"
       },
       "FeishuConnectionResponse": {
         "properties": {

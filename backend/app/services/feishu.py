@@ -980,12 +980,10 @@ class FeishuService:
 
     def _active_workspace(
         self,
-        connection_id: str,
         workspace_id: str | None,
         schedule_set_id: str = "default",
     ) -> FeishuWorkspace:
         statement = select(FeishuWorkspace).where(
-            FeishuWorkspace.connection_id == connection_id,
             FeishuWorkspace.schedule_set_id == schedule_set_id,
             FeishuWorkspace.status == "active",
         )
@@ -1082,12 +1080,19 @@ class FeishuService:
         workspace_id: str | None = None,
         schedule_set_id: str = "default",
     ) -> dict[str, Any]:
-        connection, token = self.access_token(user_id)
+        # Workspaces belong to a timetable rather than to the person who clicks
+        # “sync”.  An approver or scheduler can therefore update the timetable
+        # workspace created by its administrator, while API scope checks remain
+        # the responsibility of the caller before this service is entered.
+        workspace = self._active_workspace(workspace_id, schedule_set_id)
+        workspace_connection = self.db.get(FeishuConnection, workspace.connection_id)
+        if workspace_connection is None:
+            raise FeishuServiceError("当前多维表格缺少飞书授权连接")
+        connection, token = self.access_token(workspace_connection.user_id)
         self._require_scopes(
             connection,
             {"base:record:create", "base:record:retrieve", "base:record:update"},
         )
-        workspace = self._active_workspace(connection.id, workspace_id, schedule_set_id)
         table = self.db.scalar(
             select(FeishuTableBinding).where(
                 FeishuTableBinding.workspace_id == workspace.id,

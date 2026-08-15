@@ -93,6 +93,8 @@ from .schemas import (
     CourseSessionUpdate,
     FeishuAppConfigurationInput,
     FeishuAppConfigurationResponse,
+    FeishuBatchSyncRequest,
+    FeishuBatchSyncResponse,
     FeishuConnectionResponse,
     FeishuOAuthStartResponse,
     FeishuSyncRequest,
@@ -181,6 +183,7 @@ SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 Db = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminOrScheduler = Annotated[User, Depends(require_roles("admin", "scheduler"))]
+AdminSchedulerOrApprover = Annotated[User, Depends(require_roles("admin", "scheduler", "approver"))]
 Approver = Annotated[User, Depends(require_roles("admin", "approver"))]
 Admin = Annotated[User, Depends(require_roles("admin"))]
 
@@ -342,6 +345,15 @@ def resolve_scheduler_scope(db: Db, user: AdminOrScheduler, scope: ScheduleScope
     return scope
 
 
+def resolve_scheduler_or_approver_scope(
+    db: Db, user: AdminSchedulerOrApprover, scope: ScheduleScope
+) -> ScheduleSet:
+    # Approvers rank above schedulers in a timetable's access matrix and need
+    # this scope only for the published-data retry endpoint.
+    _require_schedule_access(db, user, scope.id, "scheduler")
+    return scope
+
+
 def resolve_approver_scope(db: Db, user: Approver, scope: ScheduleScope) -> ScheduleSet:
     _require_schedule_access(db, user, scope.id, "approver")
     return scope
@@ -349,6 +361,7 @@ def resolve_approver_scope(db: Db, user: Approver, scope: ScheduleScope) -> Sche
 
 ViewerScope = Annotated[ScheduleSet, Depends(resolve_viewer_scope)]
 SchedulerScope = Annotated[ScheduleSet, Depends(resolve_scheduler_scope)]
+SchedulerOrApproverScope = Annotated[ScheduleSet, Depends(resolve_scheduler_or_approver_scope)]
 ApproverScope = Annotated[ScheduleSet, Depends(resolve_approver_scope)]
 
 
@@ -404,7 +417,8 @@ def schedule_response(db: Session, schedule: ScheduleVersion) -> ScheduleRespons
         item.id: item
         for item in db.scalars(
             select(CourseSession).where(
-                CourseSession.id.in_([row.course_session_id for row in rows])
+                CourseSession.schedule_set_id == schedule.schedule_set_id,
+                CourseSession.id.in_([row.course_session_id for row in rows]),
             )
         )
     }
@@ -560,9 +574,7 @@ def rename_schedule_set(
     response_model=list[ScheduleSetMemberResponse],
     tags=["schedule-sets"],
 )
-def list_schedule_set_members(
-    schedule_set_id: str, db: Db, user: Admin
-) -> list[dict[str, Any]]:
+def list_schedule_set_members(schedule_set_id: str, db: Db, user: Admin) -> list[dict[str, Any]]:
     get_or_404(db, ScheduleSet, schedule_set_id)
     rows = db.execute(
         select(ScheduleSetMember, User)
@@ -792,10 +804,7 @@ def update_user_role(user_id: str, payload: UserRoleUpdate, db: Db, user: Admin)
                 )
             )
             restored_default_membership = True
-        elif (
-            not default_membership.is_active
-            or default_membership.access_role != access_ceiling
-        ):
+        elif not default_membership.is_active or default_membership.access_role != access_ceiling:
             default_membership.access_role = access_ceiling
             default_membership.is_active = True
             default_membership.granted_by = user.id
@@ -884,11 +893,31 @@ def overview(db: Db, user: CurrentUser, scope: ViewerScope) -> OverviewResponse:
         .order_by(IntegrationSync.created_at.desc())
     )
     counts = {
-        "teachers": int(db.scalar(select(func.count(Teacher.id))) or 0),
-        "class_groups": int(db.scalar(select(func.count(ClassGroup.id))) or 0),
-        "rooms": int(db.scalar(select(func.count(Room.id))) or 0),
-        "time_slots": int(db.scalar(select(func.count(TimeSlot.id))) or 0),
-        "course_sessions": int(db.scalar(select(func.count(CourseSession.id))) or 0),
+        "teachers": int(
+            db.scalar(select(func.count(Teacher.id)).where(Teacher.schedule_set_id == scope.id))
+            or 0
+        ),
+        "class_groups": int(
+            db.scalar(
+                select(func.count(ClassGroup.id)).where(ClassGroup.schedule_set_id == scope.id)
+            )
+            or 0
+        ),
+        "rooms": int(
+            db.scalar(select(func.count(Room.id)).where(Room.schedule_set_id == scope.id)) or 0
+        ),
+        "time_slots": int(
+            db.scalar(select(func.count(TimeSlot.id)).where(TimeSlot.schedule_set_id == scope.id))
+            or 0
+        ),
+        "course_sessions": int(
+            db.scalar(
+                select(func.count(CourseSession.id)).where(
+                    CourseSession.schedule_set_id == scope.id
+                )
+            )
+            or 0
+        ),
         "schedule_versions": int(
             db.scalar(
                 select(func.count(ScheduleVersion.id)).where(
@@ -915,7 +944,7 @@ def overview(db: Db, user: CurrentUser, scope: ViewerScope) -> OverviewResponse:
             db.scalar(
                 select(func.count(RescheduleEvent.id)).where(
                     RescheduleEvent.schedule_set_id == scope.id,
-                    RescheduleEvent.status.in_(["pending", "candidate_ready"])
+                    RescheduleEvent.status.in_(["pending", "candidate_ready"]),
                 )
             )
             or 0
@@ -1009,15 +1038,17 @@ def import_xlsx(
 
 
 @router.get("/campuses", response_model=list[CampusResponse], tags=["master-data"])
-def list_campuses(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[Campus]:
-    return list(db.scalars(select(Campus).order_by(Campus.business_id)))
+def list_campuses(db: Db, user: CurrentUser, scope: ViewerScope) -> list[Campus]:
+    return list(
+        db.scalars(
+            select(Campus).where(Campus.schedule_set_id == scope.id).order_by(Campus.business_id)
+        )
+    )
 
 
 @router.post("/campuses", response_model=CampusResponse, status_code=201, tags=["master-data"])
-def create_campus(
-    payload: CampusCreate, db: Db, user: Admin, _scope: ViewerScope
-) -> Campus:
-    instance = Campus(**payload.model_dump())
+def create_campus(payload: CampusCreate, db: Db, user: Admin, scope: ViewerScope) -> Campus:
+    instance = Campus(schedule_set_id=scope.id, **payload.model_dump())
     db.add(instance)
     try:
         audit(db, user, "create", "campus", instance.id, payload.model_dump())
@@ -1030,9 +1061,13 @@ def create_campus(
 
 
 def selected_master_rows(
-    db: Session, model: type[Any], object_ids: list[str], resource_label: str
+    db: Session, model: type[Any], object_ids: list[str], resource_label: str, schedule_set_id: str
 ) -> list[Any]:
-    rows = list(db.scalars(select(model).where(model.id.in_(object_ids))))
+    rows = list(
+        db.scalars(
+            select(model).where(model.schedule_set_id == schedule_set_id, model.id.in_(object_ids))
+        )
+    )
     found_ids = {item.id for item in rows}
     missing = [item for item in object_ids if item not in found_ids]
     if missing:
@@ -1071,6 +1106,7 @@ def ensure_teachers_deletable(db: Session, teachers: list[Teacher]) -> None:
         (campus_id, business_id)
         for campus_id, business_id in db.execute(
             select(CourseSession.campus_id, CourseSession.teacher_business_id).where(
+                CourseSession.schedule_set_id == teachers[0].schedule_set_id,
                 CourseSession.campus_id.in_(campus_ids),
                 CourseSession.teacher_business_id.in_(business_ids),
             )
@@ -1087,6 +1123,7 @@ def ensure_class_groups_deletable(db: Session, classes: list[ClassGroup]) -> Non
         (campus_id, business_id)
         for campus_id, business_id in db.execute(
             select(CourseSession.campus_id, CourseSession.class_business_id).where(
+                CourseSession.schedule_set_id == classes[0].schedule_set_id,
                 CourseSession.campus_id.in_(campus_ids),
                 CourseSession.class_business_id.in_(business_ids),
             )
@@ -1103,6 +1140,7 @@ def ensure_rooms_deletable(db: Session, rooms: list[Room]) -> None:
         (campus_id, business_id)
         for campus_id, business_id in db.execute(
             select(CourseSession.campus_id, CourseSession.original_room_business_id).where(
+                CourseSession.schedule_set_id == rooms[0].schedule_set_id,
                 CourseSession.campus_id.in_(campus_ids),
                 CourseSession.original_room_business_id.in_(business_ids),
             )
@@ -1118,6 +1156,7 @@ def ensure_rooms_deletable(db: Session, rooms: list[Room]) -> None:
                 ScheduleAssignment.course_session_id == CourseSession.id,
             )
             .where(
+                CourseSession.schedule_set_id == rooms[0].schedule_set_id,
                 CourseSession.campus_id.in_(campus_ids),
                 ScheduleAssignment.room_business_id.in_(business_ids),
             )
@@ -1139,6 +1178,7 @@ def ensure_time_slots_deletable(db: Session, slots: list[TimeSlot]) -> None:
         (campus_id, business_id)
         for campus_id, business_id in db.execute(
             select(CourseSession.campus_id, CourseSession.suggested_slot_id).where(
+                CourseSession.schedule_set_id == slots[0].schedule_set_id,
                 CourseSession.campus_id.in_(campus_ids),
                 CourseSession.suggested_slot_id.in_(business_ids),
             )
@@ -1154,6 +1194,7 @@ def ensure_time_slots_deletable(db: Session, slots: list[TimeSlot]) -> None:
                 ScheduleAssignment.course_session_id == CourseSession.id,
             )
             .where(
+                CourseSession.schedule_set_id == slots[0].schedule_set_id,
                 CourseSession.campus_id.in_(campus_ids),
                 ScheduleAssignment.slot_business_id.in_(business_ids),
             )
@@ -1168,15 +1209,17 @@ def ensure_time_slots_deletable(db: Session, slots: list[TimeSlot]) -> None:
 
 
 @router.get("/teachers", response_model=list[TeacherResponse], tags=["master-data"])
-def list_teachers(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[Teacher]:
-    return list(db.scalars(select(Teacher).order_by(Teacher.business_id)))
+def list_teachers(db: Db, user: CurrentUser, scope: ViewerScope) -> list[Teacher]:
+    return list(
+        db.scalars(
+            select(Teacher).where(Teacher.schedule_set_id == scope.id).order_by(Teacher.business_id)
+        )
+    )
 
 
 @router.post("/teachers", response_model=TeacherResponse, status_code=201, tags=["master-data"])
-def create_teacher(
-    payload: TeacherPayload, db: Db, user: Admin, _scope: ViewerScope
-) -> Teacher:
-    instance = Teacher(**payload.model_dump())
+def create_teacher(payload: TeacherPayload, db: Db, user: Admin, scope: ViewerScope) -> Teacher:
+    instance = Teacher(schedule_set_id=scope.id, **payload.model_dump())
     db.add(instance)
     db.commit()
     db.refresh(instance)
@@ -1185,9 +1228,9 @@ def create_teacher(
 
 @router.put("/teachers/{object_id}", response_model=TeacherResponse, tags=["master-data"])
 def update_teacher(
-    object_id: str, payload: TeacherPayload, db: Db, user: Admin, _scope: ViewerScope
+    object_id: str, payload: TeacherPayload, db: Db, user: Admin, scope: ViewerScope
 ) -> Teacher:
-    instance = get_or_404(db, Teacher, object_id)
+    instance = get_scoped_or_404(db, Teacher, object_id, scope)
     for key, value in payload.model_dump().items():
         setattr(instance, key, value)
     audit(db, user, "update", "teacher", object_id)
@@ -1202,9 +1245,11 @@ def update_teacher(
     tags=["master-data"],
 )
 def batch_update_teachers(
-    payload: TeacherBatchUpdate, db: Db, user: Admin, _scope: ViewerScope
+    payload: TeacherBatchUpdate, db: Db, user: Admin, scope: ViewerScope
 ) -> BatchOperationResponse:
-    teachers: list[Teacher] = selected_master_rows(db, Teacher, payload.object_ids, "教师")
+    teachers: list[Teacher] = selected_master_rows(
+        db, Teacher, payload.object_ids, "教师", scope.id
+    )
     changes = payload.model_dump(exclude={"object_ids"}, exclude_unset=True)
     for teacher in teachers:
         for key, value in changes.items():
@@ -1227,9 +1272,11 @@ def batch_update_teachers(
     tags=["master-data"],
 )
 def batch_delete_teachers(
-    payload: MasterDataBatchDelete, db: Db, user: Admin, _scope: ViewerScope
+    payload: MasterDataBatchDelete, db: Db, user: Admin, scope: ViewerScope
 ) -> BatchOperationResponse:
-    teachers: list[Teacher] = selected_master_rows(db, Teacher, payload.object_ids, "教师")
+    teachers: list[Teacher] = selected_master_rows(
+        db, Teacher, payload.object_ids, "教师", scope.id
+    )
     ensure_teachers_deletable(db, teachers)
     for teacher in teachers:
         db.delete(teacher)
@@ -1238,11 +1285,17 @@ def batch_delete_teachers(
     return BatchOperationResponse(affected_count=len(teachers))
 
 
-def class_group_track_index(db: Session) -> dict[tuple[str, str], list[ClassGroupTrack]]:
+def class_group_track_index(
+    db: Session, schedule_set_id: str
+) -> dict[tuple[str, str], list[ClassGroupTrack]]:
     """按课程保存的完整产品归属展开班级轨道。"""
     index: dict[tuple[str, str], list[ClassGroupTrack]] = {}
     grouped: Counter[tuple[str, str, str, str, str, str]] = Counter()
-    for course in db.scalars(select(CourseSession).order_by(CourseSession.business_id)):
+    for course in db.scalars(
+        select(CourseSession)
+        .where(CourseSession.schedule_set_id == schedule_set_id)
+        .order_by(CourseSession.business_id)
+    ):
         product_types = list(course.product_types or [])
         if course.product_type and course.product_type not in product_types:
             product_types.append(course.product_type)
@@ -1294,8 +1347,10 @@ def class_group_response(item: ClassGroup, tracks: list[ClassGroupTrack]) -> Cla
     )
 
 
-def class_group_responses(db: Session, classes: list[ClassGroup]) -> list[ClassGroupResponse]:
-    index = class_group_track_index(db)
+def class_group_responses(
+    db: Session, classes: list[ClassGroup], schedule_set_id: str
+) -> list[ClassGroupResponse]:
+    index = class_group_track_index(db, schedule_set_id)
     return [
         class_group_response(item, index.get((item.campus_id, item.business_id), []))
         for item in classes
@@ -1303,18 +1358,24 @@ def class_group_responses(db: Session, classes: list[ClassGroup]) -> list[ClassG
 
 
 @router.get("/class-groups", response_model=list[ClassGroupResponse], tags=["master-data"])
-def list_class_groups(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[ClassGroupResponse]:
-    classes = list(db.scalars(select(ClassGroup).order_by(ClassGroup.business_id)))
-    return class_group_responses(db, classes)
+def list_class_groups(db: Db, user: CurrentUser, scope: ViewerScope) -> list[ClassGroupResponse]:
+    classes = list(
+        db.scalars(
+            select(ClassGroup)
+            .where(ClassGroup.schedule_set_id == scope.id)
+            .order_by(ClassGroup.business_id)
+        )
+    )
+    return class_group_responses(db, classes, scope.id)
 
 
 @router.post(
     "/class-groups", response_model=ClassGroupResponse, status_code=201, tags=["master-data"]
 )
 def create_class_group(
-    payload: ClassGroupPayload, db: Db, user: Admin, _scope: ViewerScope
+    payload: ClassGroupPayload, db: Db, user: Admin, scope: ViewerScope
 ) -> ClassGroupResponse:
-    instance = ClassGroup(**payload.model_dump())
+    instance = ClassGroup(schedule_set_id=scope.id, **payload.model_dump())
     db.add(instance)
     try:
         audit(db, user, "create", "class_group", instance.id, payload.model_dump())
@@ -1323,7 +1384,7 @@ def create_class_group(
         db.rollback()
         raise HTTPException(status_code=409, detail="业务 ID 已存在") from exc
     db.refresh(instance)
-    return class_group_responses(db, [instance])[0]
+    return class_group_responses(db, [instance], instance.schedule_set_id)[0]
 
 
 @router.put("/class-groups/{object_id}", response_model=ClassGroupResponse, tags=["master-data"])
@@ -1332,15 +1393,15 @@ def update_class_group(
     payload: ClassGroupPayload,
     db: Db,
     user: Admin,
-    _scope: ViewerScope,
+    scope: ViewerScope,
 ) -> ClassGroupResponse:
-    instance = get_or_404(db, ClassGroup, object_id)
+    instance = get_scoped_or_404(db, ClassGroup, object_id, scope)
     for key, value in payload.model_dump().items():
         setattr(instance, key, value)
     audit(db, user, "update", "class_group", object_id)
     db.commit()
     db.refresh(instance)
-    return class_group_responses(db, [instance])[0]
+    return class_group_responses(db, [instance], instance.schedule_set_id)[0]
 
 
 @router.post(
@@ -1349,9 +1410,11 @@ def update_class_group(
     tags=["master-data"],
 )
 def batch_delete_class_groups(
-    payload: MasterDataBatchDelete, db: Db, user: Admin, _scope: ViewerScope
+    payload: MasterDataBatchDelete, db: Db, user: Admin, scope: ViewerScope
 ) -> BatchOperationResponse:
-    classes: list[ClassGroup] = selected_master_rows(db, ClassGroup, payload.object_ids, "班级")
+    classes: list[ClassGroup] = selected_master_rows(
+        db, ClassGroup, payload.object_ids, "班级", scope.id
+    )
     ensure_class_groups_deletable(db, classes)
     for class_group in classes:
         db.delete(class_group)
@@ -1361,15 +1424,15 @@ def batch_delete_class_groups(
 
 
 @router.get("/rooms", response_model=list[RoomResponse], tags=["master-data"])
-def list_rooms(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[Room]:
-    return list(db.scalars(select(Room).order_by(Room.business_id)))
+def list_rooms(db: Db, user: CurrentUser, scope: ViewerScope) -> list[Room]:
+    return list(
+        db.scalars(select(Room).where(Room.schedule_set_id == scope.id).order_by(Room.business_id))
+    )
 
 
 @router.post("/rooms", response_model=RoomResponse, status_code=201, tags=["master-data"])
-def create_room(
-    payload: RoomPayload, db: Db, user: Admin, _scope: ViewerScope
-) -> Room:
-    instance = Room(**payload.model_dump())
+def create_room(payload: RoomPayload, db: Db, user: Admin, scope: ViewerScope) -> Room:
+    instance = Room(schedule_set_id=scope.id, **payload.model_dump())
     db.add(instance)
     db.commit()
     db.refresh(instance)
@@ -1378,9 +1441,9 @@ def create_room(
 
 @router.put("/rooms/{object_id}", response_model=RoomResponse, tags=["master-data"])
 def update_room(
-    object_id: str, payload: RoomPayload, db: Db, user: Admin, _scope: ViewerScope
+    object_id: str, payload: RoomPayload, db: Db, user: Admin, scope: ViewerScope
 ) -> Room:
-    instance = get_or_404(db, Room, object_id)
+    instance = get_scoped_or_404(db, Room, object_id, scope)
     for key, value in payload.model_dump().items():
         setattr(instance, key, value)
     audit(db, user, "update", "room", object_id)
@@ -1395,9 +1458,9 @@ def update_room(
     tags=["master-data"],
 )
 def batch_update_rooms(
-    payload: RoomBatchUpdate, db: Db, user: Admin, _scope: ViewerScope
+    payload: RoomBatchUpdate, db: Db, user: Admin, scope: ViewerScope
 ) -> BatchOperationResponse:
-    rooms: list[Room] = selected_master_rows(db, Room, payload.object_ids, "教室")
+    rooms: list[Room] = selected_master_rows(db, Room, payload.object_ids, "教室", scope.id)
     for room in rooms:
         room.is_active = payload.is_active
     audit(
@@ -1418,9 +1481,9 @@ def batch_update_rooms(
     tags=["master-data"],
 )
 def batch_delete_rooms(
-    payload: MasterDataBatchDelete, db: Db, user: Admin, _scope: ViewerScope
+    payload: MasterDataBatchDelete, db: Db, user: Admin, scope: ViewerScope
 ) -> BatchOperationResponse:
-    rooms: list[Room] = selected_master_rows(db, Room, payload.object_ids, "教室")
+    rooms: list[Room] = selected_master_rows(db, Room, payload.object_ids, "教室", scope.id)
     ensure_rooms_deletable(db, rooms)
     for room in rooms:
         db.delete(room)
@@ -1430,15 +1493,17 @@ def batch_delete_rooms(
 
 
 @router.get("/time-slots", response_model=list[TimeSlotResponse], tags=["master-data"])
-def list_time_slots(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[TimeSlot]:
-    return list(db.scalars(select(TimeSlot).order_by(TimeSlot.sequence)))
+def list_time_slots(db: Db, user: CurrentUser, scope: ViewerScope) -> list[TimeSlot]:
+    return list(
+        db.scalars(
+            select(TimeSlot).where(TimeSlot.schedule_set_id == scope.id).order_by(TimeSlot.sequence)
+        )
+    )
 
 
 @router.post("/time-slots", response_model=TimeSlotResponse, status_code=201, tags=["master-data"])
-def create_time_slot(
-    payload: TimeSlotPayload, db: Db, user: Admin, _scope: ViewerScope
-) -> TimeSlot:
-    instance = TimeSlot(**payload.model_dump())
+def create_time_slot(payload: TimeSlotPayload, db: Db, user: Admin, scope: ViewerScope) -> TimeSlot:
+    instance = TimeSlot(schedule_set_id=scope.id, **payload.model_dump())
     db.add(instance)
     db.commit()
     db.refresh(instance)
@@ -1451,9 +1516,9 @@ def update_time_slot(
     payload: TimeSlotPayload,
     db: Db,
     user: Admin,
-    _scope: ViewerScope,
+    scope: ViewerScope,
 ) -> TimeSlot:
-    instance = get_or_404(db, TimeSlot, object_id)
+    instance = get_scoped_or_404(db, TimeSlot, object_id, scope)
     for key, value in payload.model_dump().items():
         setattr(instance, key, value)
     audit(db, user, "update", "time_slot", object_id)
@@ -1468,9 +1533,9 @@ def update_time_slot(
     tags=["master-data"],
 )
 def batch_update_time_slots(
-    payload: TimeSlotBatchUpdate, db: Db, user: Admin, _scope: ViewerScope
+    payload: TimeSlotBatchUpdate, db: Db, user: Admin, scope: ViewerScope
 ) -> BatchOperationResponse:
-    slots: list[TimeSlot] = selected_master_rows(db, TimeSlot, payload.object_ids, "时段")
+    slots: list[TimeSlot] = selected_master_rows(db, TimeSlot, payload.object_ids, "时段", scope.id)
     for slot in slots:
         slot.is_open = payload.is_open
     audit(
@@ -1491,9 +1556,9 @@ def batch_update_time_slots(
     tags=["master-data"],
 )
 def batch_delete_time_slots(
-    payload: MasterDataBatchDelete, db: Db, user: Admin, _scope: ViewerScope
+    payload: MasterDataBatchDelete, db: Db, user: Admin, scope: ViewerScope
 ) -> BatchOperationResponse:
-    slots: list[TimeSlot] = selected_master_rows(db, TimeSlot, payload.object_ids, "时段")
+    slots: list[TimeSlot] = selected_master_rows(db, TimeSlot, payload.object_ids, "时段", scope.id)
     ensure_time_slots_deletable(db, slots)
     for slot in slots:
         db.delete(slot)
@@ -1503,8 +1568,14 @@ def batch_delete_time_slots(
 
 
 @router.get("/course-sessions", response_model=list[CourseSessionResponse], tags=["master-data"])
-def list_course_sessions(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[CourseSession]:
-    return list(db.scalars(select(CourseSession).order_by(CourseSession.business_id)))
+def list_course_sessions(db: Db, user: CurrentUser, scope: ViewerScope) -> list[CourseSession]:
+    return list(
+        db.scalars(
+            select(CourseSession)
+            .where(CourseSession.schedule_set_id == scope.id)
+            .order_by(CourseSession.business_id)
+        )
+    )
 
 
 @router.post(
@@ -1514,7 +1585,7 @@ def list_course_sessions(db: Db, user: CurrentUser, _scope: ViewerScope) -> list
     tags=["master-data"],
 )
 def create_course_session(
-    payload: CourseSessionPayload, db: Db, user: Admin, _scope: ViewerScope
+    payload: CourseSessionPayload, db: Db, user: Admin, scope: ViewerScope
 ) -> CourseSession:
     values = payload.model_dump()
     if values["product_type"] and not values["product_types"]:
@@ -1540,7 +1611,7 @@ def create_course_session(
         ]
     if values["original_room_business_id"] and not values["candidate_room_business_ids"]:
         values["candidate_room_business_ids"] = [values["original_room_business_id"]]
-    instance = CourseSession(**values)
+    instance = CourseSession(schedule_set_id=scope.id, **values)
     db.add(instance)
     db.commit()
     db.refresh(instance)
@@ -1555,9 +1626,9 @@ def update_course_session(
     payload: CourseSessionUpdate,
     db: Db,
     user: Admin,
-    _scope: ViewerScope,
+    scope: ViewerScope,
 ) -> CourseSession:
-    instance = get_or_404(db, CourseSession, object_id)
+    instance = get_scoped_or_404(db, CourseSession, object_id, scope)
     changes = payload.model_dump(exclude_unset=True)
     for key, value in changes.items():
         setattr(instance, key, value)
@@ -1571,8 +1642,16 @@ def update_course_session(
     return instance
 
 
-def selected_course_sessions(db: Session, object_ids: list[str]) -> list[CourseSession]:
-    rows = list(db.scalars(select(CourseSession).where(CourseSession.id.in_(object_ids))))
+def selected_course_sessions(
+    db: Session, object_ids: list[str], schedule_set_id: str
+) -> list[CourseSession]:
+    rows = list(
+        db.scalars(
+            select(CourseSession).where(
+                CourseSession.schedule_set_id == schedule_set_id, CourseSession.id.in_(object_ids)
+            )
+        )
+    )
     found_ids = {item.id for item in rows}
     missing = [item for item in object_ids if item not in found_ids]
     if missing:
@@ -1633,28 +1712,30 @@ def _course_products_criterion(product_types: list[str]) -> ColumnElement[bool]:
     return or_(*(_course_product_criterion(item) for item in product_types))
 
 
-def _all_course_product_types(db: Session) -> set[str]:
+def _all_course_product_types(db: Session, schedule_set_id: str) -> set[str]:
     return {
         product_type
-        for course in db.scalars(select(CourseSession))
+        for course in db.scalars(
+            select(CourseSession).where(CourseSession.schedule_set_id == schedule_set_id)
+        )
         for product_type in _course_product_values(course)
     }
 
 
 def course_session_criteria(
-    spec: CourseSessionFilter | None, object_ids: list[str] | None
+    schedule_set_id: str, spec: CourseSessionFilter | None, object_ids: list[str] | None
 ) -> list[ColumnElement[bool]]:
     """把两种选择方式统一成一组 where 条件。
 
     条件形态（而不是 id 列表）是刻意的：按条件删两万条时，引用检查和删除都能写成
     子查询，不用把两万个绑定变量塞进 IN——SQLite 的变量上限只有三万出头。
     """
+    criteria: list[ColumnElement[bool]] = [CourseSession.schedule_set_id == schedule_set_id]
     if object_ids is not None:
-        return [CourseSession.id.in_(object_ids)]
+        return [*criteria, CourseSession.id.in_(object_ids)]
     if spec is None:
-        return []
+        return criteria
 
-    criteria: list[ColumnElement[bool]] = []
     equality: tuple[tuple[Any, Any], ...] = (
         (CourseSession.campus_id, spec.campus_id),
         (CourseSession.business_line, spec.business_line),
@@ -1719,7 +1800,10 @@ def ensure_expected_count(actual: int, expected: int | None) -> None:
 
 
 def validate_course_room(
-    db: Session, criteria: list[ColumnElement[bool]], room_business_id: str | None
+    db: Session,
+    schedule_set_id: str,
+    criteria: list[ColumnElement[bool]],
+    room_business_id: str | None,
 ) -> None:
     if room_business_id is None:
         return
@@ -1727,6 +1811,7 @@ def validate_course_room(
     matched_campuses = set(
         db.scalars(
             select(Room.campus_id).where(
+                Room.schedule_set_id == schedule_set_id,
                 Room.business_id == room_business_id,
                 Room.campus_id.in_(campus_ids),
             )
@@ -1771,18 +1856,18 @@ def ensure_course_sessions_deletable(db: Session, criteria: list[ColumnElement[b
     tags=["master-data"],
 )
 def batch_update_course_sessions(
-    payload: CourseSessionBatchUpdate, db: Db, user: Admin, _scope: ViewerScope
+    payload: CourseSessionBatchUpdate, db: Db, user: Admin, scope: ViewerScope
 ) -> BatchOperationResponse:
     if payload.object_ids is not None:
-        selected_course_sessions(db, payload.object_ids)
-    criteria = course_session_criteria(payload.filter, payload.object_ids)
+        selected_course_sessions(db, payload.object_ids, scope.id)
+    criteria = course_session_criteria(scope.id, payload.filter, payload.object_ids)
     matched = count_course_sessions(db, criteria)
     ensure_expected_count(matched, payload.expected_count)
     changes = payload.model_dump(
         exclude={"object_ids", "filter", "expected_count"}, exclude_unset=True
     )
     if "original_room_business_id" in changes:
-        validate_course_room(db, criteria, changes["original_room_business_id"])
+        validate_course_room(db, scope.id, criteria, changes["original_room_business_id"])
         changes["candidate_room_business_ids"] = (
             [changes["original_room_business_id"]] if changes["original_room_business_id"] else []
         )
@@ -1818,11 +1903,11 @@ def batch_update_course_sessions(
     tags=["master-data"],
 )
 def batch_delete_course_sessions(
-    payload: CourseSessionBatchDelete, db: Db, user: Admin, _scope: ViewerScope
+    payload: CourseSessionBatchDelete, db: Db, user: Admin, scope: ViewerScope
 ) -> BatchOperationResponse:
     if payload.object_ids is not None:
-        selected_course_sessions(db, payload.object_ids)
-    criteria = course_session_criteria(payload.filter, payload.object_ids)
+        selected_course_sessions(db, payload.object_ids, scope.id)
+    criteria = course_session_criteria(scope.id, payload.filter, payload.object_ids)
     matched = count_course_sessions(db, criteria)
     ensure_expected_count(matched, payload.expected_count)
     ensure_course_sessions_deletable(db, criteria)
@@ -1863,12 +1948,12 @@ def delete_master_data(
     object_id: str,
     db: Db,
     user: Admin,
-    _scope: ViewerScope,
+    scope: ViewerScope,
 ) -> Response:
     model = MASTER_MODELS.get(resource)
     if model is None:
         raise HTTPException(status_code=404, detail="未知主数据资源")
-    instance = get_or_404(db, model, object_id)
+    instance = get_scoped_or_404(db, model, object_id, scope)
     if resource == "teachers":
         ensure_teachers_deletable(db, [instance])
     elif resource == "class-groups":
@@ -1878,7 +1963,9 @@ def delete_master_data(
     elif resource == "time-slots":
         ensure_time_slots_deletable(db, [instance])
     elif resource == "course-sessions":
-        ensure_course_sessions_deletable(db, [CourseSession.id == instance.id])
+        ensure_course_sessions_deletable(
+            db, [CourseSession.schedule_set_id == scope.id, CourseSession.id == instance.id]
+        )
     db.delete(instance)
     audit(db, user, "delete", resource, object_id)
     db.commit()
@@ -2113,7 +2200,9 @@ def _validate_scope_integers(catalog: dict[str, Any], scope: dict[str, Any]) -> 
             )
 
 
-def validate_rule_entities(db: Session, payload: RuleCreate | RuleUpdate) -> None:
+def validate_rule_entities(
+    db: Session, payload: RuleCreate | RuleUpdate, schedule_set_id: str
+) -> None:
     catalog = RULE_CONSTRAINTS.get(payload.constraint_type)
     if catalog is None:
         supported = "、".join(sorted(RULE_CONSTRAINTS))
@@ -2145,7 +2234,10 @@ def validate_rule_entities(db: Session, payload: RuleCreate | RuleUpdate) -> Non
     if model is not None and payload.actor_ids:
         existing = set(
             db.scalars(
-                select(model.business_id).where(model.business_id.in_(payload.actor_ids))
+                select(model.business_id).where(
+                    model.schedule_set_id == schedule_set_id,
+                    model.business_id.in_(payload.actor_ids),
+                )
             ).all()
         )
         missing = sorted(set(payload.actor_ids) - existing)
@@ -2159,7 +2251,11 @@ def validate_rule_entities(db: Session, payload: RuleCreate | RuleUpdate) -> Non
     slot_ids = _scope_id_set(payload.scope, "slot_id", "slot_ids")
     if slot_ids:
         existing_slots = set(
-            db.scalars(select(TimeSlot.business_id).where(TimeSlot.business_id.in_(slot_ids))).all()
+            db.scalars(
+                select(TimeSlot.business_id).where(
+                    TimeSlot.schedule_set_id == schedule_set_id, TimeSlot.business_id.in_(slot_ids)
+                )
+            ).all()
         )
         missing_slots = sorted(slot_ids - existing_slots)
         if missing_slots:
@@ -2169,7 +2265,11 @@ def validate_rule_entities(db: Session, payload: RuleCreate | RuleUpdate) -> Non
     room_ids = _scope_id_set(payload.scope, "room_id", "room_ids")
     if room_ids:
         existing_rooms = set(
-            db.scalars(select(Room.business_id).where(Room.business_id.in_(room_ids))).all()
+            db.scalars(
+                select(Room.business_id).where(
+                    Room.schedule_set_id == schedule_set_id, Room.business_id.in_(room_ids)
+                )
+            ).all()
         )
         missing_rooms = sorted(room_ids - existing_rooms)
         if missing_rooms:
@@ -2200,17 +2300,10 @@ def list_rules(
 
 
 @router.post("/rules", response_model=RuleResponse, status_code=201, tags=["rules"])
-def create_rule(
-    payload: RuleCreate, db: Db, user: AdminOrScheduler, scope: SchedulerScope
-) -> Rule:
-    validate_rule_entities(db, payload)
-    rule_count = db.scalar(
-        select(func.count(Rule.id)).where(Rule.schedule_set_id == scope.id)
-    )
-    business_id = (
-        payload.business_id
-        or f"RL-{int(rule_count or 0) + 1:04d}"
-    )
+def create_rule(payload: RuleCreate, db: Db, user: AdminOrScheduler, scope: SchedulerScope) -> Rule:
+    validate_rule_entities(db, payload, scope.id)
+    rule_count = db.scalar(select(func.count(Rule.id)).where(Rule.schedule_set_id == scope.id))
+    business_id = payload.business_id or f"RL-{int(rule_count or 0) + 1:04d}"
     data = payload.model_dump(exclude={"business_id"})
     # 状态只能由 transition 端点推进，接口不接受调用方直接写 active。
     instance = Rule(
@@ -2233,7 +2326,7 @@ def update_rule(
     rule = get_scoped_or_404(db, Rule, rule_id, scope)
     if rule.status not in {"draft", "awaiting_confirmation"}:
         raise HTTPException(status_code=409, detail="只有待确认规则可以编辑")
-    validate_rule_entities(db, payload)
+    validate_rule_entities(db, payload, scope.id)
     for key, value in payload.model_dump().items():
         setattr(rule, key, value)
     rule.version += 1
@@ -2634,6 +2727,7 @@ def publish_schedule(
     audit(db, user, "publish", "schedule", schedule.id)
     db.commit()
     db.refresh(schedule)
+    trigger_published_data_sync(db, user, scope.id, event="publish")
     return schedule_response(db, schedule)
 
 
@@ -2659,6 +2753,7 @@ def rollback_schedule(
     audit(db, user, "rollback", "schedule", target.id)
     db.commit()
     db.refresh(target)
+    trigger_published_data_sync(db, user, scope.id, event="rollback")
     return schedule_response(db, target)
 
 
@@ -2722,9 +2817,7 @@ def ensure_schedule_deletable(db: Session, schedule: ScheduleVersion) -> None:
 
 
 @router.delete("/schedules/{schedule_id}", status_code=204, tags=["schedules"])
-def delete_schedule(
-    schedule_id: str, db: Db, user: Approver, scope: ApproverScope
-) -> Response:
+def delete_schedule(schedule_id: str, db: Db, user: Approver, scope: ApproverScope) -> Response:
     """删除课表版本。删除是发布/回滚的破坏性孪生操作，权限同为 Approver。
 
     SolverRun 与 DataSnapshot 一律保留——求解痕迹是审计链，不随版本消失。
@@ -2781,9 +2874,7 @@ def delete_schedule(
 
 
 @router.get("/schedules/{schedule_id}/export.xlsx", tags=["schedules"])
-def export_schedule(
-    schedule_id: str, db: Db, user: CurrentUser, scope: ViewerScope
-) -> Response:
+def export_schedule(schedule_id: str, db: Db, user: CurrentUser, scope: ViewerScope) -> Response:
     schedule = get_scoped_or_404(db, ScheduleVersion, schedule_id, scope)
     content = export_schedule_xlsx(db, schedule)
     filename = f"tupai-schedule-v{schedule.version_no}.xlsx"
@@ -2836,17 +2927,28 @@ def publish_schedule_to_calendar(
         item.id: item
         for item in db.scalars(
             select(CourseSession).where(
-                CourseSession.id.in_([item.course_session_id for item in assignments])
+                CourseSession.schedule_set_id == scope.id,
+                CourseSession.id.in_([item.course_session_id for item in assignments]),
             )
         )
     }
     teacher_ids = {item.teacher_business_id for item in courses.values()}
     teachers = {
         item.business_id: item
-        for item in db.scalars(select(Teacher).where(Teacher.business_id.in_(teacher_ids)))
+        for item in db.scalars(
+            select(Teacher).where(
+                Teacher.schedule_set_id == scope.id, Teacher.business_id.in_(teacher_ids)
+            )
+        )
     }
-    rooms = {item.business_id: item for item in db.scalars(select(Room))}
-    slots = {item.business_id: item for item in db.scalars(select(TimeSlot))}
+    rooms = {
+        item.business_id: item
+        for item in db.scalars(select(Room).where(Room.schedule_set_id == scope.id))
+    }
+    slots = {
+        item.business_id: item
+        for item in db.scalars(select(TimeSlot).where(TimeSlot.schedule_set_id == scope.id))
+    }
     existing_bindings = {
         item.course_session_id: item
         for item in db.scalars(
@@ -3064,7 +3166,7 @@ def publish_schedule_to_calendar(
 
 
 def reschedule_neighborhood(
-    db: Session, request: RescheduleCreate, parent: ScheduleResponse
+    db: Session, request: RescheduleCreate, parent: ScheduleResponse, schedule_set_id: str
 ) -> set[str]:
     """把调课求解收敛到受影响的局部邻域。
 
@@ -3073,8 +3175,16 @@ def reschedule_neighborhood(
     邻域外的课次不参与决策，但会作为固定占用进入模型，不会被别的课占掉。
     返回空集表示不限定范围（求解器按全量处理）。
     """
-    teachers = {item.business_id: item for item in db.scalars(select(Teacher))}
-    courses = {item.id: item for item in db.scalars(select(CourseSession))}
+    teachers = {
+        item.business_id: item
+        for item in db.scalars(select(Teacher).where(Teacher.schedule_set_id == schedule_set_id))
+    }
+    courses = {
+        item.id: item
+        for item in db.scalars(
+            select(CourseSession).where(CourseSession.schedule_set_id == schedule_set_id)
+        )
+    }
 
     def targets(assignment: AssignmentResponse) -> bool:
         course = courses.get(assignment.course_session_id)
@@ -3135,9 +3245,7 @@ def reschedule_neighborhood(
 
 
 @router.get("/reschedule-events", response_model=list[RescheduleResponse], tags=["reschedule"])
-def list_reschedule_events(
-    db: Db, user: CurrentUser, scope: ViewerScope
-) -> list[RescheduleEvent]:
+def list_reschedule_events(db: Db, user: CurrentUser, scope: ViewerScope) -> list[RescheduleEvent]:
     return list(
         db.scalars(
             select(RescheduleEvent)
@@ -3176,7 +3284,7 @@ def create_reschedule_event(
     )
     db.add(event)
     db.flush()
-    neighborhood = reschedule_neighborhood(db, request, parent_response)
+    neighborhood = reschedule_neighborhood(db, request, parent_response, scope.id)
     run = create_solver_run(
         db,
         user.id,
@@ -3357,9 +3465,7 @@ def create_feishu_workspace(
     service = FeishuService(settings, db)
     requested_name = request.name.strip()
     workspace_name = (
-        requested_name
-        if scope.name in requested_name
-        else f"{scope.name}｜{requested_name}"
+        requested_name if scope.name in requested_name else f"{scope.name}｜{requested_name}"
     )
     try:
         workspace = service.create_workspace(user.id, workspace_name, scope.id)
@@ -3415,7 +3521,7 @@ def export_resource_rows(
                 "业务线": " / ".join(item.business_lines),
                 "教师标识": " / ".join(item.teacher_business_ids),
             }
-            for item in class_group_responses(db, classes)
+            for item in class_group_responses(db, classes, schedule_set_id)
         ]
     if resource == "rooms":
         return [
@@ -3440,7 +3546,12 @@ def export_resource_rows(
             for item in db.scalars(select(TimeSlot).order_by(TimeSlot.sequence))
         ]
     if resource == "course_sessions":
-        teachers = {item.business_id: item for item in db.scalars(select(Teacher))}
+        teachers = {
+            item.business_id: item
+            for item in db.scalars(
+                select(Teacher).where(Teacher.schedule_set_id == schedule_set_id)
+            )
+        }
         return [
             {
                 "业务标识": item.business_id,
@@ -3629,6 +3740,151 @@ def export_resource_rows(
     return []
 
 
+def _sync_detail(
+    result: dict[str, Any] | None,
+    *,
+    trigger: str,
+    schedule_set_id: str,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Keep every resource result self-describing in the sync history."""
+    detail = {
+        "trigger": trigger,
+        "schedule_set_id": schedule_set_id,
+        **(result or {}),
+    }
+    if error:
+        detail["error"] = error
+    return detail
+
+
+def sync_feishu_resources(
+    db: Session,
+    user: User,
+    schedule_set_id: str,
+    resources: list[str] | tuple[str, ...],
+    *,
+    workspace_id: str | None = None,
+    trigger: str,
+) -> FeishuBatchSyncResponse:
+    """Synchronize independently logged resources without making the batch atomic.
+
+    A timetable may contain useful master-data updates even when a later table
+    (for example the public summary) cannot be written.  Each table therefore
+    receives its own IntegrationSync row and failure is returned as a readable
+    per-resource result instead of discarding successful writes.
+    """
+    service = FeishuService(settings, db)
+    syncs: list[IntegrationSync] = []
+    for resource in resources:
+        sync = IntegrationSync(
+            schedule_set_id=schedule_set_id,
+            direction="export",
+            resource=resource,
+            status="running",
+            mode="live",
+        )
+        db.add(sync)
+        db.flush()
+        try:
+            rows = export_resource_rows(db, resource, schedule_set_id)
+            result = service.sync_rows(
+                user.id,
+                resource,
+                rows,
+                workspace_id,
+                schedule_set_id,
+            )
+            sync.records_read = int(result["records_read"])
+            sync.records_written = int(result["records_written"])
+            sync.detail = _sync_detail(
+                result,
+                trigger=trigger,
+                schedule_set_id=schedule_set_id,
+            )
+            sync.status = "completed"
+        except (FeishuServiceError, httpx.HTTPError) as exc:
+            logger.warning(
+                "飞书批量同步失败：schedule_set_id=%s resource=%s", schedule_set_id, resource
+            )
+            sync.status = "failed"
+            sync.detail = _sync_detail(
+                None,
+                trigger=trigger,
+                schedule_set_id=schedule_set_id,
+                error=str(exc),
+            )
+        except Exception as exc:  # An unexpected failure must not discard other results.
+            logger.exception(
+                "飞书批量同步异常：schedule_set_id=%s resource=%s", schedule_set_id, resource
+            )
+            sync.status = "failed"
+            sync.detail = _sync_detail(
+                None,
+                trigger=trigger,
+                schedule_set_id=schedule_set_id,
+                error=str(exc),
+            )
+        audit(db, user, "sync", "feishu", sync.id, sync.detail)
+        db.commit()
+        db.refresh(sync)
+        syncs.append(sync)
+
+    failed_count = sum(item.status != "completed" for item in syncs)
+    completed_count = len(syncs) - failed_count
+    batch_status: Literal["completed", "partial", "failed"]
+    if failed_count == 0:
+        batch_status = "completed"
+    elif completed_count == 0:
+        batch_status = "failed"
+    else:
+        batch_status = "partial"
+    return FeishuBatchSyncResponse(
+        schedule_set_id=schedule_set_id,
+        status=batch_status,
+        completed_count=completed_count,
+        failed_count=failed_count,
+        records_read=sum(item.records_read for item in syncs),
+        records_written=sum(item.records_written for item in syncs),
+        results=[IntegrationSyncResponse.model_validate(item) for item in syncs],
+    )
+
+
+def trigger_published_data_sync(
+    db: Session, user: User, schedule_set_id: str, *, event: Literal["publish", "rollback"]
+) -> None:
+    """Best-effort sync after a local version change.
+
+    The schedule state has already been committed when this is called.  Failure
+    is recorded in IntegrationSync and intentionally never changes that local
+    publication or rollback result.
+    """
+    try:
+        result = sync_feishu_resources(
+            db,
+            user,
+            schedule_set_id,
+            ("schedule", "public_summary"),
+            trigger=f"version_{event}",
+        )
+        if result.failed_count:
+            logger.warning(
+                "版本%s后的飞书发布数据同步未全部完成：schedule_set_id=%s failed=%s",
+                "发布" if event == "publish" else "回滚",
+                schedule_set_id,
+                result.failed_count,
+            )
+    except Exception:
+        # The local state is committed before this helper runs.  Roll back only
+        # an unexpected sync-side transaction and preserve the version change.
+        db.rollback()
+        logger.exception(
+            "版本%s后的飞书发布数据同步触发异常：schedule_set_id=%s",
+            "发布" if event == "publish" else "回滚",
+            schedule_set_id,
+        )
+
+
 def _parse_clock(value: str) -> time:
     """Parse the fixed clock text used by the official workbook."""
     normalized = value.strip().replace("：", ":")
@@ -3738,11 +3994,20 @@ def feishu_sync(
         )
         sync.records_read = int(result["records_read"])
         sync.records_written = int(result["records_written"])
-        sync.detail = result
+        sync.detail = _sync_detail(
+            result,
+            trigger="single_resource",
+            schedule_set_id=scope.id,
+        )
         sync.status = "completed"
     except (FeishuServiceError, httpx.HTTPError) as exc:
         sync.status = "failed"
-        sync.detail = {"error": str(exc)}
+        sync.detail = _sync_detail(
+            None,
+            trigger="single_resource",
+            schedule_set_id=scope.id,
+            error=str(exc),
+        )
         audit(db, user, "sync", "feishu", sync.id, sync.detail)
         db.commit()
         code = (
@@ -3755,6 +4020,33 @@ def feishu_sync(
     db.commit()
     db.refresh(sync)
     return sync
+
+
+@router.post(
+    "/integrations/feishu/sync-batch",
+    response_model=FeishuBatchSyncResponse,
+    tags=["integrations"],
+)
+def feishu_sync_batch(
+    request: FeishuBatchSyncRequest,
+    db: Db,
+    user: AdminSchedulerOrApprover,
+    scope: SchedulerOrApproverScope,
+) -> FeishuBatchSyncResponse:
+    """One-click export for the currently selected schedule-set workspace.
+
+    Unlike a single-table retry, this endpoint always returns every requested
+    resource result.  A failed resource is logged but does not hide the
+    successes from the operator.
+    """
+    return sync_feishu_resources(
+        db,
+        user,
+        scope.id,
+        request.resources,
+        workspace_id=request.workspace_id,
+        trigger="manual_batch",
+    )
 
 
 @router.get(
@@ -3823,7 +4115,11 @@ def aily_context(db: Db, schedule_scope: AilyScheduleScope) -> AilyContextRespon
         entities={
             "teachers": [
                 {"business_id": item.business_id, "name": item.name, "subject": item.subject}
-                for item in db.scalars(select(Teacher).order_by(Teacher.business_id))
+                for item in db.scalars(
+                    select(Teacher)
+                    .where(Teacher.schedule_set_id == schedule_scope.id)
+                    .order_by(Teacher.business_id)
+                )
             ],
             "classes": [
                 {
@@ -3833,7 +4129,15 @@ def aily_context(db: Db, schedule_scope: AilyScheduleScope) -> AilyContextRespon
                     "teacher_business_ids": item.teacher_business_ids,
                 }
                 for item in class_group_responses(
-                    db, list(db.scalars(select(ClassGroup).order_by(ClassGroup.business_id)))
+                    db,
+                    list(
+                        db.scalars(
+                            select(ClassGroup)
+                            .where(ClassGroup.schedule_set_id == schedule_scope.id)
+                            .order_by(ClassGroup.business_id)
+                        )
+                    ),
+                    schedule_scope.id,
                 )
             ],
             "rooms": [
@@ -3841,11 +4145,19 @@ def aily_context(db: Db, schedule_scope: AilyScheduleScope) -> AilyContextRespon
                     "business_id": item.business_id,
                     "name": item.name,
                 }
-                for item in db.scalars(select(Room).order_by(Room.business_id))
+                for item in db.scalars(
+                    select(Room)
+                    .where(Room.schedule_set_id == schedule_scope.id)
+                    .order_by(Room.business_id)
+                )
             ],
             "courses": [
                 course_context(item)
-                for item in db.scalars(select(CourseSession).order_by(CourseSession.business_id))
+                for item in db.scalars(
+                    select(CourseSession)
+                    .where(CourseSession.schedule_set_id == schedule_scope.id)
+                    .order_by(CourseSession.business_id)
+                )
             ],
             "time_slots": [
                 {
@@ -3856,7 +4168,11 @@ def aily_context(db: Db, schedule_scope: AilyScheduleScope) -> AilyContextRespon
                     "kind": item.kind,
                     "sequence": item.sequence,
                 }
-                for item in db.scalars(select(TimeSlot).order_by(TimeSlot.sequence))
+                for item in db.scalars(
+                    select(TimeSlot)
+                    .where(TimeSlot.schedule_set_id == schedule_scope.id)
+                    .order_by(TimeSlot.sequence)
+                )
             ],
         },
         constraint_catalog=[{"type": key, **value} for key, value in RULE_CONSTRAINTS.items()],
@@ -3887,11 +4203,10 @@ def aily_rule_proposals(
 ) -> list[Rule]:
     created: list[Rule] = []
     base_number = int(
-        db.scalar(select(func.count(Rule.id)).where(Rule.schedule_set_id == schedule_scope.id))
-        or 0
+        db.scalar(select(func.count(Rule.id)).where(Rule.schedule_set_id == schedule_scope.id)) or 0
     )
     for index, proposal in enumerate(batch.proposals, start=1):
-        validate_rule_entities(db, proposal)
+        validate_rule_entities(db, proposal, schedule_scope.id)
         business_id = proposal.business_id or f"AILY-{base_number + index:04d}"
         data = proposal.model_dump(exclude={"business_id"})
         data["source_text"] = proposal.source_text or batch.source_text
@@ -3940,13 +4255,27 @@ def _solver_rules_from_labels(labels: list[str]) -> list[str]:
     return list(dict.fromkeys([*mandatory, *matched]))
 
 
-def _validated_assistant_scope(db: Session, parsed: dict[str, Any]) -> dict[str, Any]:
+def _validated_assistant_scope(
+    db: Session, parsed: dict[str, Any], schedule_set_id: str
+) -> dict[str, Any]:
     available = {
         "business_lines": {
-            item for item in db.scalars(select(CourseSession.business_line)).all() if item
+            item
+            for item in db.scalars(
+                select(CourseSession.business_line).where(
+                    CourseSession.schedule_set_id == schedule_set_id
+                )
+            ).all()
+            if item
         },
-        "product_types": {item for item in _all_course_product_types(db) if item},
-        "class_business_ids": set(db.scalars(select(CourseSession.class_business_id)).all()),
+        "product_types": {item for item in _all_course_product_types(db, schedule_set_id) if item},
+        "class_business_ids": set(
+            db.scalars(
+                select(CourseSession.class_business_id).where(
+                    CourseSession.schedule_set_id == schedule_set_id
+                )
+            ).all()
+        ),
     }
     invalid: dict[str, list[str]] = {}
     for field, valid_values in available.items():
@@ -3972,7 +4301,7 @@ def assistant_interpret(
     request: AssistantInterpretRequest,
     db: Db,
     user: AdminOrScheduler,
-    _schedule_scope: SchedulerScope,
+    schedule_scope: SchedulerScope,
 ) -> AssistantInterpretResponse:
     ai_service = AIService(settings, db)
     ai_configuration = ai_service.configuration_view()
@@ -3985,11 +4314,25 @@ def assistant_interpret(
     if ai_configuration["configured"]:
         context = {
             "business_lines": sorted(
-                {item for item in db.scalars(select(CourseSession.business_line)).all() if item}
+                {
+                    item
+                    for item in db.scalars(
+                        select(CourseSession.business_line).where(
+                            CourseSession.schedule_set_id == schedule_scope.id
+                        )
+                    ).all()
+                    if item
+                }
             ),
-            "product_types": sorted(_all_course_product_types(db)),
+            "product_types": sorted(_all_course_product_types(db, schedule_scope.id)),
             "class_business_ids": sorted(
-                set(db.scalars(select(CourseSession.class_business_id)).all())
+                set(
+                    db.scalars(
+                        select(CourseSession.class_business_id).where(
+                            CourseSession.schedule_set_id == schedule_scope.id
+                        )
+                    ).all()
+                )
             ),
             "fixed_rule_labels": list(SOLVER_RULE_LABELS.values()),
         }
@@ -4054,7 +4397,7 @@ def assistant_interpret(
     }
     parsed["solver_rules"] = _solver_rules_from_labels(parsed["recognized_rules"])
     try:
-        parsed = _validated_assistant_scope(db, parsed)
+        parsed = _validated_assistant_scope(db, parsed, schedule_scope.id)
         normalized = AssistantInterpretResponse(
             instruction=request.instruction,
             source=source,
@@ -4100,9 +4443,10 @@ def assistant_solve(
     filters/rules. The instruction is persisted for traceability, while the
     same CP-SAT path as the regular solver is used for deterministic execution.
     """
-    scope = _validated_assistant_scope(db, request.model_dump())
+    scope = _validated_assistant_scope(db, request.model_dump(), schedule_scope.id)
     selected_count = db.scalar(
         select(func.count(CourseSession.id)).where(
+            CourseSession.schedule_set_id == schedule_scope.id,
             *(
                 [CourseSession.business_line.in_(scope["business_lines"])]
                 if scope["business_lines"]

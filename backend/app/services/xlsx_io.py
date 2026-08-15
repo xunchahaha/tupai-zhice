@@ -26,10 +26,30 @@ def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
             )
         )
     )
-    courses = {item.id: item for item in db.scalars(select(CourseSession))}
-    rooms = {item.business_id: item for item in db.scalars(select(Room))}
-    teachers = {item.business_id: item for item in db.scalars(select(Teacher))}
-    slots = {item.business_id: item for item in db.scalars(select(TimeSlot))}
+    courses = {
+        item.id: item
+        for item in db.scalars(
+            select(CourseSession).where(CourseSession.schedule_set_id == schedule.schedule_set_id)
+        )
+    }
+    rooms = {
+        item.business_id: item
+        for item in db.scalars(
+            select(Room).where(Room.schedule_set_id == schedule.schedule_set_id)
+        )
+    }
+    teachers = {
+        item.business_id: item
+        for item in db.scalars(
+            select(Teacher).where(Teacher.schedule_set_id == schedule.schedule_set_id)
+        )
+    }
+    slots = {
+        item.business_id: item
+        for item in db.scalars(
+            select(TimeSlot).where(TimeSlot.schedule_set_id == schedule.schedule_set_id)
+        )
+    }
     workbook = Workbook()
     sheet = cast(Worksheet, workbook.active)
     sheet.title = "课表"

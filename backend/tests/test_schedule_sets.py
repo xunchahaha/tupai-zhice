@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -81,7 +82,7 @@ def _create_scoped_version(schedule_set_id: str, name: str) -> tuple[str, str]:
 
 
 def test_schedule_set_visibility_and_per_set_operation_permissions(
-    client: TestClient, auth_headers: dict[str, str]
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: Any
 ) -> None:
     suffix = uuid4().hex[:8]
     set_one = client.post(
@@ -224,6 +225,49 @@ def test_schedule_set_visibility_and_per_set_operation_permissions(
         second_export = export_resource_rows(db, "schedule", second["id"])
         assert [row["版本名称"] for row in first_export] == [f"课表一-{suffix}"]
         assert [row["版本名称"] for row in second_export] == [f"课表二-{suffix}"]
+        workspace_one_id = workspace_one.id
+        # Close the read transaction before the TestClient opens its own writer
+        # session against the shared SQLite test database.
+        db.rollback()
+
+        calls: list[tuple[str, str, str | None]] = []
+
+        def sync_rows(
+            service: object,
+            user_id: str,
+            resource: str,
+            rows: list[dict[str, object]],
+            workspace_id: str | None = None,
+            schedule_set_id: str = "default",
+        ) -> dict[str, object]:
+            del service, user_id, rows
+            calls.append((resource, schedule_set_id, workspace_id))
+            return {
+                "records_read": 0,
+                "records_written": 1,
+                "records_created": 1,
+                "records_updated": 0,
+                "workspace_id": workspace_one_id,
+            }
+
+        monkeypatch.setattr(FeishuService, "sync_rows", sync_rows)
+        batch = client.post(
+            "/api/v1/integrations/feishu/sync-batch",
+            headers=_headers(token_a, first["id"]),
+            json={"resources": ["schedule", "public_summary"]},
+        )
+        assert batch.status_code == 200, batch.text
+        batch_payload = batch.json()
+        assert batch_payload["schedule_set_id"] == first["id"]
+        assert batch_payload["status"] == "completed"
+        assert calls == [
+            ("schedule", first["id"], None),
+            ("public_summary", first["id"], None),
+        ]
+        assert all(
+            item["detail"]["schedule_set_id"] == first["id"]
+            for item in batch_payload["results"]
+        )
 
         # The shared test database is reused by the Feishu OAuth tests.  Remove
         # this deliberately synthetic connection so it cannot become their
