@@ -316,6 +316,24 @@ def test_auto_create_workspace_and_sync_idempotently(
         if method == "PATCH" and "/tables/tbl-default" in url:
             assert body == {"name": "接入说明"}
             return response(method, url, {"code": 0, "data": {}})
+        if method == "GET" and url.endswith("/tables"):
+            return response(
+                method,
+                url,
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {"table_id": "tbl-default", "name": "接入说明"},
+                            *[
+                                {"table_id": f"tbl-{index}", "name": item["name"]}
+                                for index, item in enumerate(created_tables, start=1)
+                            ],
+                        ],
+                        "has_more": False,
+                    },
+                },
+            )
         if method == "POST" and url.endswith("/tables"):
             created_tables.append(body["table"])
             table_id = f"tbl-{len(created_tables)}"
@@ -329,8 +347,24 @@ def test_auto_create_workspace_and_sync_idempotently(
             (part for part in url.split("/") if part.startswith("tbl-") and part != "tbl-default"),
             "",
         )
+        if method == "GET" and url.endswith("/fields"):
+            table_index = int(table_id.removeprefix("tbl-")) - 1
+            return response(
+                method,
+                url,
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {"field_name": field["field_name"], "type": field["type"]}
+                            for field in created_tables[table_index]["fields"]
+                        ],
+                        "has_more": False,
+                    },
+                },
+            )
         if method == "POST" and url.endswith("/records/search"):
-            assert body == {"field_names": ["业务标识"]}
+            assert body["field_names"][0] == "业务标识"
             return response(
                 method,
                 url,
@@ -420,7 +454,8 @@ def test_auto_create_workspace_and_sync_idempotently(
     )
     assert second.status_code == 200, second.text
     assert second.json()["detail"]["records_created"] == 0
-    assert second.json()["detail"]["records_updated"] == 6
+    assert second.json()["detail"]["records_updated"] == 0
+    assert second.json()["detail"]["records_skipped"] == 6
     assert len(remote_records["tbl-1"]) == 6
 
     batch = client.post(
@@ -443,6 +478,120 @@ def test_auto_create_workspace_and_sync_idempotently(
     assert {item["resource"] for item in history.json()} >= set(TABLE_SCHEMAS)
     with SessionLocal() as db:
         assert db.scalar(select(func.count(FeishuRecordBinding.id))) >= 6
+
+
+def test_sync_preflight_adopts_existing_table_and_adds_only_missing_fields(
+    monkeypatch: Any,
+) -> None:
+    """An upgraded app must repair the existing Base instead of cloning it."""
+
+    with SessionLocal() as db:
+        user = User(
+            username="preflight_existing_table_fixture",
+            password_hash="not-used-in-this-test",
+            role="admin",
+        )
+        db.add(user)
+        db.flush()
+        connection = FeishuConnection(
+            user_id=user.id,
+            access_token_encrypted="preflight-access",
+            refresh_token_encrypted="preflight-refresh",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            scopes=[
+                "base:record:create",
+                "base:record:retrieve",
+                "base:record:update",
+                "base:table:read",
+                "base:table:update",
+            ],
+            status="active",
+        )
+        db.add(connection)
+        db.flush()
+        workspace = FeishuWorkspace(
+            connection_id=connection.id,
+            schedule_set_id="default",
+            name="已有飞书原表",
+            app_token="app-existing-public-notice",
+            default_table_id="tbl-default",
+            url="https://example.test/existing-public-notice",
+            status="active",
+        )
+        db.add(workspace)
+        db.commit()
+
+        service = FeishuService(settings, db)
+        monkeypatch.setattr(service, "_app_configuration", lambda: None)
+        monkeypatch.setattr(service, "access_token", lambda _user_id: (connection, "token"))
+        added_fields: list[dict[str, Any]] = []
+
+        def request(method: str, url: str, **kwargs: Any) -> tuple[dict[str, Any], None]:
+            if method == "GET" and url.endswith("/tables"):
+                return (
+                    {
+                        "items": [{"table_id": "tbl-existing-notice", "name": "公开调课通知"}],
+                        "has_more": False,
+                    },
+                    None,
+                )
+            if method == "GET" and url.endswith("/fields"):
+                return (
+                    {
+                        "items": [
+                            {"field_name": "业务标识", "type": 1},
+                            {"field_name": "是否展示", "type": 1},
+                        ],
+                        "has_more": False,
+                    },
+                    None,
+                )
+            if method == "POST" and url.endswith("/fields"):
+                added_fields.append(kwargs["json_body"])
+                return {}, None
+            if method == "POST" and url.endswith("/tables"):
+                raise AssertionError("matching remote table must be adopted, not recreated")
+            raise AssertionError(f"unexpected request: {method} {url}")
+
+        monkeypatch.setattr(service, "_request", request)
+        prepared = service.prepare_sync_resources(user.id, ["public_adjustment_notice"])
+        table = prepared["public_adjustment_notice"]
+        assert table.table_id == "tbl-existing-notice"
+        assert {item["field_name"] for item in added_fields} == {
+            field_name
+            for field_name, _field_type in TABLE_SCHEMAS["public_adjustment_notice"][1]
+        } - {"业务标识", "是否展示"}
+        stored = db.get(FeishuTableBinding, table.id)
+        assert stored is not None and stored.table_id == "tbl-existing-notice"
+
+        db.delete(stored)
+        db.delete(workspace)
+        db.delete(connection)
+        db.delete(user)
+        db.commit()
+
+
+def test_sync_request_retries_a_transient_transport_failure(monkeypatch: Any) -> None:
+    service = FeishuService(settings, object())  # type: ignore[arg-type]
+    calls = 0
+
+    def flaky_request(method: str, url: str, **_kwargs: Any) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("temporary", request=httpx.Request(method, url))
+        return response(method, url, {"code": 0, "data": {"items": []}})
+
+    monkeypatch.setattr("app.services.feishu.httpx.request", flaky_request)
+    monkeypatch.setattr("app.services.feishu.time.sleep", lambda _delay: None)
+    data, _ = service._request(
+        "POST",
+        "https://example.test/records/search",
+        retry_attempts=2,
+        timeout=0.01,
+    )
+    assert data == {"items": []}
+    assert calls == 2
 
 
 def test_public_sync_normalizes_rich_text_and_repairs_historical_duplicate(
@@ -538,10 +687,11 @@ def test_public_sync_normalizes_rich_text_and_repairs_historical_duplicate(
         service = FeishuService(settings, db)
         monkeypatch.setattr(service, "_app_configuration", lambda: None)
         monkeypatch.setattr(service, "access_token", lambda _user_id: (connection, "token"))
+        monkeypatch.setattr(service, "prepare_sync_resources", lambda *_args, **_kwargs: {})
         monkeypatch.setattr(
             service,
             "_list_records",
-            lambda _token, _workspace, _table_id: (remote_records, ["log-list"]),
+            lambda _token, _workspace, _table_id, _field_names: (remote_records, ["log-list"]),
         )
         updates: list[tuple[str, dict[str, Any]]] = []
         monkeypatch.setattr(
@@ -598,6 +748,7 @@ def test_public_sync_normalizes_rich_text_and_repairs_historical_duplicate(
             "skipped_missing_delete_scope": 0,
             "unmanaged_duplicates": 0,
             "unmanaged_stale_records": 0,
+            "removed_stale_bindings": 0,
             "error": None,
         }
         db.refresh(binding)
@@ -664,10 +815,11 @@ def test_duplicate_cleanup_without_optional_delete_scope_keeps_primary_upsert(
         service = FeishuService(settings, db)
         monkeypatch.setattr(service, "_app_configuration", lambda: None)
         monkeypatch.setattr(service, "access_token", lambda _user_id: (connection, "token"))
+        monkeypatch.setattr(service, "prepare_sync_resources", lambda *_args, **_kwargs: {})
         monkeypatch.setattr(
             service,
             "_list_records",
-            lambda _token, _workspace, _table_id: (
+            lambda _token, _workspace, _table_id, _field_names: (
                 [
                     {
                         "record_id": "rec-old-no-delete",
@@ -757,6 +909,7 @@ def test_sync_keeps_binding_when_remote_search_temporarily_omits_record(
         service = FeishuService(settings, db)
         monkeypatch.setattr(service, "_app_configuration", lambda: None)
         monkeypatch.setattr(service, "access_token", lambda _user_id: (connection, "token"))
+        monkeypatch.setattr(service, "prepare_sync_resources", lambda *_args, **_kwargs: {})
         monkeypatch.setattr(service, "_list_records", lambda *_args: ([], []))
         monkeypatch.setattr(
             service,

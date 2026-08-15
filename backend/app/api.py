@@ -3725,6 +3725,17 @@ def _public_time_text(snapshot: dict[str, str]) -> str:
     return " ".join(item for item in (date_text, weekday, clocks) if item)
 
 
+def _public_projection_updated_at(schedule: ScheduleVersion | None) -> str:
+    """Use the published release time instead of sync wall-clock time.
+
+    A manual retry must not make every public record look modified.  The
+    projection only changes when the published timetable changes, so its
+    visible update time should be stable for that release as well.
+    """
+
+    return schedule.published_at.isoformat() if schedule and schedule.published_at else ""
+
+
 def _public_class_schedule_rows(
     db: Session, schedule_set_id: str
 ) -> list[dict[str, Any]]:
@@ -3734,43 +3745,35 @@ def _public_class_schedule_rows(
         for item in _assignment_rows(db, schedule.id if schedule else None)
     }
     courses, classes, rooms, slots = _public_schedule_maps(db, schedule_set_id)
-    updated_at = utcnow().isoformat()
+    updated_at = _public_projection_updated_at(schedule)
     rows: list[dict[str, Any]] = []
     for course in courses:
         assignment = assignments.get(course.id)
-        row: dict[str, Any] = {
-            "业务标识": _public_projection_key(
-                schedule_set_id, "public_class_schedule", course.id
-            ),
-            "是否展示": "是" if assignment else "否",
-            "班级名称": "",
-            "上课日期": "",
-            "星期": "",
-            "开始时间": "",
-            "结束时间": "",
-            "课程名称": "",
-            "学科": "",
-            "上课地点": "",
-            "课表版本": "",
-            "更新时间": updated_at,
-        }
-        if assignment:
-            snapshot = _public_assignment_snapshot(assignment, course, rooms, slots)
-            class_group = classes.get((course.campus_id, course.class_business_id))
-            row.update(
-                {
-                    "班级名称": class_group.name if class_group else "未分班",
-                    "上课日期": snapshot["date"],
-                    "星期": snapshot["weekday"],
-                    "开始时间": snapshot["start"],
-                    "结束时间": snapshot["end"],
-                    "课程名称": course.lesson_name or "课程安排",
-                    "学科": course.subject or "",
-                    "上课地点": snapshot["location"],
-                    "课表版本": f"V{schedule.version_no}" if schedule else "",
-                }
-            )
-        rows.append(row)
+        if assignment is None:
+            # The public source is an actual timetable, not an internal audit
+            # table.  Empty/unpublished course rows neither help MiaoDa nor
+            # should be repeatedly synchronized just to say "不展示".
+            continue
+        snapshot = _public_assignment_snapshot(assignment, course, rooms, slots)
+        class_group = classes.get((course.campus_id, course.class_business_id))
+        rows.append(
+            {
+                "业务标识": _public_projection_key(
+                    schedule_set_id, "public_class_schedule", course.id
+                ),
+                "是否展示": "是",
+                "班级名称": class_group.name if class_group else "未分班",
+                "上课日期": snapshot["date"],
+                "星期": snapshot["weekday"],
+                "开始时间": snapshot["start"],
+                "结束时间": snapshot["end"],
+                "课程名称": course.lesson_name or "课程安排",
+                "学科": course.subject or "",
+                "上课地点": snapshot["location"],
+                "课表版本": f"V{schedule.version_no}" if schedule else "",
+                "更新时间": updated_at,
+            }
+        )
     return rows
 
 
@@ -3788,7 +3791,7 @@ def _public_adjustment_notice_rows(
         for item in _assignment_rows(db, baseline.id if baseline else None)
     }
     courses, classes, rooms, slots = _public_schedule_maps(db, schedule_set_id)
-    updated_at = utcnow().isoformat()
+    updated_at = _public_projection_updated_at(schedule)
     rows: list[dict[str, Any]] = []
     for course in courses:
         before_assignment = parent_assignments.get(course.id)
@@ -3815,40 +3818,30 @@ def _public_adjustment_notice_rows(
         elif visible:
             change_type = "地点调整"
         else:
-            change_type = ""
-        row: dict[str, Any] = {
-            "业务标识": _public_projection_key(
-                schedule_set_id, "public_adjustment_notice", course.id
-            ),
-            "是否展示": "是" if visible else "否",
-            "公告状态": "已生效" if visible else "不展示",
-            "通用提示": "",
-            "调整类型": "",
-            "班级名称": "",
-            "课程名称": "",
-            "原上课时间": "",
-            "新上课时间": "",
-            "原上课地点": "",
-            "新上课地点": "",
-            "生效版本": "",
-            "更新时间": updated_at,
-        }
-        if visible:
-            class_group = classes.get((course.campus_id, course.class_business_id))
-            row.update(
-                {
-                    "通用提示": "课程安排已更新，请以本表为准",
-                    "调整类型": change_type,
-                    "班级名称": class_group.name if class_group else "未分班",
-                    "课程名称": course.lesson_name or "课程安排",
-                    "原上课时间": _public_time_text(before),
-                    "新上课时间": _public_time_text(after),
-                    "原上课地点": before["location"],
-                    "新上课地点": after["location"],
-                    "生效版本": f"V{schedule.version_no}" if schedule else "",
-                }
-            )
-        rows.append(row)
+            # Only actual changes belong in the public notice source.  Keeping
+            # thousands of blank "不展示" records turns a retry into a full-table
+            # write and makes the public MiaoDa data source needlessly noisy.
+            continue
+        class_group = classes.get((course.campus_id, course.class_business_id))
+        rows.append(
+            {
+                "业务标识": _public_projection_key(
+                    schedule_set_id, "public_adjustment_notice", course.id
+                ),
+                "是否展示": "是",
+                "公告状态": "已生效",
+                "通用提示": "课程安排已更新，请以本表为准",
+                "调整类型": change_type,
+                "班级名称": class_group.name if class_group else "未分班",
+                "课程名称": course.lesson_name or "课程安排",
+                "原上课时间": _public_time_text(before),
+                "新上课时间": _public_time_text(after),
+                "原上课地点": before["location"],
+                "新上课地点": after["location"],
+                "生效版本": f"V{schedule.version_no}" if schedule else "",
+                "更新时间": updated_at,
+            }
+        )
     return rows
 
 
@@ -4106,8 +4099,8 @@ def export_resource_rows(
         return rows
     if resource == "public_summary":
         summary = _public_summary(db, schedule_set_id)
-        updated_at = utcnow().isoformat()
         published = _current_published_schedule(db, schedule_set_id)
+        updated_at = _public_projection_updated_at(published)
         assignments = _assignment_rows(db, published.id if published else None)
         courses = {
             item.id: item
@@ -4259,6 +4252,21 @@ def sync_feishu_resources(
     """
     service = FeishuService(settings, db)
     syncs: list[IntegrationSync] = []
+    preflight_error: str | None = None
+    try:
+        # Inspect the existing Base once for this batch.  It adopts matching
+        # tables, adds only missing tables/fields, and caches the result for
+        # the per-resource exports below.
+        service.prepare_sync_resources(
+            user.id,
+            list(resources),
+            workspace_id,
+            schedule_set_id,
+        )
+    except (FeishuServiceError, httpx.HTTPError) as exc:
+        # Still persist one readable result per requested resource; a batch
+        # should not vanish merely because its readiness check failed.
+        preflight_error = str(exc)
     for resource in resources:
         sync = IntegrationSync(
             schedule_set_id=schedule_set_id,
@@ -4268,9 +4276,17 @@ def sync_feishu_resources(
             mode="live",
         )
         db.add(sync)
-        db.flush()
+        # Never hold SQLite's write lock while a Feishu request is waiting.
+        # The running record is durable before any network operation begins.
+        db.commit()
         try:
+            if preflight_error is not None:
+                raise FeishuServiceError(preflight_error)
             rows = export_resource_rows(db, resource, schedule_set_id)
+            # Materialize rows before remote I/O and release the read
+            # transaction as well; rollback/role changes can then commit while
+            # Feishu is processing this resource.
+            db.commit()
             result = service.sync_rows(
                 user.id,
                 resource,
@@ -4288,7 +4304,10 @@ def sync_feishu_resources(
             sync.status = "completed"
         except (FeishuServiceError, httpx.HTTPError) as exc:
             logger.warning(
-                "飞书批量同步失败：schedule_set_id=%s resource=%s", schedule_set_id, resource
+                "飞书批量同步失败：schedule_set_id=%s resource=%s",
+                schedule_set_id,
+                resource,
+                exc_info=True,
             )
             sync.status = "failed"
             sync.detail = _sync_detail(
@@ -4470,10 +4489,20 @@ def feishu_sync(
         mode="live",
     )
     db.add(sync)
-    db.flush()
+    # Persist the running state first; the following remote calls must not
+    # monopolize SQLite's write lock.
+    db.commit()
     try:
         rows = export_resource_rows(db, request.resource, scope.id)
-        result = FeishuService(settings, db).sync_rows(
+        db.commit()
+        service = FeishuService(settings, db)
+        service.prepare_sync_resources(
+            user.id,
+            [request.resource],
+            request.workspace_id,
+            scope.id,
+        )
+        result = service.sync_rows(
             user.id,
             request.resource,
             rows,

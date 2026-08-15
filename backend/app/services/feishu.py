@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -38,8 +41,15 @@ BUSINESS_KEY_FIELD = "业务标识"
 SYSTEM_OWNED_PUBLIC_RESOURCES = frozenset(
     {"public_summary", "public_class_schedule", "public_adjustment_notice"}
 )
+SYNC_RECORD_PAGE_SIZE = 200
+SYNC_BATCH_SIZE = 200
+SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
+SYNC_RETRY_ATTEMPTS = 2
+_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_RETRYABLE_FEISHU_ERROR_CODES = frozenset({1254290, 1255001, 1255002})
 _refresh_locks: dict[str, threading.Lock] = {}
 _refresh_locks_guard = threading.Lock()
+logger = logging.getLogger(__name__)
 
 TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
     "teachers": (
@@ -296,6 +306,14 @@ class FeishuService:
     def __init__(self, settings: Settings, db: Session) -> None:
         self.settings = settings
         self.db = db
+        # A batch invokes ``sync_rows`` once per resource.  Reuse the resolved
+        # workspace/token and the table-readiness result within that one service
+        # instance so clicking "全部同步" does not repeat the same metadata
+        # discovery ten times.
+        self._sync_contexts: dict[
+            tuple[str, str, str | None], tuple[FeishuWorkspace, FeishuConnection, str]
+        ] = {}
+        self._ready_table_ids: dict[tuple[str, str], str] = {}
 
     def _cipher(self) -> TokenCipher:
         key = self.settings.feishu_token_encryption_key.strip()
@@ -481,44 +499,91 @@ class FeishuService:
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         timeout: float = 30,
+        retry_attempts: int = 1,
     ) -> tuple[dict[str, Any], str | None]:
         headers = {"Authorization": f"Bearer {token}"} if token else None
-        response = httpx.request(
+
+        # Do not retry a mutation by default: a connection can die after
+        # Feishu has committed a create/delete, and blindly sending it again
+        # can make the remote state worse.  Safe read/update callers opt in
+        # below with ``retry_attempts``.
+        attempts = max(1, retry_attempts)
+        for attempt in range(attempts):
+            try:
+                response = httpx.request(
+                    method,
+                    url,
+                    headers=headers,
+                    json=json_body,
+                    params=params,
+                    timeout=timeout,
+                )
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if attempt + 1 >= attempts:
+                    raise
+                self._retry_request(method, url, attempt + 1, attempts, str(exc))
+                continue
+
+            if response.status_code in _RETRYABLE_HTTP_STATUS_CODES and attempt + 1 < attempts:
+                self._retry_request(
+                    method,
+                    url,
+                    attempt + 1,
+                    attempts,
+                    f"HTTP {response.status_code}",
+                )
+                continue
+
+            if response.status_code >= 400:
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = None
+                if isinstance(payload, dict):
+                    code = payload.get("code")
+                    message = (
+                        payload.get("msg")
+                        or payload.get("error_description")
+                        or payload.get("error")
+                        or "接口返回错误"
+                    )
+                    raise FeishuServiceError(
+                        f"飞书接口请求失败（HTTP {response.status_code}，错误码 {code}）：{message}"
+                    )
+                response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise FeishuServiceError("飞书接口返回了非预期响应")
+            code = payload.get("code")
+            if code not in (None, 0):
+                if code in _RETRYABLE_FEISHU_ERROR_CODES and attempt + 1 < attempts:
+                    self._retry_request(method, url, attempt + 1, attempts, f"错误码 {code}")
+                    continue
+                message = payload.get("msg") or payload.get("error_description") or "接口返回错误"
+                raise FeishuServiceError(f"飞书接口请求失败（错误码 {code}）：{message}")
+            data = payload.get("data", payload)
+            if not isinstance(data, dict):
+                raise FeishuServiceError("飞书接口响应缺少数据对象")
+            return data, self._request_log_id(response)
+
+        # The loop either returned or raised above.  Keep mypy and future
+        # refactors honest with an explicit terminal error.
+        raise FeishuServiceError("飞书接口重试结束但没有返回结果")
+
+    @staticmethod
+    def _retry_request(method: str, url: str, attempt: int, total: int, reason: str) -> None:
+        # A bounded sub-second backoff repairs transient Feishu disconnects
+        # without converting one failed click into a long opaque wait.
+        delay = 0.25 * attempt
+        logger.info(
+            "飞书请求短暂失败，准备重试：method=%s url=%s attempt=%s/%s reason=%s",
             method,
             url,
-            headers=headers,
-            json=json_body,
-            params=params,
-            timeout=timeout,
+            attempt,
+            total,
+            reason,
         )
-        if response.status_code >= 400:
-            try:
-                payload = response.json()
-            except ValueError:
-                payload = None
-            if isinstance(payload, dict):
-                code = payload.get("code")
-                message = (
-                    payload.get("msg")
-                    or payload.get("error_description")
-                    or payload.get("error")
-                    or "接口返回错误"
-                )
-                raise FeishuServiceError(
-                    f"飞书接口请求失败（HTTP {response.status_code}，错误码 {code}）：{message}"
-                )
-            response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise FeishuServiceError("飞书接口返回了非预期响应")
-        if payload.get("code") not in (None, 0):
-            code = payload.get("code")
-            message = payload.get("msg") or payload.get("error_description") or "接口返回错误"
-            raise FeishuServiceError(f"飞书接口请求失败（错误码 {code}）：{message}")
-        data = payload.get("data", payload)
-        if not isinstance(data, dict):
-            raise FeishuServiceError("飞书接口响应缺少数据对象")
-        return data, self._request_log_id(response)
+        time.sleep(delay)
 
     def create_oauth_start(self, user_id: str) -> dict[str, Any]:
         app = self._app_configuration()
@@ -977,7 +1042,7 @@ class FeishuService:
         connection, token = self.access_token(user_id)
         self._require_scopes(
             connection,
-            {"base:app:create", "base:table:create", "base:table:update"},
+            {"base:app:create", "base:table:create", "base:table:read", "base:table:update"},
         )
         # A timetable owns exactly one working Bitable.  The name is a label,
         # not a second identity: old workspaces created before the timetable
@@ -1032,45 +1097,16 @@ class FeishuService:
                 token=token,
                 json_body={"name": "接入说明"},
             )
-            existing = {
-                item.resource
-                for item in self.db.scalars(
-                    select(FeishuTableBinding).where(
-                        FeishuTableBinding.workspace_id == workspace.id
-                    )
-                )
-            }
-            for resource in FEISHU_RESOURCES:
-                if resource in existing:
-                    continue
-                table_name, fields = TABLE_SCHEMAS[resource]
-                data, _ = self._request(
-                    "POST",
-                    f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables",
-                    token=token,
-                    json_body={
-                        "table": {
-                            "name": table_name,
-                            "default_view_name": "全部记录",
-                            "fields": [
-                                {"field_name": field_name, "type": field_type}
-                                for field_name, field_type in fields
-                            ],
-                        }
-                    },
-                )
-                table = data.get("table", data)
-                if not isinstance(table, dict) or not table.get("table_id"):
-                    raise FeishuServiceError(f"创建“{table_name}”数据表后未返回标识")
-                self.db.add(
-                    FeishuTableBinding(
-                        workspace_id=workspace.id,
-                        resource=resource,
-                        table_name=table_name,
-                        table_id=str(table["table_id"]),
-                    )
-                )
-                self.db.commit()
+            # A Base can outlive local bindings (for example after an upgrade
+            # added a public projection table).  Inspect the actual Base first:
+            # adopt matching existing tables, add only missing tables/fields,
+            # and never create a second Base merely because a local row is old.
+            self._reconcile_workspace_resources(
+                connection,
+                token,
+                workspace,
+                FEISHU_RESOURCES,
+            )
             workspace.status = "active"
             workspace.last_error = None
             self.db.commit()
@@ -1122,14 +1158,304 @@ class FeishuService:
             raise FeishuServiceError("请先创建排课多维表格")
         return workspace
 
-    def _list_records(
+    def _list_tables(
+        self, token: str, workspace: FeishuWorkspace
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Read all actual Bitable tables before deciding whether to create one."""
+
+        tables: list[dict[str, Any]] = []
+        log_ids: list[str] = []
+        page_token: str | None = None
+        while True:
+            params: dict[str, Any] = {"page_size": 100}
+            if page_token:
+                params["page_token"] = page_token
+            data, log_id = self._request(
+                "GET",
+                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables",
+                token=token,
+                params=params,
+                timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
+                retry_attempts=SYNC_RETRY_ATTEMPTS,
+            )
+            if log_id:
+                log_ids.append(log_id)
+            items = data.get("items", [])
+            if not isinstance(items, list):
+                raise FeishuServiceError("飞书数据表列表格式不正确")
+            tables.extend(item for item in items if isinstance(item, dict))
+            if not data.get("has_more"):
+                return tables, log_ids
+            page_token = str(data.get("page_token") or "")
+            if not page_token:
+                raise FeishuServiceError("飞书数据表分页响应缺少下一页标识")
+
+    def _list_fields(
         self, token: str, workspace: FeishuWorkspace, table_id: str
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        fields: list[dict[str, Any]] = []
+        log_ids: list[str] = []
+        page_token: str | None = None
+        while True:
+            params: dict[str, Any] = {"page_size": 100}
+            if page_token:
+                params["page_token"] = page_token
+            data, log_id = self._request(
+                "GET",
+                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/{table_id}/fields",
+                token=token,
+                params=params,
+                timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
+                retry_attempts=SYNC_RETRY_ATTEMPTS,
+            )
+            if log_id:
+                log_ids.append(log_id)
+            items = data.get("items", [])
+            if not isinstance(items, list):
+                raise FeishuServiceError("飞书字段列表格式不正确")
+            fields.extend(item for item in items if isinstance(item, dict))
+            if not data.get("has_more"):
+                return fields, log_ids
+            page_token = str(data.get("page_token") or "")
+            if not page_token:
+                raise FeishuServiceError("飞书字段分页响应缺少下一页标识")
+
+    def _create_table(
+        self,
+        token: str,
+        workspace: FeishuWorkspace,
+        table_name: str,
+        fields: list[tuple[str, int]],
+    ) -> str:
+        data, _ = self._request(
+            "POST",
+            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables",
+            token=token,
+            json_body={
+                "table": {
+                    "name": table_name,
+                    "default_view_name": "全部记录",
+                    "fields": [
+                        {"field_name": field_name, "type": field_type}
+                        for field_name, field_type in fields
+                    ],
+                }
+            },
+        )
+        table = data.get("table", data)
+        if not isinstance(table, dict) or not table.get("table_id"):
+            raise FeishuServiceError(f"创建“{table_name}”数据表后未返回标识")
+        return str(table["table_id"])
+
+    def _create_field(
+        self,
+        token: str,
+        workspace: FeishuWorkspace,
+        table_id: str,
+        field_name: str,
+        field_type: int,
+    ) -> None:
+        self._request(
+            "POST",
+            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/{table_id}/fields",
+            token=token,
+            json_body={"field_name": field_name, "type": field_type},
+        )
+
+    def _reconcile_workspace_resources(
+        self,
+        connection: FeishuConnection,
+        token: str,
+        workspace: FeishuWorkspace,
+        resources: tuple[str, ...] | list[str],
+    ) -> dict[str, FeishuTableBinding]:
+        """Adopt/reconcile tables in an existing Base without creating a new Base.
+
+        Local bindings are a cache, not the source of truth.  This is important
+        for upgrades: a pre-existing Base may already contain a table that the
+        local database has not yet bound, and an old binding can point to a
+        manually deleted table.  We inspect the Base first, then add only what
+        is missing.
+        """
+
+        unique_resources = tuple(dict.fromkeys(resources))
+        unknown = set(unique_resources) - set(TABLE_SCHEMAS)
+        if unknown:
+            raise FeishuServiceError(f"未知飞书同步资源：{sorted(unknown)[0]}")
+        self._require_scopes(connection, {"base:table:read"})
+        # Ensure no local write transaction remains open while the metadata
+        # requests are in flight; SQLite otherwise blocks unrelated admin work.
+        self.db.commit()
+        remote_tables, _ = self._list_tables(token, workspace)
+        remote_by_id = {
+            str(item.get("table_id") or ""): item
+            for item in remote_tables
+            if str(item.get("table_id") or "")
+        }
+        remote_by_name: dict[str, list[dict[str, Any]]] = {}
+        for item in remote_tables:
+            name = str(item.get("name") or "").strip()
+            if name:
+                remote_by_name.setdefault(name, []).append(item)
+
+        bindings = list(
+            self.db.scalars(
+                select(FeishuTableBinding).where(FeishuTableBinding.workspace_id == workspace.id)
+            )
+        )
+        bindings_by_resource = {item.resource: item for item in bindings}
+        binding_by_table_id = {item.table_id: item for item in bindings}
+        prepared: dict[str, FeishuTableBinding] = {}
+
+        for resource in unique_resources:
+            table_name, expected_fields = TABLE_SCHEMAS[resource]
+            binding = bindings_by_resource.get(resource)
+            table_id = binding.table_id if binding and binding.table_id in remote_by_id else ""
+            created_new_table = False
+
+            if not table_id:
+                # Prefer an existing matching table that is not already bound
+                # to another resource.  Never create a duplicate just because
+                # the local binding cache was absent or stale.
+                candidate = next(
+                    (
+                        item
+                        for item in remote_by_name.get(table_name, [])
+                        if str(item.get("table_id") or "") not in binding_by_table_id
+                        or binding_by_table_id[str(item.get("table_id") or "")].resource == resource
+                    ),
+                    None,
+                )
+                if candidate is not None:
+                    table_id = str(candidate.get("table_id") or "")
+                else:
+                    self._require_scopes(connection, {"base:table:create"})
+                    table_id = self._create_table(token, workspace, table_name, expected_fields)
+                    remote_by_id[table_id] = {"table_id": table_id, "name": table_name}
+                    created_new_table = True
+
+                if binding is None:
+                    binding = FeishuTableBinding(
+                        workspace_id=workspace.id,
+                        resource=resource,
+                        table_name=table_name,
+                        table_id=table_id,
+                    )
+                    self.db.add(binding)
+                    bindings_by_resource[resource] = binding
+                else:
+                    # Changing a table target invalidates all record IDs held
+                    # by the old table's binding ledger.
+                    self.db.execute(
+                        delete(FeishuRecordBinding).where(
+                            FeishuRecordBinding.table_binding_id == binding.id
+                        )
+                    )
+                    binding.table_id = table_id
+                    binding.table_name = table_name
+                self.db.commit()
+                binding_by_table_id[table_id] = binding
+            elif binding is not None:
+                # Keep the locally displayed name aligned with this product's
+                # known resource name, without renaming a user's real table.
+                if binding.table_name != table_name:
+                    binding.table_name = table_name
+                    self.db.commit()
+
+            if binding is None:
+                raise FeishuServiceError(f"飞书数据表“{table_name}”绑定未建立")
+
+            if created_new_table:
+                # The creation payload above already supplied every expected
+                # field, so an immediate field-list round trip would be pure
+                # latency.  Future preflights still inspect it normally.
+                prepared[resource] = binding
+                continue
+
+            # A table that already existed may be from an earlier app version.
+            # Inspect its columns and append only schema fields that are absent.
+            remote_fields, _ = self._list_fields(token, workspace, table_id)
+            fields_by_name = {
+                str(item.get("field_name") or "").strip(): item for item in remote_fields
+            }
+            missing_fields = [
+                (field_name, field_type)
+                for field_name, field_type in expected_fields
+                if field_name not in fields_by_name
+            ]
+            if missing_fields:
+                self._require_scopes(connection, {"base:table:update"})
+                for field_name, field_type in missing_fields:
+                    self._create_field(token, workspace, table_id, field_name, field_type)
+            prepared[resource] = binding
+
+        self.db.commit()
+        return prepared
+
+    def prepare_sync_resources(
+        self,
+        user_id: str,
+        resources: tuple[str, ...] | list[str],
+        workspace_id: str | None = None,
+        schedule_set_id: str = "default",
+    ) -> dict[str, FeishuTableBinding]:
+        """Run one preflight for a sync batch and cache ready table bindings."""
+
+        context = self._resolve_sync_context(user_id, workspace_id, schedule_set_id)
+        workspace, connection, token = context
+        prepared = self._reconcile_workspace_resources(
+            connection,
+            token,
+            workspace,
+            resources,
+        )
+        for resource, table in prepared.items():
+            self._ready_table_ids[(workspace.id, resource)] = table.id
+        return prepared
+
+    def _resolve_sync_context(
+        self,
+        user_id: str,
+        workspace_id: str | None,
+        schedule_set_id: str,
+    ) -> tuple[FeishuWorkspace, FeishuConnection, str]:
+        key = (user_id, schedule_set_id, workspace_id)
+        cached = self._sync_contexts.get(key)
+        if cached is not None:
+            return cached
+        self._app_configuration()
+        workspace = self._active_workspace(
+            workspace_id,
+            schedule_set_id,
+            owner_user_id=user_id,
+        )
+        workspace_connection = self.db.get(FeishuConnection, workspace.connection_id)
+        if workspace_connection is None:
+            raise FeishuServiceError("当前多维表格缺少飞书授权连接")
+        connection, token = self.access_token(workspace_connection.user_id)
+        self._require_scopes(
+            connection,
+            {"base:record:create", "base:record:retrieve", "base:record:update"},
+        )
+        # The next action is a network call.  Close any read transaction opened
+        # while resolving the workspace so it never blocks SQLite writers.
+        self.db.commit()
+        context = (workspace, connection, token)
+        self._sync_contexts[key] = context
+        return context
+
+    def _list_records(
+        self,
+        token: str,
+        workspace: FeishuWorkspace,
+        table_id: str,
+        field_names: list[str],
     ) -> tuple[list[dict[str, Any]], list[str]]:
         records: list[dict[str, Any]] = []
         log_ids: list[str] = []
         page_token: str | None = None
         while True:
-            params: dict[str, Any] = {"page_size": 500}
+            params: dict[str, Any] = {"page_size": SYNC_RECORD_PAGE_SIZE}
             if page_token:
                 params["page_token"] = page_token
             data, log_id = self._request(
@@ -1138,7 +1464,9 @@ class FeishuService:
                 f"{table_id}/records/search",
                 token=token,
                 params=params,
-                json_body={"field_names": [BUSINESS_KEY_FIELD]},
+                json_body={"field_names": field_names},
+                timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
+                retry_attempts=SYNC_RETRY_ATTEMPTS,
             )
             if log_id:
                 log_ids.append(log_id)
@@ -1157,8 +1485,8 @@ class FeishuService:
     ) -> tuple[list[dict[str, Any]], list[str]]:
         created: list[dict[str, Any]] = []
         log_ids: list[str] = []
-        for start in range(0, len(rows), 500):
-            batch = rows[start : start + 500]
+        for start in range(0, len(rows), SYNC_BATCH_SIZE):
+            batch = rows[start : start + SYNC_BATCH_SIZE]
             data, log_id = self._request(
                 "POST",
                 f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
@@ -1181,8 +1509,8 @@ class FeishuService:
         rows: list[tuple[str, dict[str, Any]]],
     ) -> list[str]:
         log_ids: list[str] = []
-        for start in range(0, len(rows), 500):
-            batch = rows[start : start + 500]
+        for start in range(0, len(rows), SYNC_BATCH_SIZE):
+            batch = rows[start : start + SYNC_BATCH_SIZE]
             _, log_id = self._request(
                 "POST",
                 f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
@@ -1193,6 +1521,8 @@ class FeishuService:
                         {"record_id": record_id, "fields": fields} for record_id, fields in batch
                     ]
                 },
+                timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
+                retry_attempts=SYNC_RETRY_ATTEMPTS,
             )
             if log_id:
                 log_ids.append(log_id)
@@ -1217,8 +1547,8 @@ class FeishuService:
         failed: set[str] = set()
         log_ids: list[str] = []
         error: str | None = None
-        for start in range(0, len(record_ids), 500):
-            batch = record_ids[start : start + 500]
+        for start in range(0, len(record_ids), SYNC_BATCH_SIZE):
+            batch = record_ids[start : start + SYNC_BATCH_SIZE]
             try:
                 data, log_id = self._request(
                     "POST",
@@ -1226,6 +1556,8 @@ class FeishuService:
                     f"{table_id}/records/batch_delete",
                     token=token,
                     json_body={"records": batch},
+                    params={"ignore_consistency_check": True},
+                    timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
                 )
             except (FeishuServiceError, httpx.HTTPError) as exc:
                 failed.update(record_ids[start:])
@@ -1277,6 +1609,69 @@ class FeishuService:
                 candidates.append(record_id)
         return by_key, record_ids
 
+    @staticmethod
+    def _plain_text(value: object) -> str:
+        """Normalize Bitable's text/rich-text shapes for a lossless comparison."""
+
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                    elif text is not None:
+                        parts.append(str(text))
+                elif item is not None:
+                    parts.append(str(item))
+            return "".join(parts)
+        if isinstance(value, dict):
+            text = value.get("text")
+            if isinstance(text, str):
+                return text
+            if text is not None:
+                return str(text)
+        return str(value)
+
+    @classmethod
+    def _comparable_field_value(cls, field_type: int, value: object) -> str:
+        if field_type != 2:
+            return cls._plain_text(value)
+        text = cls._plain_text(value).strip()
+        if not text:
+            return ""
+        try:
+            number = Decimal(text)
+        except (InvalidOperation, ValueError):
+            return text
+        normalized = format(number.normalize(), "f")
+        return "0" if normalized in {"", "-0"} else normalized
+
+    @classmethod
+    def _fields_match(
+        cls,
+        local_fields: dict[str, Any],
+        remote_fields: dict[str, Any],
+        field_types: dict[str, int],
+    ) -> bool:
+        # We own the schema fields but deliberately ignore extra remote columns
+        # so a user can add a local display/formula column without every sync
+        # trying to erase it.
+        for field_name, local_value in local_fields.items():
+            field_type = field_types.get(field_name, 1)
+            if cls._comparable_field_value(field_type, local_value) != cls._comparable_field_value(
+                field_type,
+                remote_fields.get(field_name),
+            ):
+                return False
+        return True
+
     def sync_rows(
         self,
         user_id: str,
@@ -1285,26 +1680,18 @@ class FeishuService:
         workspace_id: str | None = None,
         schedule_set_id: str = "default",
     ) -> dict[str, Any]:
-        # Preserve the actionable setup error when sync is clicked before the
-        # Feishu app is configured; otherwise a missing workspace would hide it.
-        self._app_configuration()
-        # Workspaces belong to a timetable rather than to the person who clicks
-        # “sync”.  An approver or scheduler can therefore update the timetable
-        # workspace created by its administrator, while API scope checks remain
-        # the responsibility of the caller before this service is entered.
-        workspace = self._active_workspace(
+        workspace, connection, token = self._resolve_sync_context(
+            user_id,
             workspace_id,
             schedule_set_id,
-            owner_user_id=user_id,
         )
-        workspace_connection = self.db.get(FeishuConnection, workspace.connection_id)
-        if workspace_connection is None:
-            raise FeishuServiceError("当前多维表格缺少飞书授权连接")
-        connection, token = self.access_token(workspace_connection.user_id)
-        self._require_scopes(
-            connection,
-            {"base:record:create", "base:record:retrieve", "base:record:update"},
-        )
+        if (workspace.id, resource) not in self._ready_table_ids:
+            self.prepare_sync_resources(
+                user_id,
+                [resource],
+                workspace_id,
+                schedule_set_id,
+            )
         table = self.db.scalar(
             select(FeishuTableBinding).where(
                 FeishuTableBinding.workspace_id == workspace.id,
@@ -1313,6 +1700,8 @@ class FeishuService:
         )
         if table is None:
             raise FeishuServiceError("当前多维表格缺少对应业务数据表")
+        field_types = dict(TABLE_SCHEMAS[resource][1])
+        field_names = list(field_types)
 
         normalized: list[dict[str, Any]] = []
         local_keys: set[str] = set()
@@ -1329,8 +1718,22 @@ class FeishuService:
             fields[BUSINESS_KEY_FIELD] = business_key
             normalized.append(fields)
 
-        remote_records, log_ids = self._list_records(token, workspace, table.table_id)
+        # Do not keep a SQLite transaction open while the remote records are
+        # read.  The rows above are plain Python data now, so committing cannot
+        # affect the projection being synchronized.
+        self.db.commit()
+        remote_records, log_ids = self._list_records(
+            token,
+            workspace,
+            table.table_id,
+            field_names,
+        )
         remote_by_key, remote_record_ids = self._remote_record_index(remote_records)
+        remote_fields_by_record_id = {
+            str(item.get("record_id") or ""): item["fields"]
+            for item in remote_records
+            if str(item.get("record_id") or "") and isinstance(item.get("fields"), dict)
+        }
         bindings = list(
             self.db.scalars(
                 select(FeishuRecordBinding).where(FeishuRecordBinding.table_binding_id == table.id)
@@ -1381,7 +1784,19 @@ class FeishuService:
             (canonical_by_key[str(row[BUSINESS_KEY_FIELD])], row)
             for row in normalized
             if str(row[BUSINESS_KEY_FIELD]) in canonical_by_key
+            and not self._fields_match(
+                row,
+                remote_fields_by_record_id.get(
+                    canonical_by_key[str(row[BUSINESS_KEY_FIELD])], {}
+                ),
+                field_types,
+            )
         ]
+        records_skipped = len(normalized) - len(to_create) - len(to_update)
+        # Bindings were just read.  Close that read transaction before sending
+        # any potentially slow batch request so unrelated account edits are not
+        # blocked by this sync.
+        self.db.commit()
         created_records, create_logs = self._batch_create(
             token, workspace, table.table_id, to_create
         )
@@ -1397,7 +1812,12 @@ class FeishuService:
                         remote_record_ids.add(record_id)
                         remote_by_key.setdefault(key, []).append(record_id)
             if any(str(row[BUSINESS_KEY_FIELD]) not in canonical_by_key for row in to_create):
-                refreshed, refresh_logs = self._list_records(token, workspace, table.table_id)
+                refreshed, refresh_logs = self._list_records(
+                    token,
+                    workspace,
+                    table.table_id,
+                    field_names,
+                )
                 log_ids.extend(refresh_logs)
                 remote_by_key, remote_record_ids = self._remote_record_index(refreshed)
                 for row in to_create:
@@ -1429,6 +1849,7 @@ class FeishuService:
         stale_candidates = 0
         unmanaged_duplicates = 0
         unmanaged_stale_records = 0
+        removed_stale_bindings = 0
 
         def add_cleanup_candidate(record_id: str, *, stale: bool = False) -> None:
             nonlocal duplicate_candidates, stale_candidates
@@ -1439,9 +1860,9 @@ class FeishuService:
                 stale_candidates += 1
             else:
                 duplicate_candidates += 1
-            binding = bindings_by_record_id.get(record_id)
-            if binding is not None:
-                cleanup_bindings_by_record_id[record_id] = binding
+            bound_record = bindings_by_record_id.get(record_id)
+            if bound_record is not None:
+                cleanup_bindings_by_record_id[record_id] = bound_record
 
         if system_owned_public_table:
             # Public projection tables are fully generated resources.  Delete
@@ -1455,6 +1876,16 @@ class FeishuService:
             }
             for record_id in sorted(remote_record_ids - canonical_record_ids):
                 add_cleanup_candidate(record_id, stale=record_id not in local_remote_ids)
+            # If a record was already removed outside the app, its local ledger
+            # entry is stale too.  It must not survive forever and influence a
+            # later projection reconciliation.
+            for binding in bindings:
+                if (
+                    binding.business_key not in local_keys
+                    and binding.record_id not in remote_record_ids
+                ):
+                    self.db.delete(binding)
+                    removed_stale_bindings += 1
         else:
             for key in local_keys:
                 canonical_id = canonical_by_key[key]
@@ -1463,8 +1894,11 @@ class FeishuService:
                     # bound canonical record. Never delete any such record.
                     if record_id == canonical_id or record_id in canonical_record_ids:
                         continue
-                    binding = bindings_by_record_id.get(record_id)
-                    if binding is not None and binding.business_key not in local_keys:
+                    candidate_binding = bindings_by_record_id.get(record_id)
+                    if (
+                        candidate_binding is not None
+                        and candidate_binding.business_key not in local_keys
+                    ):
                         add_cleanup_candidate(record_id)
                     else:
                         unmanaged_duplicates += 1
@@ -1472,21 +1906,21 @@ class FeishuService:
         for row in normalized:
             key = str(row[BUSINESS_KEY_FIELD])
             bound_record_id = canonical_by_key[key]
-            binding = bindings_by_key.get(key)
-            if binding is None:
-                binding = FeishuRecordBinding(
+            record_binding = bindings_by_key.get(key)
+            if record_binding is None:
+                record_binding = FeishuRecordBinding(
                     table_binding_id=table.id,
                     business_key=key,
                     record_id=bound_record_id,
                 )
-                self.db.add(binding)
-                bindings_by_key[key] = binding
-                bindings_by_record_id[bound_record_id] = binding
+                self.db.add(record_binding)
+                bindings_by_key[key] = record_binding
+                bindings_by_record_id[bound_record_id] = record_binding
             else:
-                if binding.record_id != bound_record_id:
-                    bindings_by_record_id.pop(binding.record_id, None)
-                binding.record_id = bound_record_id
-                bindings_by_record_id[bound_record_id] = binding
+                if record_binding.record_id != bound_record_id:
+                    bindings_by_record_id.pop(record_binding.record_id, None)
+                record_binding.record_id = bound_record_id
+                bindings_by_record_id[bound_record_id] = record_binding
 
         duplicate_cleanup: dict[str, Any] = {
             "status": "not_needed",
@@ -1499,6 +1933,7 @@ class FeishuService:
             "skipped_missing_delete_scope": 0,
             "unmanaged_duplicates": unmanaged_duplicates,
             "unmanaged_stale_records": unmanaged_stale_records,
+            "removed_stale_bindings": removed_stale_bindings,
             "error": None,
         }
         if cleanup_candidate_ids:
@@ -1539,6 +1974,8 @@ class FeishuService:
             "records_read": len(remote_records),
             "records_created": len(to_create),
             "records_updated": len(to_update),
+            "records_skipped": records_skipped,
+            "records_deleted": int(duplicate_cleanup["deleted"]),
             "records_written": len(to_create) + len(to_update),
             "duplicate_cleanup": duplicate_cleanup,
             "request_log_ids": list(dict.fromkeys(log_ids)),

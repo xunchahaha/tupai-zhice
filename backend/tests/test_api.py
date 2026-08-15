@@ -195,6 +195,9 @@ def test_publish_keeps_local_version_when_published_data_sync_partially_fails(
         }
 
     monkeypatch.setattr("app.api.FeishuService.sync_rows", sync_rows)
+    monkeypatch.setattr(
+        "app.api.FeishuService.prepare_sync_resources", lambda *_args, **_kwargs: {}
+    )
     published = client.post(
         f"/api/v1/schedules/{schedule['id']}/publish", headers=auth_headers
     )
@@ -783,38 +786,11 @@ def test_public_bitable_projections_use_only_current_schedule_and_safe_fields(
     assert changed_notice["调整类型"] == "时间及地点调整"
     assert changed_notice["公告状态"] == "已生效"
     assert changed_notice["通用提示"] == "课程安排已更新，请以本表为准"
-    hidden_class = next(item for item in class_rows if item["业务标识"] == hidden_class_key)
-    assert hidden_class["是否展示"] == "否"
-    assert all(
-        hidden_class[field] == ""
-        for field in (
-            "班级名称",
-            "上课日期",
-            "星期",
-            "开始时间",
-            "结束时间",
-            "课程名称",
-            "学科",
-            "上课地点",
-            "课表版本",
-        )
-    )
-    hidden_notice = next(item for item in notices if item["业务标识"] == hidden_notice_key)
-    assert hidden_notice["是否展示"] == "否"
-    assert all(
-        hidden_notice[field] == ""
-        for field in (
-            "通用提示",
-            "调整类型",
-            "班级名称",
-            "课程名称",
-            "原上课时间",
-            "新上课时间",
-            "原上课地点",
-            "新上课地点",
-            "生效版本",
-        )
-    )
+    # Public data sources contain real display rows only.  An unscheduled
+    # course must not create a blank record that later forces a full-table
+    # update just to say "不展示".
+    assert all(item["业务标识"] != hidden_class_key for item in class_rows)
+    assert all(item["业务标识"] != hidden_notice_key for item in notices)
     assert any(item["指标名称"] == "当前发布版本" for item in summary)
     assert any(item["指标名称"] == "调整课次" for item in summary)
 
