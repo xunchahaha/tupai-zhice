@@ -5,11 +5,12 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { CourseSessionBatchDeleteObjectIds } from './courseSessionBatchDeleteObjectIds';
+import type { CourseSessionBatchDeleteFilter } from './courseSessionBatchDeleteFilter';
+import type { CourseSessionBatchDeleteExpectedCount } from './courseSessionBatchDeleteExpectedCount';
 
 export interface CourseSessionBatchDelete {
-  /**
-   * @minItems 1
-   * @maxItems 1000
-   */
-  object_ids: string[];
+  object_ids?: CourseSessionBatchDeleteObjectIds;
+  filter?: CourseSessionBatchDeleteFilter;
+  expected_count?: CourseSessionBatchDeleteExpectedCount;
 }

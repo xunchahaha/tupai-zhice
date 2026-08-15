@@ -42,7 +42,6 @@ import type {
   CalendarPublishResponse,
   CampusCreate,
   CampusResponse,
-  ClassGroupBatchUpdate,
   ClassGroupPayload,
   ClassGroupResponse,
   CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams,
@@ -84,7 +83,8 @@ import type {
   ScheduleResponse,
   ScheduleSummaryResponse,
   SolveRequest,
-  SolverRunExplanation,
+  SolverRunDetailResponse,
+  SolverRunExplanationDetail,
   SolverRunResponse,
   TeacherBatchUpdate,
   TeacherPayload,
@@ -1870,71 +1870,6 @@ export const useUpdateClassGroupApiV1ClassGroupsObjectIdPut = <TError = HTTPVali
     }
     
 /**
- * @summary Batch Update Class Groups
- */
-export const batchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePost = (
-    classGroupBatchUpdate: ClassGroupBatchUpdate,
- signal?: AbortSignal
-) => {
-      
-      
-      return customInstance<BatchOperationResponse>(
-      {url: `/api/v1/class-groups/batch-update`, method: 'POST',
-      headers: {'Content-Type': 'application/json', },
-      data: classGroupBatchUpdate, signal
-    },
-      );
-    }
-  
-
-
-export const getBatchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePostMutationOptions = <TError = HTTPValidationError,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof batchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePost>>, TError,{data: ClassGroupBatchUpdate}, TContext>, }
-): UseMutationOptions<Awaited<ReturnType<typeof batchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePost>>, TError,{data: ClassGroupBatchUpdate}, TContext> => {
-
-const mutationKey = ['batchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePost'];
-const {mutation: mutationOptions} = options ?
-      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
-      options
-      : {...options, mutation: {...options.mutation, mutationKey}}
-      : {mutation: { mutationKey, }};
-
-      
-
-
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof batchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePost>>, {data: ClassGroupBatchUpdate}> = (props) => {
-          const {data} = props ?? {};
-
-          return  batchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePost(data,)
-        }
-
-        
-
-
-  return  { mutationFn, ...mutationOptions }}
-
-    export type BatchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePostMutationResult = NonNullable<Awaited<ReturnType<typeof batchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePost>>>
-    export type BatchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePostMutationBody = ClassGroupBatchUpdate
-    export type BatchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePostMutationError = HTTPValidationError
-
-    /**
- * @summary Batch Update Class Groups
- */
-export const useBatchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePost = <TError = HTTPValidationError,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof batchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePost>>, TError,{data: ClassGroupBatchUpdate}, TContext>, }
- , queryClient?: QueryClient): UseMutationResult<
-        Awaited<ReturnType<typeof batchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePost>>,
-        TError,
-        {data: ClassGroupBatchUpdate},
-        TContext
-      > => {
-
-      const mutationOptions = getBatchUpdateClassGroupsApiV1ClassGroupsBatchUpdatePostMutationOptions(options);
-
-      return useMutation(mutationOptions, queryClient);
-    }
-    
-/**
  * @summary Batch Delete Class Groups
  */
 export const batchDeleteClassGroupsApiV1ClassGroupsBatchDeletePost = (
@@ -3514,7 +3449,7 @@ export const listSolverRunsApiV1SolverRunsGet = (
 ) => {
       
       
-      return customInstance<SolverRunResponse[]>(
+      return customInstance<SolverRunDetailResponse[]>(
       {url: `/api/v1/solver-runs`, method: 'GET', signal
     },
       );
@@ -3607,7 +3542,7 @@ export const submitSolverRunApiV1SolverRunsPost = (
 ) => {
       
       
-      return customInstance<SolverRunResponse>(
+      return customInstance<SolverRunDetailResponse>(
       {url: `/api/v1/solver-runs`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
       data: solveRequest, signal
@@ -3672,7 +3607,7 @@ export const getSolverRunApiV1SolverRunsRunIdGet = (
 ) => {
       
       
-      return customInstance<SolverRunResponse>(
+      return customInstance<SolverRunDetailResponse>(
       {url: `/api/v1/solver-runs/${runId}`, method: 'GET', signal
     },
       );
@@ -3770,7 +3705,7 @@ export const explainSolverRunApiV1SolverRunsRunIdExplanationPost = (
 ) => {
       
       
-      return customInstance<SolverRunExplanation>(
+      return customInstance<SolverRunExplanationDetail>(
       {url: `/api/v1/solver-runs/${runId}/explanation`, method: 'POST',
         params, signal
     },
@@ -4104,6 +4039,71 @@ export function useGetScheduleApiV1SchedulesScheduleIdGet<TData = Awaited<Return
 
 
 
+/**
+ * 删除课表版本。删除是发布/回滚的破坏性孪生操作，权限同为 Approver。
+
+SolverRun 与 DataSnapshot 一律保留——求解痕迹是审计链，不随版本消失。
+ * @summary Delete Schedule
+ */
+export const deleteScheduleApiV1SchedulesScheduleIdDelete = (
+    scheduleId: string,
+ ) => {
+      
+      
+      return customInstance<void>(
+      {url: `/api/v1/schedules/${scheduleId}`, method: 'DELETE'
+    },
+      );
+    }
+  
+
+
+export const getDeleteScheduleApiV1SchedulesScheduleIdDeleteMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteScheduleApiV1SchedulesScheduleIdDelete>>, TError,{scheduleId: string}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof deleteScheduleApiV1SchedulesScheduleIdDelete>>, TError,{scheduleId: string}, TContext> => {
+
+const mutationKey = ['deleteScheduleApiV1SchedulesScheduleIdDelete'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteScheduleApiV1SchedulesScheduleIdDelete>>, {scheduleId: string}> = (props) => {
+          const {scheduleId} = props ?? {};
+
+          return  deleteScheduleApiV1SchedulesScheduleIdDelete(scheduleId,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DeleteScheduleApiV1SchedulesScheduleIdDeleteMutationResult = NonNullable<Awaited<ReturnType<typeof deleteScheduleApiV1SchedulesScheduleIdDelete>>>
+    
+    export type DeleteScheduleApiV1SchedulesScheduleIdDeleteMutationError = HTTPValidationError
+
+    /**
+ * @summary Delete Schedule
+ */
+export const useDeleteScheduleApiV1SchedulesScheduleIdDelete = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteScheduleApiV1SchedulesScheduleIdDelete>>, TError,{scheduleId: string}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof deleteScheduleApiV1SchedulesScheduleIdDelete>>,
+        TError,
+        {scheduleId: string},
+        TContext
+      > => {
+
+      const mutationOptions = getDeleteScheduleApiV1SchedulesScheduleIdDeleteMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
 /**
  * @summary Diff Schedules
  */

@@ -6,11 +6,14 @@
  * OpenAPI spec version: 0.1.0
  */
 
+/**
+ * 班级的可写字段只有身份。班型/业务线/教师是课次的属性，不在这里填。
+
+extra="forbid" 是刻意的：留一个「看起来能填班型」的入口，等于允许有人手填一个和
+课次矛盾的值，而界面上显示的又是聚合结果，两边对不上却谁都不报错。
+ */
 export interface ClassGroupPayload {
   campus_id: string;
   business_id: string;
   name: string;
-  grade?: string;
-  subject?: string;
-  teacher_business_id: string;
 }

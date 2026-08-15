@@ -5,13 +5,24 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { ClassGroupTrack } from './classGroupTrack';
 
+/**
+ * 班型/业务线/教师全部由 course_sessions 实时聚合，库里不存这三个单值列。
+
+手工新建、还没有任何课次的班级，这些数组一律为空、session_count 为 0——
+这不是数据丢了，是这个班还没排课。
+ */
 export interface ClassGroupResponse {
   campus_id: string;
   business_id: string;
   name: string;
-  grade?: string;
-  subject?: string;
-  teacher_business_id: string;
   id: string;
+  business_lines: string[];
+  product_types: string[];
+  subjects: string[];
+  teacher_business_ids: string[];
+  /** @minimum 0 */
+  session_count: number;
+  tracks: ClassGroupTrack[];
 }
