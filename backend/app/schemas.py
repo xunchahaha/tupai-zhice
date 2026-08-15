@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .timezone import as_shanghai
+
 Role = Literal["admin", "scheduler", "approver", "viewer"]
 ScheduleAccessRole = Literal["viewer", "scheduler", "approver"]
 RuleStatus = Literal["draft", "awaiting_confirmation", "active", "rejected", "retired"]
@@ -35,7 +37,26 @@ def normalize_solver_rules(rules: list[SolverRule]) -> list[SolverRule]:
     return list(dict.fromkeys([*rules, *MANDATORY_SOLVER_RULES]))
 
 
-class ORMModel(BaseModel):
+class ShanghaiTimestampResponse(BaseModel):
+    """Normalize every response datetime to the application's UTC+8 policy.
+
+    ORM values already round-trip through ``ShanghaiDateTime``.  This extra
+    response boundary protects manually-built DTOs and non-SQLite deployments
+    from leaking a UTC or timezone-naive timestamp into JSON.
+    """
+
+    @model_validator(mode="after")
+    def normalize_datetime_fields(self) -> ShanghaiTimestampResponse:
+        for field_name in type(self).model_fields:
+            value = getattr(self, field_name)
+            if isinstance(value, datetime):
+                normalized = as_shanghai(value)
+                if normalized is not None:
+                    setattr(self, field_name, normalized)
+        return self
+
+
+class ORMModel(ShanghaiTimestampResponse):
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -705,7 +726,7 @@ class FeishuAppConfigurationResponse(BaseModel):
     aily_skill_id: str | None
 
 
-class FeishuConnectionResponse(BaseModel):
+class FeishuConnectionResponse(ShanghaiTimestampResponse):
     status: Literal["unconfigured", "not_authorized", "connected", "reauthorization_required"]
     app_configured: bool
     authorized: bool
@@ -720,7 +741,7 @@ class FeishuConnectionResponse(BaseModel):
     workspace: FeishuWorkspaceResponse | None
 
 
-class FeishuOAuthStartResponse(BaseModel):
+class FeishuOAuthStartResponse(ShanghaiTimestampResponse):
     authorization_url: str
     expires_at: datetime
 

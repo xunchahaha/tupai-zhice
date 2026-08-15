@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     Boolean,
     Date,
-    DateTime,
     Float,
     ForeignKey,
     Integer,
@@ -19,6 +18,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
+from .timezone import ShanghaiDateTime, shanghai_now
 
 DEFAULT_SCHEDULE_SET_ID = "default"
 
@@ -27,14 +27,10 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
-def utcnow() -> datetime:
-    return datetime.now(UTC)
-
-
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(ShanghaiDateTime(), default=shanghai_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+        ShanghaiDateTime(), default=shanghai_now, onupdate=shanghai_now
     )
 
 
@@ -46,14 +42,14 @@ class User(TimestampMixin, Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(30), default="viewer")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(ShanghaiDateTime(), nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    password_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    password_changed_at: Mapped[datetime] = mapped_column(ShanghaiDateTime(), default=shanghai_now)
     # 令牌版本用于吊销：改密时自增，旧 JWT 携带的版本不再匹配即失效。
     # 不用签发时间做判断——JWT 的 iat 只有秒级精度，同一秒内会误伤新令牌。
     token_version: Mapped[int] = mapped_column(Integer, default=0)
     failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
-    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_until: Mapped[datetime | None] = mapped_column(ShanghaiDateTime(), nullable=True)
 
 
 class ScheduleSet(TimestampMixin, Base):
@@ -124,8 +120,8 @@ class FeishuOAuthState(TimestampMixin, Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     pkce_verifier_encrypted: Mapped[str] = mapped_column(Text)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(ShanghaiDateTime(), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(ShanghaiDateTime(), nullable=True)
 
 
 class FeishuConnection(TimestampMixin, Base):
@@ -135,9 +131,9 @@ class FeishuConnection(TimestampMixin, Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
     access_token_encrypted: Mapped[str] = mapped_column(Text)
     refresh_token_encrypted: Mapped[str] = mapped_column(Text)
-    access_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    access_expires_at: Mapped[datetime] = mapped_column(ShanghaiDateTime(), index=True)
     refresh_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        ShanghaiDateTime(), nullable=True
     )
     scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(30), default="active", index=True)
@@ -422,7 +418,7 @@ class ScheduleVersion(TimestampMixin, Base):
     metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     approved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(ShanghaiDateTime(), nullable=True)
 
     assignments: Mapped[list[ScheduleAssignment]] = relationship(
         back_populates="schedule_version", cascade="all, delete-orphan"
@@ -511,4 +507,4 @@ class AuditLog(Base):
     resource_type: Mapped[str] = mapped_column(String(50))
     resource_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(ShanghaiDateTime(), default=shanghai_now)

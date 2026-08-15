@@ -8,6 +8,8 @@ export function datetime(value: string | undefined | null): string {
   return new Intl.DateTimeFormat("zh-CN", {
     dateStyle: "short",
     timeStyle: "short",
+    timeZone: "Asia/Shanghai",
+    hourCycle: "h23",
   }).format(new Date(value));
 }
 

@@ -4,7 +4,7 @@ import hashlib
 import json
 import sys
 from collections import Counter, defaultdict
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,7 @@ from ..models import (
     Teacher,
     TimeSlot,
 )
+from ..timezone import shanghai_now
 
 WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 PLACEHOLDER_ROOM = "教室-待校区确认"
@@ -853,7 +854,7 @@ def import_schedule_workbook(
     db.flush()
 
     version_stats: list[dict[str, Any]] = []
-    now = datetime.now(UTC)
+    now = shanghai_now()
     version_name = official_version_name(campus_name)
     version = db.scalar(
         select(ScheduleVersion).where(
