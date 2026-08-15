@@ -1,9 +1,10 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeftRight, History, RotateCcw, Send, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
-import { getListSchedulesApiV1SchedulesGetQueryKey, useDeleteScheduleApiV1SchedulesScheduleIdDelete, useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet, useListAuditLogsApiV1AuditLogsGet, useListSchedulesApiV1SchedulesGet, usePublishScheduleApiV1SchedulesScheduleIdPublishPost, useRollbackScheduleApiV1SchedulesScheduleIdRollbackPost } from "@/api/generated/client";
+import { getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey, getListSchedulesApiV1SchedulesGetQueryKey, useDeleteScheduleApiV1SchedulesScheduleIdDelete, useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet, useFeishuConnectionApiV1IntegrationsFeishuConnectionGet, useFeishuSyncApiV1IntegrationsFeishuSyncPost, useListAuditLogsApiV1AuditLogsGet, useListSchedulesApiV1SchedulesGet, usePublishScheduleApiV1SchedulesScheduleIdPublishPost, useRollbackScheduleApiV1SchedulesScheduleIdRollbackPost } from "@/api/generated/client";
 import { UserResponseRole, type ScheduleSummaryResponse } from "@/api/generated/models";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,10 +26,13 @@ const localActionLabels: Record<string, string> = { delete: "删除" };
 
 export function VersionsPage() {
   const user = useAppUser();
+  const navigate = useNavigate();
   const canManageVersions = VERSION_WRITE_ROLES.includes(user.role);
+  const canViewAudit = user.role === UserResponseRole.admin;
   const client = useQueryClient();
   const schedules = useListSchedulesApiV1SchedulesGet();
-  const logs = useListAuditLogsApiV1AuditLogsGet({ limit: 12 });
+  const logs = useListAuditLogsApiV1AuditLogsGet({ limit: 12 }, { query: { enabled: canViewAudit } });
+  const feishu = useFeishuConnectionApiV1IntegrationsFeishuConnectionGet({ query: { enabled: canManageVersions } });
   const [base, setBase] = useState("");
   const [target, setTarget] = useState("");
   // 删除成功到列表 refetch 落地之间有一个窗口期，schedules.data 里还留着已删版本。
@@ -45,8 +49,23 @@ export function VersionsPage() {
   }, [versions]);
   const diff = useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet(base, target, { query: { enabled: Boolean(base && target && base !== target) } });
   const refresh = () => void client.invalidateQueries({ queryKey: getListSchedulesApiV1SchedulesGetQueryKey() });
-  const publish = usePublishScheduleApiV1SchedulesScheduleIdPublishPost({ mutation: { onSuccess: () => { toast.success("版本已发布为当前课表"); refresh(); }, onError: (error) => toast.error(errorMessage(error)) } });
-  const rollback = useRollbackScheduleApiV1SchedulesScheduleIdRollbackPost({ mutation: { onSuccess: () => { toast.success("已恢复到历史版本"); refresh(); }, onError: (error) => toast.error(errorMessage(error)) } });
+  const syncSchedule = useFeishuSyncApiV1IntegrationsFeishuSyncPost({ mutation: {
+    onSuccess: async (data) => {
+      toast.success(`当前课表已同步到飞书（${data.records_written} 条）`);
+      await client.invalidateQueries({ queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey() });
+    },
+    onError: (error) => toast.warning(`版本已更新，但飞书同步未完成：${errorMessage(error)}。请打开“飞书集成”检查第 5 步。`),
+  } });
+  const syncAfterVersionChange = () => {
+    const status = feishu.data;
+    if (!status?.authorized || status.missing_scopes.length > 0 || status.workspace?.status !== "active" || (status.workspace.tables?.length ?? 0) < 8) {
+      toast.info("版本已更新；请到“飞书集成”完成授权/建表后，在第 5 步同步课表。", { action: { label: "打开飞书集成", onClick: () => navigate("/integrations") } });
+      return;
+    }
+    syncSchedule.mutate({ data: { resource: "schedule" } });
+  };
+  const publish = usePublishScheduleApiV1SchedulesScheduleIdPublishPost({ mutation: { onSuccess: () => { toast.success("版本已发布为当前课表"); refresh(); syncAfterVersionChange(); }, onError: (error) => toast.error(errorMessage(error)) } });
+  const rollback = useRollbackScheduleApiV1SchedulesScheduleIdRollbackPost({ mutation: { onSuccess: () => { toast.success("已恢复到历史版本"); refresh(); syncAfterVersionChange(); }, onError: (error) => toast.error(errorMessage(error)) } });
   const remove = useDeleteScheduleApiV1SchedulesScheduleIdDelete({ mutation: {
     onSuccess: (_result, { scheduleId }) => {
       toast.success("版本已删除");
@@ -57,11 +76,11 @@ export function VersionsPage() {
     // 服务端的 409 话术（已发布 / 官方基线 / 有子版本 / 被调课引用 / 已下发日历）是可读中文，原样透出去。
     onError: (error) => toast.error(errorMessage(error)),
   } });
-  if (schedules.isPending || logs.isPending) return <LoadingState />;
-  if (schedules.isError || logs.isError) return <ErrorState retry={() => { void schedules.refetch(); void logs.refetch(); }} />;
+  if (schedules.isPending || (canViewAudit && logs.isPending) || (canManageVersions && feishu.isPending)) return <LoadingState />;
+  if (schedules.isError || (canViewAudit && logs.isError) || (canManageVersions && feishu.isError)) return <ErrorState retry={() => { void schedules.refetch(); if (canViewAudit) void logs.refetch(); if (canManageVersions) void feishu.refetch(); }} />;
   return <div className="space-y-5">
-    <PageHeader title="版本与回滚" />
-    <section className={canManageVersions ? "border border-blue-200 bg-blue-50/40 px-4 py-3 text-sm text-blue-900" : "border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600"}>{canManageVersions ? "发布：把草稿版本设为当前课表；回滚：恢复已经发布过的历史版本；删除：清理不再需要的版本，连同它的排课记录一并清除。当前版本、官方原始课表、派生过子版本、被调课事件引用或已下发飞书日历的版本都不能删除。" : "当前账号可以查看和比较版本记录；发布、回滚、删除等变更操作仅由具备相应权限的账号执行。"}</section>
+    <PageHeader title="版本与回滚" actions={canManageVersions ? <Button size="sm" variant="outline" onClick={syncAfterVersionChange} disabled={syncSchedule.isPending}><Send className="size-3.5" />{syncSchedule.isPending ? "正在同步当前课表" : "同步当前课表到飞书"}</Button> : null} />
+    <section className={canManageVersions ? "border border-blue-200 bg-blue-50/40 px-4 py-3 text-sm text-blue-900" : "border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600"}>{canManageVersions ? "发布/回滚会先更新本地当前版本；若飞书连接已就绪，页面会自动同步课表。同步失败不会撤销本地发布，请到“飞书集成”第 5 步重试。" : "当前账号可以查看和比较版本记录；发布、回滚、删除等变更操作仅由具备相应权限的账号执行。"}</section>
     <div className="grid gap-2 xl:grid-cols-[minmax(0,1.4fr)_minmax(340px,0.8fr)]">
       <section className="border border-zinc-200 bg-white">
         <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 p-4"><select aria-label="基准版本" className="h-8 min-w-36 rounded-md border border-zinc-300 px-2 text-xs" value={base} onChange={(event) => setBase(event.target.value)}><option value="">基准版本</option>{versions.map((item) => <option key={item.id} value={item.id}>v{item.version_no} / {statusLabel(item.status)}</option>)}</select><ArrowLeftRight className="size-4 text-zinc-400" /><select aria-label="目标版本" className="h-8 min-w-36 rounded-md border border-zinc-300 px-2 text-xs" value={target} onChange={(event) => setTarget(event.target.value)}><option value="">目标版本</option>{versions.map((item) => <option key={item.id} value={item.id}>v{item.version_no} / {statusLabel(item.status)}</option>)}</select></div>
@@ -69,7 +88,7 @@ export function VersionsPage() {
       </section>
       <section className="border border-zinc-200 bg-white"><div className="border-b border-zinc-200 px-4 py-3 text-sm font-semibold">版本记录</div><div className="divide-y divide-zinc-100">{versions.map((item) => { const canPublish = canManageVersions && item.status === "draft"; const canRollback = canManageVersions && (item.status === "archived" || item.status === "rolled_back"); const canDelete = canManageVersions && item.status !== "published" && !item.name.endsWith(OFFICIAL_VERSION_SUFFIX); return <div key={item.id} data-testid={`version-card-${item.id}`} className="p-4"><div className="flex items-center justify-between"><div><span className="font-medium">v{item.version_no}</span><span className="ml-2 text-xs text-zinc-400">{datetime(item.created_at)}</span></div><Badge tone={statusTone(item.status)}>{item.status === "published" ? "当前版本" : statusLabel(item.status)}</Badge></div><div className="mt-2 flex gap-2">{canPublish ? <Button size="sm" variant="outline" aria-label={`发布版本 v${item.version_no}`} onClick={() => publish.mutate({ scheduleId: item.id })}><Send className="size-3.5" />发布此版本</Button> : null}{canRollback ? <Button size="sm" variant="ghost" aria-label={`回滚到版本 v${item.version_no}`} onClick={() => rollback.mutate({ scheduleId: item.id })}><RotateCcw className="size-3.5" />回滚到此版本</Button> : null}{item.status === "published" ? <span className="text-xs text-zinc-400">当前正在使用</span> : null}{canDelete ? <Button size="sm" variant="ghost" className="ml-auto text-red-600 hover:bg-red-50 hover:text-red-700" aria-label={`删除版本 v${item.version_no}`} onClick={() => setPendingDelete(item)}><Trash2 className="size-3.5" />删除</Button> : null}</div></div>; })}</div></section>
     </div>
-    <section className="border border-zinc-200 bg-white"><div className="flex items-center gap-2 border-b border-zinc-200 px-4 py-3 text-sm font-semibold"><History className="size-4" />审计日志</div><div className="divide-y divide-zinc-100">{logs.data?.map((log) => <div key={log.id} className="flex flex-wrap items-center gap-4 px-4 py-2.5 text-sm"><span className="min-w-32 text-zinc-400">{datetime(log.created_at)}</span><span className="font-mono text-xs text-zinc-600">{actionLabel(log.action)}</span><span className="text-zinc-500">{resourceLabel(log.resource_type)}</span><span className="text-zinc-400">{log.resource_id ?? "-"}</span></div>)}</div></section>
+    {canViewAudit ? <section className="border border-zinc-200 bg-white"><div className="flex items-center gap-2 border-b border-zinc-200 px-4 py-3 text-sm font-semibold"><History className="size-4" />审计日志</div><div className="divide-y divide-zinc-100">{logs.data?.map((log) => <div key={log.id} className="flex flex-wrap items-center gap-4 px-4 py-2.5 text-sm"><span className="min-w-32 text-zinc-400">{datetime(log.created_at)}</span><span className="font-mono text-xs text-zinc-600">{actionLabel(log.action)}</span><span className="text-zinc-500">{resourceLabel(log.resource_type)}</span><span className="text-zinc-400">{log.resource_id ?? "-"}</span>{Object.keys(log.detail ?? {}).length ? <span className="text-xs text-zinc-500">{JSON.stringify(log.detail)}</span> : null}</div>)}</div></section> : <section className="border border-zinc-200 bg-zinc-50 px-4 py-3 text-xs text-zinc-500">审计日志仅管理员可见；版本列表、版本对比和当前课表状态仍可正常查看。</section>}
     {pendingDelete ? <ConfirmDialog open danger pending={remove.isPending} title={`删除课表版本 v${pendingDelete.version_no}`} description={deleteDescription(pendingDelete, versions.filter((item) => item.parent_id === pendingDelete.id))} confirmLabel="删除" onOpenChange={(open) => { if (!open) setPendingDelete(null); }} onConfirm={() => remove.mutate({ scheduleId: pendingDelete.id })} /> : null}
   </div>;
 }

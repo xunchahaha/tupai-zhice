@@ -1,17 +1,17 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Activity, Bot, CalendarPlus, ClipboardCopy, CornerUpLeft, Loader2, MessageSquareText, Play, RefreshCw, Settings2, SlidersHorizontal, Sparkles } from "lucide-react";
+import { Activity, Bot, CalendarPlus, ClipboardCopy, CornerUpLeft, Loader2, LockKeyhole, MessageSquareText, Play, RefreshCw, Settings2, SlidersHorizontal, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
-import { getListSchedulesApiV1SchedulesGetQueryKey, getListSolverRunsApiV1SolverRunsGetQueryKey, getOverviewApiV1OverviewGetQueryKey, useGetSolverRunApiV1SolverRunsRunIdGet, useListCourseSessionsApiV1CourseSessionsGet, useListRulesApiV1RulesGet, useListSchedulesApiV1SchedulesGet, useListSolverRunsApiV1SolverRunsGet, useSubmitSolverRunApiV1SolverRunsPost } from "@/api/generated/client";
-import { type SolveRequest, type SolverRunExplanation, type SolverRunResponse } from "@/api/generated/models";
+import { getListSchedulesApiV1SchedulesGetQueryKey, getListSolverRunsApiV1SolverRunsGetQueryKey, getOverviewApiV1OverviewGetQueryKey, useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet, useGetSolverRunApiV1SolverRunsRunIdGet, useListCourseSessionsApiV1CourseSessionsGet, useListRulesApiV1RulesGet, useListSchedulesApiV1SchedulesGet, useListSolverRunsApiV1SolverRunsGet, useSubmitSolverRunApiV1SolverRunsPost } from "@/api/generated/client";
+import { type ScheduleDiffResponse, type SolveRequest, type SolverRunExplanation, type SolverRunResponse } from "@/api/generated/models";
 import { http } from "@/api/http";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/format";
-import { modelStatusLabel, statusLabel } from "@/lib/labels";
+import { diffKindLabel, modelStatusLabel, statusLabel } from "@/lib/labels";
 import { latestDraftSchedule, preferredSchedule } from "@/lib/schedule";
 import { modelStatusTone, statusTone } from "@/lib/status";
 
@@ -44,20 +44,23 @@ interface SolverParamValues {
   date_to: string | null;
 }
 
-/** 只列出求解器真正会读取的参数。教师偏好与座位浪费在当前数据模型下无法建模，故不再提供。 */
-const SOLVER_RULES: Array<{ key: SolverRule; label: string; hint: string }> = [
+/** 教室、教师冲突是系统级硬约束，界面展示但不允许关闭。 */
+const SYSTEM_SOLVER_RULES: Array<{ key: SolverRule; label: string; hint: string }> = [
+  { key: "room_no_overlap", label: "教室不重叠", hint: "同一教室的真实时间区间不可重叠，始终生效" },
+  { key: "teacher_no_overlap", label: "教师不重叠", hint: "同一教师不可同时上两节课，始终生效" },
+];
+const OPTIONAL_SOLVER_RULES: Array<{ key: SolverRule; label: string; hint: string }> = [
   { key: "fixed_time", label: "固定上课时段", hint: "只调整日期和教室，不动上课时刻" },
-  { key: "room_no_overlap", label: "教室不重叠", hint: "同一教室的真实时间区间不可重叠" },
-  { key: "teacher_no_overlap", label: "教师不重叠", hint: "同一教师不可同时上两节课；教研组不受此限" },
   { key: "calendar_no_overlap", label: "日程账号不重叠", hint: "已映射飞书账号的教师按个人日历约束" },
   { key: "minimize_changes", label: "最小化变更", hint: "优先保持与已发布课表一致" },
 ];
+const SYSTEM_RULE_KEYS = SYSTEM_SOLVER_RULES.map((item) => item.key);
 
 const defaultParams: SolverParamValues = {
   time_limit_seconds: 30,
   date_window_days: 7,
   change_weight: 100000,
-  solver_rules: SOLVER_RULES.map((item) => item.key),
+  solver_rules: [...SYSTEM_SOLVER_RULES, ...OPTIONAL_SOLVER_RULES].map((item) => item.key),
   business_lines: [],
   class_business_ids: [],
   date_from: null,
@@ -112,8 +115,6 @@ export function SolverPage() {
   const progress = useGetSolverRunApiV1SolverRunsRunIdGet(runId, { query: { enabled: Boolean(runId), refetchInterval: (query) => query.state.data?.status === "completed" || query.state.data?.status === "failed" ? false : 700 } });
   const submit = useSubmitSolverRunApiV1SolverRunsPost({ mutation: { onSuccess: (result) => { setRunId(result.id); setCurrent(result); toast.success("求解任务已创建"); }, onError: (error) => toast.error(errorMessage(error)) } });
   useEffect(() => { if (progress.data) { setCurrent(progress.data); if (progress.data.status === "completed" || progress.data.status === "failed") { void Promise.all([client.invalidateQueries({ queryKey: getListSchedulesApiV1SchedulesGetQueryKey() }), client.invalidateQueries({ queryKey: getListSolverRunsApiV1SolverRunsGetQueryKey() }), client.invalidateQueries({ queryKey: getOverviewApiV1OverviewGetQueryKey() })]); } } }, [client, progress.data]);
-  if (rules.isPending || runs.isPending || schedules.isPending) return <LoadingState />;
-  if (rules.isError || runs.isError || schedules.isError) return <ErrorState retry={() => { void rules.refetch(); void runs.refetch(); void schedules.refetch(); }} />;
   const courseRows = courses.data ?? [];
   const scopeOptions = {
     businessLines: [...new Set(courseRows.map((item) => item.business_line ?? "").filter(Boolean))].sort(),
@@ -127,9 +128,22 @@ export function SolverPage() {
     return true;
   }).length;
   const activeRun = current ?? runs.data?.[0] ?? null;
+  const draftSchedule = activeRun?.status === "completed" ? latestDraftSchedule(schedules.data) : undefined;
+  const baseSchedule = draftSchedule
+    ? (draftSchedule.parent_id
+      ? schedules.data?.find((item) => item.id === draftSchedule.parent_id)
+      : schedules.data?.find((item) => item.status === "published" && item.id !== draftSchedule.id))
+    : undefined;
+  const scheduleDiff = useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet(
+    baseSchedule?.id ?? "",
+    draftSchedule?.id ?? "",
+    { query: { enabled: Boolean(baseSchedule?.id && draftSchedule?.id && baseSchedule.id !== draftSchedule.id) } },
+  );
   const schedule = activeRun?.status === "completed"
     ? (latestDraftSchedule(schedules.data) ?? preferredSchedule(schedules.data))
     : preferredSchedule(schedules.data);
+  if (rules.isPending || runs.isPending || schedules.isPending) return <LoadingState />;
+  if (rules.isError || runs.isError || schedules.isError) return <ErrorState retry={() => { void rules.refetch(); void runs.refetch(); void schedules.refetch(); }} />;
   const interpret = async () => {
     setInterpreting(true);
     try {
@@ -164,10 +178,17 @@ export function SolverPage() {
         scope={scopeOptions}
         selectedCount={selectedCount}
         pending={submit.isPending || activeRun?.status === "running"}
-        onSubmit={() => submit.mutate({ data: { ...params, wait: false } })}
+        onSubmit={() => submit.mutate({ data: { ...params, solver_rules: [...new Set([...params.solver_rules, ...SYSTEM_RULE_KEYS])], wait: false } })}
       />
       <RunPanel run={activeRun} onUseInstruction={applySuggestedInstruction} />
     </div>
+    <ScheduleChangePanel
+      base={baseSchedule}
+      target={draftSchedule}
+      diff={scheduleDiff.data}
+      loading={scheduleDiff.isPending}
+      onOpenVersions={() => navigate("/versions")}
+    />
     <section className="border border-zinc-200 bg-white p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><div className="flex items-center gap-2"><CalendarPlus className="size-4 text-blue-600" /><h2 className="font-semibold">教师日历下发</h2></div><p className="mt-1 text-xs text-zinc-500">{schedule ? `当前课表：${schedule.name}` : "当前没有可下发课表"}。教师忙闲冲突会告警，但正式下发仍继续创建日程。</p></div><div className="flex gap-2"><Button variant="outline" onClick={() => publishCalendar(true)} disabled={!schedule || publishing !== null}>{publishing === "dry-run" ? "预检中" : "忙闲预检"}</Button><Button onClick={() => publishCalendar(false)} disabled={!schedule || publishing !== null}>{publishing === "publish" ? "正在下发" : "确认下发"}</Button></div></div>{calendarResult ? <><div className="mt-4 grid gap-2 sm:grid-cols-3 xl:grid-cols-6"><Value label="预计下发" value={String(calendarResult.would_publish)} /><Value label="本次发布" value={String(calendarResult.published)} /><Value label="已存在" value={String(calendarResult.existing)} /><Value label="待补账号" value={String(calendarResult.skipped_unmapped)} /><Value label="冲突告警" value={String(calendarResult.conflict_count)} /><Value label="执行模式" value={calendarResult.dry_run ? "仅预检" : "正式下发"} /></div>{calendarResult.skipped_unmapped ? <div className="mt-3 border-l-2 border-amber-500 bg-amber-50 px-4 py-2 text-xs text-amber-900">未映射具体飞书账号的课程已跳过，请先补充课程账号或教师账号。</div> : null}</> : null}{calendarResult?.conflicts.length ? <div className="mt-4 max-h-48 overflow-auto border-l-2 border-red-500 bg-red-50 px-4 py-2 text-xs text-red-900"><div className="mb-1 font-medium">冲突明细（正式下发仍会创建并标记冲突）</div>{calendarResult.conflicts.slice(0, 20).map((item, index) => <div key={`${item.course_session_id}-${item.lesson_date}-${item.source}-${index}`}>{item.lesson_date} {item.start_time}-{item.end_time} / {item.calendar_user_id} / 课程 {item.course_session_id.slice(0, 8)} / {item.source === "feishu_freebusy" ? "飞书已有忙碌" : "待下发课表内部重叠"}</div>)}</div> : null}</section>
     <section className="border border-zinc-200 bg-white"><div className="border-b border-zinc-200 px-4 py-3 text-sm font-semibold">求解记录</div><div className="overflow-x-auto"><table className="w-full min-w-[720px] text-left text-sm"><thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="h-9 px-4">任务</th><th>状态</th><th>模型结果</th><th>目标值</th><th>最佳界</th><th>耗时</th></tr></thead><tbody>{runs.data?.map((run) => <tr key={run.id} className="border-t border-zinc-100"><td className="h-10 px-4 font-mono text-xs">{run.id.slice(0, 8)}</td><td><Badge tone={run.status === "completed" ? modelStatusTone(run.model_status) : statusTone(run.status)}>{statusLabel(run.status)}</Badge></td><td>{modelStatusLabel(run.model_status, run.presolve_infeasible)}</td><td>{run.objective_value?.toFixed(1) ?? "-"}</td><td>{run.best_bound?.toFixed(1) ?? "-"}</td><td>{run.wall_time_seconds?.toFixed(2) ?? "-"} 秒</td></tr>)}</tbody></table></div></section>
   </div>;
@@ -264,6 +285,9 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
             </label>
           ))}
         </div>
+        <p className="text-xs leading-5 text-zinc-500">
+          起始/结束日期有两个作用：只选原课表日期落在区间内的课次，并限制新课表允许落到的绝对日期；新日期还会与“日期调整窗口”取交集。留空表示不设绝对边界。
+        </p>
         <p className={"text-xs leading-5 " + (selectedCount > 1500 ? "text-amber-700" : "text-zinc-400")}>
           当前范围命中 <span className="font-mono tabular-nums">{selectedCount}</span> 个课次。
           {selectedCount > 1500 ? "课次过多时求解会超时，建议按班级或按周分批。" : ""}
@@ -275,10 +299,22 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
         <NumberField label="变更权重" hint="每挪动一天的代价，越大越倾向保持原课表" value={params.change_weight} min={0} max={1000000} step={1000} onChange={(value) => setParams((current) => ({ ...current, change_weight: value }))} />
       </div>
       <fieldset className="mt-5 border-t border-zinc-100 pt-4">
-        <legend className="sr-only">硬约束开关</legend>
-        <div className="text-xs font-medium text-zinc-500">硬约束</div>
+        <legend className="sr-only">硬约束与可选策略</legend>
+        <div className="text-xs font-medium text-zinc-500">系统硬约束</div>
         <div className="mt-2 grid gap-2">
-          {SOLVER_RULES.map((rule) => (
+          {SYSTEM_SOLVER_RULES.map((rule) => (
+            <div key={rule.key} className="flex items-start gap-2 rounded border border-emerald-100 bg-emerald-50/60 px-3 py-2 text-sm text-zinc-700">
+              <LockKeyhole className="mt-0.5 size-3.5 shrink-0 text-emerald-700" />
+              <span>
+                {rule.label}<span className="ml-2 text-xs text-emerald-700">始终生效</span>
+                <span className="block text-xs leading-5 text-zinc-500">{rule.hint}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+        <div className="mt-4 text-xs font-medium text-zinc-500">可选策略</div>
+        <div className="mt-2 grid gap-2">
+          {OPTIONAL_SOLVER_RULES.map((rule) => (
             <label key={rule.key} className="flex cursor-pointer items-start gap-2 text-sm text-zinc-700">
               <input className="mt-1 accent-blue-600" type="checkbox" checked={params.solver_rules.includes(rule.key)} onChange={() => toggleRule(rule.key)} />
               <span>
@@ -298,6 +334,59 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
 }
 
 function Scope({ label, values }: { label: string; values: string[] }) { return <div><div className="text-xs text-zinc-400">{label}</div><div className="mt-1 flex flex-wrap gap-1">{values.length ? values.map((value) => <Badge key={value} tone="blue">{value}</Badge>) : <span className="text-xs text-zinc-500">全部</span>}</div></div>; }
+
+function ScheduleChangePanel({
+  base,
+  target,
+  diff,
+  loading,
+  onOpenVersions,
+}: {
+  base: { version_no: number; name: string } | undefined;
+  target: { version_no: number; name: string } | undefined;
+  diff: ScheduleDiffResponse | undefined;
+  loading: boolean;
+  onOpenVersions: () => void;
+}) {
+  if (!target) return null;
+  if (!base) {
+    return <section className="border border-amber-200 bg-amber-50/50 p-5 text-sm text-amber-900">本次已生成 v{target.version_no} 草稿，但还没有可比较的基准版本。</section>;
+  }
+  if (loading) return <section className="border border-zinc-200 bg-white p-5 text-sm text-zinc-500">正在整理本次排课调整……</section>;
+  if (!diff) return null;
+  const changed = diff.items.filter((item) => item.change_kind !== "unchanged");
+  const dateChanges = changed.filter((item) => item.before_lesson_date !== item.after_lesson_date).length;
+  const slotChanges = changed.filter((item) => item.before_slot_id !== item.after_slot_id).length;
+  const roomChanges = changed.filter((item) => item.before_room_id !== item.after_room_id).length;
+  return (
+    <section className="border border-blue-200 bg-blue-50/40 p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="font-semibold">本次排课调整</h2>
+          <p className="mt-1 text-xs text-zinc-600">v{base.version_no}「{base.name}」→ v{target.version_no}「{target.name}」。下面列出实际发生变化的课次。</p>
+          <p className="mt-1 text-xs text-zinc-500">调整依据：教室与教师不重叠始终生效；其余日期、时段和教室变化按本次求解的日期窗口与变更权重择优。</p>
+        </div>
+        <Button size="sm" variant="outline" onClick={onOpenVersions}>查看完整版本对比</Button>
+      </div>
+      <div className="mt-4 grid gap-2 sm:grid-cols-4">
+        <Value label="变更课次" value={String(diff.changed_count)} />
+        <Value label="日期变化" value={String(dateChanges)} />
+        <Value label="时段变化" value={String(slotChanges)} />
+        <Value label="教室变化" value={String(roomChanges)} />
+      </div>
+      {changed.length ? (
+        <div className="mt-4 max-h-72 overflow-auto rounded border border-blue-100 bg-white">
+          <table className="w-full min-w-[720px] text-left text-xs">
+            <thead className="sticky top-0 bg-zinc-50 text-zinc-500"><tr><th className="h-8 px-3">课次</th><th>调整前</th><th>调整后</th><th>类型</th></tr></thead>
+            <tbody>{changed.slice(0, 30).map((item) => <tr key={item.course_business_id} className="border-t border-zinc-100"><td className="px-3 py-2 font-mono">{item.course_business_id}</td><td>{item.before_lesson_date ?? "-"} / {item.before_slot_id ?? "-"} / {item.before_room_id ?? "-"}</td><td>{item.after_lesson_date ?? "-"} / {item.after_slot_id ?? "-"} / {item.after_room_id ?? "-"}</td><td><Badge tone="blue">{diffKindLabel(item.change_kind)}</Badge></td></tr>)}</tbody>
+          </table>
+          {changed.length > 30 ? <p className="border-t border-zinc-100 px-3 py-2 text-zinc-500">仅展示前 30 条，完整列表请打开版本对比。</p> : null}
+        </div>
+      ) : <p className="mt-4 text-sm text-zinc-500">本次没有相对基准版本发生变化。</p>}
+    </section>
+  );
+}
+
 function RunPanel({ run, onUseInstruction }: { run: SolverRunResponse | null; onUseInstruction?: (value: string) => void }) {
   const presolved = Boolean(run?.presolve_infeasible);
   const finished = run?.status === "completed";

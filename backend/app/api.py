@@ -173,6 +173,9 @@ SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 Db = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminOrScheduler = Annotated[User, Depends(require_roles("admin", "scheduler"))]
+IntegrationOperator = Annotated[
+    User, Depends(require_roles("admin", "scheduler", "approver"))
+]
 Approver = Annotated[User, Depends(require_roles("admin", "approver"))]
 Admin = Annotated[User, Depends(require_roles("admin"))]
 
@@ -3079,7 +3082,7 @@ def _event_id(payload: dict[str, Any]) -> str:
     response_model=IntegrationSyncResponse,
     tags=["integrations"],
 )
-def feishu_sync(request: FeishuSyncRequest, db: Db, user: AdminOrScheduler) -> IntegrationSync:
+def feishu_sync(request: FeishuSyncRequest, db: Db, user: IntegrationOperator) -> IntegrationSync:
     sync = IntegrationSync(
         direction=request.direction,
         resource=request.resource,

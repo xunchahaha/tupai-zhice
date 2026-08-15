@@ -253,6 +253,16 @@ export function IntegrationsPage() {
       status.missing_scopes.length === 0 &&
       workspaceReady,
   );
+  const syncBlockers = [
+    !status.app_configured ? "还没有保存企业自建应用配置" : null,
+    !status.authorized ? "还没有授权飞书管理员账号" : null,
+    status.missing_scopes.length > 0 ? `还缺少 ${status.missing_scopes.length} 项飞书权限（请在第 3 步查看）` : null,
+    !workspaceReady
+      ? status.workspace?.status === "error"
+        ? `排课多维表格创建失败：${status.workspace.last_error ?? "请重试第 4 步"}`
+        : `排课多维表格尚未完成（当前 ${status.workspace?.tables?.length ?? 0} / ${resources.length} 张业务表）`
+      : null,
+  ].filter((item): item is string => Boolean(item));
   const currentStep = !status.app_configured
     ? 0
     : !aiConfiguration.data.configured
@@ -446,7 +456,7 @@ export function IntegrationsPage() {
           <FlowStep
             number={5}
             title="同步业务数据"
-            description="按业务标识新增或更新，重复执行不会产生重复记录。"
+            description="发布不会自动写入飞书；在这里选择资源后，按业务标识新增或更新，重复执行不会产生重复记录。"
             state={ready ? "current" : "pending"}
             icon={CloudUpload}
           >
@@ -471,10 +481,14 @@ export function IntegrationsPage() {
                 <SendHorizontal className="size-4" />
                 {sync.isPending ? "正在同步" : "同步到飞书"}
               </Button>
+              {status.workspace?.url ? <a href={status.workspace.url} target="_blank" rel="noreferrer"><Button type="button" variant="outline"><ExternalLink className="size-4" />打开当前多维表格</Button></a> : null}
             </div>
             {!ready ? (
-              <p className="mt-2 text-xs text-amber-700">完成账号授权和自动建表后开放同步。</p>
-            ) : null}
+              <div className="mt-3 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                <div className="font-medium">同步暂不可用，原因是：</div>
+                <ul className="mt-1 list-disc pl-4">{syncBlockers.map((item) => <li key={item}>{item}</li>)}</ul>
+              </div>
+            ) : <p className="mt-2 text-xs text-emerald-700">连接已就绪，可以同步课表、主数据和规则。</p>}
           </FlowStep>
 
           <FlowStep

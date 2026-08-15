@@ -15,6 +15,9 @@ SolverRule = Literal[
     "minimize_changes",
 ]
 
+# 教室和教师资源冲突是排课结果的基本有效性条件，不作为业务人员可关闭的选项。
+MANDATORY_SOLVER_RULES: tuple[SolverRule, ...] = ("room_no_overlap", "teacher_no_overlap")
+
 
 def default_solver_rules() -> list[SolverRule]:
     return [
@@ -24,6 +27,11 @@ def default_solver_rules() -> list[SolverRule]:
         "calendar_no_overlap",
         "minimize_changes",
     ]
+
+
+def normalize_solver_rules(rules: list[SolverRule]) -> list[SolverRule]:
+    """去重并补齐系统级硬约束，统一手动求解与一句话排课的行为。"""
+    return list(dict.fromkeys([*rules, *MANDATORY_SOLVER_RULES]))
 
 
 class ORMModel(BaseModel):
@@ -451,6 +459,7 @@ class SolveRequest(BaseModel):
     def validate_date_range(self) -> SolveRequest:
         if self.date_from and self.date_to and self.date_from > self.date_to:
             raise ValueError("date_from 必须早于或等于 date_to")
+        self.solver_rules = normalize_solver_rules(self.solver_rules)
         return self
 
 
@@ -757,6 +766,7 @@ class AilySolveRequest(BaseModel):
     def validate_date_range(self) -> AilySolveRequest:
         if self.date_from and self.date_to and self.date_from > self.date_to:
             raise ValueError("date_from 必须早于或等于 date_to")
+        self.solver_rules = normalize_solver_rules(self.solver_rules)
         return self
 
 
