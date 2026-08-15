@@ -1080,6 +1080,9 @@ class FeishuService:
         workspace_id: str | None = None,
         schedule_set_id: str = "default",
     ) -> dict[str, Any]:
+        # Preserve the actionable setup error when sync is clicked before the
+        # Feishu app is configured; otherwise a missing workspace would hide it.
+        self._app_configuration()
         # Workspaces belong to a timetable rather than to the person who clicks
         # “sync”.  An approver or scheduler can therefore update the timetable
         # workspace created by its administrator, while API scope checks remain

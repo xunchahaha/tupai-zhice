@@ -1348,7 +1348,9 @@ def class_group_response(item: ClassGroup, tracks: list[ClassGroupTrack]) -> Cla
 
 
 def class_group_responses(
-    db: Session, classes: list[ClassGroup], schedule_set_id: str
+    db: Session,
+    classes: list[ClassGroup],
+    schedule_set_id: str = DEFAULT_SCHEDULE_SET_ID,
 ) -> list[ClassGroupResponse]:
     index = class_group_track_index(db, schedule_set_id)
     return [
