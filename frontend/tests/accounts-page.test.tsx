@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -176,7 +176,11 @@ describe("AccountsPage", () => {
   });
 
   it("does not grant a global approver the scheduler-only timetable role", async () => {
+    const user = userEvent.setup();
     renderPage();
+    const approverRow = (await screen.findAllByText("approver_demo"))[0].closest("tr");
+    expect(approverRow).not.toBeNull();
+    await user.click(within(approverRow!).getByRole("button", { name: "课表权限" }));
     const selector = await screen.findByRole("combobox", {
       name: "approver_demo 在 第一套课表 的课表权限",
     });

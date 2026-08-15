@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Activity, Bot, CalendarPlus, ClipboardCopy, CornerUpLeft, Loader2, LockKeyhole, MessageSquareText, Play, RefreshCw, Settings2, SlidersHorizontal, Sparkles } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Activity, Bot, CalendarPlus, CircleAlert, ClipboardCopy, CornerUpLeft, Loader2, LockKeyhole, MessageSquareText, Play, RefreshCw, Settings2, SlidersHorizontal, Sparkles } from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -194,13 +194,36 @@ export function SolverPage() {
   </div>;
 }
 
+function InfoTooltip({ label, children }: { label: string; children: ReactNode }) {
+  const id = useId();
+  return (
+    <span className="group relative inline-flex align-middle">
+      <button
+        type="button"
+        aria-label={`${label}说明`}
+        aria-describedby={id}
+        className="inline-flex size-4 items-center justify-center rounded-full text-zinc-400 outline-none transition-colors hover:text-zinc-700 focus-visible:text-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+      >
+        <CircleAlert className="size-3.5" aria-hidden="true" />
+      </button>
+      <span
+        id={id}
+        role="tooltip"
+        className="pointer-events-none absolute left-0 top-[calc(100%+6px)] z-30 w-64 rounded-md bg-zinc-900 px-3 py-2 text-left text-xs leading-5 text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+      >
+        {children}
+      </span>
+    </span>
+  );
+}
+
 function NumberField({ label, hint, value, min, max, step, onChange }: { label: string; hint: string; value: number; min: number; max: number; step: number; onChange: (value: number) => void }) {
   const id = `solver-${label}`;
   return (
-    <label className="block text-sm text-zinc-700" htmlFor={id}>
+    <div className="block text-sm text-zinc-700">
       <span className="flex items-baseline justify-between">
-        <span>{label}</span>
-        <span className="font-mono text-xs tabular-nums text-zinc-500">{value}</span>
+        <label htmlFor={id}>{label}</label>
+        <span className="inline-flex items-center gap-1.5 font-mono text-xs tabular-nums text-zinc-500">{value}<InfoTooltip label={label}>{hint}</InfoTooltip></span>
       </span>
       <input
         id={id}
@@ -212,8 +235,7 @@ function NumberField({ label, hint, value, min, max, step, onChange }: { label: 
         value={value}
         onChange={(event) => onChange(Number(event.target.value))}
       />
-      <span className="mt-1 block text-xs leading-5 text-zinc-400">{hint}</span>
-    </label>
+    </div>
   );
 }
 
@@ -271,32 +293,41 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
           </select>
         </label>
         <div className="grid grid-cols-2 gap-3">
-          {(["date_from", "date_to"] as const).map((key) => (
-            <label key={key} className="block text-sm text-zinc-700">
-              {key === "date_from" ? "起始日期" : "结束日期"}
-              <input
-                className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm"
-                type="date"
-                value={params[key] ?? ""}
-                onChange={(event) =>
-                  setParams((current) => ({ ...current, [key]: event.target.value || null }))
-                }
-              />
-            </label>
-          ))}
+          {(["date_from", "date_to"] as const).map((key) => {
+            const label = key === "date_from" ? "起始日期" : "结束日期";
+            const id = `solver-${key}`;
+            return (
+              <div key={key} className="block text-sm text-zinc-700">
+                <span className="inline-flex items-center gap-1.5">
+                  <label htmlFor={id}>{label}</label>
+                  <InfoTooltip label={label}>
+                    {key === "date_from"
+                      ? "只选择原课表日期不早于这一天的课次，并限制新日期不早于这一天；还会与日期调整窗口共同生效。留空不设下界。"
+                      : "只选择原课表日期不晚于这一天的课次，并限制新日期不晚于这一天；还会与日期调整窗口共同生效。留空不设上界。"}
+                  </InfoTooltip>
+                </span>
+                <input
+                  id={id}
+                  className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm"
+                  type="date"
+                  value={params[key] ?? ""}
+                  onChange={(event) =>
+                    setParams((current) => ({ ...current, [key]: event.target.value || null }))
+                  }
+                />
+              </div>
+            );
+          })}
         </div>
-        <p className="text-xs leading-5 text-zinc-500">
-          起始/结束日期有两个作用：只选原课表日期落在区间内的课次，并限制新课表允许落到的绝对日期；新日期还会与“日期调整窗口”取交集。留空表示不设绝对边界。
-        </p>
         <p className={"text-xs leading-5 " + (selectedCount > 1500 ? "text-amber-700" : "text-zinc-400")}>
           当前范围命中 <span className="font-mono tabular-nums">{selectedCount}</span> 个课次。
           {selectedCount > 1500 ? "课次过多时求解会超时，建议按班级或按周分批。" : ""}
         </p>
       </fieldset>
       <div className="mt-4 grid gap-4">
-        <NumberField label="求解时限（秒）" hint="超时返回 UNKNOWN，课次越多需要越长" value={params.time_limit_seconds} min={1} max={900} step={5} onChange={(value) => setParams((current) => ({ ...current, time_limit_seconds: value }))} />
-        <NumberField label="日期调整窗口（天）" hint="每节课最多可以前后挪动的天数" value={params.date_window_days} min={0} max={31} step={1} onChange={(value) => setParams((current) => ({ ...current, date_window_days: value }))} />
-        <NumberField label="变更权重" hint="每挪动一天的代价，越大越倾向保持原课表" value={params.change_weight} min={0} max={1000000} step={1000} onChange={(value) => setParams((current) => ({ ...current, change_weight: value }))} />
+        <NumberField label="求解时限（秒）" hint="CP-SAT 最多运行多久。达到时限会返回 UNKNOWN；课次范围越大，通常需要越长时间。" value={params.time_limit_seconds} min={1} max={900} step={5} onChange={(value) => setParams((current) => ({ ...current, time_limit_seconds: value }))} />
+        <NumberField label="日期调整窗口（天）" hint="每节课相对原日期最多可前后挪动几天。实际新日期还必须落在起始日期与结束日期设定的边界内；设为 0 表示不调日期。" value={params.date_window_days} min={0} max={31} step={1} onChange={(value) => setParams((current) => ({ ...current, date_window_days: value }))} />
+        <NumberField label="变更权重" hint="每挪动一天的代价。数值越大，求解器越倾向保持原课表。" value={params.change_weight} min={0} max={1000000} step={1000} onChange={(value) => setParams((current) => ({ ...current, change_weight: value }))} />
       </div>
       <fieldset className="mt-5 border-t border-zinc-100 pt-4">
         <legend className="sr-only">硬约束与可选策略</legend>
@@ -306,8 +337,7 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
             <div key={rule.key} className="flex items-start gap-2 rounded border border-emerald-100 bg-emerald-50/60 px-3 py-2 text-sm text-zinc-700">
               <LockKeyhole className="mt-0.5 size-3.5 shrink-0 text-emerald-700" />
               <span>
-                {rule.label}<span className="ml-2 text-xs text-emerald-700">始终生效</span>
-                <span className="block text-xs leading-5 text-zinc-500">{rule.hint}</span>
+                <span className="inline-flex items-center gap-1.5">{rule.label}<InfoTooltip label={rule.label}>{rule.hint}</InfoTooltip><span className="text-xs text-emerald-700">始终生效</span></span>
               </span>
             </div>
           ))}
@@ -315,13 +345,13 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
         <div className="mt-4 text-xs font-medium text-zinc-500">可选策略</div>
         <div className="mt-2 grid gap-2">
           {OPTIONAL_SOLVER_RULES.map((rule) => (
-            <label key={rule.key} className="flex cursor-pointer items-start gap-2 text-sm text-zinc-700">
-              <input className="mt-1 accent-blue-600" type="checkbox" checked={params.solver_rules.includes(rule.key)} onChange={() => toggleRule(rule.key)} />
-              <span>
-                {rule.label}
-                <span className="block text-xs leading-5 text-zinc-400">{rule.hint}</span>
+            <div key={rule.key} className="flex items-start gap-2 text-sm text-zinc-700">
+              <input id={`solver-rule-${rule.key}`} className="mt-1 accent-blue-600" type="checkbox" checked={params.solver_rules.includes(rule.key)} onChange={() => toggleRule(rule.key)} />
+              <span className="inline-flex items-center gap-1.5">
+                <label className="cursor-pointer" htmlFor={`solver-rule-${rule.key}`}>{rule.label}</label>
+                <InfoTooltip label={rule.label}>{rule.hint}</InfoTooltip>
               </span>
-            </label>
+            </div>
           ))}
         </div>
       </fieldset>

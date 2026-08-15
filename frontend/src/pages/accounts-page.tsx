@@ -52,6 +52,49 @@ function accessAllowed(role: UserResponseRole, access: "none" | ScheduleAccessRo
   return access === "viewer";
 }
 
+function accessLabel(access: ScheduleAccessRole): string {
+  return { viewer: "只读", scheduler: "排课", approver: "审批" }[access];
+}
+
+function accessTone(access: ScheduleAccessRole): "neutral" | "blue" | "green" {
+  return access === "viewer" ? "neutral" : access === "scheduler" ? "blue" : "green";
+}
+
+function ScheduleAccessSummary({
+  account,
+  scheduleSets,
+  membersBySet,
+  loading,
+  error,
+}: {
+  account: UserResponse;
+  scheduleSets: ScheduleSet[];
+  membersBySet: Record<string, ScheduleSetMember[]>;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (account.role === "admin") {
+    return <span className="text-xs text-blue-700">全部课表（管理员）</span>;
+  }
+  if (loading) return <span className="text-xs text-zinc-400">读取中…</span>;
+  if (error) return <span className="text-xs text-red-600">读取失败</span>;
+  const grants = scheduleSets.flatMap((scheduleSet) => {
+    const member = membersBySet[scheduleSet.id]?.find(
+      (item) => item.user_id === account.id && item.is_active,
+    );
+    return member ? [{ scheduleSet, access: member.access_role }] : [];
+  });
+  if (!grants.length) return <span className="text-xs text-zinc-400">未分配课表</span>;
+  return (
+    <div className="flex max-w-72 flex-wrap gap-1">
+      {grants.slice(0, 2).map(({ scheduleSet, access }) => (
+        <Badge key={scheduleSet.id} tone={accessTone(access)}>{scheduleSet.name} · {accessLabel(access)}</Badge>
+      ))}
+      {grants.length > 2 ? <Badge tone="neutral">+{grants.length - 2}</Badge> : null}
+    </div>
+  );
+}
+
 export function AccountsPage() {
   const currentUser = useAppUser();
   const client = useQueryClient();
@@ -68,6 +111,7 @@ export function AccountsPage() {
   const [scheduleSetsLoading, setScheduleSetsLoading] = useState(true);
   const [scheduleSetsError, setScheduleSetsError] = useState<string | null>(null);
   const [memberSavingKey, setMemberSavingKey] = useState<string | null>(null);
+  const [accessTarget, setAccessTarget] = useState<UserResponse | null>(null);
 
   const invalidate = () =>
     void client.invalidateQueries({ queryKey: getListUsersApiV1UsersGetQueryKey() });
@@ -123,6 +167,7 @@ export function AccountsPage() {
         setCreateOpen(false);
         setDraft({ username: "", password: "", role: "viewer" });
         invalidate();
+        void refreshScheduleAccess();
         toast.success("成员账号已创建");
       },
       onError,
@@ -214,12 +259,13 @@ export function AccountsPage() {
           <span className="text-xs text-zinc-400">{rows.length} 个账号</span>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[820px] text-left text-sm">
+          <table className="w-full min-w-[1040px] text-left text-sm">
             <thead className="bg-zinc-50 text-xs text-zinc-500">
               <tr>
                 <th className="h-10 px-4 font-medium">用户名</th>
                 <th className="px-4 font-medium">角色</th>
                 <th className="px-4 font-medium">状态</th>
+                <th className="px-4 font-medium">可访问课表</th>
                 <th className="px-4 font-medium">创建时间</th>
                 <th className="px-4 font-medium">最近登录</th>
                 <th className="px-4 text-right font-medium">操作</th>
@@ -268,10 +314,32 @@ export function AccountsPage() {
                         {account.is_active ? "启用中" : "已停用"}
                       </Badge>
                     </td>
+                    <td className="px-4 py-3">
+                      <ScheduleAccessSummary
+                        account={account}
+                        scheduleSets={scheduleSets}
+                        membersBySet={membersBySet}
+                        loading={scheduleSetsLoading}
+                        error={scheduleSetsError}
+                      />
+                    </td>
                     <td className="px-4 py-3 text-zinc-500">{datetime(account.created_at)}</td>
                     <td className="px-4 py-3 text-zinc-500">{datetime(account.last_login_at)}</td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-1.5">
+                        {account.role !== "admin" ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setAccessTarget(account);
+                              if (scheduleSetsError) void refreshScheduleAccess();
+                            }}
+                            disabled={!account.is_active}
+                          >
+                            课表权限
+                          </Button>
+                        ) : null}
                         {!self && account.is_active ? (
                           <Button
                             size="sm"
@@ -324,89 +392,78 @@ export function AccountsPage() {
         ) : null}
       </section>
 
-      <section className="border border-zinc-200 bg-white">
-        <div className="flex flex-col gap-1 border-b border-zinc-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-2 text-sm font-semibold">
-            <ShieldCheck className="size-4 text-blue-600" />
-            课表访问权限
+      <Dialog
+        open={Boolean(accessTarget)}
+        onOpenChange={(open) => {
+          if (!open && !memberSavingKey) setAccessTarget(null);
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogTitle className="text-base font-semibold">课表访问权限</DialogTitle>
+          <DialogDescription className="mt-1 text-sm text-zinc-500">
+            为“{accessTarget?.username ?? ""}”配置可见课表。全局角色决定该成员可被授予的最高课表权限。
+          </DialogDescription>
+          {accessTarget ? (
+            <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+              <span>全局角色</span>
+              <Badge tone="blue">{roleLabel(accessTarget.role)}</Badge>
+              <span>权限：只读可查看；排课可维护数据并发起求解；审批可发布与回滚。</span>
+            </div>
+          ) : null}
+          {scheduleSetsLoading ? (
+            <div className="grid min-h-36 place-items-center text-sm text-zinc-400">正在读取课表方案…</div>
+          ) : scheduleSetsError ? (
+            <div className="mt-5 flex min-h-32 items-center justify-center gap-3 text-sm text-red-600">
+              <span>{scheduleSetsError}</span>
+              <Button size="sm" variant="outline" onClick={() => void refreshScheduleAccess()}>重试</Button>
+            </div>
+          ) : !scheduleSets.length ? (
+            <div className="grid min-h-32 place-items-center text-sm text-zinc-400">请先在顶栏新建课表方案</div>
+          ) : (
+            <div className="mt-5 divide-y divide-zinc-100 border-y border-zinc-200">
+              {scheduleSets.map((scheduleSet) => {
+                const member = membersBySet[scheduleSet.id]?.find(
+                  (item) => item.user_id === accessTarget?.id && item.is_active,
+                );
+                const value: "none" | ScheduleAccessRole = member?.access_role ?? "none";
+                const saving = memberSavingKey === `${scheduleSet.id}:${accessTarget?.id ?? ""}`;
+                return (
+                  <div key={scheduleSet.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium text-zinc-800">{scheduleSet.name}</div>
+                      <div className="mt-0.5 font-mono text-[11px] text-zinc-400">{scheduleSet.code}</div>
+                    </div>
+                    <select
+                      aria-label={`${accessTarget?.username ?? "成员"} 在 ${scheduleSet.name} 的课表权限`}
+                      className="h-8 w-full rounded-md border border-zinc-300 bg-white px-2 text-xs disabled:opacity-60 sm:w-32"
+                      value={value}
+                      disabled={saving || !accessTarget?.is_active}
+                      onChange={(event) => {
+                        if (!accessTarget) return;
+                        const next = event.target.value as "none" | ScheduleAccessRole;
+                        if (accessAllowed(accessTarget.role, next)) {
+                          void updateScheduleAccess(accessTarget, scheduleSet, next);
+                        } else {
+                          toast.error("课表权限不能高于成员的全局角色");
+                        }
+                      }}
+                    >
+                      {ACCESS_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value} disabled={!accessAllowed(accessTarget?.role ?? "viewer", option.value)}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div className="mt-5 flex justify-end">
+            <Button variant="outline" onClick={() => setAccessTarget(null)} disabled={Boolean(memberSavingKey)}>关闭</Button>
           </div>
-          <span className="text-xs text-zinc-400">按成员 × 课表方案配置查看、排课和审批权限</span>
-        </div>
-        {scheduleSetsLoading ? (
-          <div className="grid min-h-28 place-items-center text-sm text-zinc-400">课表权限加载中…</div>
-        ) : scheduleSetsError ? (
-          <div className="flex min-h-28 items-center justify-center gap-3 text-sm text-red-500">
-            <span>{scheduleSetsError}</span>
-            <Button size="sm" variant="outline" onClick={() => void refreshScheduleAccess()}>重试</Button>
-          </div>
-        ) : !scheduleSets.length ? (
-          <div className="grid min-h-28 place-items-center text-sm text-zinc-400">暂无课表方案</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[980px] text-left text-sm">
-              <thead className="bg-zinc-50 text-xs text-zinc-500">
-                <tr>
-                  <th className="h-10 min-w-44 px-4 font-medium">成员</th>
-                  {scheduleSets.map((scheduleSet) => (
-                    <th key={scheduleSet.id} className="min-w-40 px-4 font-medium">
-                      <div className="truncate text-zinc-700" title={scheduleSet.name}>{scheduleSet.name}</div>
-                      <div className="mt-0.5 font-mono text-[10px] text-zinc-400">{scheduleSet.code}</div>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((account) => (
-                  <tr key={account.id} className="border-t border-zinc-100">
-                    <td className="px-4 py-3">
-                      <div className="font-medium text-zinc-800">{account.username}</div>
-                      <div className="mt-0.5 text-[11px] text-zinc-400">全局角色：{roleLabel(account.role)}</div>
-                    </td>
-                    {scheduleSets.map((scheduleSet) => {
-                      if (account.role === "admin") {
-                        return (
-                          <td key={scheduleSet.id} className="px-4 py-3">
-                            <Badge tone="blue">全部管理</Badge>
-                          </td>
-                        );
-                      }
-                      const member = membersBySet[scheduleSet.id]?.find(
-                        (item) => item.user_id === account.id && item.is_active,
-                      );
-                      const value: "none" | ScheduleAccessRole = member?.access_role ?? "none";
-                      const saving = memberSavingKey === `${scheduleSet.id}:${account.id}`;
-                      return (
-                        <td key={scheduleSet.id} className="px-4 py-3">
-                          <select
-                            aria-label={`${account.username} 在 ${scheduleSet.name} 的课表权限`}
-                            className="h-8 w-full rounded-md border border-zinc-300 bg-white px-2 text-xs disabled:opacity-60"
-                            value={value}
-                            disabled={saving || !account.is_active}
-                            onChange={(event) => {
-                              const next = event.target.value as "none" | ScheduleAccessRole;
-                              if (accessAllowed(account.role, next)) {
-                                void updateScheduleAccess(account, scheduleSet, next);
-                              } else {
-                                toast.error("课表权限不能高于成员的全局角色");
-                              }
-                            }}
-                          >
-                            {ACCESS_OPTIONS.map((option) => (
-                              <option key={option.value} value={option.value} disabled={!accessAllowed(account.role, option.value)}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={createOpen}
