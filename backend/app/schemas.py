@@ -790,6 +790,7 @@ class AilyRuleBatch(BaseModel):
 
 
 class AilyContextResponse(BaseModel):
+    schedule_set_id: str
     entities: dict[str, list[dict[str, Any]]]
     constraint_catalog: list[dict[str, Any]]
     output_contract: dict[str, Any]

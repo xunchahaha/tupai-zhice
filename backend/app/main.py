@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api import router
 from .config import get_settings
-from .db import SessionLocal, create_all
+from .db import SessionLocal, require_current_database_schema
 from .services.seed import bootstrap_admin, ensure_default_schedule_set
 
 settings = get_settings()
@@ -27,9 +27,13 @@ async def lifespan(app: FastAPI):
             # 示例密钥公开在仓库里，生产环境带着它启动等于没有鉴权。
             raise RuntimeError(f"生产环境不允许使用示例密钥：{message}")
         logger.warning("当前使用示例密钥，部署前必须更换：%s", message)
-    create_all()
+    require_current_database_schema()
     with SessionLocal() as db:
-        admin = bootstrap_admin(db, settings.bootstrap_admin_username, settings.bootstrap_admin_password)
+        admin = bootstrap_admin(
+            db,
+            settings.bootstrap_admin_username,
+            settings.bootstrap_admin_password,
+        )
         ensure_default_schedule_set(db, admin)
     yield
 

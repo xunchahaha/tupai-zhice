@@ -181,9 +181,6 @@ SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 Db = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminOrScheduler = Annotated[User, Depends(require_roles("admin", "scheduler"))]
-IntegrationOperator = Annotated[
-    User, Depends(require_roles("admin", "scheduler", "approver"))
-]
 Approver = Annotated[User, Depends(require_roles("admin", "approver"))]
 Admin = Annotated[User, Depends(require_roles("admin"))]
 
@@ -217,7 +214,7 @@ def _role_allows_access(user: User, access_role: str) -> bool:
     if user.role == "scheduler":
         return access_role in {"viewer", "scheduler"}
     if user.role == "approver":
-        return access_role in {"viewer", "scheduler", "approver"}
+        return access_role in {"viewer", "approver"}
     return False
 
 
@@ -269,6 +266,48 @@ def resolve_schedule_set(
 
 
 ScheduleScope = Annotated[ScheduleSet, Depends(resolve_schedule_set)]
+
+
+def resolve_aily_schedule_scope(
+    db: Db,
+    header_id: Annotated[str | None, Header(alias=SCHEDULE_SET_HEADER)] = None,
+) -> ScheduleSet:
+    """Select the timetable used by a key-authenticated Aily call.
+
+    Aily has no interactive user identity to resolve against the membership
+    matrix. It can use the only active timetable automatically, but must send
+    the same selector header as the web client once multiple sets exist.
+    """
+    schedule_set_id = header_id.strip() if header_id and header_id.strip() else None
+    if schedule_set_id:
+        schedule_set = db.scalar(
+            select(ScheduleSet).where(
+                ScheduleSet.id == schedule_set_id,
+                ScheduleSet.is_active.is_(True),
+            )
+        )
+        if schedule_set is None:
+            raise HTTPException(status_code=404, detail="指定的课表方案不存在或已停用")
+        return schedule_set
+
+    active_sets = list(
+        db.scalars(
+            select(ScheduleSet)
+            .where(ScheduleSet.is_active.is_(True))
+            .order_by(ScheduleSet.display_order, ScheduleSet.name)
+        )
+    )
+    if len(active_sets) == 1:
+        return active_sets[0]
+    if not active_sets:
+        raise HTTPException(status_code=404, detail="没有可供 Aily 使用的启用课表方案")
+    raise HTTPException(
+        status_code=409,
+        detail=f"当前存在多套课表，Aily 请求必须提供 {SCHEDULE_SET_HEADER}",
+    )
+
+
+AilyScheduleScope = Annotated[ScheduleSet, Depends(resolve_aily_schedule_scope)]
 
 
 def _schedule_access(db: Session, user: User, schedule_set_id: str) -> str:
@@ -727,20 +766,45 @@ def update_user_role(user_id: str, payload: UserRoleUpdate, db: Db, user: Admin)
             raise HTTPException(status_code=409, detail="至少需要保留一个启用中的管理员")
     previous = target.role
     target.role = payload.role
-    access_ceiling = {
-        "viewer": "viewer",
-        "scheduler": "scheduler",
-        "approver": "approver",
-    }.get(payload.role)
+    access_ceiling = payload.role if payload.role in ACCESS_ORDER else None
     adjusted_memberships = 0
+    restored_default_membership = False
     if access_ceiling is not None:
-        for membership in db.scalars(
-            select(ScheduleSetMember).where(
-                ScheduleSetMember.user_id == target.id,
-                ScheduleSetMember.is_active.is_(True),
+        default_set = _ensure_default_schedule_set(db)
+        memberships = list(
+            db.scalars(
+                select(ScheduleSetMember).where(
+                    ScheduleSetMember.user_id == target.id,
+                )
             )
+        )
+        default_membership = next(
+            (item for item in memberships if item.schedule_set_id == default_set.id),
+            None,
+        )
+        if default_membership is None:
+            db.add(
+                ScheduleSetMember(
+                    schedule_set_id=default_set.id,
+                    user_id=target.id,
+                    access_role=access_ceiling,
+                    granted_by=user.id,
+                )
+            )
+            restored_default_membership = True
+        elif (
+            not default_membership.is_active
+            or default_membership.access_role != access_ceiling
         ):
-            if ACCESS_ORDER[membership.access_role] > ACCESS_ORDER[access_ceiling]:
+            default_membership.access_role = access_ceiling
+            default_membership.is_active = True
+            default_membership.granted_by = user.id
+            restored_default_membership = True
+
+        for membership in memberships:
+            if membership.schedule_set_id == default_set.id or not membership.is_active:
+                continue
+            if not _role_allows_access(target, membership.access_role):
                 membership.access_role = access_ceiling
                 adjusted_memberships += 1
     audit(
@@ -754,6 +818,7 @@ def update_user_role(user_id: str, payload: UserRoleUpdate, db: Db, user: Admin)
             "from": previous,
             "to": payload.role,
             "adjusted_schedule_memberships": adjusted_memberships,
+            "restored_default_schedule_membership": restored_default_membership,
         },
     )
     db.commit()
@@ -877,8 +942,8 @@ MAX_IMPORT_BYTES = 64 * 1024 * 1024
 @router.post("/imports/xlsx", response_model=ImportResult, tags=["imports"])
 def import_xlsx(
     db: Db,
-    user: AdminOrScheduler,
-    scope: SchedulerScope,
+    user: Admin,
+    scope: ViewerScope,
     file: Annotated[UploadFile, File(...)],
     campus_business_id: Annotated[str, Query(max_length=40)] = CAMPUS_BUSINESS_ID,
     campus_name: Annotated[str, Query(max_length=120)] = CAMPUS_NAME,
@@ -950,7 +1015,7 @@ def list_campuses(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[Campus
 
 @router.post("/campuses", response_model=CampusResponse, status_code=201, tags=["master-data"])
 def create_campus(
-    payload: CampusCreate, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: CampusCreate, db: Db, user: Admin, _scope: ViewerScope
 ) -> Campus:
     instance = Campus(**payload.model_dump())
     db.add(instance)
@@ -1109,7 +1174,7 @@ def list_teachers(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[Teache
 
 @router.post("/teachers", response_model=TeacherResponse, status_code=201, tags=["master-data"])
 def create_teacher(
-    payload: TeacherPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: TeacherPayload, db: Db, user: Admin, _scope: ViewerScope
 ) -> Teacher:
     instance = Teacher(**payload.model_dump())
     db.add(instance)
@@ -1120,7 +1185,7 @@ def create_teacher(
 
 @router.put("/teachers/{object_id}", response_model=TeacherResponse, tags=["master-data"])
 def update_teacher(
-    object_id: str, payload: TeacherPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    object_id: str, payload: TeacherPayload, db: Db, user: Admin, _scope: ViewerScope
 ) -> Teacher:
     instance = get_or_404(db, Teacher, object_id)
     for key, value in payload.model_dump().items():
@@ -1137,7 +1202,7 @@ def update_teacher(
     tags=["master-data"],
 )
 def batch_update_teachers(
-    payload: TeacherBatchUpdate, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: TeacherBatchUpdate, db: Db, user: Admin, _scope: ViewerScope
 ) -> BatchOperationResponse:
     teachers: list[Teacher] = selected_master_rows(db, Teacher, payload.object_ids, "教师")
     changes = payload.model_dump(exclude={"object_ids"}, exclude_unset=True)
@@ -1162,7 +1227,7 @@ def batch_update_teachers(
     tags=["master-data"],
 )
 def batch_delete_teachers(
-    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: MasterDataBatchDelete, db: Db, user: Admin, _scope: ViewerScope
 ) -> BatchOperationResponse:
     teachers: list[Teacher] = selected_master_rows(db, Teacher, payload.object_ids, "教师")
     ensure_teachers_deletable(db, teachers)
@@ -1247,7 +1312,7 @@ def list_class_groups(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[Cl
     "/class-groups", response_model=ClassGroupResponse, status_code=201, tags=["master-data"]
 )
 def create_class_group(
-    payload: ClassGroupPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: ClassGroupPayload, db: Db, user: Admin, _scope: ViewerScope
 ) -> ClassGroupResponse:
     instance = ClassGroup(**payload.model_dump())
     db.add(instance)
@@ -1266,8 +1331,8 @@ def update_class_group(
     object_id: str,
     payload: ClassGroupPayload,
     db: Db,
-    user: AdminOrScheduler,
-    _scope: SchedulerScope,
+    user: Admin,
+    _scope: ViewerScope,
 ) -> ClassGroupResponse:
     instance = get_or_404(db, ClassGroup, object_id)
     for key, value in payload.model_dump().items():
@@ -1284,7 +1349,7 @@ def update_class_group(
     tags=["master-data"],
 )
 def batch_delete_class_groups(
-    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: MasterDataBatchDelete, db: Db, user: Admin, _scope: ViewerScope
 ) -> BatchOperationResponse:
     classes: list[ClassGroup] = selected_master_rows(db, ClassGroup, payload.object_ids, "班级")
     ensure_class_groups_deletable(db, classes)
@@ -1302,7 +1367,7 @@ def list_rooms(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[Room]:
 
 @router.post("/rooms", response_model=RoomResponse, status_code=201, tags=["master-data"])
 def create_room(
-    payload: RoomPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: RoomPayload, db: Db, user: Admin, _scope: ViewerScope
 ) -> Room:
     instance = Room(**payload.model_dump())
     db.add(instance)
@@ -1313,7 +1378,7 @@ def create_room(
 
 @router.put("/rooms/{object_id}", response_model=RoomResponse, tags=["master-data"])
 def update_room(
-    object_id: str, payload: RoomPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    object_id: str, payload: RoomPayload, db: Db, user: Admin, _scope: ViewerScope
 ) -> Room:
     instance = get_or_404(db, Room, object_id)
     for key, value in payload.model_dump().items():
@@ -1330,7 +1395,7 @@ def update_room(
     tags=["master-data"],
 )
 def batch_update_rooms(
-    payload: RoomBatchUpdate, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: RoomBatchUpdate, db: Db, user: Admin, _scope: ViewerScope
 ) -> BatchOperationResponse:
     rooms: list[Room] = selected_master_rows(db, Room, payload.object_ids, "教室")
     for room in rooms:
@@ -1353,7 +1418,7 @@ def batch_update_rooms(
     tags=["master-data"],
 )
 def batch_delete_rooms(
-    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: MasterDataBatchDelete, db: Db, user: Admin, _scope: ViewerScope
 ) -> BatchOperationResponse:
     rooms: list[Room] = selected_master_rows(db, Room, payload.object_ids, "教室")
     ensure_rooms_deletable(db, rooms)
@@ -1371,7 +1436,7 @@ def list_time_slots(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[Time
 
 @router.post("/time-slots", response_model=TimeSlotResponse, status_code=201, tags=["master-data"])
 def create_time_slot(
-    payload: TimeSlotPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: TimeSlotPayload, db: Db, user: Admin, _scope: ViewerScope
 ) -> TimeSlot:
     instance = TimeSlot(**payload.model_dump())
     db.add(instance)
@@ -1385,8 +1450,8 @@ def update_time_slot(
     object_id: str,
     payload: TimeSlotPayload,
     db: Db,
-    user: AdminOrScheduler,
-    _scope: SchedulerScope,
+    user: Admin,
+    _scope: ViewerScope,
 ) -> TimeSlot:
     instance = get_or_404(db, TimeSlot, object_id)
     for key, value in payload.model_dump().items():
@@ -1403,7 +1468,7 @@ def update_time_slot(
     tags=["master-data"],
 )
 def batch_update_time_slots(
-    payload: TimeSlotBatchUpdate, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: TimeSlotBatchUpdate, db: Db, user: Admin, _scope: ViewerScope
 ) -> BatchOperationResponse:
     slots: list[TimeSlot] = selected_master_rows(db, TimeSlot, payload.object_ids, "时段")
     for slot in slots:
@@ -1426,7 +1491,7 @@ def batch_update_time_slots(
     tags=["master-data"],
 )
 def batch_delete_time_slots(
-    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: MasterDataBatchDelete, db: Db, user: Admin, _scope: ViewerScope
 ) -> BatchOperationResponse:
     slots: list[TimeSlot] = selected_master_rows(db, TimeSlot, payload.object_ids, "时段")
     ensure_time_slots_deletable(db, slots)
@@ -1449,7 +1514,7 @@ def list_course_sessions(db: Db, user: CurrentUser, _scope: ViewerScope) -> list
     tags=["master-data"],
 )
 def create_course_session(
-    payload: CourseSessionPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: CourseSessionPayload, db: Db, user: Admin, _scope: ViewerScope
 ) -> CourseSession:
     values = payload.model_dump()
     if values["product_type"] and not values["product_types"]:
@@ -1489,8 +1554,8 @@ def update_course_session(
     object_id: str,
     payload: CourseSessionUpdate,
     db: Db,
-    user: AdminOrScheduler,
-    _scope: SchedulerScope,
+    user: Admin,
+    _scope: ViewerScope,
 ) -> CourseSession:
     instance = get_or_404(db, CourseSession, object_id)
     changes = payload.model_dump(exclude_unset=True)
@@ -1706,7 +1771,7 @@ def ensure_course_sessions_deletable(db: Session, criteria: list[ColumnElement[b
     tags=["master-data"],
 )
 def batch_update_course_sessions(
-    payload: CourseSessionBatchUpdate, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: CourseSessionBatchUpdate, db: Db, user: Admin, _scope: ViewerScope
 ) -> BatchOperationResponse:
     if payload.object_ids is not None:
         selected_course_sessions(db, payload.object_ids)
@@ -1753,7 +1818,7 @@ def batch_update_course_sessions(
     tags=["master-data"],
 )
 def batch_delete_course_sessions(
-    payload: CourseSessionBatchDelete, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+    payload: CourseSessionBatchDelete, db: Db, user: Admin, _scope: ViewerScope
 ) -> BatchOperationResponse:
     if payload.object_ids is not None:
         selected_course_sessions(db, payload.object_ids)
@@ -1797,8 +1862,8 @@ def delete_master_data(
     resource: str,
     object_id: str,
     db: Db,
-    user: AdminOrScheduler,
-    _scope: SchedulerScope,
+    user: Admin,
+    _scope: ViewerScope,
 ) -> Response:
     model = MASTER_MODELS.get(resource)
     if model is None:
@@ -3650,10 +3715,9 @@ def _event_id(payload: dict[str, Any]) -> str:
 def feishu_sync(
     request: FeishuSyncRequest,
     db: Db,
-    user: IntegrationOperator,
-    scope: ViewerScope,
+    user: AdminOrScheduler,
+    scope: SchedulerScope,
 ) -> IntegrationSync:
-    require_scope_access(db, user, scope, "scheduler")
     sync = IntegrationSync(
         schedule_set_id=scope.id,
         direction=request.direction,
@@ -3726,7 +3790,7 @@ def require_aily_key(x_aily_key: Annotated[str, Header()]) -> None:
     tags=["aily"],
     dependencies=[Depends(require_aily_key)],
 )
-def aily_context(db: Db) -> AilyContextResponse:
+def aily_context(db: Db, schedule_scope: AilyScheduleScope) -> AilyContextResponse:
     teachers = {item.business_id: item for item in db.scalars(select(Teacher))}
 
     def course_context(item: CourseSession) -> dict[str, Any]:
@@ -3755,6 +3819,7 @@ def aily_context(db: Db) -> AilyContextResponse:
         }
 
     return AilyContextResponse(
+        schedule_set_id=schedule_scope.id,
         entities={
             "teachers": [
                 {"business_id": item.business_id, "name": item.name, "subject": item.subject}
@@ -3800,7 +3865,8 @@ def aily_context(db: Db) -> AilyContextResponse:
             "hard_rule_policy": "硬约束必须由教务人工确认后生效",
             "entity_policy": "actor_ids 和 scope 中的业务 ID 必须来自 entities",
             "batch_endpoint": "/api/v1/aily/rule-proposals",
-            "solve_endpoint": "/api/v1/assistant/solve",
+            "solve_endpoint": "/api/v1/aily/solve",
+            "schedule_set_header": SCHEDULE_SET_HEADER,
             "skill_contract": {
                 "input": "自然语言排课意图 + 可选结构化筛选",
                 "output": "结构化范围/规则 + solver_run_id",
@@ -3816,9 +3882,14 @@ def aily_context(db: Db) -> AilyContextResponse:
     tags=["aily"],
     dependencies=[Depends(require_aily_key)],
 )
-def aily_rule_proposals(batch: AilyRuleBatch, db: Db) -> list[Rule]:
+def aily_rule_proposals(
+    batch: AilyRuleBatch, db: Db, schedule_scope: AilyScheduleScope
+) -> list[Rule]:
     created: list[Rule] = []
-    base_number = int(db.scalar(select(func.count(Rule.id))) or 0)
+    base_number = int(
+        db.scalar(select(func.count(Rule.id)).where(Rule.schedule_set_id == schedule_scope.id))
+        or 0
+    )
     for index, proposal in enumerate(batch.proposals, start=1):
         validate_rule_entities(db, proposal)
         business_id = proposal.business_id or f"AILY-{base_number + index:04d}"
@@ -3826,10 +3897,17 @@ def aily_rule_proposals(batch: AilyRuleBatch, db: Db) -> list[Rule]:
         data["source_text"] = proposal.source_text or batch.source_text
         data["source_doc"] = proposal.source_doc or batch.source_doc
         data["status"] = "awaiting_confirmation"
-        rule = Rule(business_id=business_id, **data)
+        rule = Rule(schedule_set_id=schedule_scope.id, business_id=business_id, **data)
         db.add(rule)
         created.append(rule)
-    audit(db, None, "propose", "aily_rule_batch", None, {"source_text": batch.source_text})
+    audit(
+        db,
+        None,
+        "propose",
+        "aily_rule_batch",
+        None,
+        {"source_text": batch.source_text, "schedule_set_id": schedule_scope.id},
+    )
     db.commit()
     for rule in created:
         db.refresh(rule)
@@ -3843,8 +3921,8 @@ def aily_rule_proposals(batch: AilyRuleBatch, db: Db) -> list[Rule]:
     tags=["aily"],
     dependencies=[Depends(require_aily_key)],
 )
-def aily_solve(request: AilySolveRequest, db: Db) -> SolverRun:
-    run = create_solver_run(db, None, request)
+def aily_solve(request: AilySolveRequest, db: Db, schedule_scope: AilyScheduleScope) -> SolverRun:
+    run = create_solver_run(db, None, request, schedule_scope.id)
     enqueue_solver_run(run.id)
     return run
 

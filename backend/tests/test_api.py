@@ -276,7 +276,10 @@ def test_feishu_requires_production_configuration(
 def test_aily_context_proposal_confirmation_and_solve(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
-    aily_headers = {"X-Aily-Key": "test-aily-key-not-the-repo-default"}
+    aily_headers = {
+        "X-Aily-Key": "test-aily-key-not-the-repo-default",
+        "X-Schedule-Set-Id": "default",
+    }
     context = client.get("/api/v1/aily/context", headers=aily_headers)
     assert context.status_code == 200
     assert len(context.json()["entities"]["teachers"]) == 6
@@ -412,7 +415,10 @@ def test_product_loop_calendar_assistant_export_and_public_summary(
 
     context = client.get(
         "/api/v1/aily/context",
-        headers={"X-Aily-Key": "test-aily-key-not-the-repo-default"},
+        headers={
+            "X-Aily-Key": "test-aily-key-not-the-repo-default",
+            "X-Schedule-Set-Id": "default",
+        },
     )
     mapped = [
         item
