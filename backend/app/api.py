@@ -3507,12 +3507,22 @@ def export_resource_rows(
                 "学科": item.subject,
                 "飞书用户标识": item.calendar_user_id or "",
             }
-            for item in db.scalars(select(Teacher).order_by(Teacher.business_id))
+            for item in db.scalars(
+                select(Teacher)
+                .where(Teacher.schedule_set_id == schedule_set_id)
+                .order_by(Teacher.business_id)
+            )
         ]
     if resource == "class_groups":
         # 飞书「班级」表的班型/业务线/教师标识都是单值文本字段，多值只能拼串。
         # 字段名保持不变，避免已同步过的表被迫重建。
-        classes = list(db.scalars(select(ClassGroup).order_by(ClassGroup.business_id)))
+        classes = list(
+            db.scalars(
+                select(ClassGroup)
+                .where(ClassGroup.schedule_set_id == schedule_set_id)
+                .order_by(ClassGroup.business_id)
+            )
+        )
         return [
             {
                 "业务标识": item.business_id,
@@ -3530,7 +3540,11 @@ def export_resource_rows(
                 "教室名称": item.name,
                 "是否启用": "是" if item.is_active else "否",
             }
-            for item in db.scalars(select(Room).order_by(Room.business_id))
+            for item in db.scalars(
+                select(Room)
+                .where(Room.schedule_set_id == schedule_set_id)
+                .order_by(Room.business_id)
+            )
         ]
     if resource == "time_slots":
         return [
@@ -3543,7 +3557,11 @@ def export_resource_rows(
                 "顺序": item.sequence,
                 "是否开放": "是" if item.is_open else "否",
             }
-            for item in db.scalars(select(TimeSlot).order_by(TimeSlot.sequence))
+            for item in db.scalars(
+                select(TimeSlot)
+                .where(TimeSlot.schedule_set_id == schedule_set_id)
+                .order_by(TimeSlot.sequence)
+            )
         ]
     if resource == "course_sessions":
         teachers = {
@@ -3557,7 +3575,6 @@ def export_resource_rows(
                 "业务标识": item.business_id,
                 "业务线": item.business_line,
                 "产品班型": " / ".join(_course_product_values(item)),
-                "产品上下文": json_text(item.product_contexts),
                 "班级标识": item.class_business_id,
                 "教师标识": " / ".join(item.teacher_business_ids or [item.teacher_business_id]),
                 "具体日程账号": item.calendar_user_id
@@ -3576,21 +3593,20 @@ def export_resource_rows(
                 "课次序号": item.session_no,
                 "上课日期": item.lesson_date.isoformat() if item.lesson_date else "",
                 "时长分钟": item.duration_minutes,
-                "候选时段标识": " / ".join(
+                "建议时段": " / ".join(
                     item.candidate_slot_ids
                     or ([item.suggested_slot_id] if item.suggested_slot_id else [])
                 ),
-                "候选时钟窗口": json_text(item.candidate_clock_windows),
                 "固定开始时间": item.fixed_start_time,
                 "固定结束时间": item.fixed_end_time,
-                "候选教室标识": " / ".join(
-                    item.candidate_room_business_ids
-                    or ([item.original_room_business_id] if item.original_room_business_id else [])
-                ),
-                "来源变体数": item.source_variant_count,
+                "原始教室标识": item.original_room_business_id or "",
                 "是否锁定": "是" if item.is_locked else "否",
             }
-            for item in db.scalars(select(CourseSession).order_by(CourseSession.business_id))
+            for item in db.scalars(
+                select(CourseSession)
+                .where(CourseSession.schedule_set_id == schedule_set_id)
+                .order_by(CourseSession.business_id)
+            )
         ]
     if resource == "rules":
         hardness_labels = {"hard": "硬约束", "soft": "软约束"}
@@ -3632,10 +3648,30 @@ def export_resource_rows(
                 .order_by(ScheduleVersion.version_no)
             )
         )
-        sessions = {item.id: item for item in db.scalars(select(CourseSession))}
-        teachers = {item.business_id: item for item in db.scalars(select(Teacher))}
-        slots = {item.business_id: item for item in db.scalars(select(TimeSlot))}
-        rooms = {item.business_id: item for item in db.scalars(select(Room))}
+        sessions = {
+            item.id: item
+            for item in db.scalars(
+                select(CourseSession).where(CourseSession.schedule_set_id == schedule_set_id)
+            )
+        }
+        teachers = {
+            item.business_id: item
+            for item in db.scalars(
+                select(Teacher).where(Teacher.schedule_set_id == schedule_set_id)
+            )
+        }
+        slots = {
+            item.business_id: item
+            for item in db.scalars(
+                select(TimeSlot).where(TimeSlot.schedule_set_id == schedule_set_id)
+            )
+        }
+        rooms = {
+            item.business_id: item
+            for item in db.scalars(
+                select(Room).where(Room.schedule_set_id == schedule_set_id)
+            )
+        }
         status_labels = {
             "published": "当前发布",
             "archived": "历史发布",
@@ -4511,11 +4547,15 @@ def _public_summary(
         item.id: item
         for item in db.scalars(
             select(CourseSession).where(
+                CourseSession.schedule_set_id == schedule_set_id,
                 CourseSession.id.in_([item.course_session_id for item in assignments])
             )
         )
     }
-    rooms = {item.business_id: item for item in db.scalars(select(Room))}
+    rooms = {
+        item.business_id: item
+        for item in db.scalars(select(Room).where(Room.schedule_set_id == schedule_set_id))
+    }
     line_counts: Counter[str] = Counter()
     monthly_counts: Counter[str] = Counter()
     room_period_keys: set[tuple[str, date | None, str, str]] = set()

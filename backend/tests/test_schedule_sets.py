@@ -10,13 +10,18 @@ from sqlalchemy import select
 from app.api import export_resource_rows, settings
 from app.db import SessionLocal
 from app.models import (
+    Campus,
+    ClassGroup,
     CourseSession,
     DataSnapshot,
     FeishuConnection,
     FeishuWorkspace,
+    Room,
     ScheduleAssignment,
     ScheduleVersion,
     SolverRun,
+    Teacher,
+    TimeSlot,
 )
 from app.services.feishu import FeishuService
 
@@ -65,10 +70,28 @@ def _create_scoped_version(schedule_set_id: str, name: str) -> tuple[str, str]:
         )
         db.add(version)
         db.flush()
-        course_session_id = db.scalar(select(CourseSession.id))
-        assert course_session_id is not None, (
-            "seeded course session is required for Feishu export fixture"
+        course_session_id = db.scalar(
+            select(CourseSession.id).where(CourseSession.schedule_set_id == schedule_set_id)
         )
+        if course_session_id is None:
+            campus = Campus(
+                schedule_set_id=schedule_set_id,
+                business_id=f"fixture-campus-{schedule_set_id}",
+                name="同步测试校区",
+            )
+            db.add(campus)
+            db.flush()
+            course = CourseSession(
+                schedule_set_id=schedule_set_id,
+                campus_id=campus.id,
+                business_id=f"fixture-course-{schedule_set_id}",
+                class_business_id="",
+                teacher_business_id="",
+                lesson_name="同步测试课程",
+            )
+            db.add(course)
+            db.flush()
+            course_session_id = course.id
         db.add(
             ScheduleAssignment(
                 schedule_version_id=version.id,
@@ -79,6 +102,108 @@ def _create_scoped_version(schedule_set_id: str, name: str) -> tuple[str, str]:
         )
         db.commit()
         return version.id, run.id
+
+
+def test_feishu_master_data_export_is_scoped_to_the_selected_schedule_set(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    suffix = uuid4().hex[:8]
+    first = client.post(
+        "/api/v1/schedule-sets", headers=auth_headers, json={"name": f"导出一-{suffix}"}
+    )
+    second = client.post(
+        "/api/v1/schedule-sets", headers=auth_headers, json={"name": f"导出二-{suffix}"}
+    )
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    first_id = first.json()["id"]
+    second_id = second.json()["id"]
+
+    with SessionLocal() as db:
+        for schedule_set_id, marker in ((first_id, "一"), (second_id, "二")):
+            campus = Campus(
+                schedule_set_id=schedule_set_id,
+                business_id=f"C-{suffix}",
+                name=f"校区{marker}",
+            )
+            db.add(campus)
+            db.flush()
+            db.add_all(
+                [
+                    Teacher(
+                        schedule_set_id=schedule_set_id,
+                        campus_id=campus.id,
+                        business_id=f"T-{suffix}",
+                        name=f"教师{marker}",
+                    ),
+                    ClassGroup(
+                        schedule_set_id=schedule_set_id,
+                        campus_id=campus.id,
+                        business_id=f"G-{suffix}",
+                        name=f"班级{marker}",
+                    ),
+                    Room(
+                        schedule_set_id=schedule_set_id,
+                        campus_id=campus.id,
+                        business_id=f"R-{suffix}",
+                        name=f"教室{marker}",
+                    ),
+                    TimeSlot(
+                        schedule_set_id=schedule_set_id,
+                        campus_id=campus.id,
+                        business_id=f"S-{suffix}",
+                        weekday="周一",
+                        start_time="09:00",
+                        end_time="10:00",
+                    ),
+                    CourseSession(
+                        schedule_set_id=schedule_set_id,
+                        campus_id=campus.id,
+                        business_id=f"CS-{suffix}",
+                        class_business_id=f"G-{suffix}",
+                        teacher_business_id=f"T-{suffix}",
+                        lesson_name=f"课程{marker}",
+                    ),
+                ]
+            )
+        db.commit()
+
+        assert [row["教师名称"] for row in export_resource_rows(db, "teachers", first_id)] == [
+            "教师一"
+        ]
+        assert [row["班级名称"] for row in export_resource_rows(db, "class_groups", first_id)] == [
+            "班级一"
+        ]
+        assert [
+            row["教室名称"] for row in export_resource_rows(db, "rooms", first_id)
+        ] == ["教室一"]
+        assert [row["业务标识"] for row in export_resource_rows(db, "time_slots", first_id)] == [
+            f"S-{suffix}"
+        ]
+        courses = export_resource_rows(db, "course_sessions", first_id)
+        assert [row["业务标识"] for row in courses] == [f"CS-{suffix}"]
+        assert set(courses[0]) == {
+            "业务标识",
+            "业务线",
+            "产品班型",
+            "班级标识",
+            "教师标识",
+            "具体日程账号",
+            "学科",
+            "课节名称",
+            "编排来源",
+            "编排阶段",
+            "计划课次",
+            "计划课时",
+            "课次序号",
+            "上课日期",
+            "时长分钟",
+            "建议时段",
+            "固定开始时间",
+            "固定结束时间",
+            "原始教室标识",
+            "是否锁定",
+        }
 
 
 def test_schedule_set_visibility_and_per_set_operation_permissions(
