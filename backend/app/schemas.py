@@ -236,22 +236,31 @@ class CourseSessionPayload(BaseModel):
     source_row_id: str = ""
     business_line: str = ""
     product_type: str = ""
+    product_types: list[str] = Field(default_factory=list)
+    product_contexts: list[dict[str, Any]] = Field(default_factory=list)
     class_business_id: str
     teacher_business_id: str
+    teacher_business_ids: list[str] = Field(default_factory=list)
     calendar_user_id: str | None = None
     subject: str = ""
     lesson_name: str = ""
+    lesson_names: list[str] = Field(default_factory=list)
     schedule_source: str = ""
     stage: str = ""
+    stages: list[str] = Field(default_factory=list)
     planned_sessions: int = Field(default=0, ge=0)
     planned_hours: float = Field(default=0, ge=0)
     session_no: int = Field(default=0, ge=0)
     lesson_date: date | None = None
     duration_minutes: int = Field(default=90, gt=0)
     suggested_slot_id: str | None = None
+    candidate_slot_ids: list[str] = Field(default_factory=list)
+    candidate_clock_windows: list[dict[str, str]] = Field(default_factory=list)
     fixed_start_time: str = ""
     fixed_end_time: str = ""
     original_room_business_id: str | None = None
+    candidate_room_business_ids: list[str] = Field(default_factory=list)
+    source_variant_count: int = Field(default=1, ge=1)
     is_locked: bool = False
 
 
@@ -585,6 +594,11 @@ class ImportResult(BaseModel):
     dropped_classes: list[str] = Field(default_factory=list)
     rows_kept: int = 0
     rows_deduped: int = 0
+    preprocessed_demands: int = 0
+    collapsed_source_variants: int = 0
+    multi_product_demands: int = 0
+    multi_lesson_name_demands: int = 0
+    multi_slot_demands: int = 0
     rows_skipped: int = 0
     skipped_examples: list[dict[str, Any]] = Field(default_factory=list)
     duplicate_lessons: int = 0

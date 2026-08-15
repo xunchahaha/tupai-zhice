@@ -228,23 +228,35 @@ class CourseSession(TimestampMixin, Base):
     source_row_id: Mapped[str] = mapped_column(String(64), default="", index=True)
     business_line: Mapped[str] = mapped_column(String(40), default="", index=True)
     product_type: Mapped[str] = mapped_column(String(120), default="", index=True)
+    # 郑州源表的一节教学需求可能同时归属多个产品班型。保留旧的 product_type 作为
+    # 兼容/排序主值，完整归属放在 product_types 与 product_contexts，避免导入时按
+    # 字典序任取一条而丢失产品关系。
+    product_types: Mapped[list[str]] = mapped_column(JSON, default=list)
+    product_contexts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     # 这三列是「按筛选条件批量」和班级聚合的过滤/分组键，全表扫在真实数据量下太慢。
     class_business_id: Mapped[str] = mapped_column(String(40), index=True)
     teacher_business_id: Mapped[str] = mapped_column(String(40), index=True)
+    teacher_business_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     calendar_user_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     subject: Mapped[str] = mapped_column(String(80), default="")
     lesson_name: Mapped[str] = mapped_column(String(120), default="")
+    lesson_names: Mapped[list[str]] = mapped_column(JSON, default=list)
     schedule_source: Mapped[str] = mapped_column(String(80), default="")
     stage: Mapped[str] = mapped_column(String(40), default="")
+    stages: Mapped[list[str]] = mapped_column(JSON, default=list)
     planned_sessions: Mapped[int] = mapped_column(Integer, default=0)
     planned_hours: Mapped[float] = mapped_column(Float, default=0)
     session_no: Mapped[int] = mapped_column(Integer, default=0)
     lesson_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     duration_minutes: Mapped[int] = mapped_column(Integer, default=90)
     suggested_slot_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    candidate_slot_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    candidate_clock_windows: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
     fixed_start_time: Mapped[str] = mapped_column(String(10), default="")
     fixed_end_time: Mapped[str] = mapped_column(String(10), default="")
     original_room_business_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    candidate_room_business_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source_variant_count: Mapped[int] = mapped_column(Integer, default=1)
     is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
 
 

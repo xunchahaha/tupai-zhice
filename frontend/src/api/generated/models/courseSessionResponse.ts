@@ -5,9 +5,11 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { CourseSessionResponseProductContextsItem } from './courseSessionResponseProductContextsItem';
 import type { CourseSessionResponseCalendarUserId } from './courseSessionResponseCalendarUserId';
 import type { CourseSessionResponseLessonDate } from './courseSessionResponseLessonDate';
 import type { CourseSessionResponseSuggestedSlotId } from './courseSessionResponseSuggestedSlotId';
+import type { CourseSessionResponseCandidateClockWindowsItem } from './courseSessionResponseCandidateClockWindowsItem';
 import type { CourseSessionResponseOriginalRoomBusinessId } from './courseSessionResponseOriginalRoomBusinessId';
 
 export interface CourseSessionResponse {
@@ -16,13 +18,18 @@ export interface CourseSessionResponse {
   source_row_id?: string;
   business_line?: string;
   product_type?: string;
+  product_types?: string[];
+  product_contexts?: CourseSessionResponseProductContextsItem[];
   class_business_id: string;
   teacher_business_id: string;
+  teacher_business_ids?: string[];
   calendar_user_id?: CourseSessionResponseCalendarUserId;
   subject?: string;
   lesson_name?: string;
+  lesson_names?: string[];
   schedule_source?: string;
   stage?: string;
+  stages?: string[];
   /** @minimum 0 */
   planned_sessions?: number;
   /** @minimum 0 */
@@ -33,9 +40,14 @@ export interface CourseSessionResponse {
   /** */
   duration_minutes?: number;
   suggested_slot_id?: CourseSessionResponseSuggestedSlotId;
+  candidate_slot_ids?: string[];
+  candidate_clock_windows?: CourseSessionResponseCandidateClockWindowsItem[];
   fixed_start_time?: string;
   fixed_end_time?: string;
   original_room_business_id?: CourseSessionResponseOriginalRoomBusinessId;
+  candidate_room_business_ids?: string[];
+  /** @minimum 1 */
+  source_variant_count?: number;
   is_locked?: boolean;
   id: string;
 }

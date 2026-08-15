@@ -11,7 +11,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import CourseSession, Room, ScheduleAssignment, ScheduleVersion, Teacher
+from ..models import CourseSession, Room, ScheduleAssignment, ScheduleVersion, Teacher, TimeSlot
 
 
 def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
@@ -29,6 +29,7 @@ def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
     courses = {item.id: item for item in db.scalars(select(CourseSession))}
     rooms = {item.business_id: item for item in db.scalars(select(Room))}
     teachers = {item.business_id: item for item in db.scalars(select(Teacher))}
+    slots = {item.business_id: item for item in db.scalars(select(TimeSlot))}
     workbook = Workbook()
     sheet = cast(Worksheet, workbook.active)
     sheet.title = "课表"
@@ -41,7 +42,10 @@ def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
         "教师ID",
         "具体日程账号",
         "课节名称",
+        "编排阶段",
         "上课日期",
+        "实际开始时间",
+        "实际结束时间",
         "固定开始时间",
         "固定结束时间",
         "时段ID",
@@ -57,6 +61,7 @@ def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
         original_room = rooms.get(course.original_room_business_id or "")
         final_room = rooms.get(assignment.room_business_id)
         teacher = teachers.get(course.teacher_business_id)
+        slot = slots.get(assignment.slot_business_id)
         calendar_user_id = course.calendar_user_id or (
             teacher.calendar_user_id if teacher else None
         )
@@ -65,12 +70,15 @@ def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
                 schedule.version_no,
                 course.business_id,
                 course.business_line,
-                course.product_type,
+                " / ".join(course.product_types or [course.product_type]),
                 course.class_business_id,
                 course.teacher_business_id,
                 calendar_user_id or "",
-                course.lesson_name,
+                " / ".join(course.lesson_names or [course.lesson_name]),
+                " / ".join(course.stages or [course.stage]),
                 assignment.lesson_date.isoformat() if assignment.lesson_date else "",
+                slot.start_time if slot else course.fixed_start_time,
+                slot.end_time if slot else course.fixed_end_time,
                 course.fixed_start_time,
                 course.fixed_end_time,
                 assignment.slot_business_id,
@@ -86,7 +94,28 @@ def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
         cell.font = Font(color="FFFFFF", bold=True)
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center")
-    widths = [10, 16, 12, 24, 16, 16, 22, 24, 12, 14, 14, 16, 16, 20, 16, 20, 12]
+    widths = [
+        10,
+        16,
+        12,
+        32,
+        16,
+        16,
+        22,
+        32,
+        22,
+        12,
+        14,
+        14,
+        14,
+        14,
+        18,
+        16,
+        20,
+        16,
+        20,
+        12,
+    ]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     sheet.freeze_panes = "A2"

@@ -45,14 +45,25 @@ def _clock_minutes(value: str) -> int:
     return hours * 60 + minutes
 
 
-def _occupancy_window(course: Any, item: dict[str, Any]) -> tuple[Any, ...]:
+def _occupancy_window(course: Any, item: dict[str, Any], slots: dict[str, Any]) -> tuple[Any, ...]:
     """课次实际占用的时间区间。
 
     日期感知课表用「日期 + 固定起止时刻」，经典时段课表退化为时段标识本身。
     """
     lesson_date = item.get("lesson_date")
-    start = str(getattr(course, "fixed_start_time", "") or "")
-    end = str(getattr(course, "fixed_end_time", "") or "")
+    slot = slots.get(str(item.get("slot_business_id") or ""))
+    start = str(
+        (slot.start_time if slot else None)
+        or item.get("start_time")
+        or getattr(course, "fixed_start_time", "")
+        or ""
+    )
+    end = str(
+        (slot.end_time if slot else None)
+        or item.get("end_time")
+        or getattr(course, "fixed_end_time", "")
+        or ""
+    )
     if lesson_date and start and end:
         return ("clock", str(lesson_date), _clock_minutes(start), _clock_minutes(end))
     return ("slot", str(lesson_date or ""), str(item["slot_business_id"]))
@@ -74,43 +85,60 @@ def count_hard_conflicts(db: Any, assignments: list[dict[str, Any]]) -> dict[str
     """
     courses = {item.id: item for item in db.scalars(select(CourseSession)).all()}
     teachers = {item.business_id: item for item in db.scalars(select(Teacher)).all()}
+    slots = {item.business_id: item for item in db.scalars(select(TimeSlot)).all()}
     entries: list[tuple[dict[str, Any], Any, tuple[Any, ...]]] = []
     for item in assignments:
         course = courses.get(item["course_session_id"])
         if course is None:
             continue
-        entries.append((item, course, _occupancy_window(course, item)))
+        entries.append((item, course, _occupancy_window(course, item, slots)))
 
-    def dimension_key(item: dict[str, Any], course: Any, name: str) -> str | None:
+    def dimension_keys(item: dict[str, Any], course: Any, name: str) -> list[str]:
         if name == "room":
-            return str(item.get("room_business_id") or "") or None
+            value = str(item.get("room_business_id") or "")
+            return [value] if value else []
         if name == "class":
-            return "\x00".join(
-                (
-                    str(getattr(course, "business_line", "") or ""),
-                    str(getattr(course, "product_type", "") or ""),
-                    str(item.get("class_business_id") or ""),
+            product_types = list(getattr(course, "product_types", None) or [])
+            primary = str(getattr(course, "product_type", "") or "")
+            if primary and primary not in product_types:
+                product_types.append(primary)
+            return [
+                "\x00".join(
+                    (
+                        str(getattr(course, "business_line", "") or ""),
+                        str(product_type),
+                        str(item.get("class_business_id") or ""),
+                    )
                 )
-            )
-        teacher_id = str(item.get("teacher_business_id") or "")
-        teacher = teachers.get(teacher_id)
+                for product_type in sorted(set(product_types or [""]))
+            ]
+        teacher_ids = list(getattr(course, "teacher_business_ids", None) or [])
+        primary_teacher = str(item.get("teacher_business_id") or "")
+        if primary_teacher and primary_teacher not in teacher_ids:
+            teacher_ids.append(primary_teacher)
         if name == "teacher":
-            if not teacher_id or (teacher is not None and teacher.is_group):
-                return None
-            return teacher_id
-        calendar_user_id = str(
-            getattr(course, "calendar_user_id", None)
-            or (teacher.calendar_user_id if teacher else None)
-            or ""
+            return [
+                teacher_id
+                for teacher_id in teacher_ids
+                if teacher_id
+                and not bool(teachers.get(teacher_id) and teachers[teacher_id].is_group)
+            ]
+        explicit = str(getattr(course, "calendar_user_id", None) or "").strip()
+        if explicit:
+            return [explicit]
+        return sorted(
+            {
+                str(teachers[teacher_id].calendar_user_id or "").strip()
+                for teacher_id in teacher_ids
+                if teacher_id in teachers and teachers[teacher_id].calendar_user_id
+            }
         )
-        return calendar_user_id or None
 
     breakdown: dict[str, int] = {}
     for name in ("room", "class", "teacher", "calendar"):
         grouped: dict[str, list[tuple[dict[str, Any], tuple[Any, ...]]]] = {}
         for item, course, window in entries:
-            key = dimension_key(item, course, name)
-            if key:
+            for key in dimension_keys(item, course, name):
                 grouped.setdefault(key, []).append((item, window))
         involved: set[str] = set()
         for rows in grouped.values():
@@ -120,9 +148,7 @@ def count_hard_conflicts(db: Any, assignments: list[dict[str, Any]]) -> dict[str
                         involved.add(str(left_item["course_session_id"]))
                         involved.add(str(right_item["course_session_id"]))
         breakdown[name] = len(involved)
-    breakdown["total"] = sum(
-        breakdown[name] for name in ("room", "class", "teacher", "calendar")
-    )
+    breakdown["total"] = sum(breakdown[name] for name in ("room", "class", "teacher", "calendar"))
     return breakdown
 
 
@@ -201,9 +227,7 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
             assignments = list(result["assignments"])
             parent_previous: dict[str, tuple[str | None, str, str]] = {}
             if parent_id:
-                solved_course_ids = {
-                    str(item["course_session_id"]) for item in assignments
-                }
+                solved_course_ids = {str(item["course_session_id"]) for item in assignments}
                 parent_rows = db.scalars(
                     select(ScheduleAssignment).where(
                         ScheduleAssignment.schedule_version_id == parent_id
@@ -213,9 +237,7 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
                     item.id: item
                     for item in db.scalars(
                         select(CourseSession).where(
-                            CourseSession.id.in_(
-                                [item.course_session_id for item in parent_rows]
-                            )
+                            CourseSession.id.in_([item.course_session_id for item in parent_rows])
                         )
                     )
                 }

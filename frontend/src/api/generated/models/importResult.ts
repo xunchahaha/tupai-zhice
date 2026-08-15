@@ -22,6 +22,11 @@ export interface ImportResult {
   dropped_classes?: string[];
   rows_kept?: number;
   rows_deduped?: number;
+  preprocessed_demands?: number;
+  collapsed_source_variants?: number;
+  multi_product_demands?: number;
+  multi_lesson_name_demands?: number;
+  multi_slot_demands?: number;
   rows_skipped?: number;
   skipped_examples?: ImportResultSkippedExamplesItem[];
   duplicate_lessons?: number;

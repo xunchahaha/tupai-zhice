@@ -4808,6 +4808,21 @@
             "title": "Product Type",
             "default": ""
           },
+          "product_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Product Types"
+          },
+          "product_contexts": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Product Contexts"
+          },
           "class_business_id": {
             "type": "string",
             "title": "Class Business Id"
@@ -4815,6 +4830,13 @@
           "teacher_business_id": {
             "type": "string",
             "title": "Teacher Business Id"
+          },
+          "teacher_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Teacher Business Ids"
           },
           "calendar_user_id": {
             "anyOf": [
@@ -4837,6 +4859,13 @@
             "title": "Lesson Name",
             "default": ""
           },
+          "lesson_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Lesson Names"
+          },
           "schedule_source": {
             "type": "string",
             "title": "Schedule Source",
@@ -4846,6 +4875,13 @@
             "type": "string",
             "title": "Stage",
             "default": ""
+          },
+          "stages": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Stages"
           },
           "planned_sessions": {
             "type": "integer",
@@ -4894,6 +4930,23 @@
             ],
             "title": "Suggested Slot Id"
           },
+          "candidate_slot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Candidate Slot Ids"
+          },
+          "candidate_clock_windows": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Candidate Clock Windows"
+          },
           "fixed_start_time": {
             "type": "string",
             "title": "Fixed Start Time",
@@ -4914,6 +4967,19 @@
               }
             ],
             "title": "Original Room Business Id"
+          },
+          "candidate_room_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Candidate Room Business Ids"
+          },
+          "source_variant_count": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Source Variant Count",
+            "default": 1
           },
           "is_locked": {
             "type": "boolean",
@@ -4955,6 +5021,21 @@
             "title": "Product Type",
             "default": ""
           },
+          "product_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Product Types"
+          },
+          "product_contexts": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Product Contexts"
+          },
           "class_business_id": {
             "type": "string",
             "title": "Class Business Id"
@@ -4962,6 +5043,13 @@
           "teacher_business_id": {
             "type": "string",
             "title": "Teacher Business Id"
+          },
+          "teacher_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Teacher Business Ids"
           },
           "calendar_user_id": {
             "anyOf": [
@@ -4984,6 +5072,13 @@
             "title": "Lesson Name",
             "default": ""
           },
+          "lesson_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Lesson Names"
+          },
           "schedule_source": {
             "type": "string",
             "title": "Schedule Source",
@@ -4993,6 +5088,13 @@
             "type": "string",
             "title": "Stage",
             "default": ""
+          },
+          "stages": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Stages"
           },
           "planned_sessions": {
             "type": "integer",
@@ -5041,6 +5143,23 @@
             ],
             "title": "Suggested Slot Id"
           },
+          "candidate_slot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Candidate Slot Ids"
+          },
+          "candidate_clock_windows": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Candidate Clock Windows"
+          },
           "fixed_start_time": {
             "type": "string",
             "title": "Fixed Start Time",
@@ -5061,6 +5180,19 @@
               }
             ],
             "title": "Original Room Business Id"
+          },
+          "candidate_room_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Candidate Room Business Ids"
+          },
+          "source_variant_count": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Source Variant Count",
+            "default": 1
           },
           "is_locked": {
             "type": "boolean",
@@ -5576,6 +5708,31 @@
           "rows_deduped": {
             "type": "integer",
             "title": "Rows Deduped",
+            "default": 0
+          },
+          "preprocessed_demands": {
+            "type": "integer",
+            "title": "Preprocessed Demands",
+            "default": 0
+          },
+          "collapsed_source_variants": {
+            "type": "integer",
+            "title": "Collapsed Source Variants",
+            "default": 0
+          },
+          "multi_product_demands": {
+            "type": "integer",
+            "title": "Multi Product Demands",
+            "default": 0
+          },
+          "multi_lesson_name_demands": {
+            "type": "integer",
+            "title": "Multi Lesson Name Demands",
+            "default": 0
+          },
+          "multi_slot_demands": {
+            "type": "integer",
+            "title": "Multi Slot Demands",
             "default": 0
           },
           "rows_skipped": {

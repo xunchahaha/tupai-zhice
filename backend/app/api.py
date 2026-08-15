@@ -9,6 +9,7 @@ from collections import Counter
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from typing import cast as type_cast
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
@@ -25,7 +26,18 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import ColumnElement, delete, func, literal, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    String,
+    cast,
+    delete,
+    exists,
+    func,
+    literal,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -153,6 +165,7 @@ DEMO_AILY_KEY = "aily-demo-key"
 
 def _aware_utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=UTC)
+
 
 settings = get_settings()
 router = APIRouter(prefix=settings.api_prefix)
@@ -296,9 +309,7 @@ def create_user(payload: UserCreate, db: Db, user: Admin) -> User:
 
 
 @router.patch("/users/{user_id}/status", response_model=UserResponse, tags=["accounts"])
-def update_user_status(
-    user_id: str, payload: UserStatusUpdate, db: Db, user: Admin
-) -> User:
+def update_user_status(user_id: str, payload: UserStatusUpdate, db: Db, user: Admin) -> User:
     target = get_or_404(db, User, user_id)
     if target.id == user.id and not payload.is_active:
         raise HTTPException(status_code=409, detail="当前登录账号不能停用自己")
@@ -355,9 +366,7 @@ def update_user_role(user_id: str, payload: UserRoleUpdate, db: Db, user: Admin)
 
 
 @router.post("/users/{user_id}/reset-password", status_code=204, tags=["accounts"])
-def reset_user_password(
-    user_id: str, payload: UserPasswordReset, db: Db, user: Admin
-) -> Response:
+def reset_user_password(user_id: str, payload: UserPasswordReset, db: Db, user: Admin) -> Response:
     target = get_or_404(db, User, user_id)
     target.password_hash = hash_password(payload.password)
     # 重置密码必须让该账号手里的旧令牌立即失效。
@@ -482,6 +491,7 @@ def import_xlsx(
     audit(db, user, "import_xlsx", "workbook", file.filename, result)
     db.commit()
     dropped = result["warnings"]["dropped_placeholder_room"]
+    preprocessing = result["duplicate_lessons"]
     return ImportResult(
         source=file.filename or target.name,
         campuses=1,
@@ -497,6 +507,11 @@ def import_xlsx(
         dropped_classes=dropped["affected_classes"],
         rows_kept=result["rows_kept"],
         rows_deduped=result["rows_deduped"],
+        preprocessed_demands=preprocessing["preprocessed_demands"],
+        collapsed_source_variants=preprocessing["collapsed_source_variants"],
+        multi_product_demands=preprocessing["multi_product_demands"],
+        multi_lesson_name_demands=preprocessing["multi_lesson_name_demands"],
+        multi_slot_demands=preprocessing["multi_slot_demands"],
         rows_skipped=result["rows_skipped"],
         skipped_examples=result["skipped_examples"],
         duplicate_lessons=result["duplicate_lessons"]["conflicting_lessons"],
@@ -539,9 +554,7 @@ def raise_reference_conflict(
     items: list[Any], referenced: set[tuple[str, str]], resource_label: str, references: str
 ) -> None:
     labels = [
-        item.business_id
-        for item in items
-        if (item.campus_id, item.business_id) in referenced
+        item.business_id for item in items if (item.campus_id, item.business_id) in referenced
     ]
     if not labels:
         return
@@ -550,8 +563,7 @@ def raise_reference_conflict(
     raise HTTPException(
         status_code=409,
         detail=(
-            f"{len(labels)} 条{resource_label}已被{references}引用，"
-            f"不能直接删除：{preview}{suffix}"
+            f"{len(labels)} 条{resource_label}已被{references}引用，不能直接删除：{preview}{suffix}"
         ),
     )
 
@@ -735,38 +747,30 @@ def batch_delete_teachers(
 
 
 def class_group_track_index(db: Session) -> dict[tuple[str, str], list[ClassGroupTrack]]:
-    """一条 GROUP BY 把全部班级的走班轨道算出来，按 (校区, 班级标识) 挂好。
-
-    郑州真实数据下 9000 多条课次会收敛到一百多组，所以整表分组比按班级 N+1 查更便宜；
-    也不用把班级标识拼成巨大的 IN 列表去撞 SQLite 的绑定变量上限。
-    """
+    """按课程保存的完整产品归属展开班级轨道。"""
     index: dict[tuple[str, str], list[ClassGroupTrack]] = {}
-    rows = db.execute(
-        select(
-            CourseSession.campus_id,
-            CourseSession.class_business_id,
-            CourseSession.business_line,
-            CourseSession.product_type,
-            CourseSession.subject,
-            CourseSession.teacher_business_id,
-            func.count(CourseSession.id),
-        )
-        .group_by(
-            CourseSession.campus_id,
-            CourseSession.class_business_id,
-            CourseSession.business_line,
-            CourseSession.product_type,
-            CourseSession.subject,
-            CourseSession.teacher_business_id,
-        )
-        .order_by(
-            CourseSession.business_line,
-            CourseSession.product_type,
-            CourseSession.subject,
-            CourseSession.teacher_business_id,
-        )
-    )
-    for campus_id, class_business_id, business_line, product_type, subject, teacher, count in rows:
+    grouped: Counter[tuple[str, str, str, str, str, str]] = Counter()
+    for course in db.scalars(select(CourseSession).order_by(CourseSession.business_id)):
+        product_types = list(course.product_types or [])
+        if course.product_type and course.product_type not in product_types:
+            product_types.append(course.product_type)
+        teacher_ids = list(course.teacher_business_ids or [])
+        if course.teacher_business_id and course.teacher_business_id not in teacher_ids:
+            teacher_ids.append(course.teacher_business_id)
+        for product_type in sorted(set(product_types or [""])):
+            for teacher in sorted(set(teacher_ids or [""])):
+                grouped[
+                    (
+                        course.campus_id,
+                        course.class_business_id,
+                        course.business_line or "",
+                        product_type,
+                        course.subject or "",
+                        teacher,
+                    )
+                ] += 1
+    for key, count in sorted(grouped.items(), key=lambda item: item[0]):
+        campus_id, class_business_id, business_line, product_type, subject, teacher = key
         index.setdefault((campus_id, class_business_id), []).append(
             ClassGroupTrack(
                 business_line=business_line or "",
@@ -779,9 +783,7 @@ def class_group_track_index(db: Session) -> dict[tuple[str, str], list[ClassGrou
     return index
 
 
-def class_group_response(
-    item: ClassGroup, tracks: list[ClassGroupTrack]
-) -> ClassGroupResponse:
+def class_group_response(item: ClassGroup, tracks: list[ClassGroupTrack]) -> ClassGroupResponse:
     def distinct(values: list[str]) -> list[str]:
         # 空串不是一个班型/教师，只是课次上没填，别让它占一个 chip。
         return sorted({value for value in values if value})
@@ -853,9 +855,7 @@ def update_class_group(
 def batch_delete_class_groups(
     payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler
 ) -> BatchOperationResponse:
-    classes: list[ClassGroup] = selected_master_rows(
-        db, ClassGroup, payload.object_ids, "班级"
-    )
+    classes: list[ClassGroup] = selected_master_rows(db, ClassGroup, payload.object_ids, "班级")
     ensure_class_groups_deletable(db, classes)
     for class_group in classes:
         db.delete(class_group)
@@ -1010,7 +1010,31 @@ def list_course_sessions(db: Db, user: CurrentUser) -> list[CourseSession]:
 def create_course_session(
     payload: CourseSessionPayload, db: Db, user: AdminOrScheduler
 ) -> CourseSession:
-    instance = CourseSession(**payload.model_dump())
+    values = payload.model_dump()
+    if values["product_type"] and not values["product_types"]:
+        values["product_types"] = [values["product_type"]]
+    if values["teacher_business_id"] and not values["teacher_business_ids"]:
+        values["teacher_business_ids"] = [values["teacher_business_id"]]
+    if values["lesson_name"] and not values["lesson_names"]:
+        values["lesson_names"] = [values["lesson_name"]]
+    if values["stage"] and not values["stages"]:
+        values["stages"] = [values["stage"]]
+    if values["suggested_slot_id"] and not values["candidate_slot_ids"]:
+        values["candidate_slot_ids"] = [values["suggested_slot_id"]]
+    if (
+        values["fixed_start_time"]
+        and values["fixed_end_time"]
+        and not values["candidate_clock_windows"]
+    ):
+        values["candidate_clock_windows"] = [
+            {
+                "start_time": values["fixed_start_time"],
+                "end_time": values["fixed_end_time"],
+            }
+        ]
+    if values["original_room_business_id"] and not values["candidate_room_business_ids"]:
+        values["candidate_room_business_ids"] = [values["original_room_business_id"]]
+    instance = CourseSession(**values)
     db.add(instance)
     db.commit()
     db.refresh(instance)
@@ -1024,8 +1048,13 @@ def update_course_session(
     object_id: str, payload: CourseSessionUpdate, db: Db, user: AdminOrScheduler
 ) -> CourseSession:
     instance = get_or_404(db, CourseSession, object_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    for key, value in changes.items():
         setattr(instance, key, value)
+    if "original_room_business_id" in changes:
+        instance.candidate_room_business_ids = (
+            [changes["original_room_business_id"]] if changes["original_room_business_id"] else []
+        )
     audit(db, user, "update", "course_session", object_id)
     db.commit()
     db.refresh(instance)
@@ -1047,17 +1076,59 @@ COURSE_SEARCH_COLUMNS = (
     CourseSession.business_id,
     CourseSession.class_business_id,
     CourseSession.teacher_business_id,
+    cast(CourseSession.teacher_business_ids, String),
     CourseSession.lesson_name,
     CourseSession.subject,
     CourseSession.business_line,
     CourseSession.product_type,
+    cast(CourseSession.product_types, String),
+    cast(CourseSession.lesson_names, String),
     CourseSession.original_room_business_id,
+    cast(CourseSession.candidate_room_business_ids, String),
 )
 
 
 def _like_pattern(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
+
+
+def _course_product_values(course: CourseSession) -> list[str]:
+    values = [str(item) for item in course.product_types or [] if item]
+    if course.product_type and course.product_type not in values:
+        values.append(course.product_type)
+    return sorted(set(values))
+
+
+def _course_product_criterion(product_type: str) -> ColumnElement[bool]:
+    return or_(
+        CourseSession.product_type == product_type,
+        _json_array_contains(CourseSession.product_types, product_type),
+    )
+
+
+def _json_array_contains(values: Any, target: str) -> ColumnElement[bool]:
+    elements = func.json_each(values).table_valued("key", "value")
+    return exists(select(literal(1)).select_from(elements).where(elements.c.value == target))
+
+
+def _course_list_dimension_criterion(primary: Any, values: Any, target: str) -> ColumnElement[bool]:
+    return or_(
+        primary == target,
+        _json_array_contains(values, target),
+    )
+
+
+def _course_products_criterion(product_types: list[str]) -> ColumnElement[bool]:
+    return or_(*(_course_product_criterion(item) for item in product_types))
+
+
+def _all_course_product_types(db: Session) -> set[str]:
+    return {
+        product_type
+        for course in db.scalars(select(CourseSession))
+        for product_type in _course_product_values(course)
+    }
 
 
 def course_session_criteria(
@@ -1074,25 +1145,40 @@ def course_session_criteria(
         return []
 
     criteria: list[ColumnElement[bool]] = []
-    equality = (
+    equality: tuple[tuple[Any, Any], ...] = (
         (CourseSession.campus_id, spec.campus_id),
         (CourseSession.business_line, spec.business_line),
-        (CourseSession.product_type, spec.product_type),
         (CourseSession.class_business_id, spec.class_business_id),
-        (CourseSession.teacher_business_id, spec.teacher_business_id),
         (CourseSession.subject, spec.subject),
-        (CourseSession.original_room_business_id, spec.original_room_business_id),
         (CourseSession.lesson_date, spec.lesson_date),
     )
     for column, value in equality:
         if value is not None:
             criteria.append(column == value)
+    if spec.product_type is not None:
+        criteria.append(_course_product_criterion(spec.product_type))
+    if spec.teacher_business_id is not None:
+        criteria.append(
+            _course_list_dimension_criterion(
+                CourseSession.teacher_business_id,
+                CourseSession.teacher_business_ids,
+                spec.teacher_business_id,
+            )
+        )
+    if spec.original_room_business_id is not None:
+        criteria.append(
+            _course_list_dimension_criterion(
+                CourseSession.original_room_business_id,
+                CourseSession.candidate_room_business_ids,
+                spec.original_room_business_id,
+            )
+        )
     if spec.lesson_date_from is not None:
         criteria.append(CourseSession.lesson_date >= spec.lesson_date_from)
     if spec.lesson_date_to is not None:
         criteria.append(CourseSession.lesson_date <= spec.lesson_date_to)
     if spec.search:
-        blob: ColumnElement[str] = func.coalesce(COURSE_SEARCH_COLUMNS[0], "")
+        blob = type_cast(ColumnElement[str], func.coalesce(COURSE_SEARCH_COLUMNS[0], ""))
         for column in COURSE_SEARCH_COLUMNS[1:]:
             blob = blob + literal(" ") + func.coalesce(column, "")
         criteria.append(
@@ -1102,9 +1188,7 @@ def course_session_criteria(
 
 
 def count_course_sessions(db: Session, criteria: list[ColumnElement[bool]]) -> int:
-    return int(
-        db.scalar(select(func.count()).select_from(CourseSession).where(*criteria)) or 0
-    )
+    return int(db.scalar(select(func.count()).select_from(CourseSession).where(*criteria)) or 0)
 
 
 def ensure_expected_count(actual: int, expected: int | None) -> None:
@@ -1129,9 +1213,7 @@ def validate_course_room(
 ) -> None:
     if room_business_id is None:
         return
-    campus_ids = set(
-        db.scalars(select(CourseSession.campus_id).where(*criteria).distinct())
-    )
+    campus_ids = set(db.scalars(select(CourseSession.campus_id).where(*criteria).distinct()))
     matched_campuses = set(
         db.scalars(
             select(Room.campus_id).where(
@@ -1144,9 +1226,7 @@ def validate_course_room(
         raise HTTPException(status_code=422, detail="指定教室不属于所选课程的校区")
 
 
-def ensure_course_sessions_deletable(
-    db: Session, criteria: list[ColumnElement[bool]]
-) -> None:
+def ensure_course_sessions_deletable(db: Session, criteria: list[ColumnElement[bool]]) -> None:
     """被课表版本或飞书日程引用的课次一条都不能删，整批拒绝。
 
     用半连接而不是 id 列表：按条件删的场景下 id 列表可能上万条，撑爆绑定变量上限。
@@ -1171,9 +1251,7 @@ def ensure_course_sessions_deletable(
     suffix = "等" if total > 5 else ""
     raise HTTPException(
         status_code=409,
-        detail=(
-            f"{total} 条课程已被课表版本或飞书日程引用，不能直接删除：{preview}{suffix}"
-        ),
+        detail=(f"{total} 条课程已被课表版本或飞书日程引用，不能直接删除：{preview}{suffix}"),
     )
 
 
@@ -1195,6 +1273,9 @@ def batch_update_course_sessions(
     )
     if "original_room_business_id" in changes:
         validate_course_room(db, criteria, changes["original_room_business_id"])
+        changes["candidate_room_business_ids"] = (
+            [changes["original_room_business_id"]] if changes["original_room_business_id"] else []
+        )
     if matched:
         db.execute(
             update(CourseSession)
@@ -1237,9 +1318,7 @@ def batch_delete_course_sessions(
     ensure_course_sessions_deletable(db, criteria)
     if matched:
         db.execute(
-            delete(CourseSession)
-            .where(*criteria)
-            .execution_options(synchronize_session=False)
+            delete(CourseSession).where(*criteria).execution_options(synchronize_session=False)
         )
     audit(
         db,
@@ -1367,8 +1446,7 @@ RULE_CONSTRAINTS: dict[str, dict[str, Any]] = {
     "consecutive_sessions": {
         "label": "连续课次",
         "description": (
-            "同一对象的课次尽量连排。"
-            "当前模型按两两相邻计分，尚未按 minimum_consecutive 精确建模。"
+            "同一对象的课次尽量连排。当前模型按两两相邻计分，尚未按 minimum_consecutive 精确建模。"
         ),
         "scope": ["minimum_consecutive"],
         "scope_fields": [
@@ -1850,9 +1928,7 @@ async def solver_run_events(run_id: str, user: CurrentUser) -> StreamingResponse
 
 @router.get("/schedules", response_model=list[ScheduleSummaryResponse], tags=["schedules"])
 def list_schedules(db: Db, user: CurrentUser) -> list[ScheduleSummaryResponse]:
-    versions = list(
-        db.scalars(select(ScheduleVersion).order_by(ScheduleVersion.version_no.desc()))
-    )
+    versions = list(db.scalars(select(ScheduleVersion).order_by(ScheduleVersion.version_no.desc())))
     counts: dict[str, int] = {
         str(version_id): int(total)
         for version_id, total in db.execute(
@@ -2049,8 +2125,7 @@ def ensure_schedule_deletable(db: Session, schedule: ScheduleVersion) -> None:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"该版本已下发飞书日历（{bindings} 条日程），"
-                "删除后无法回收已创建的日程，不允许删除"
+                f"该版本已下发飞书日历（{bindings} 条日程），删除后无法回收已创建的日程，不允许删除"
             ),
         )
 
@@ -2172,6 +2247,7 @@ def publish_schedule_to_calendar(
         for item in db.scalars(select(Teacher).where(Teacher.business_id.in_(teacher_ids)))
     }
     rooms = {item.business_id: item for item in db.scalars(select(Room))}
+    slots = {item.business_id: item for item in db.scalars(select(TimeSlot))}
     existing_bindings = {
         item.course_session_id: item
         for item in db.scalars(
@@ -2194,16 +2270,15 @@ def publish_schedule_to_calendar(
         calendar_user_id = (course.calendar_user_id or "").strip() or (
             (teacher.calendar_user_id or "").strip() if teacher else ""
         )
-        if not calendar_user_id or not course.fixed_start_time or not course.fixed_end_time:
+        slot = slots.get(assignment.slot_business_id)
+        start_time = str((slot.start_time if slot else None) or course.fixed_start_time or "")
+        end_time = str((slot.end_time if slot else None) or course.fixed_end_time or "")
+        if not calendar_user_id or not start_time or not end_time:
             skipped_unmapped += 1
             continue
         try:
-            start = datetime.combine(
-                assignment.lesson_date, _parse_clock(course.fixed_start_time), SHANGHAI_TZ
-            )
-            end = datetime.combine(
-                assignment.lesson_date, _parse_clock(course.fixed_end_time), SHANGHAI_TZ
-            )
+            start = datetime.combine(assignment.lesson_date, _parse_clock(start_time), SHANGHAI_TZ)
+            end = datetime.combine(assignment.lesson_date, _parse_clock(end_time), SHANGHAI_TZ)
         except ValueError:
             skipped_unmapped += 1
             continue
@@ -2267,8 +2342,8 @@ def publish_schedule_to_calendar(
                     "course_session_id": course.id,
                     "calendar_user_id": calendar_user_id,
                     "lesson_date": assignment.lesson_date,
-                    "start_time": course.fixed_start_time,
-                    "end_time": course.fixed_end_time,
+                    "start_time": start.strftime("%H:%M"),
+                    "end_time": end.strftime("%H:%M"),
                     "source": "feishu_freebusy",
                 }
             )
@@ -2292,8 +2367,8 @@ def publish_schedule_to_calendar(
                             "course_session_id": course.id,
                             "calendar_user_id": calendar_user_id,
                             "lesson_date": assignment.lesson_date,
-                            "start_time": course.fixed_start_time,
-                            "end_time": course.fixed_end_time,
+                            "start_time": start.strftime("%H:%M"),
+                            "end_time": end.strftime("%H:%M"),
                             "source": "schedule_overlap",
                         }
                     )
@@ -2318,21 +2393,19 @@ def publish_schedule_to_calendar(
                         ),
                         "start_time": {
                             "timestamp": _timestamp_epoch(
-                                assignment.lesson_date, course.fixed_start_time
+                                assignment.lesson_date, _start.strftime("%H:%M")
                             ),
                             "timezone": "Asia/Shanghai",
                         },
                         "end_time": {
                             "timestamp": _timestamp_epoch(
-                                assignment.lesson_date, course.fixed_end_time
+                                assignment.lesson_date, _end.strftime("%H:%M")
                             ),
                             "timezone": "Asia/Shanghai",
                         },
                         "visibility": "private",
                         "free_busy_status": "busy",
-                        "location": {
-                            "name": room.name if room else assignment.room_business_id
-                        },
+                        "location": {"name": room.name if room else assignment.room_business_id},
                     },
                 )
                 binding = CalendarEventBinding(
@@ -2412,8 +2485,7 @@ def reschedule_neighborhood(
             return True
         if request.event_type == "room_outage":
             return bool(
-                request.room_business_id
-                and assignment.room_business_id == request.room_business_id
+                request.room_business_id and assignment.room_business_id == request.room_business_id
             )
         if request.event_type == "teacher_leave":
             teacher = teachers.get(assignment.teacher_business_id)
@@ -2479,9 +2551,7 @@ def create_reschedule_event(
         request.slot_business_ids or request.date_from
     ):
         # 不限定时段也不限定日期的请假等于「该教师全程不可用」，只会产出必然无解的任务。
-        raise HTTPException(
-            status_code=422, detail="教师请假必须至少指定时段或日期范围"
-        )
+        raise HTTPException(status_code=422, detail="教师请假必须至少指定时段或日期范围")
     if request.date_from and request.date_to and request.date_from > request.date_to:
         raise HTTPException(status_code=422, detail="事件的开始日期不能晚于结束日期")
     parent_response = schedule_response(db, parent)
@@ -2749,9 +2819,10 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
             {
                 "业务标识": item.business_id,
                 "业务线": item.business_line,
-                "产品班型": item.product_type,
+                "产品班型": " / ".join(_course_product_values(item)),
+                "产品上下文": json_text(item.product_contexts),
                 "班级标识": item.class_business_id,
-                "教师标识": item.teacher_business_id,
+                "教师标识": " / ".join(item.teacher_business_ids or [item.teacher_business_id]),
                 "具体日程账号": item.calendar_user_id
                 or (
                     teachers[item.teacher_business_id].calendar_user_id
@@ -2760,18 +2831,26 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
                 )
                 or "",
                 "学科": item.subject,
-                "课节名称": item.lesson_name,
+                "课节名称": " / ".join(item.lesson_names or [item.lesson_name]),
                 "编排来源": item.schedule_source,
-                "编排阶段": item.stage,
+                "编排阶段": " / ".join(item.stages or [item.stage]),
                 "计划课次": item.planned_sessions,
                 "计划课时": item.planned_hours,
                 "课次序号": item.session_no,
                 "上课日期": item.lesson_date.isoformat() if item.lesson_date else "",
                 "时长分钟": item.duration_minutes,
-                "建议时段": item.suggested_slot_id or "",
+                "候选时段标识": " / ".join(
+                    item.candidate_slot_ids
+                    or ([item.suggested_slot_id] if item.suggested_slot_id else [])
+                ),
+                "候选时钟窗口": json_text(item.candidate_clock_windows),
                 "固定开始时间": item.fixed_start_time,
                 "固定结束时间": item.fixed_end_time,
-                "原始教室标识": item.original_room_business_id or "",
+                "候选教室标识": " / ".join(
+                    item.candidate_room_business_ids
+                    or ([item.original_room_business_id] if item.original_room_business_id else [])
+                ),
+                "来源变体数": item.source_variant_count,
                 "是否锁定": "是" if item.is_locked else "否",
             }
             for item in db.scalars(select(CourseSession).order_by(CourseSession.business_id))
@@ -2841,7 +2920,7 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
                         "发布状态": status_labels.get(version.status, version.status),
                         "场次标识": session.business_id,
                         "业务线": session.business_line,
-                        "产品班型": session.product_type,
+                        "产品班型": " / ".join(_course_product_values(session)),
                         "班级标识": session.class_business_id,
                         "教师标识": session.teacher_business_id,
                         "具体日程账号": session.calendar_user_id
@@ -2857,8 +2936,8 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
                         else "",
                         "时段标识": assignment.slot_business_id,
                         "星期": slot.weekday if slot else "",
-                        "开始时间": session.fixed_start_time,
-                        "结束时间": session.fixed_end_time,
+                        "开始时间": slot.start_time if slot else session.fixed_start_time,
+                        "结束时间": slot.end_time if slot else session.fixed_end_time,
                         "固定开始时间": session.fixed_start_time,
                         "固定结束时间": session.fixed_end_time,
                         "原始教室标识": session.original_room_business_id or "",
@@ -3071,22 +3150,27 @@ def aily_context(db: Db) -> AilyContextResponse:
 
     def course_context(item: CourseSession) -> dict[str, Any]:
         teacher = teachers.get(item.teacher_business_id)
-        calendar_user_id = item.calendar_user_id or (
-            teacher.calendar_user_id if teacher else None
-        )
+        calendar_user_id = item.calendar_user_id or (teacher.calendar_user_id if teacher else None)
         return {
             "business_id": item.business_id,
             "business_line": item.business_line,
             "product_type": item.product_type,
+            "product_types": _course_product_values(item),
+            "product_contexts": item.product_contexts,
             "class_business_id": item.class_business_id,
             "teacher_business_id": item.teacher_business_id,
+            "teacher_business_ids": item.teacher_business_ids,
             "calendar_user_id": calendar_user_id,
             "calendar_mapping_status": "mapped" if calendar_user_id else "unmapped",
             "subject": item.subject,
+            "lesson_names": item.lesson_names,
+            "stages": item.stages,
             "lesson_date": item.lesson_date.isoformat() if item.lesson_date else None,
             "fixed_start_time": item.fixed_start_time,
             "fixed_end_time": item.fixed_end_time,
+            "candidate_clock_windows": item.candidate_clock_windows,
             "original_room_business_id": item.original_room_business_id,
+            "candidate_room_business_ids": item.candidate_room_business_ids,
         }
 
     return AilyContextResponse(
@@ -3202,9 +3286,7 @@ def _validated_assistant_scope(db: Session, parsed: dict[str, Any]) -> dict[str,
         "business_lines": {
             item for item in db.scalars(select(CourseSession.business_line)).all() if item
         },
-        "product_types": {
-            item for item in db.scalars(select(CourseSession.product_type)).all() if item
-        },
+        "product_types": {item for item in _all_course_product_types(db) if item},
         "class_business_ids": set(db.scalars(select(CourseSession.class_business_id)).all()),
     }
     invalid: dict[str, list[str]] = {}
@@ -3241,19 +3323,9 @@ def assistant_interpret(
     if ai_configuration["configured"]:
         context = {
             "business_lines": sorted(
-                {
-                    item
-                    for item in db.scalars(select(CourseSession.business_line)).all()
-                    if item
-                }
+                {item for item in db.scalars(select(CourseSession.business_line)).all() if item}
             ),
-            "product_types": sorted(
-                {
-                    item
-                    for item in db.scalars(select(CourseSession.product_type)).all()
-                    if item
-                }
-            ),
+            "product_types": sorted(_all_course_product_types(db)),
             "class_business_ids": sorted(
                 set(db.scalars(select(CourseSession.class_business_id)).all())
             ),
@@ -3354,9 +3426,7 @@ def assistant_interpret(
     status_code=202,
     tags=["aily", "assistant"],
 )
-def assistant_solve(
-    request: AssistantSolveRequest, db: Db, user: AdminOrScheduler
-) -> SolverRun:
+def assistant_solve(request: AssistantSolveRequest, db: Db, user: AdminOrScheduler) -> SolverRun:
     """Login-session entry point for Aily's natural-language scheduling skill.
 
     Aily may call this endpoint after turning the instruction into structured
@@ -3372,7 +3442,7 @@ def assistant_solve(
                 else []
             ),
             *(
-                [CourseSession.product_type.in_(scope["product_types"])]
+                [_course_products_criterion(scope["product_types"])]
                 if scope["product_types"]
                 else []
             ),

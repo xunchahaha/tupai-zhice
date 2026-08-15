@@ -42,9 +42,7 @@ def _priority_recommendation(
     payload: dict[str, Any], conflict_rule_ids: list[str]
 ) -> tuple[list[str], list[str]]:
     rules = [
-        rule
-        for rule in payload.get("rules", [])
-        if rule.get("business_id") in conflict_rule_ids
+        rule for rule in payload.get("rules", []) if rule.get("business_id") in conflict_rule_ids
     ]
     if len(rules) < 2:
         return [], []
@@ -89,7 +87,9 @@ def _event_blocks(
     slots = set(event.get("slot_business_ids") or [])
     in_window = not slots or slot_id in slots
     if event_type == "teacher_leave":
-        return in_window and session["teacher_business_id"] == event.get("teacher_business_id")
+        return in_window and str(event.get("teacher_business_id") or "") in _session_teacher_ids(
+            session
+        )
     if event_type == "room_outage":
         return in_window and room_id == event.get("room_business_id")
     return False
@@ -111,6 +111,35 @@ def _clock_minutes(value: str) -> int:
     return hours * 60 + minutes
 
 
+def _candidate_clock_windows(session: dict[str, Any]) -> list[tuple[str, str]]:
+    windows: set[tuple[str, str]] = set()
+    for item in session.get("candidate_clock_windows") or []:
+        if not isinstance(item, dict):
+            continue
+        start = str(item.get("start_time") or "")
+        end = str(item.get("end_time") or "")
+        if start and end and _clock_minutes(end) > _clock_minutes(start):
+            windows.add((start, end))
+    fixed_start = str(session.get("fixed_start_time") or "")
+    fixed_end = str(session.get("fixed_end_time") or "")
+    if not windows and fixed_start and fixed_end:
+        windows.add((fixed_start, fixed_end))
+    return sorted(windows, key=lambda item: (_clock_minutes(item[0]), _clock_minutes(item[1])))
+
+
+def _calendar_user_ids(session: dict[str, Any], teachers: dict[str, dict[str, Any]]) -> list[str]:
+    explicit = str(session.get("calendar_user_id") or "").strip()
+    if explicit:
+        return [explicit]
+    return sorted(
+        {
+            str(teachers.get(teacher_id, {}).get("calendar_user_id") or "").strip()
+            for teacher_id in _session_teacher_ids(session)
+            if str(teachers.get(teacher_id, {}).get("calendar_user_id") or "").strip()
+        }
+    )
+
+
 def _session_matches_rule(session: dict[str, Any], room_id: str, rule: dict[str, Any]) -> bool:
     actor_ids = set(rule.get("actor_ids") or [])
     actor_type = str(rule.get("actor_type") or "").lower()
@@ -119,24 +148,47 @@ def _session_matches_rule(session: dict[str, Any], room_id: str, rule: dict[str,
     return (
         not actor_ids
         or session["business_id"] in actor_ids
-        or session["teacher_business_id"] in actor_ids
+        or bool(actor_ids.intersection(_session_teacher_ids(session)))
         or session["class_business_id"] in actor_ids
         or room_id in actor_ids
     )
 
 
-def _class_scope_key(session: dict[str, Any]) -> tuple[str, str, str]:
-    """Identify a real class within its product scenario.
+def _session_product_types(session: dict[str, Any]) -> list[str]:
+    values = [str(item) for item in session.get("product_types") or [] if item]
+    primary = str(session.get("product_type") or "")
+    if primary and primary not in values:
+        values.append(primary)
+    return sorted(set(values)) or [""]
+
+
+def _session_teacher_ids(session: dict[str, Any]) -> list[str]:
+    values = [str(item) for item in session.get("teacher_business_ids") or [] if item]
+    primary = str(session.get("teacher_business_id") or "")
+    if primary and primary not in values:
+        values.append(primary)
+    return sorted(set(values))
+
+
+def _class_scope_keys(session: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """Identify every student group occupied by a teaching demand.
 
     Official data reuses labels such as “走读SMART班” across different
     product types. Those are parallel business scenarios, not one physical
-    class, so the label alone must not create a class-overlap constraint.
+    class, so the label alone must not create a class-overlap constraint. A
+    preprocessed shared lesson can, however, belong to product A and B at once;
+    it must reserve both student groups while still consuming one room.
     """
-    return (
-        str(session.get("business_line") or ""),
-        str(session.get("product_type") or ""),
-        str(session.get("class_business_id") or ""),
-    )
+    business_line = str(session.get("business_line") or "")
+    class_id = str(session.get("class_business_id") or "")
+    return [
+        (business_line, product_type, class_id) for product_type in _session_product_types(session)
+    ]
+
+
+def _class_scope_key(session: dict[str, Any]) -> tuple[str, str, str]:
+    """Compatibility helper for callers that need a stable primary key."""
+    return _class_scope_keys(session)[0]
 
 
 def _rule_items(value: object) -> list[dict[str, Any]]:
@@ -162,8 +214,7 @@ def _rule_items(value: object) -> list[dict[str, Any]]:
         if key in {"hard_constraints", "soft_constraints"}:
             default_hardness = "hard" if key == "hard_constraints" else "soft"
             items = [
-                {**item, "hardness": item.get("hardness") or default_hardness}
-                for item in items
+                {**item, "hardness": item.get("hardness") or default_hardness} for item in items
             ]
         nested_rules.extend(items)
     for key, nested in value.items():
@@ -210,8 +261,7 @@ def _normalized_rules(payload: dict[str, Any]) -> list[dict[str, Any]]:
         if key in {"hard_constraints", "soft_constraints"}:
             default_hardness = "hard" if key == "hard_constraints" else "soft"
             items = [
-                {**item, "hardness": item.get("hardness") or default_hardness}
-                for item in items
+                {**item, "hardness": item.get("hardness") or default_hardness} for item in items
             ]
         raw_rules.extend(items)
 
@@ -334,7 +384,7 @@ def _event_targets_session(event: dict[str, Any], session: dict[str, Any]) -> bo
         teacher_id = event.get("teacher_business_id")
         calendar_user_id = event.get("calendar_user_id")
         return bool(
-            (teacher_id and teacher_id == session["teacher_business_id"])
+            (teacher_id and str(teacher_id) in _session_teacher_ids(session))
             or (calendar_user_id and calendar_user_id == session.get("calendar_user_id"))
         )
     return True
@@ -368,6 +418,21 @@ def _event_blocks_date(
     return candidate_slot in slot_ids
 
 
+def _event_blocks_option(
+    event: dict[str, Any], session: dict[str, Any], candidate: date, slot_id: str
+) -> bool:
+    if event.get("event_type") != "teacher_leave" or not _event_targets_session(event, session):
+        return False
+    date_from = _parse_date(event.get("date_from"))
+    date_to = _parse_date(event.get("date_to"))
+    if date_from and candidate < date_from:
+        return False
+    if date_to and candidate > date_to:
+        return False
+    slot_ids = set(event.get("slot_business_ids") or [])
+    return not slot_ids or slot_id in slot_ids
+
+
 def _selected_sessions(payload: dict[str, Any]) -> list[dict[str, Any]]:
     business_lines = set(payload.get("business_lines") or [])
     product_types = set(payload.get("product_types") or [])
@@ -383,7 +448,7 @@ def _selected_sessions(payload: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         if business_lines and session.get("business_line") not in business_lines:
             continue
-        if product_types and session.get("product_type") not in product_types:
+        if product_types and not product_types.intersection(_session_product_types(session)):
             continue
         if class_ids and session["class_business_id"] not in class_ids:
             continue
@@ -396,10 +461,10 @@ def _selected_sessions(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _has_date_information(session: dict[str, Any]) -> bool:
+    windows = session.get("candidate_clock_windows") or []
     return bool(
         _parse_date(session.get("lesson_date"))
-        and session.get("fixed_start_time")
-        and session.get("fixed_end_time")
+        and (windows or (session.get("fixed_start_time") and session.get("fixed_end_time")))
     )
 
 
@@ -472,21 +537,9 @@ def _date_infeasible_diagnostics(payload: dict[str, Any]) -> tuple[list[str], li
         ids.extend(
             [
                 "SYSTEM-CLASS-NO-OVERLAP",
-                *(
-                    ["SYSTEM-ROOM-NO-OVERLAP"]
-                    if "room_no_overlap" in solver_rules
-                    else []
-                ),
-                *(
-                    ["SYSTEM-TEACHER-NO-OVERLAP"]
-                    if "teacher_no_overlap" in solver_rules
-                    else []
-                ),
-                *(
-                    ["SYSTEM-CALENDAR-NO-OVERLAP"]
-                    if "calendar_no_overlap" in solver_rules
-                    else []
-                ),
+                *(["SYSTEM-ROOM-NO-OVERLAP"] if "room_no_overlap" in solver_rules else []),
+                *(["SYSTEM-TEACHER-NO-OVERLAP"] if "teacher_no_overlap" in solver_rules else []),
+                *(["SYSTEM-CALENDAR-NO-OVERLAP"] if "calendar_no_overlap" in solver_rules else []),
             ]
         )
     ids = list(dict.fromkeys(ids))
@@ -494,9 +547,8 @@ def _date_infeasible_diagnostics(payload: dict[str, Any]) -> tuple[list[str], li
     detail_text = " ".join(capacity_explanations)
     explanations = [
         "日期感知模型未使用可供 CP-SAT 提取的假设文字；本次无解按内置硬约束标记。",
-        f"约束范围：{dynamic_text}；系统约束：{'、'.join(ids[len(dynamic_ids):])}。",
-        detail_text
-        or "优先检查同一业务场景的班级重叠、固定上课时段、教室容量和具体日程账号占用。",
+        f"约束范围：{dynamic_text}；系统约束：{'、'.join(ids[len(dynamic_ids) :])}。",
+        detail_text or "优先检查同一业务场景的班级重叠、固定上课时段、教室容量和具体日程账号占用。",
     ]
     return ids, explanations
 
@@ -538,18 +590,20 @@ def _date_capacity_explanations(payload: dict[str, Any]) -> list[str]:
         if session.get("is_locked"):
             lower = upper = original
         interval = (lower, upper, str(session.get("business_id")))
-        clock = (session.get("fixed_start_time"), session.get("fixed_end_time"))
-        groups[(_class_scope_key(session), clock)].append(interval)
+        windows = _candidate_clock_windows(session)
+        # 只有单一时钟窗口时才可做这个 Hall 式预估。多个候选时段的需求不能被
+        # 强行塞进主值时段，否则会把本来可行的表误报为容量无解。
+        if len(windows) != 1:
+            continue
+        clock = windows[0]
+        for class_key in _class_scope_keys(session):
+            groups[(class_key, clock)].append(interval)
         room_groups[clock].append(interval)
-        teacher = teachers.get(str(session.get("teacher_business_id")), {})
-        calendar_user_id = str(
-            session.get("calendar_user_id") or teacher.get("calendar_user_id") or ""
-        ).strip()
-        if calendar_user_id:
+        for calendar_user_id in _calendar_user_ids(session, teachers):
             calendar_groups[(calendar_user_id, clock)].append(interval)
-        teacher_id = str(session.get("teacher_business_id") or "")
-        if teacher_id and _is_person(teacher):
-            person_groups[(teacher_id, clock)].append(interval)
+        for teacher_id in _session_teacher_ids(session):
+            if _is_person(teachers.get(teacher_id, {})):
+                person_groups[(teacher_id, clock)].append(interval)
 
     explanations: list[str] = []
 
@@ -571,9 +625,7 @@ def _date_capacity_explanations(payload: dict[str, Any]) -> list[str]:
                 for end in boundaries:
                     if end < start:
                         continue
-                    contained = [
-                        item for item in intervals if item[0] >= start and item[1] <= end
-                    ]
+                    contained = [item for item in intervals if item[0] >= start and item[1] <= end]
                     available = (end - start).days + 1
                     if len(contained) <= capacity * available:
                         continue
@@ -609,18 +661,342 @@ def _is_person(teacher: dict[str, Any]) -> bool:
     return not bool(teacher.get("is_group"))
 
 
+def _can_use_discrete_date_grid(payload: dict[str, Any]) -> bool:
+    """Use the compact grid model when source clock windows never overlap.
+
+    Zhengzhou's source has three disjoint clock windows. Modelling each demand
+    against every individual room creates large room-symmetry branches, while
+    a per-date/window capacity constraint is mathematically equivalent. Cases
+    with overlapping clocks or room-specific rules stay on the interval model.
+    """
+    sessions = _selected_sessions(payload)
+    if not sessions or any(session.get("is_locked") for session in sessions):
+        return False
+    event = payload.get("event") or {}
+    if event.get("event_type") == "room_outage":
+        return False
+    room_types = {"fixed_room", "preferred_room", "forbidden_room", "unavailable_room"}
+    if any(rule.get("constraint_type") in room_types for rule in _normalized_rules(payload)):
+        return False
+    selected_ids = {str(item["business_id"]) for item in sessions}
+    if any(
+        str(item.get("course_business_id") or "") not in selected_ids
+        for item in payload.get("previous_assignments", [])
+    ):
+        return False
+    windows = sorted(
+        {window for session in sessions for window in _candidate_clock_windows(session)},
+        key=lambda item: (_clock_minutes(item[0]), _clock_minutes(item[1])),
+    )
+    return all(
+        _clock_minutes(left[1]) <= _clock_minutes(right[0])
+        for left, right in zip(windows, windows[1:], strict=False)
+    )
+
+
+def _solve_date_aware_grid(payload: dict[str, Any]) -> dict[str, Any]:
+    model = cp_model.CpModel()
+    sessions = _selected_sessions(payload)
+    rooms = {
+        str(item["business_id"]): item for item in payload.get("rooms", []) if item.get("is_active")
+    }
+    teachers = {str(item["business_id"]): item for item in payload.get("teachers", [])}
+    slots = {
+        (item.get("weekday"), item.get("start_time"), item.get("end_time")): str(
+            item["business_id"]
+        )
+        for item in payload.get("time_slots", [])
+        if item.get("is_open")
+    }
+    defines_time_slots = bool(payload.get("time_slots"))
+    rules = _normalized_rules(payload)
+    solver_rules = set(
+        payload.get("solver_rules")
+        or {
+            "fixed_time",
+            "room_no_overlap",
+            "teacher_no_overlap",
+            "calendar_no_overlap",
+            "minimize_changes",
+        }
+    )
+    event = payload.get("event") or {}
+    date_window = int(payload.get("date_window_days", 7))
+    request_date_from = _parse_date(payload.get("date_from"))
+    request_date_to = _parse_date(payload.get("date_to"))
+    change_weight = (
+        int(payload.get("change_weight", 100000)) if "minimize_changes" in solver_rules else 0
+    )
+    result = _empty_result(presolved=True)
+    if not sessions or not rooms:
+        result["conflict_rule_ids"], result["priority_explanations"] = _date_infeasible_diagnostics(
+            payload
+        )
+        result["priority_rule_ids"] = list(result["conflict_rule_ids"])
+        return result
+
+    choices: dict[str, list[tuple[dict[str, Any], cp_model.IntVar]]] = {}
+    room_capacity: dict[tuple[int, str, str], list[cp_model.IntVar]] = {}
+    class_capacity: dict[tuple[tuple[str, str, str], int, str, str], list[cp_model.IntVar]] = {}
+    person_capacity: dict[tuple[str, int, str, str], list[cp_model.IntVar]] = {}
+    calendar_capacity: dict[tuple[str, int, str, str], list[cp_model.IntVar]] = {}
+    objective_terms: list[Any] = []
+
+    for session in sessions:
+        course_id = str(session["business_id"])
+        original_date = _parse_date(session.get("lesson_date"))
+        if original_date is None:
+            model.add_bool_or([])
+            continue
+        lower = original_date - timedelta(days=date_window)
+        upper = original_date + timedelta(days=date_window)
+        if request_date_from:
+            lower = max(lower, request_date_from)
+        if request_date_to:
+            upper = min(upper, request_date_to)
+        matching_rules = [rule for rule in rules if _session_matches_rule(session, "", rule)]
+        for rule in matching_rules:
+            if rule.get("hardness") != "hard":
+                continue
+            scope = rule.get("scope") or {}
+            constraint_type = rule.get("constraint_type")
+            if constraint_type in {"date_window", "date_range", "allowed_date_range"}:
+                symmetric_days = scope.get("date_window_days", scope.get("days"))
+                before_days = scope.get("before_days", symmetric_days)
+                after_days = scope.get("after_days", symmetric_days)
+                if before_days is not None:
+                    lower = max(lower, original_date - timedelta(days=int(before_days)))
+                if after_days is not None:
+                    upper = min(upper, original_date + timedelta(days=int(after_days)))
+                rule_from = _parse_date(scope.get("date_from"))
+                rule_to = _parse_date(scope.get("date_to"))
+                if rule_from:
+                    lower = max(lower, rule_from)
+                if rule_to:
+                    upper = min(upper, rule_to)
+            elif constraint_type == "fixed_date":
+                fixed_date = _parse_date(scope.get("date") or scope.get("date_from"))
+                if fixed_date:
+                    lower = max(lower, fixed_date)
+                    upper = min(upper, fixed_date)
+        allowed_dates = (
+            [lower + timedelta(days=offset) for offset in range((upper - lower).days + 1)]
+            if lower <= upper
+            else []
+        )
+        own_choices: list[tuple[dict[str, Any], cp_model.IntVar]] = []
+        for candidate_date in allowed_dates:
+            for start_time, end_time in _candidate_clock_windows(session):
+                slot_id = _slot_for_date(slots, candidate_date, start_time, end_time)
+                if defines_time_slots and not slot_id:
+                    continue
+                blocked = False
+                for rule in matching_rules:
+                    if rule.get("hardness") != "hard":
+                        continue
+                    scope = rule.get("scope") or {}
+                    slot_ids = {str(item) for item in scope.get("slot_ids") or [] if item}
+                    if scope.get("slot_id"):
+                        slot_ids.add(str(scope["slot_id"]))
+                    constraint_type = rule.get("constraint_type")
+                    if (constraint_type == "fixed_slot" and slot_id not in slot_ids) or (
+                        constraint_type in {"forbidden_slot", "unavailable_slot"}
+                        and slot_id in slot_ids
+                    ):
+                        blocked = True
+                        break
+                if blocked or _event_blocks_option(event, session, candidate_date, slot_id):
+                    continue
+                start_minute = _clock_minutes(start_time)
+                duration = max(1, _clock_minutes(end_time) - start_minute)
+                option = {
+                    "lesson_date": candidate_date,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "slot_business_id": slot_id or str(session.get("suggested_slot_id") or ""),
+                    "absolute_start": candidate_date.toordinal() * 1440 + start_minute,
+                    "duration": duration,
+                }
+                variable = model.new_bool_var(
+                    f"grid_{course_id}_{candidate_date.toordinal()}_{start_minute}"
+                )
+                own_choices.append((option, variable))
+                time_key = (
+                    candidate_date.toordinal(),
+                    start_time,
+                    end_time,
+                )
+                room_capacity.setdefault(time_key, []).append(variable)
+                for class_key in _class_scope_keys(session):
+                    class_capacity.setdefault((class_key, *time_key), []).append(variable)
+                if "teacher_no_overlap" in solver_rules:
+                    for teacher_id in _session_teacher_ids(session):
+                        if _is_person(teachers.get(teacher_id, {})):
+                            person_capacity.setdefault((teacher_id, *time_key), []).append(variable)
+                if "calendar_no_overlap" in solver_rules:
+                    for calendar_user_id in _calendar_user_ids(session, teachers):
+                        calendar_capacity.setdefault((calendar_user_id, *time_key), []).append(
+                            variable
+                        )
+                delta = abs((candidate_date - original_date).days)
+                if delta:
+                    objective_terms.append(change_weight * delta * variable)
+
+                for rule in matching_rules:
+                    if rule.get("hardness") != "soft":
+                        continue
+                    scope = rule.get("scope") or {}
+                    constraint_type = rule.get("constraint_type")
+                    penalized = False
+                    if constraint_type in {"fixed_date", "preferred_date"}:
+                        preferred = _parse_date(scope.get("date") or scope.get("date_from"))
+                        penalized = bool(preferred and candidate_date != preferred)
+                    elif constraint_type in {
+                        "date_window",
+                        "date_range",
+                        "allowed_date_range",
+                    }:
+                        rule_from = _parse_date(scope.get("date_from"))
+                        rule_to = _parse_date(scope.get("date_to"))
+                        symmetric_days = scope.get("date_window_days", scope.get("days"))
+                        if symmetric_days is not None:
+                            rule_from = original_date - timedelta(days=int(symmetric_days))
+                            rule_to = original_date + timedelta(days=int(symmetric_days))
+                        penalized = bool(
+                            (rule_from and candidate_date < rule_from)
+                            or (rule_to and candidate_date > rule_to)
+                        )
+                    elif constraint_type in {
+                        "fixed_slot",
+                        "preferred_slot",
+                        "forbidden_slot",
+                        "unavailable_slot",
+                    }:
+                        rule_slots = {str(item) for item in scope.get("slot_ids") or [] if item}
+                        if scope.get("slot_id"):
+                            rule_slots.add(str(scope["slot_id"]))
+                        matches = slot_id in rule_slots
+                        penalized = (
+                            not matches
+                            if constraint_type in {"fixed_slot", "preferred_slot"}
+                            else matches
+                        )
+                    if penalized:
+                        objective_terms.append(max(1, int(rule.get("weight") or 1)) * variable)
+        if own_choices:
+            model.add_exactly_one(variable for _option, variable in own_choices)
+            choices[course_id] = own_choices
+        else:
+            model.add_bool_or([])
+
+    if "room_no_overlap" in solver_rules:
+        for variables in room_capacity.values():
+            model.add(sum(variables) <= len(rooms))
+    for variables in class_capacity.values():
+        model.add_at_most_one(variables)
+    if "teacher_no_overlap" in solver_rules:
+        for variables in person_capacity.values():
+            model.add_at_most_one(variables)
+    if "calendar_no_overlap" in solver_rules:
+        for variables in calendar_capacity.values():
+            model.add_at_most_one(variables)
+
+    result["presolve_infeasible"] = False
+    model.minimize(sum(objective_terms))
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = float(payload.get("time_limit_seconds", 30))
+    solver.parameters.random_seed = int(payload.get("random_seed", 2026))
+    solver.parameters.num_search_workers = max(1, int(payload.get("search_workers", 8)))
+    status_code = solver.solve(model)
+    result["model_status"] = STATUS_NAMES.get(status_code, "UNKNOWN")
+    result["wall_time_seconds"] = solver.wall_time
+    if status_code not in {cp_model.OPTIMAL, cp_model.FEASIBLE}:
+        if status_code == cp_model.INFEASIBLE:
+            result["conflict_rule_ids"], result["priority_explanations"] = (
+                _date_infeasible_diagnostics(payload)
+            )
+            result["priority_rule_ids"] = list(result["conflict_rule_ids"])
+        return result
+
+    result["objective_value"] = solver.objective_value
+    result["best_bound"] = solver.best_objective_bound
+    selected_options: dict[str, dict[str, Any]] = {}
+    for course_id, own_choices in choices.items():
+        selected_options[course_id] = next(
+            option for option, variable in own_choices if solver.boolean_value(variable)
+        )
+
+    room_end = {room_id: -1 for room_id in rooms}
+    assigned_rooms: dict[str, str] = {}
+    all_sessions = {str(item["business_id"]): item for item in payload.get("course_sessions", [])}
+    for course_id, room_option in sorted(
+        selected_options.items(),
+        key=lambda item: (
+            int(item[1]["absolute_start"]),
+            int(item[1]["absolute_start"]) + int(item[1]["duration"]),
+            item[0],
+        ),
+    ):
+        start = int(room_option["absolute_start"])
+        end = start + int(room_option["duration"])
+        session = all_sessions[course_id]
+        preferred_rooms = [
+            str(item)
+            for item in session.get("candidate_room_business_ids") or []
+            if str(item) in rooms
+        ]
+        original = str(session.get("original_room_business_id") or "")
+        if original in rooms and original not in preferred_rooms:
+            preferred_rooms.append(original)
+        available = [
+            room_id for room_id, occupied_until in room_end.items() if occupied_until <= start
+        ]
+        candidates = available if "room_no_overlap" in solver_rules else list(rooms)
+        chosen_room = next((item for item in preferred_rooms if item in candidates), None)
+        if chosen_room is None:
+            chosen_room = min(candidates, key=lambda item: (room_end[item], item))
+        assigned_rooms[course_id] = chosen_room
+        room_end[chosen_room] = end
+
+    for session in sessions:
+        course_id = str(session["business_id"])
+        selected_option = selected_options.get(course_id)
+        if selected_option is None:
+            continue
+        result["assignments"].append(
+            {
+                "course_session_id": session["id"],
+                "course_business_id": course_id,
+                "class_business_id": session["class_business_id"],
+                "teacher_business_id": session["teacher_business_id"],
+                "lesson_date": selected_option["lesson_date"].isoformat(),
+                "room_business_id": assigned_rooms[course_id],
+                "slot_business_id": selected_option["slot_business_id"],
+                "start_time": selected_option["start_time"],
+                "end_time": selected_option["end_time"],
+            }
+        )
+    return result
+
+
 def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
+    if _can_use_discrete_date_grid(payload):
+        return _solve_date_aware_grid(payload)
     model = cp_model.CpModel()
     sessions = _selected_sessions(payload)
     rooms = {
         item["business_id"]: item for item in payload.get("rooms", []) if item.get("is_active")
     }
     teachers = {item["business_id"]: item for item in payload.get("teachers", [])}
+    slot_details = {
+        str(item["business_id"]): item
+        for item in payload.get("time_slots", [])
+        if item.get("is_open")
+    }
     # 时段标识按 (星期, 开始, 结束) 定位：同一开始时间可以有多种时长。
     slots = {
         (item.get("weekday"), item.get("start_time"), item.get("end_time")): item["business_id"]
-        for item in payload.get("time_slots", [])
-        if item.get("is_open")
+        for item in slot_details.values()
     }
     defines_time_slots = bool(payload.get("time_slots"))
     rules = _normalized_rules(payload)
@@ -644,34 +1020,44 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
 
     result = _empty_result(presolved=True)
     if not sessions or not rooms:
-        result["conflict_rule_ids"], result["priority_explanations"] = (
-            _date_infeasible_diagnostics(payload)
-        )
-        result["priority_rule_ids"] = list(result["conflict_rule_ids"])
-        return result
-    capacity_explanations = _date_capacity_explanations(payload)
-    if capacity_explanations:
-        result["conflict_rule_ids"], result["priority_explanations"] = (
-            _date_infeasible_diagnostics(payload)
+        result["conflict_rule_ids"], result["priority_explanations"] = _date_infeasible_diagnostics(
+            payload
         )
         result["priority_rule_ids"] = list(result["conflict_rule_ids"])
         return result
 
-    date_vars: dict[str, cp_model.IntVar] = {}
-    start_vars: dict[str, cp_model.IntVar] = {}
+    previous_assignments = list(payload.get("previous_assignments", []))
+    selected_business_ids = {str(item["business_id"]) for item in sessions}
+    has_fixed_parent_rooms = any(
+        str(item.get("course_business_id") or "") not in selected_business_ids
+        for item in previous_assignments
+    )
+    room_constraint_types = {
+        "fixed_room",
+        "preferred_room",
+        "forbidden_room",
+        "unavailable_room",
+    }
+    explicit_room_choices = bool(
+        has_fixed_parent_rooms
+        or event.get("event_type") == "room_outage"
+        or any(session.get("is_locked") for session in sessions)
+        or any(rule.get("constraint_type") in room_constraint_types for rule in rules)
+    )
+
     intervals: dict[str, cp_model.IntervalVar] = {}
+    time_choices: dict[str, cp_model.IntVar] = {}
+    time_options: dict[str, list[dict[str, Any]]] = {}
     room_choices: dict[tuple[str, str], cp_model.IntVar] = {}
     room_intervals: dict[str, list[cp_model.IntervalVar]] = {room_id: [] for room_id in rooms}
+    aggregate_room_intervals: list[cp_model.IntervalVar] = []
     class_intervals: dict[tuple[str, str, str], list[cp_model.IntervalVar]] = {}
     calendar_intervals: dict[str, list[cp_model.IntervalVar]] = {}
     person_intervals: dict[str, list[cp_model.IntervalVar]] = {}
     objective_terms: list[Any] = []
 
-    selected_business_ids = {str(item["business_id"]) for item in sessions}
-    all_sessions = {
-        str(item["business_id"]): item for item in payload.get("course_sessions", [])
-    }
-    for index, previous in enumerate(payload.get("previous_assignments", [])):
+    all_sessions = {str(item["business_id"]): item for item in payload.get("course_sessions", [])}
+    for index, previous in enumerate(previous_assignments):
         course_id = str(previous.get("course_business_id") or "")
         if not course_id or course_id in selected_business_ids:
             continue
@@ -679,8 +1065,15 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         lesson_date = _parse_date(previous.get("lesson_date"))
         if not course or not lesson_date:
             continue
-        fixed_start = str(course.get("fixed_start_time") or "")
-        fixed_end = str(course.get("fixed_end_time") or "")
+        assigned_slot = slot_details.get(str(previous.get("slot_business_id") or ""))
+        if assigned_slot:
+            fixed_start = str(assigned_slot.get("start_time") or "")
+            fixed_end = str(assigned_slot.get("end_time") or "")
+        else:
+            windows = _candidate_clock_windows(course)
+            if not windows:
+                continue
+            fixed_start, fixed_end = windows[0]
         if not fixed_start or not fixed_end:
             continue
         start_minute = _clock_minutes(fixed_start)
@@ -691,21 +1084,20 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
             f"parent_interval_{index}_{course_id}",
         )
         room_id = str(previous.get("room_business_id") or "")
-        if room_id in room_intervals:
+        if explicit_room_choices and room_id in room_intervals:
             room_intervals[room_id].append(fixed_interval)
-        class_intervals.setdefault(_class_scope_key(course), []).append(fixed_interval)
-        teacher_id = str(course["teacher_business_id"])
-        teacher = teachers.get(teacher_id, {})
-        calendar_user_id = str(
-            course.get("calendar_user_id") or teacher.get("calendar_user_id") or ""
-        ).strip()
-        if calendar_user_id:
+        else:
+            aggregate_room_intervals.append(fixed_interval)
+        for class_key in _class_scope_keys(course):
+            class_intervals.setdefault(class_key, []).append(fixed_interval)
+        for calendar_user_id in _calendar_user_ids(course, teachers):
             calendar_intervals.setdefault(calendar_user_id, []).append(fixed_interval)
-        if teacher_id and _is_person(teacher):
-            person_intervals.setdefault(teacher_id, []).append(fixed_interval)
+        for teacher_id in _session_teacher_ids(course):
+            if _is_person(teachers.get(teacher_id, {})):
+                person_intervals.setdefault(teacher_id, []).append(fixed_interval)
 
     for session in sessions:
-        course_id = session["business_id"]
+        course_id = str(session["business_id"])
         original_date = _parse_date(session.get("lesson_date"))
         if original_date is None:
             model.add_bool_or([])
@@ -716,9 +1108,7 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
             lower = max(lower, request_date_from)
         if request_date_to:
             upper = min(upper, request_date_to)
-        matching_rules = [
-            rule for rule in rules if _session_matches_rule(session, "", rule)
-        ]
+        matching_rules = [rule for rule in rules if _session_matches_rule(session, "", rule)]
         for rule in matching_rules:
             if rule.get("hardness") != "hard":
                 continue
@@ -748,206 +1138,267 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
             if lower <= upper
             else []
         )
-
-        fixed_start = str(session["fixed_start_time"])
-        fixed_end = str(session["fixed_end_time"])
-        for rule in matching_rules:
-            if rule.get("hardness") != "hard":
-                continue
-            scope = rule.get("scope") or {}
-            slot_ids = set(scope.get("slot_ids") or [])
-            if scope.get("slot_id"):
-                slot_ids.add(scope["slot_id"])
-            constraint_type = rule.get("constraint_type")
-            if constraint_type in {"fixed_slot", "forbidden_slot", "unavailable_slot"}:
-                matching_dates = {
-                    candidate
-                    for candidate in allowed_dates
-                    if slots.get((WEEKDAYS[candidate.weekday()], fixed_start, fixed_end))
-                    in slot_ids
-                }
-                if constraint_type == "fixed_slot":
-                    allowed_dates = [item for item in allowed_dates if item in matching_dates]
-                else:
-                    allowed_dates = [item for item in allowed_dates if item not in matching_dates]
-        allowed_dates = [
-            item
-            for item in allowed_dates
-            if not _event_blocks_date(event, session, item, slots)
-        ]
-        if defines_time_slots:
-            # 只保留该「星期 + 起止时刻」确实存在且开放的日期，否则会把课排到
-            # 未开放的日子，并回填一个星期对不上的时段标识。
-            # 守卫看的是「数据集有没有定义时段」，不能看 slots 是否为空——
-            # 时段全部关闭时 slots 正好是空的，那恰恰是必须拦住的情况。
-            allowed_dates = [
-                item
-                for item in allowed_dates
-                if _slot_for_date(slots, item, fixed_start, fixed_end)
-            ]
         if session.get("is_locked"):
             allowed_dates = [item for item in allowed_dates if item == original_date]
-        if not allowed_dates:
+
+        windows = _candidate_clock_windows(session)
+        if session.get("is_locked") and windows:
+            fixed_window = (
+                str(session.get("fixed_start_time") or ""),
+                str(session.get("fixed_end_time") or ""),
+            )
+            windows = [fixed_window] if fixed_window in windows else [windows[0]]
+
+        options: list[dict[str, Any]] = []
+        for candidate_date in allowed_dates:
+            for start_time, end_time in windows:
+                slot_id = _slot_for_date(slots, candidate_date, start_time, end_time)
+                if defines_time_slots and not slot_id:
+                    continue
+                blocked = False
+                for rule in matching_rules:
+                    if rule.get("hardness") != "hard":
+                        continue
+                    scope = rule.get("scope") or {}
+                    slot_ids = {str(item) for item in scope.get("slot_ids") or [] if item}
+                    if scope.get("slot_id"):
+                        slot_ids.add(str(scope["slot_id"]))
+                    constraint_type = rule.get("constraint_type")
+                    if (constraint_type == "fixed_slot" and slot_id not in slot_ids) or (
+                        constraint_type in {"forbidden_slot", "unavailable_slot"}
+                        and slot_id in slot_ids
+                    ):
+                        blocked = True
+                if blocked or _event_blocks_option(event, session, candidate_date, slot_id):
+                    continue
+                start_minute = _clock_minutes(start_time)
+                duration = max(1, _clock_minutes(end_time) - start_minute)
+                options.append(
+                    {
+                        "lesson_date": candidate_date,
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "slot_business_id": slot_id or str(session.get("suggested_slot_id") or ""),
+                        "absolute_start": candidate_date.toordinal() * 1440 + start_minute,
+                        "duration": duration,
+                    }
+                )
+        if not options:
             model.add_bool_or([])
             continue
 
-        ordinals = sorted(item.toordinal() for item in allowed_dates)
+        choice_var = model.new_int_var(0, len(options) - 1, f"time_choice_{course_id}")
+        ordinals = sorted({item["lesson_date"].toordinal() for item in options})
         day_var = model.new_int_var_from_domain(
             cp_model.Domain.from_values(ordinals), f"day_{course_id}"
         )
-        start_minute = _clock_minutes(fixed_start)
-        duration = max(1, _clock_minutes(fixed_end) - start_minute)
-        start_var = model.new_int_var(
-            ordinals[0] * 1440 + start_minute,
-            ordinals[-1] * 1440 + start_minute,
-            f"start_{course_id}",
+        start_values = [int(item["absolute_start"]) for item in options]
+        duration_values = [int(item["duration"]) for item in options]
+        end_values = [int(item["absolute_start"]) + int(item["duration"]) for item in options]
+        start_var = model.new_int_var(min(start_values), max(start_values), f"start_{course_id}")
+        duration_var = model.new_int_var(
+            min(duration_values), max(duration_values), f"duration_{course_id}"
         )
-        model.add(start_var == day_var * 1440 + start_minute)
-        interval = model.new_fixed_size_interval_var(start_var, duration, f"interval_{course_id}")
-        date_vars[course_id] = day_var
-        start_vars[course_id] = start_var
+        end_var = model.new_int_var(min(end_values), max(end_values), f"end_{course_id}")
+        model.add_element(
+            choice_var, [item["lesson_date"].toordinal() for item in options], day_var
+        )
+        model.add_element(choice_var, start_values, start_var)
+        model.add_element(choice_var, duration_values, duration_var)
+        model.add_element(choice_var, end_values, end_var)
+        interval = model.new_interval_var(start_var, duration_var, end_var, f"interval_{course_id}")
         intervals[course_id] = interval
+        if not explicit_room_choices:
+            aggregate_room_intervals.append(interval)
+        time_choices[course_id] = choice_var
+        time_options[course_id] = options
 
-        max_date_delta = max(abs(item - original_date).days for item in allowed_dates)
-        date_delta = model.new_int_var(0, max_date_delta, f"date_delta_{course_id}")
-        model.add_abs_equality(date_delta, day_var - original_date.toordinal())
+        date_deltas = [abs((item["lesson_date"] - original_date).days) for item in options]
+        date_delta = model.new_int_var(
+            min(date_deltas), max(date_deltas), f"date_delta_{course_id}"
+        )
+        model.add_element(choice_var, date_deltas, date_delta)
         objective_terms.append(change_weight * date_delta)
 
         for rule in matching_rules:
             if rule.get("hardness") != "soft":
                 continue
             constraint_type = rule.get("constraint_type")
-            if constraint_type not in {
+            scope = rule.get("scope") or {}
+            penalties: list[int] | None = None
+            if constraint_type in {
                 "fixed_date",
                 "preferred_date",
                 "date_window",
                 "date_range",
                 "allowed_date_range",
             }:
+                preferred_dates = {item["lesson_date"].toordinal() for item in options}
+                fixed_date = _parse_date(scope.get("date") or scope.get("date_from"))
+                if constraint_type in {"fixed_date", "preferred_date"} and fixed_date:
+                    preferred_dates = {fixed_date.toordinal()}
+                elif constraint_type in {"date_window", "date_range", "allowed_date_range"}:
+                    rule_from = _parse_date(scope.get("date_from"))
+                    rule_to = _parse_date(scope.get("date_to"))
+                    symmetric_days = scope.get("date_window_days", scope.get("days"))
+                    if symmetric_days is not None:
+                        rule_from = original_date - timedelta(days=int(symmetric_days))
+                        rule_to = original_date + timedelta(days=int(symmetric_days))
+                    preferred_dates = {
+                        item["lesson_date"].toordinal()
+                        for item in options
+                        if (not rule_from or item["lesson_date"] >= rule_from)
+                        and (not rule_to or item["lesson_date"] <= rule_to)
+                    }
+                penalties = [
+                    int(item["lesson_date"].toordinal() not in preferred_dates) for item in options
+                ]
+            elif constraint_type in {
+                "fixed_slot",
+                "preferred_slot",
+                "forbidden_slot",
+                "unavailable_slot",
+            }:
+                rule_slot_ids = {str(item) for item in scope.get("slot_ids") or [] if item}
+                if scope.get("slot_id"):
+                    rule_slot_ids.add(str(scope["slot_id"]))
+                prefer_match = constraint_type in {"fixed_slot", "preferred_slot"}
+                penalties = [
+                    int((str(item["slot_business_id"]) in rule_slot_ids) != prefer_match)
+                    for item in options
+                ]
+            if penalties is None:
                 continue
-            scope = rule.get("scope") or {}
-            preferred_dates = set(ordinals)
-            fixed_date = _parse_date(scope.get("date") or scope.get("date_from"))
-            if constraint_type in {"fixed_date", "preferred_date"} and fixed_date:
-                preferred_dates = {fixed_date.toordinal()}
-            elif constraint_type in {"date_window", "date_range", "allowed_date_range"}:
-                rule_from = _parse_date(scope.get("date_from"))
-                rule_to = _parse_date(scope.get("date_to"))
-                symmetric_days = scope.get("date_window_days", scope.get("days"))
-                if symmetric_days is not None:
-                    rule_from = original_date - timedelta(days=int(symmetric_days))
-                    rule_to = original_date + timedelta(days=int(symmetric_days))
-                preferred_dates = {
-                    ordinal
-                    for ordinal in ordinals
-                    if (not rule_from or ordinal >= rule_from.toordinal())
-                    and (not rule_to or ordinal <= rule_to.toordinal())
-                }
-            penalty = model.new_bool_var(f"date_rule_penalty_{course_id}_{rule['business_id']}")
-            for ordinal in ordinals:
-                if ordinal not in preferred_dates:
-                    model.add(day_var != ordinal).only_enforce_if(penalty.Not())
+            penalty = model.new_int_var(
+                0, 1, f"time_rule_penalty_{course_id}_{rule['business_id']}"
+            )
+            model.add_element(choice_var, penalties, penalty)
             objective_terms.append(max(1, int(rule.get("weight") or 1)) * penalty)
 
-        valid_room_choices: list[cp_model.IntVar] = []
-        original_room = session.get("original_room_business_id")
-        fixed_room_ids: set[str] | None = None
-        forbidden_room_ids: set[str] = set()
-        for rule in matching_rules:
-            if rule.get("hardness") != "hard":
-                continue
-            constraint_type = rule.get("constraint_type")
-            rule_room_ids = _rule_room_ids(rule)
-            if constraint_type == "fixed_room":
-                fixed_room_ids = (
-                    rule_room_ids
-                    if fixed_room_ids is None
-                    else fixed_room_ids.intersection(rule_room_ids)
-                )
-            elif constraint_type in {"forbidden_room", "unavailable_room"}:
-                forbidden_room_ids.update(rule_room_ids)
-        if session.get("is_locked") and original_room:
-            locked_room = {str(original_room)}
-            fixed_room_ids = (
-                locked_room if fixed_room_ids is None else fixed_room_ids.intersection(locked_room)
-            )
-        for room_id in rooms:
-            if fixed_room_ids is not None and room_id not in fixed_room_ids:
-                continue
-            if room_id in forbidden_room_ids:
-                continue
-            if event.get("event_type") == "room_outage" and room_id == event.get(
-                "room_business_id"
-            ):
-                if not _event_targets_session(event, session):
-                    pass
-                elif not event.get("slot_business_ids"):
-                    continue
-            selected = model.new_bool_var(f"room_{course_id}_{room_id}")
-            optional = model.new_optional_fixed_size_interval_var(
-                start_var, duration, selected, f"room_interval_{course_id}_{room_id}"
-            )
-            room_choices[(course_id, room_id)] = selected
-            room_intervals[room_id].append(optional)
-            valid_room_choices.append(selected)
-            if original_room and room_id != original_room:
-                objective_terms.append(selected)
-            if (
-                event.get("event_type") == "room_outage"
-                and room_id == event.get("room_business_id")
-                and _event_targets_session(event, session)
-            ):
-                outage_slots = set(event.get("slot_business_ids") or [])
-                for candidate in allowed_dates:
-                    if _slot_for_date(slots, candidate, fixed_start, fixed_end) in outage_slots:
-                        model.add(day_var != candidate.toordinal()).only_enforce_if(selected)
+        if explicit_room_choices:
+            valid_room_choices: list[cp_model.IntVar] = []
+            source_rooms = {
+                str(item) for item in session.get("candidate_room_business_ids") or [] if item
+            }
+            original_room = str(session.get("original_room_business_id") or "")
+            if original_room:
+                source_rooms.add(original_room)
+            fixed_room_ids: set[str] | None = None
+            forbidden_room_ids: set[str] = set()
             for rule in matching_rules:
-                if rule.get("hardness") != "soft":
+                if rule.get("hardness") != "hard":
                     continue
                 constraint_type = rule.get("constraint_type")
                 rule_room_ids = _rule_room_ids(rule)
-                penalized = (
-                    constraint_type in {"fixed_room", "preferred_room"}
-                    and room_id not in rule_room_ids
-                ) or (
-                    constraint_type in {"forbidden_room", "unavailable_room"}
-                    and room_id in rule_room_ids
+                if constraint_type == "fixed_room":
+                    fixed_room_ids = (
+                        rule_room_ids
+                        if fixed_room_ids is None
+                        else fixed_room_ids.intersection(rule_room_ids)
+                    )
+                elif constraint_type in {"forbidden_room", "unavailable_room"}:
+                    forbidden_room_ids.update(rule_room_ids)
+            if session.get("is_locked") and original_room:
+                locked_room = {original_room}
+                fixed_room_ids = (
+                    locked_room
+                    if fixed_room_ids is None
+                    else fixed_room_ids.intersection(locked_room)
                 )
-                if penalized:
-                    objective_terms.append(max(1, int(rule.get("weight") or 1)) * selected)
-        if valid_room_choices:
-            model.add_exactly_one(valid_room_choices)
-        else:
-            model.add_bool_or([])
+
+            event_from = _parse_date(event.get("date_from"))
+            event_to = _parse_date(event.get("date_to"))
+            for room_id in rooms:
+                if fixed_room_ids is not None and room_id not in fixed_room_ids:
+                    continue
+                if room_id in forbidden_room_ids:
+                    continue
+                room_event = (
+                    event.get("event_type") == "room_outage"
+                    and room_id == event.get("room_business_id")
+                    and _event_targets_session(event, session)
+                )
+                if (
+                    room_event
+                    and not event.get("slot_business_ids")
+                    and not event_from
+                    and not event_to
+                ):
+                    continue
+                selected = model.new_bool_var(f"room_{course_id}_{room_id}")
+                optional = model.new_optional_interval_var(
+                    start_var,
+                    duration_var,
+                    end_var,
+                    selected,
+                    f"room_interval_{course_id}_{room_id}",
+                )
+                room_choices[(course_id, room_id)] = selected
+                room_intervals[room_id].append(optional)
+                valid_room_choices.append(selected)
+                if source_rooms and room_id not in source_rooms:
+                    objective_terms.append(selected)
+                if room_event:
+                    outage_slots = set(event.get("slot_business_ids") or [])
+                    for option_index, option in enumerate(options):
+                        option_date = option["lesson_date"]
+                        if event_from and option_date < event_from:
+                            continue
+                        if event_to and option_date > event_to:
+                            continue
+                        if outage_slots and option["slot_business_id"] not in outage_slots:
+                            continue
+                        model.add(choice_var != option_index).only_enforce_if(selected)
+                for rule in matching_rules:
+                    if rule.get("hardness") != "soft":
+                        continue
+                    constraint_type = rule.get("constraint_type")
+                    rule_room_ids = _rule_room_ids(rule)
+                    penalized = (
+                        constraint_type in {"fixed_room", "preferred_room"}
+                        and room_id not in rule_room_ids
+                    ) or (
+                        constraint_type in {"forbidden_room", "unavailable_room"}
+                        and room_id in rule_room_ids
+                    )
+                    if penalized:
+                        objective_terms.append(max(1, int(rule.get("weight") or 1)) * selected)
+            if valid_room_choices:
+                model.add_exactly_one(valid_room_choices)
+            else:
+                model.add_bool_or([])
 
     if "room_no_overlap" in solver_rules:
-        for grouped in room_intervals.values():
-            if grouped:
-                model.add_no_overlap(grouped)
+        if explicit_room_choices:
+            for grouped in room_intervals.values():
+                if grouped:
+                    model.add_no_overlap(grouped)
+        elif aggregate_room_intervals:
+            model.add_cumulative(
+                aggregate_room_intervals,
+                [1] * len(aggregate_room_intervals),
+                len(rooms),
+            )
 
     for session in sessions:
-        class_interval = intervals.get(session["business_id"])
-        if class_interval is not None:
-            class_intervals.setdefault(_class_scope_key(session), []).append(class_interval)
+        class_interval = intervals.get(str(session["business_id"]))
+        if class_interval is None:
+            continue
+        for class_key in _class_scope_keys(session):
+            class_intervals.setdefault(class_key, []).append(class_interval)
     for grouped in class_intervals.values():
         if grouped:
             model.add_no_overlap(grouped)
 
-    # 教师维度有两层：自然人（教师标识本身）和具体飞书日程账号。
-    # 教研组不是自然人，只有映射到具体账号后才按个人日历约束。
     for session in sessions:
-        teacher_id = str(session["teacher_business_id"])
-        teacher = teachers.get(session["teacher_business_id"], {})
-        calendar_user_id = str(
-            session.get("calendar_user_id") or teacher.get("calendar_user_id") or ""
-        ).strip()
-        teacher_interval = intervals.get(session["business_id"])
+        teacher_interval = intervals.get(str(session["business_id"]))
         if teacher_interval is None:
             continue
-        if calendar_user_id:
+        for calendar_user_id in _calendar_user_ids(session, teachers):
             calendar_intervals.setdefault(calendar_user_id, []).append(teacher_interval)
-        if teacher_id and _is_person(teacher):
-            person_intervals.setdefault(teacher_id, []).append(teacher_interval)
+        for teacher_id in _session_teacher_ids(session):
+            if _is_person(teachers.get(teacher_id, {})):
+                person_intervals.setdefault(teacher_id, []).append(teacher_interval)
     if "teacher_no_overlap" in solver_rules:
         for grouped in person_intervals.values():
             if grouped:
@@ -975,36 +1426,68 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         return result
     result["objective_value"] = solver.objective_value
     result["best_bound"] = solver.best_objective_bound
+    selected_options = {
+        course_id: options[solver.value(time_choices[course_id])]
+        for course_id, options in time_options.items()
+    }
+    assigned_rooms: dict[str, str] = {}
+    if not explicit_room_choices:
+        room_end = {room_id: -1 for room_id in rooms}
+        for course_id, option in sorted(
+            selected_options.items(),
+            key=lambda item: (
+                int(item[1]["absolute_start"]),
+                int(item[1]["absolute_start"]) + int(item[1]["duration"]),
+                item[0],
+            ),
+        ):
+            start = int(option["absolute_start"])
+            end = start + int(option["duration"])
+            session = all_sessions[course_id]
+            preferred = [
+                str(item)
+                for item in session.get("candidate_room_business_ids") or []
+                if str(item) in rooms
+            ]
+            original = str(session.get("original_room_business_id") or "")
+            if original in rooms and original not in preferred:
+                preferred.append(original)
+            available = [
+                room_id for room_id, occupied_until in room_end.items() if occupied_until <= start
+            ]
+            candidates = available if "room_no_overlap" in solver_rules else list(rooms)
+            chosen_room = next((item for item in preferred if item in candidates), None)
+            if chosen_room is None:
+                chosen_room = min(candidates, key=lambda item: (room_end[item], item))
+            assigned_rooms[course_id] = chosen_room
+            room_end[chosen_room] = end
     for session in sessions:
-        course_id = session["business_id"]
-        result_day_var = date_vars.get(course_id)
-        if result_day_var is None:
+        course_id = str(session["business_id"])
+        selected_choice = time_choices.get(course_id)
+        if selected_choice is None:
             continue
-        lesson_date = date.fromordinal(solver.value(result_day_var))
-        room_id = next(
-            room_id
-            for candidate_course, room_id in room_choices
-            if candidate_course == course_id
-            and solver.boolean_value(room_choices[(candidate_course, room_id)])
-        )
-        slot_id = slots.get(
-            (
-                WEEKDAYS[lesson_date.weekday()],
-                str(session["fixed_start_time"]),
-                str(session["fixed_end_time"]),
+        option = selected_options[course_id]
+        room_id = (
+            next(
+                room_id
+                for candidate_course, room_id in room_choices
+                if candidate_course == course_id
+                and solver.boolean_value(room_choices[(candidate_course, room_id)])
             )
+            if explicit_room_choices
+            else assigned_rooms[course_id]
         )
-        if not slot_id:
-            slot_id = str(session.get("suggested_slot_id") or "")
         result["assignments"].append(
             {
                 "course_session_id": session["id"],
                 "course_business_id": course_id,
                 "class_business_id": session["class_business_id"],
                 "teacher_business_id": session["teacher_business_id"],
-                "lesson_date": lesson_date.isoformat(),
+                "lesson_date": option["lesson_date"].isoformat(),
                 "room_business_id": room_id,
-                "slot_business_id": slot_id,
+                "slot_business_id": option["slot_business_id"],
+                "start_time": option["start_time"],
+                "end_time": option["end_time"],
             }
         )
     return result
@@ -1038,15 +1521,16 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
         room_id = str(previous.get("room_business_id") or "")
         if room_id:
             busy_rooms.add((room_id, slot_id))
-        teacher_id = str(course.get("teacher_business_id") or "")
-        if teacher_id and _is_person(teachers.get(teacher_id, {})):
-            busy_teachers.add((teacher_id, slot_id))
-        busy_classes.add((_class_scope_key(course), slot_id))
+        for teacher_id in _session_teacher_ids(course):
+            if _is_person(teachers.get(teacher_id, {})):
+                busy_teachers.add((teacher_id, slot_id))
+        for class_key in _class_scope_keys(course):
+            busy_classes.add((class_key, slot_id))
 
     for course in sessions:
         feasible: list[cp_model.IntVar] = []
-        course_teacher = str(course.get("teacher_business_id") or "")
-        course_class = _class_scope_key(course)
+        course_teachers = _session_teacher_ids(course)
+        course_classes = _class_scope_keys(course)
         for room_id, room in rooms.items():
             if not room["is_active"]:
                 continue
@@ -1055,9 +1539,9 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
                     continue
                 if (room_id, slot_id) in busy_rooms:
                     continue
-                if (course_teacher, slot_id) in busy_teachers:
+                if any((teacher_id, slot_id) in busy_teachers for teacher_id in course_teachers):
                     continue
-                if (course_class, slot_id) in busy_classes:
+                if any((class_key, slot_id) in busy_classes for class_key in course_classes):
                     continue
                 variable = model.new_bool_var(f"x_{course['business_id']}_{room_id}_{slot_id}")
                 variables[(course["business_id"], room_id, slot_id)] = variable
@@ -1088,16 +1572,16 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
                 variable
                 for (course_id, room_id, current_slot), variable in variables.items()
                 if current_slot == slot_id
-                and session_by_id[course_id]["teacher_business_id"] == teacher_id
+                and teacher_id in _session_teacher_ids(session_by_id[course_id])
             )
-    class_ids = {_class_scope_key(item) for item in sessions}
+    class_ids = {key for item in sessions for key in _class_scope_keys(item)}
     for class_id in class_ids:
         for slot_id in slots:
             model.add_at_most_one(
                 variable
                 for (course_id, room_id, current_slot), variable in variables.items()
                 if current_slot == slot_id
-                and _class_scope_key(session_by_id[course_id]) == class_id
+                and class_id in _class_scope_keys(session_by_id[course_id])
             )
     for room_id in rooms:
         for slot_id in slots:
@@ -1125,7 +1609,7 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
             actor_matches = (
                 not actor_ids
                 or course_id in actor_ids
-                or course["teacher_business_id"] in actor_ids
+                or bool(actor_ids.intersection(_session_teacher_ids(course)))
                 or course["class_business_id"] in actor_ids
                 or room_id in actor_ids
             )
@@ -1170,19 +1654,17 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
             actor_matches = (
                 not actor_ids
                 or course_id in actor_ids
-                or course["teacher_business_id"] in actor_ids
+                or bool(actor_ids.intersection(_session_teacher_ids(course)))
                 or course["class_business_id"] in actor_ids
                 or room_id in actor_ids
             )
             if not actor_matches:
                 continue
             penalized = (
-                constraint_type in {"forbidden_slot", "unavailable_slot"}
-                and slot_id in slot_ids
-            ) or (
-                constraint_type in {"fixed_slot", "preferred_slot"}
-                and slot_id not in slot_ids
-            ) or (constraint_type == "fixed_room" and room_id != scope.get("room_id"))
+                (constraint_type in {"forbidden_slot", "unavailable_slot"} and slot_id in slot_ids)
+                or (constraint_type in {"fixed_slot", "preferred_slot"} and slot_id not in slot_ids)
+                or (constraint_type == "fixed_room" and room_id != scope.get("room_id"))
+            )
             if penalized:
                 objective_terms.append(weight * variable)
 
@@ -1192,7 +1674,7 @@ def _build_model(payload: dict[str, Any], enabled_rule_ids: set[str] | None = No
                 for course in sessions
                 if not actor_ids
                 or course["business_id"] in actor_ids
-                or course["teacher_business_id"] in actor_ids
+                or bool(actor_ids.intersection(_session_teacher_ids(course)))
                 or course["class_business_id"] in actor_ids
             ]
             matching_courses.sort(key=lambda item: item["business_id"])
@@ -1314,9 +1796,7 @@ def solve_problem(payload: dict[str, Any]) -> dict[str, Any]:
         return _solve_date_aware(payload)
     result = _solve_once(payload)
     if result["model_status"] == "INFEASIBLE":
-        priority_ids, explanations = _priority_recommendation(
-            payload, result["conflict_rule_ids"]
-        )
+        priority_ids, explanations = _priority_recommendation(payload, result["conflict_rule_ids"])
         result["priority_rule_ids"] = priority_ids
         result["priority_explanations"] = explanations
     if result["model_status"] != "INFEASIBLE" or len(result["conflict_rule_ids"]) < 2:

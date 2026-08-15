@@ -67,7 +67,7 @@ const DELETE_DOUBLE_CONFIRM_THRESHOLD = 100;
 
 type MasterResource = "teachers" | "class-groups" | "rooms" | "time-slots" | "course-sessions";
 type EntityKind = "teacher" | "class" | "room" | "slot";
-type CourseColumnKey = "business_id" | "business_line" | "product_type" | "lesson_name" | "fixed_time";
+type CourseColumnKey = "business_id" | "business_line" | "product_type" | "stage" | "lesson_name" | "candidate_time";
 type EntityDialogMode = "create" | "edit";
 type CourseDialogMode = "create" | "edit";
 type CourseBatchAction = "date" | "room" | "delete";
@@ -151,15 +151,17 @@ const COURSE_OPTIONAL_COLUMNS: Array<{ key: CourseColumnKey; label: string }> = 
   { key: "business_id", label: "课程 ID" },
   { key: "business_line", label: "业务线" },
   { key: "product_type", label: "班型" },
+  { key: "stage", label: "编排阶段" },
   { key: "lesson_name", label: "课节名称" },
-  { key: "fixed_time", label: "固定时段" },
+  { key: "candidate_time", label: "候选时段" },
 ];
 const DEFAULT_COURSE_COLUMNS: Record<CourseColumnKey, boolean> = {
   business_id: false,
   business_line: true,
   product_type: true,
+  stage: true,
   lesson_name: true,
-  fixed_time: true,
+  candidate_time: true,
 };
 
 function emptyCourseDraft(campusId = ""): CourseDraft {
@@ -212,6 +214,31 @@ function draftFromCourse(course: CourseSessionResponse): CourseDraft {
     calendarUserId: course.calendar_user_id ?? "",
     isLocked: course.is_locked ?? false,
   };
+}
+
+function courseProducts(course: CourseSessionResponse): string[] {
+  return Array.from(new Set([...(course.product_types ?? []), course.product_type ?? ""].filter(Boolean)));
+}
+
+function courseTeachers(course: CourseSessionResponse): string[] {
+  return Array.from(new Set([...(course.teacher_business_ids ?? []), course.teacher_business_id].filter(Boolean)));
+}
+
+function courseLessons(course: CourseSessionResponse): string[] {
+  return Array.from(new Set([...(course.lesson_names ?? []), course.lesson_name ?? ""].filter(Boolean)));
+}
+
+function courseStages(course: CourseSessionResponse): string[] {
+  return Array.from(new Set([...(course.stages ?? []), course.stage ?? ""].filter(Boolean)));
+}
+
+function courseClockWindows(course: CourseSessionResponse): string[] {
+  const windows = (course.candidate_clock_windows ?? []).map((item) => `${item.start_time ?? ""}-${item.end_time ?? ""}`);
+  return windows.length ? windows : [`${course.fixed_start_time ?? ""}-${course.fixed_end_time ?? ""}`].filter((item) => item !== "-");
+}
+
+function courseRooms(course: CourseSessionResponse): string[] {
+  return Array.from(new Set([...(course.candidate_room_business_ids ?? []), course.original_room_business_id ?? ""].filter(Boolean)));
 }
 
 export function MasterDataPage() {
@@ -367,21 +394,21 @@ export function MasterDataPage() {
     const unique = (values: string[]) => Array.from(new Set(values.filter(Boolean))).sort((a, b) => a.localeCompare(b, "zh-CN"));
     return {
       businessLines: unique(source.map((item) => item.business_line ?? "")),
-      productTypes: unique(source.map((item) => item.product_type ?? "")),
+      productTypes: unique(source.flatMap(courseProducts)),
       classes: unique(source.map((item) => item.class_business_id)),
-      teachers: unique(source.map((item) => item.teacher_business_id)),
+      teachers: unique(source.flatMap(courseTeachers)),
     };
   }, [courseQuery.data]);
 
   const filteredCourses = useMemo(() => {
     const query = courseSearch.trim().toLocaleLowerCase();
     return (courseQuery.data ?? []).filter((course) => {
-      const searchable = [course.business_id, course.class_business_id, course.teacher_business_id, course.lesson_name ?? "", course.subject ?? "", course.business_line ?? "", course.product_type ?? "", course.original_room_business_id ?? ""].join(" ").toLocaleLowerCase();
+      const searchable = [course.business_id, course.class_business_id, course.teacher_business_id, course.lesson_name ?? "", course.subject ?? "", course.business_line ?? "", course.product_type ?? "", ...courseProducts(course), ...courseLessons(course), ...courseRooms(course)].join(" ").toLocaleLowerCase();
       return (!query || searchable.includes(query))
         && (!businessLineFilter || course.business_line === businessLineFilter)
-        && (!productTypeFilter || course.product_type === productTypeFilter)
+        && (!productTypeFilter || courseProducts(course).includes(productTypeFilter))
         && (!classFilter || course.class_business_id === classFilter)
-        && (!teacherFilter || course.teacher_business_id === teacherFilter)
+        && (!teacherFilter || courseTeachers(course).includes(teacherFilter))
         && (!dateFilter || course.lesson_date === dateFilter);
     });
   }, [businessLineFilter, classFilter, courseQuery.data, courseSearch, dateFilter, productTypeFilter, teacherFilter]);
@@ -651,14 +678,15 @@ export function MasterDataPage() {
   const courseColumns: ColumnDef<CourseSessionResponse>[] = [
     ...(visibleCourseColumns.business_id ? [{ accessorKey: "business_id", header: () => <ColumnHeader>课程 ID</ColumnHeader>, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <CopyableId value={row.original.business_id} className="w-32" /> } as ColumnDef<CourseSessionResponse>] : []),
     ...(visibleCourseColumns.business_line ? [{ accessorKey: "business_line", header: () => <ColumnHeader>业务线</ColumnHeader>, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TableText value={row.original.business_line} className="w-16" /> } as ColumnDef<CourseSessionResponse>] : []),
-    ...(visibleCourseColumns.product_type ? [{ accessorKey: "product_type", header: () => <ColumnHeader>班型</ColumnHeader>, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TableText value={row.original.product_type} className="w-36" /> } as ColumnDef<CourseSessionResponse>] : []),
+    ...(visibleCourseColumns.product_type ? [{ id: "product_type", header: () => <ColumnHeader>产品班型</ColumnHeader>, accessorFn: (row: CourseSessionResponse) => courseProducts(row).join(" / "), cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TagList values={courseProducts(row.original)} className="w-44" /> } as ColumnDef<CourseSessionResponse>] : []),
     { accessorKey: "class_business_id", header: () => <ColumnHeader>班级标签</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.class_business_id} className="w-32" /> },
-    { accessorKey: "teacher_business_id", header: () => <ColumnHeader>教师</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.teacher_business_id} className="w-32" /> },
-    ...(visibleCourseColumns.lesson_name ? [{ accessorKey: "lesson_name", header: () => <ColumnHeader>课节名称</ColumnHeader>, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TableText value={row.original.lesson_name} className="w-40" /> } as ColumnDef<CourseSessionResponse>] : []),
+    { id: "teacher_business_id", header: () => <ColumnHeader>教师</ColumnHeader>, accessorFn: (row) => courseTeachers(row).join(" / "), cell: ({ row }) => <TagList values={courseTeachers(row.original)} className="w-36" /> },
+    ...(visibleCourseColumns.stage ? [{ id: "stage", header: () => <ColumnHeader>编排阶段</ColumnHeader>, accessorFn: (row: CourseSessionResponse) => courseStages(row).join(" / "), cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TagList values={courseStages(row.original)} className="w-36" /> } as ColumnDef<CourseSessionResponse>] : []),
+    ...(visibleCourseColumns.lesson_name ? [{ id: "lesson_name", header: () => <ColumnHeader>课节名称</ColumnHeader>, accessorFn: (row: CourseSessionResponse) => courseLessons(row).join(" / "), cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TagList values={courseLessons(row.original)} className="w-48" /> } as ColumnDef<CourseSessionResponse>] : []),
     { accessorKey: "session_no", header: () => <ColumnHeader>课次序号</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.session_no} className="w-12 tabular-nums" /> },
     { accessorKey: "lesson_date", header: () => <ColumnHeader>上课日期</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.lesson_date} className="w-24 tabular-nums" /> },
-    ...(visibleCourseColumns.fixed_time ? [{ id: "fixed_time", header: () => <ColumnHeader>固定时段</ColumnHeader>, accessorFn: (row: CourseSessionResponse) => `${row.fixed_start_time ?? ""}-${row.fixed_end_time ?? ""}`, cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TableText value={`${row.original.fixed_start_time ?? ""}-${row.original.fixed_end_time ?? ""}`} className="w-24 tabular-nums" /> } as ColumnDef<CourseSessionResponse>] : []),
-    { accessorKey: "original_room_business_id", header: () => <ColumnHeader>授课教室</ColumnHeader>, cell: ({ row }) => <TableText value={row.original.original_room_business_id} className="w-20" /> },
+    ...(visibleCourseColumns.candidate_time ? [{ id: "candidate_time", header: () => <ColumnHeader>候选时段</ColumnHeader>, accessorFn: (row: CourseSessionResponse) => courseClockWindows(row).join(" / "), cell: ({ row }: { row: { original: CourseSessionResponse } }) => <TagList values={courseClockWindows(row.original)} className="w-36 tabular-nums" /> } as ColumnDef<CourseSessionResponse>] : []),
+    { id: "candidate_rooms", header: () => <ColumnHeader>候选教室</ColumnHeader>, accessorFn: (row) => courseRooms(row).join(" / "), cell: ({ row }) => <TagList values={courseRooms(row.original)} className="w-28" /> },
     ...(!readOnly ? [actionsColumn<CourseSessionResponse>((item) => <RowActions editLabel="编辑课程" editTitle="编辑日期、教室和日程账号" onEdit={() => { setCourseDraft(draftFromCourse(item)); setCourseDialogMode("edit"); }} deleting={deletingKey === `course-sessions:${item.id}`} onDelete={() => confirmDelete({ id: item.id, label: item.business_id, resource: "course-sessions", resourceLabel: "课程" })} />)] : []),
   ];
 
@@ -982,7 +1010,11 @@ function ImportReportPanel({ report, onDismiss }: { report: ImportResult; onDism
     { label: "读取行数", value: String(report.rows_total ?? 0) },
     { label: "教室待确认丢弃", value: String(dropped) },
     { label: "参与排课行数", value: String(report.rows_kept ?? 0) },
-    { label: "去重后课次", value: String(report.rows_deduped ?? 0) },
+    { label: "完全去重后来源行", value: String(report.rows_deduped ?? 0) },
+    { label: "预处理后教学需求", value: String(report.preprocessed_demands ?? 0) },
+    { label: "多产品共享需求", value: String(report.multi_product_demands ?? 0) },
+    { label: "多课节名称需求", value: String(report.multi_lesson_name_demands ?? 0) },
+    { label: "多候选时段需求", value: String(report.multi_slot_demands ?? 0) },
     { label: "本次新建课次", value: String(report.course_sessions) },
   ];
   return (
@@ -1001,6 +1033,10 @@ function ImportReportPanel({ report, onDismiss }: { report: ImportResult; onDism
           </div>
         ))}
       </dl>
+      <p className="border-t border-zinc-200 px-4 py-3 text-xs leading-5 text-zinc-600">
+        导入先按完整 14 列去重，再按“业务线 × 班级标签 × 课次序号 × 上课日期 × 学科”合并为教学需求；
+        产品班型、编排阶段、课节名称、候选时段和候选教室分别保留，不再互相冒充。
+      </p>
       {dropped ? (
         <p className="border-t border-zinc-200 px-4 py-3 text-xs leading-5 text-amber-800">
           「教室-待校区确认」的 {dropped} 行已整行丢弃，涉及 {report.dropped_lesson_groups ?? 0} 个

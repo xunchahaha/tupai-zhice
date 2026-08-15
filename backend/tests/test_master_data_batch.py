@@ -148,8 +148,7 @@ def test_master_data_batch_update_delete_and_reference_guards(
     }
     assert all(teacher_rows[item["id"]]["subject"] == "批量新学科" for item in teachers)
     assert all(
-        teacher_rows[item["id"]]["calendar_user_id"] == "ou_batch_teacher"
-        for item in teachers
+        teacher_rows[item["id"]]["calendar_user_id"] == "ou_batch_teacher" for item in teachers
     )
 
     courses = [
@@ -176,9 +175,7 @@ def test_master_data_batch_update_delete_and_reference_guards(
     ]
 
     with SessionLocal() as db:
-        second_course = db.scalar(
-            select(CourseSession).where(CourseSession.id == courses[1]["id"])
-        )
+        second_course = db.scalar(select(CourseSession).where(CourseSession.id == courses[1]["id"]))
         assert second_course is not None
         revision = int(db.scalar(select(func.max(DataSnapshot.revision))) or 0) + 1
         snapshot = DataSnapshot(
@@ -209,6 +206,7 @@ def test_master_data_batch_update_delete_and_reference_guards(
         )
         db.add(assignment)
         db.commit()
+
         assignment_id = assignment.id
         version_id = version.id
         run_id = run.id
@@ -275,6 +273,59 @@ def test_master_data_batch_update_delete_and_reference_guards(
         db.delete(run)
         db.delete(snapshot)
         db.commit()
+
+
+def test_course_batch_filter_matches_secondary_product_membership(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    campus = client.get("/api/v1/campuses", headers=auth_headers).json()[0]
+    class_group = client.get("/api/v1/class-groups", headers=auth_headers).json()[0]
+    teacher = client.get("/api/v1/teachers", headers=auth_headers).json()[0]
+    room = client.get("/api/v1/rooms", headers=auth_headers).json()[0]
+    course = create_master_record(
+        client,
+        auth_headers,
+        "course-sessions",
+        {
+            "campus_id": campus["id"],
+            "business_id": "BATCH-SHARED-PRODUCT",
+            "business_line": "考研",
+            "product_type": "产品A",
+            "product_types": ["产品A", "产品B"],
+            "class_business_id": class_group["business_id"],
+            "teacher_business_id": teacher["business_id"],
+            "lesson_name": "英语·共享产品课",
+            "lesson_date": "2026-10-10",
+            "fixed_start_time": "09:00",
+            "fixed_end_time": "12:00",
+            "original_room_business_id": room["business_id"],
+        },
+    )
+
+    response = client.post(
+        "/api/v1/course-sessions/batch-update",
+        headers=auth_headers,
+        json={
+            "filter": {"product_type": "产品B"},
+            "expected_count": 1,
+            "lesson_date": "2026-10-11",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["affected_count"] == 1
+    updated = next(
+        item
+        for item in client.get("/api/v1/course-sessions", headers=auth_headers).json()
+        if item["id"] == course["id"]
+    )
+    assert updated["lesson_date"] == "2026-10-11"
+
+    cleanup = client.post(
+        "/api/v1/course-sessions/batch-delete",
+        headers=auth_headers,
+        json={"object_ids": [course["id"]]},
+    )
+    assert cleanup.status_code == 200, cleanup.text
 
 
 def test_member_cannot_use_master_data_batch_write(

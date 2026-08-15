@@ -16,6 +16,7 @@ from app.services.converter_zhengzhou import (
     PLACEHOLDER_ROOM,
     SHEET_NAME,
     WorkbookFormatError,
+    _collect_lesson_rows,
     _read_rows,
     _row_identity,
     _split_placeholder_rows,
@@ -24,9 +25,7 @@ from app.services.converter_zhengzhou import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SAMPLE_WORKBOOK = PROJECT_ROOT / "data" / "imports" / "sample.xlsx"
-OFFICIAL_WORKBOOK = (
-    PROJECT_ROOT / "相关文件" / "郑州考研公职专升本课表数据源_教室班级标签版.xlsx"
-)
+OFFICIAL_WORKBOOK = PROJECT_ROOT / "相关文件" / "郑州考研公职专升本课表数据源_教室班级标签版.xlsx"
 
 HEADERS = (
     "标准业务线",
@@ -315,6 +314,11 @@ def test_official_workbook_import_counts() -> None:
     ]
     assert len(kept) == 36610
     assert len(deduped) == 9340
+    demands, preprocessing = _collect_lesson_rows(list(deduped.values()), "CAMPUS-ZZ")
+    assert len(demands) == 4544
+    assert preprocessing["multi_product_demands"] == 242
+    assert preprocessing["multi_lesson_name_demands"] == 1353
+    assert preprocessing["multi_slot_demands"] == 1868
 
 
 def test_official_workbook_placeholder_drop_deletes_two_whole_business_lines() -> None:
@@ -330,7 +334,7 @@ def test_official_workbook_placeholder_drop_deletes_two_whole_business_lines() -
     _, dropped = _split_placeholder_rows(source_rows)
 
     assert dropped["dropped_rows_by_business_line"] == {"专升本": 487, "公职": 19247}
-    assert dropped["dropped_lessons"] == 1395
+    assert dropped["dropped_lessons"] == 555
     assert dropped["partially_dropped_lesson_groups"] == 0
     lost = dropped["lost_entirely"]
     assert lost["business_lines"] == ["专升本", "公职"]
@@ -437,7 +441,7 @@ def test_rows_removed_from_the_workbook_are_deleted_on_reimport(
 
 
 def test_semantic_duplicates_are_collapsed_and_reported(db: Session, tmp_path: Path) -> None:
-    """同一节课被登记了两个教师：收敛成一条，并在导入报告里报出差异。"""
+    """同一需求的多教师来源完整保留，并在导入报告里标成歧义。"""
     base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
     path = tmp_path / "conflict.xlsx"
     _write_workbook(path, [base, _edit_cell(base, 13, "另一个教研组")])
@@ -449,9 +453,43 @@ def test_semantic_duplicates_are_collapsed_and_reported(db: Session, tmp_path: P
     assert result["rows_deduped"] == 2
     assert result["lessons"] == 1
     assert report["conflicting_lessons"] == 1
-    assert report["discarded_rows"] == 1
-    assert report["examples"][0]["差异字段"] == ["授课教师"]
-    assert db.scalar(select(func.count(CourseSession.id))) == 1
+    assert report["discarded_rows"] == 0
+    assert report["ambiguous_teacher_demands"] == 1
+    assert report["examples"][0]["教师"] == ["另一个教研组", base[13]]
+    session = db.scalar(select(CourseSession))
+    assert session is not None
+    assert session.teacher_business_ids == ["另一个教研组", base[13]]
+    assert session.source_variant_count == 2
+
+
+def test_product_stage_lesson_and_slot_dimensions_are_merged_without_loss(
+    db: Session, tmp_path: Path
+) -> None:
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    variant = _edit_cell(base, 1, "考研·共享产品B")
+    variant = _edit_cell(variant, 5, "强化阶段")
+    variant = _edit_cell(variant, 9, "英语·阅读理解强化")
+    variant = _edit_cell(variant, 11, "14:00-17:00")
+    path = tmp_path / "source-dimensions.xlsx"
+    _write_workbook(path, [base, variant])
+
+    result = import_schedule_workbook(db, path)
+    db.commit()
+
+    session = db.scalar(select(CourseSession))
+    assert session is not None
+    assert result["lessons"] == 1
+    assert session.product_types == sorted([base[1], "考研·共享产品B"])
+    assert session.stages == sorted([base[5], "强化阶段"])
+    assert session.lesson_names == sorted([base[9], "英语·阅读理解强化"])
+    assert session.candidate_clock_windows == [
+        {"start_time": "08:30", "end_time": "11:30"},
+        {"start_time": "14:00", "end_time": "17:00"},
+    ]
+    assert len(session.candidate_slot_ids) == 2
+    assert result["duplicate_lessons"]["multi_product_demands"] == 1
+    assert result["duplicate_lessons"]["multi_lesson_name_demands"] == 1
+    assert result["duplicate_lessons"]["multi_slot_demands"] == 1
 
 
 def test_same_class_twice_in_one_slot_is_reported_as_a_data_conflict(
@@ -498,9 +536,7 @@ def test_one_slot_conflicts_separate_parallel_subjects_from_same_subject_repeats
     assert report["conflicting_groups"] == 2
     assert report["cross_subject_groups"] == 1
     assert report["same_subject_groups"] == 1
-    parallel_example = next(
-        item for item in report["examples"] if item["班级标签"] == base[2]
-    )
+    parallel_example = next(item for item in report["examples"] if item["班级标签"] == base[2])
     assert parallel_example["科目"] == ["数学", "英语"]
     assert parallel_example["科目是否互不相同"] is True
 

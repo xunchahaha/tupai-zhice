@@ -146,12 +146,8 @@ def test_solver_skips_inactive_rooms() -> None:
 
 def test_solver_applies_consecutive_soft_rule() -> None:
     payload = {
-        "teachers": [
-            {"business_id": "T1", "name": "教师甲", "subject": "数学"}
-        ],
-        "rooms": [
-            {"business_id": "R1", "name": "教室1", "is_active": True}
-        ],
+        "teachers": [{"business_id": "T1", "name": "教师甲", "subject": "数学"}],
+        "rooms": [{"business_id": "R1", "name": "教室1", "is_active": True}],
         "time_slots": [
             {"business_id": "S1", "weekday": "周一", "sequence": 1, "is_open": True},
             {"business_id": "S2", "weekday": "周一", "sequence": 2, "is_open": True},
@@ -248,6 +244,67 @@ def test_date_solver_allows_reused_class_label_across_product_types() -> None:
     assert len(result["assignments"]) == 2
 
 
+def test_shared_product_lesson_reserves_every_linked_student_group() -> None:
+    shared = _course("SHARED", class_id="B1", room="R1") | {
+        "product_types": ["产品A", "产品B"],
+        "product_type": "产品A",
+    }
+    product_b_only = _course("B-ONLY", class_id="B1", room="R2", product_type="产品B")
+    payload = _date_payload(
+        [shared, product_b_only],
+        teachers=[{"business_id": "郑州考研英语教研组", "name": "英语组", "is_group": True}],
+        date_window_days=0,
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "INFEASIBLE"
+    assert "SYSTEM-CLASS-NO-OVERLAP" in result["conflict_rule_ids"]
+
+
+def test_product_filter_matches_a_shared_lessons_secondary_product() -> None:
+    shared = _course("SHARED", class_id="B1") | {
+        "product_types": ["产品A", "产品B"],
+        "product_type": "产品A",
+    }
+    result = solve_problem(_date_payload([shared], product_types=["产品B"]))
+    assert result["model_status"] == "OPTIMAL"
+    assert [item["course_business_id"] for item in result["assignments"]] == ["SHARED"]
+
+
+def test_date_solver_selects_an_actual_candidate_clock_window() -> None:
+    first = _course("C1", class_id="B1", room="R1")
+    second = _course("C2", class_id="B2", room="R1") | {
+        "candidate_clock_windows": [
+            {"start_time": "08:30", "end_time": "11:30"},
+            {"start_time": "14:00", "end_time": "17:00"},
+        ]
+    }
+    payload = _date_payload(
+        [first, second],
+        rooms=[{"business_id": "R1", "name": "教室1", "is_active": True}],
+        teachers=[{"business_id": "郑州考研英语教研组", "name": "英语组", "is_group": True}],
+        date_window_days=0,
+    )
+    payload["time_slots"].append(
+        {
+            "business_id": "S-周一-1400",
+            "weekday": "周一",
+            "start_time": "14:00",
+            "end_time": "17:00",
+            "is_open": True,
+        }
+    )
+
+    result = solve_problem(payload)
+
+    assert result["model_status"] == "OPTIMAL"
+    assigned = {item["course_business_id"]: item for item in result["assignments"]}
+    assert assigned["C2"]["slot_business_id"] == "S-周一-1400"
+    assert assigned["C2"]["start_time"] == "14:00"
+    assert assigned["C2"]["end_time"] == "17:00"
+
+
 def test_teacher_group_text_does_not_create_personal_calendar_conflict() -> None:
     payload = _date_payload(
         [
@@ -267,9 +324,7 @@ def test_teacher_group_text_does_not_create_personal_calendar_conflict() -> None
     result = solve_problem(payload)
 
     assert result["model_status"] == "OPTIMAL"
-    assert {item["teacher_business_id"] for item in result["assignments"]} == {
-        "郑州考研英语教研组"
-    }
+    assert {item["teacher_business_id"] for item in result["assignments"]} == {"郑州考研英语教研组"}
 
 
 def test_concrete_calendar_user_cannot_have_overlapping_sessions() -> None:

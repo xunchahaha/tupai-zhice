@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -270,33 +270,22 @@ def _row_identity(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-LESSON_IDENTITY_FIELDS = ("班级标签", "课次序号", "课节名称", "上课日期", "上课时段")
-MUTABLE_FIELDS = (
-    "业务线",
-    "产品班型",
-    "教室标签",
-    "编排来源",
-    "编排阶段",
-    "计划课次",
-    "计划课时",
-    "课节时长小时",
-    "授课教师",
-)
+LESSON_IDENTITY_FIELDS = ("业务线", "班级标签", "课次序号", "上课日期", "科目")
 
 
 def _lesson_identity(row: dict[str, Any]) -> tuple[Any, ...]:
-    """一节课的稳定身份。
+    """预处理后的教学需求身份。
 
-    只由「哪个班、第几课次、什么课、哪天、什么时段」决定。教室、教师、编排来源等
-    都是这节课的**属性**而非身份——把它们放进身份键，会让修正表格里的一个单元格
-    变成"新增一节课"，重新导入即成倍产生脏数据。
+    原表四层信息不能平铺成一行一课：产品班型是归属、班级标签是行政班、编排阶段是
+    课次阶段，课节名称/上课时段是该学科需求的内容与候选时段。同一个行政班、课次、
+    日期和学科只建一条需求；产品、阶段、具体课节名称、时段和教室完整保存在多值字段。
     """
     return (
+        row["业务线"],
         row["班级标签"],
         row["课次序号"],
-        row["课节名称"],
         row["上课日期"].isoformat(),
-        row["上课时段"],
+        _lesson_subject(str(row["课节名称"])),
     )
 
 
@@ -314,14 +303,37 @@ def _source_row_id(row: dict[str, Any]) -> str:
     return _digest(_row_identity(row))
 
 
+def _source_group_id(rows: list[dict[str, Any]]) -> str:
+    """所有来源变体共同决定追溯 ID，行序变化不会导致新 ID。"""
+    return _digest(tuple(sorted(_source_row_id(row) for row in rows)))
+
+
+def _product_contexts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row["产品班型"])].append(row)
+    contexts: list[dict[str, Any]] = []
+    for product_type, items in sorted(grouped.items()):
+        contexts.append(
+            {
+                "product_type": product_type,
+                "stages": sorted({str(item["编排阶段"]) for item in items}),
+                "lesson_names": sorted({str(item["课节名称"]) for item in items}),
+                "planned_sessions": sorted({int(item["计划课次"]) for item in items}),
+                "planned_hours": sorted({float(item["计划课时"]) for item in items}),
+                "schedule_sources": sorted({str(item["编排来源"]) for item in items}),
+            }
+        )
+    return contexts
+
+
 def _collect_lesson_rows(
     rows: list[dict[str, Any]], campus_business_id: str
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """按稳定身份收敛到「每节课一条」，并报告身份相同但内容冲突的行。
+    """把平铺源表预处理成可求解的「行政班 × 课次 × 学科」需求。
 
-    完全相同的行直接消除。身份相同、可变字段不同的行是**语义重复**（同一个班同一
-    时刻被登记了两节不同的课或两个不同教师），源表里真实存在，必须报出来而不是
-    静默双写进课表。取用顺序按整行内容排序，保证同一份表多次导入结果一致。
+    不丢任何语义：多产品班型、多阶段、多个具体课节名称、候选时段与候选教室全部
+    保留。单值列只作为兼容主值，求解和页面展示读取对应多值字段。
     """
     grouped: dict[str, dict[tuple[Any, ...], dict[str, Any]]] = {}
     for row in rows:
@@ -329,41 +341,93 @@ def _collect_lesson_rows(
         grouped.setdefault(business_id, {})[_row_identity(row)] = row
 
     session_rows: dict[str, dict[str, Any]] = {}
-    conflicts: list[dict[str, Any]] = []
+    examples: list[dict[str, Any]] = []
+    ambiguous_teachers = 0
+    ambiguous_rooms = 0
+    ambiguous_demands = 0
+    multi_product_demands = 0
+    multi_lesson_name_demands = 0
+    multi_slot_demands = 0
     for business_id, variants in grouped.items():
         ordered = [variants[key] for key in sorted(variants)]
-        session_rows[business_id] = ordered[0]
-        if len(ordered) == 1:
-            continue
-        differing = sorted(
-            field for field in MUTABLE_FIELDS if len({str(item[field]) for item in ordered}) > 1
+        merged = dict(ordered[0])
+        product_types = sorted({str(item["产品班型"]) for item in ordered})
+        stages = sorted({str(item["编排阶段"]) for item in ordered})
+        lesson_names = sorted({str(item["课节名称"]) for item in ordered})
+        teachers = sorted({str(item["授课教师"]) for item in ordered})
+        rooms = sorted({str(item["教室标签"]) for item in ordered})
+        clock_windows = sorted(
+            {(str(item["开始时间"]), str(item["结束时间"])) for item in ordered},
+            key=lambda item: (_clock_minutes(item[0]), _clock_minutes(item[1])),
         )
-        conflicts.append(
+        contexts = _product_contexts(ordered)
+        subject = _lesson_subject(str(ordered[0]["课节名称"]))
+        merged.update(
             {
-                "业务标识": business_id,
-                "班级标签": ordered[0]["班级标签"],
-                "课次序号": int(str(ordered[0]["课次序号"])),
-                "上课日期": ordered[0]["上课日期"].isoformat(),
-                "上课时段": ordered[0]["上课时段"],
-                "冲突行数": len(ordered),
-                "差异字段": differing,
-                "取用": {field: str(ordered[0][field]) for field in differing},
-                "丢弃": [
-                    {field: str(item[field]) for field in differing} for item in ordered[1:]
+                "科目": subject,
+                "产品班型": product_types[0],
+                "产品班型列表": product_types,
+                "产品上下文": contexts,
+                "编排阶段": " / ".join(stages),
+                "编排阶段列表": stages,
+                "课节名称": " / ".join(lesson_names),
+                "课节名称列表": lesson_names,
+                "授课教师": teachers[0],
+                "授课教师列表": teachers,
+                "教室标签": rooms[0],
+                "候选教室列表": rooms,
+                "上课时段": f"{clock_windows[0][0]}-{clock_windows[0][1]}",
+                "开始时间": clock_windows[0][0],
+                "结束时间": clock_windows[0][1],
+                "候选时钟窗口": [
+                    {"start_time": start, "end_time": end} for start, end in clock_windows
                 ],
+                "来源变体数": len(ordered),
+                "来源组标识": _source_group_id(ordered),
             }
         )
-    conflicts.sort(key=lambda item: str(item["业务标识"]))
+        session_rows[business_id] = merged
+        multi_product_demands += int(len(product_types) > 1)
+        multi_lesson_name_demands += int(len(lesson_names) > 1)
+        multi_slot_demands += int(len(clock_windows) > 1)
+        ambiguous_teachers += int(len(teachers) > 1)
+        ambiguous_rooms += int(len(rooms) > 1)
+        ambiguous_demands += int(len(teachers) > 1 or len(rooms) > 1)
+        if len(ordered) > 1 and len(examples) < 20:
+            examples.append(
+                {
+                    "业务标识": business_id,
+                    "班级标签": merged["班级标签"],
+                    "课次序号": int(merged["课次序号"]),
+                    "上课日期": merged["上课日期"].isoformat(),
+                    "科目": subject,
+                    "产品班型": product_types,
+                    "编排阶段": stages,
+                    "课节名称": lesson_names,
+                    "候选时段": [f"{start}-{end}" for start, end in clock_windows],
+                    "候选教室": rooms,
+                    "教师": teachers,
+                    "来源变体数": len(ordered),
+                }
+            )
     return session_rows, {
-        "conflicting_lessons": len(conflicts),
-        "discarded_rows": sum(int(str(item["冲突行数"])) - 1 for item in conflicts),
-        "examples": conflicts[:20],
+        # 兼容旧接口名：这里只统计预处理后仍有多教师/多教室的真正歧义，合并产品、
+        # 内容名称和候选时段不再叫“冲突”，因为这些信息已完整保留。
+        "conflicting_lessons": ambiguous_demands,
+        "discarded_rows": 0,
+        "source_rows": len(rows),
+        "preprocessed_demands": len(session_rows),
+        "collapsed_source_variants": len(rows) - len(session_rows),
+        "multi_product_demands": multi_product_demands,
+        "multi_lesson_name_demands": multi_lesson_name_demands,
+        "multi_slot_demands": multi_slot_demands,
+        "ambiguous_teacher_demands": ambiguous_teachers,
+        "ambiguous_room_demands": ambiguous_rooms,
+        "examples": examples,
     }
 
 
-def _upsert(
-    db: Session, model: type[Any], match: dict[str, Any], values: dict[str, Any]
-) -> Any:
+def _upsert(db: Session, model: type[Any], match: dict[str, Any], values: dict[str, Any]) -> Any:
     statement = select(model)
     for key, value in match.items():
         statement = statement.where(getattr(model, key) == value)
@@ -392,19 +456,31 @@ def _class_slot_conflicts(session_rows: dict[str, dict[str, Any]]) -> dict[str, 
     """
     grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for row in session_rows.values():
-        grouped.setdefault(_lesson_group(row), []).append(row)
+        for window in row.get("候选时钟窗口") or []:
+            key = (
+                str(row["班级标签"]),
+                row["上课日期"].isoformat(),
+                f"{window['start_time']}-{window['end_time']}",
+            )
+            grouped.setdefault(key, []).append(row)
     conflicts: list[dict[str, Any]] = []
     for key, items in grouped.items():
         if len(items) <= 1:
             continue
-        subjects = [_lesson_subject(str(item["课节名称"])) for item in items]
+        subjects = [str(item.get("科目") or "") for item in items]
         conflicts.append(
             {
                 "班级标签": key[0],
                 "上课日期": key[1],
                 "上课时段": key[2],
                 "课节数": len(items),
-                "课节名称": sorted({str(item["课节名称"]) for item in items}),
+                "课节名称": sorted(
+                    {
+                        str(name)
+                        for item in items
+                        for name in item.get("课节名称列表") or [item["课节名称"]]
+                    }
+                ),
                 "科目": sorted(set(subjects)),
                 "科目是否互不相同": len(set(subjects)) == len(subjects),
             }
@@ -432,15 +508,16 @@ def _product_subject_mismatches(session_rows: dict[str, dict[str, Any]]) -> dict
     """
     grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for row in session_rows.values():
-        subject = _lesson_subject(str(row["课节名称"]))
+        subject = str(row.get("科目") or "")
         if not subject:
             continue
-        product_type = str(row["产品班型"])
-        # 「无{科目}」是产品班型名里对科目的显式否定声明。
-        if f"无{subject}" not in product_type:
-            continue
-        key = (str(row["业务线"]), product_type, str(row["班级标签"]), subject)
-        grouped.setdefault(key, []).append(row)
+        for product_type in row.get("产品班型列表") or [str(row["产品班型"])]:
+            product_type = str(product_type)
+            # 「无{科目}」是产品班型名里对科目的显式否定声明。
+            if f"无{subject}" not in product_type:
+                continue
+            key = (str(row["业务线"]), product_type, str(row["班级标签"]), subject)
+            grouped.setdefault(key, []).append(row)
     examples = [
         {
             "业务线": key[0],
@@ -448,7 +525,13 @@ def _product_subject_mismatches(session_rows: dict[str, dict[str, Any]]) -> dict
             "班级标签": key[2],
             "科目": key[3],
             "课次数": len(items),
-            "课节名称": sorted({str(item["课节名称"]) for item in items}),
+            "课节名称": sorted(
+                {
+                    str(name)
+                    for item in items
+                    for name in item.get("课节名称列表") or [item["课节名称"]]
+                }
+            ),
             "日期范围": [
                 min(item["上课日期"] for item in items).isoformat(),
                 max(item["上课日期"] for item in items).isoformat(),
@@ -542,9 +625,7 @@ def import_schedule_workbook(
             f"「{PLACEHOLDER_ROOM}」，没有可排课的课次"
         )
 
-    campus = _upsert(
-        db, Campus, {"business_id": campus_business_id}, {"name": campus_name}
-    )
+    campus = _upsert(db, Campus, {"business_id": campus_business_id}, {"name": campus_name})
     db.flush()
 
     teachers = sorted({row["授课教师"] for row in rows if row["授课教师"]})
@@ -629,31 +710,43 @@ def import_schedule_workbook(
 
     existing_sessions = {
         item.business_id: item
-        for item in db.scalars(
-            select(CourseSession).where(CourseSession.campus_id == campus.id)
-        )
+        for item in db.scalars(select(CourseSession).where(CourseSession.campus_id == campus.id))
     }
     new_rows = []
     for business_id, row in session_rows.items():
+        candidate_clock_windows = list(row["候选时钟窗口"])
+        candidate_slot_ids = [
+            slot_business_ids[(row["星期"], item["start_time"], item["end_time"])]
+            for item in candidate_clock_windows
+        ]
         values = {
-            "source_row_id": _source_row_id(row),
+            "source_row_id": row["来源组标识"],
             "business_line": row["业务线"],
             "product_type": row["产品班型"],
+            "product_types": row["产品班型列表"],
+            "product_contexts": row["产品上下文"],
             "class_business_id": row["班级标签"],
             "teacher_business_id": row["授课教师"],
-            "subject": _lesson_subject(row["课节名称"]),
+            "teacher_business_ids": row["授课教师列表"],
+            "subject": row["科目"],
             "lesson_name": row["课节名称"],
+            "lesson_names": row["课节名称列表"],
             "schedule_source": row["编排来源"],
             "stage": row["编排阶段"],
+            "stages": row["编排阶段列表"],
             "planned_sessions": row["计划课次"],
             "planned_hours": row["计划课时"],
             "session_no": row["课次序号"],
             "lesson_date": row["上课日期"],
             "duration_minutes": int(row["课节时长小时"] * 60),
-            "suggested_slot_id": slot_business_ids[(row["星期"], row["开始时间"], row["结束时间"])],
+            "suggested_slot_id": candidate_slot_ids[0],
+            "candidate_slot_ids": candidate_slot_ids,
+            "candidate_clock_windows": candidate_clock_windows,
             "fixed_start_time": row["开始时间"],
             "fixed_end_time": row["结束时间"],
             "original_room_business_id": row["教室标签"],
+            "candidate_room_business_ids": row["候选教室列表"],
+            "source_variant_count": row["来源变体数"],
         }
         existing = existing_sessions.get(business_id)
         if existing is None:
@@ -700,6 +793,7 @@ def import_schedule_workbook(
             "rows_dropped_placeholder_room": placeholder_report["dropped_rows"],
             "rows_kept": len(rows),
             "rows_deduped": len(deduped),
+            "preprocessing": duplicate_report,
         },
     )
     db.add(snapshot)
@@ -708,16 +802,18 @@ def import_schedule_workbook(
     version_stats: list[dict[str, Any]] = []
     now = datetime.now(UTC)
     version_name = official_version_name(campus_name)
-    version = db.scalar(
-        select(ScheduleVersion).where(ScheduleVersion.name == version_name)
-    )
+    version = db.scalar(select(ScheduleVersion).where(ScheduleVersion.name == version_name))
     if version is None:
         run = SolverRun(
             snapshot_id=snapshot.id,
             run_type="import",
             status="completed",
             model_status="IMPORTED",
-            request_payload={"source": workbook_path.name, "deduplication": "exact_row"},
+            request_payload={
+                "source": workbook_path.name,
+                "deduplication": "exact_row",
+                "preprocessing": "class_session_subject",
+            },
         )
         db.add(run)
         db.flush()

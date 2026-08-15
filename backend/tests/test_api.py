@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.models import CourseSession, ScheduleAssignment, SolverRun, Teacher
+from app.models import CourseSession, ScheduleAssignment, SolverRun, Teacher, TimeSlot
 
 
 def solve(client: TestClient, headers: dict[str, str]) -> dict:
@@ -80,10 +80,13 @@ def test_admin_manages_read_only_member_accounts(
     assert disabled.status_code == 200
     assert disabled.json()["is_active"] is False
     assert client.get("/api/v1/overview", headers=member_headers).status_code == 401
-    assert client.post(
-        "/api/v1/auth/token",
-        data={"username": "member_demo", "password": "member-pass-2026"},
-    ).status_code == 401
+    assert (
+        client.post(
+            "/api/v1/auth/token",
+            data={"username": "member_demo", "password": "member-pass-2026"},
+        ).status_code
+        == 401
+    )
 
     reenabled = client.patch(
         f"/api/v1/users/{member['id']}/status",
@@ -97,14 +100,20 @@ def test_admin_manages_read_only_member_accounts(
         json={"password": "member-new-pass-2026"},
     )
     assert reset.status_code == 204
-    assert client.post(
-        "/api/v1/auth/token",
-        data={"username": "member_demo", "password": "member-pass-2026"},
-    ).status_code == 401
-    assert client.post(
-        "/api/v1/auth/token",
-        data={"username": "member_demo", "password": "member-new-pass-2026"},
-    ).status_code == 200
+    assert (
+        client.post(
+            "/api/v1/auth/token",
+            data={"username": "member_demo", "password": "member-pass-2026"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/api/v1/auth/token",
+            data={"username": "member_demo", "password": "member-new-pass-2026"},
+        ).status_code
+        == 200
+    )
 
 
 def test_download_master_data_sample(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -121,9 +130,7 @@ def test_sample_solve_publish_and_xlsx(client: TestClient, auth_headers: dict[st
     run = solve(client, auth_headers)
     assert run["model_status"] in {"OPTIMAL", "FEASIBLE"}
     schedules = client.get("/api/v1/schedules", headers=auth_headers).json()
-    schedule = client.get(
-        f"/api/v1/schedules/{schedules[0]['id']}", headers=auth_headers
-    ).json()
+    schedule = client.get(f"/api/v1/schedules/{schedules[0]['id']}", headers=auth_headers).json()
     assert len(schedule["assignments"]) == 24
     assert schedule["metrics"]["hard_conflicts"] == 0
     assert schedule["metrics"]["room_slot_occupancy"] >= 0
@@ -368,6 +375,18 @@ def test_product_loop_calendar_assistant_export_and_public_summary(
         )
         assert teacher is not None
         assignment.lesson_date = date(2026, 9, 5)
+        db.add(
+            TimeSlot(
+                campus_id=course.campus_id,
+                business_id="S-TEST-0900",
+                weekday="周六",
+                start_time="09:00",
+                end_time="12:00",
+                kind="测试实际时段",
+                sequence=999,
+            )
+        )
+        assignment.slot_business_id = "S-TEST-0900"
         course.business_line = "内部业务线"
         course.product_type = "内部产品班型"
         course.fixed_start_time = "09:00"
@@ -424,9 +443,7 @@ def test_product_loop_calendar_assistant_export_and_public_summary(
     interpreted = client.post(
         "/api/v1/assistant/interpret",
         headers=auth_headers,
-        json={
-            "instruction": "内部业务线在固定时段不变的前提下尽量不变，日期范围 2 天"
-        },
+        json={"instruction": "内部业务线在固定时段不变的前提下尽量不变，日期范围 2 天"},
     )
     assert interpreted.status_code == 200
     assert interpreted.json()["source"] == "feishu_aily"
@@ -821,9 +838,7 @@ def test_infeasible_run_explanation_translates_conflicts_into_business_wording(
     run = solve(client, auth_headers)
     assert run["model_status"] == "INFEASIBLE"
 
-    explained = client.post(
-        f"/api/v1/solver-runs/{run['id']}/explanation", headers=auth_headers
-    )
+    explained = client.post(f"/api/v1/solver-runs/{run['id']}/explanation", headers=auth_headers)
     assert explained.status_code == 200, explained.text
     payload = explained.json()
     joined = "\n".join(payload["explanation"])

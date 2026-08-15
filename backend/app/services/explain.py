@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, exists, func, literal, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import CourseSession, Rule, ScheduleVersion, SolverRun
@@ -129,6 +129,11 @@ def _iso(value: Any) -> str | None:
     return parsed.isoformat() if parsed else None
 
 
+def _json_array_contains(values: Any, target: str) -> ColumnElement[bool]:
+    elements = func.json_each(values).table_valued("key", "value")
+    return exists(select(literal(1)).select_from(elements).where(elements.c.value == target))
+
+
 def _scope_candidates(db: Session, scope: dict[str, Any]) -> dict[str, Any]:
     """本次求解范围内真实存在的业务线 / 产品班型 / 班级，以及最小的一组课次。
 
@@ -136,11 +141,18 @@ def _scope_candidates(db: Session, scope: dict[str, Any]) -> dict[str, Any]:
     实体（`_validated_assistant_scope` 对未知实体直接 422）。所以候选值一律从课次表
     取，拼出来的指令里的班级、产品班型必然落在合法集合内，而不是模型编出来的名字。
     """
-    conditions = []
+    conditions: list[ColumnElement[bool]] = []
     if scope.get("business_lines"):
         conditions.append(CourseSession.business_line.in_(scope["business_lines"]))
     if scope.get("product_types"):
-        conditions.append(CourseSession.product_type.in_(scope["product_types"]))
+        product_conditions = [
+            or_(
+                CourseSession.product_type == product_type,
+                _json_array_contains(CourseSession.product_types, product_type),
+            )
+            for product_type in scope["product_types"]
+        ]
+        conditions.append(or_(*product_conditions))
     if scope.get("class_business_ids"):
         conditions.append(CourseSession.class_business_id.in_(scope["class_business_ids"]))
     if scope.get("course_business_ids"):
@@ -167,7 +179,7 @@ def _scope_candidates(db: Session, scope: dict[str, Any]) -> dict[str, Any]:
             CourseSession.class_business_id,
         )
     ).all()
-    groups = [
+    groups: list[dict[str, Any]] = [
         {
             "business_line": row[0] or "",
             "product_type": row[1] or "",
@@ -199,9 +211,9 @@ def _scope_candidates(db: Session, scope: dict[str, Any]) -> dict[str, Any]:
         "business_lines": sorted(
             {item["business_line"] for item in groups if item["business_line"]}
         )[:12],
-        "product_types": sorted(
-            {item["product_type"] for item in groups if item["product_type"]}
-        )[:12],
+        "product_types": sorted({item["product_type"] for item in groups if item["product_type"]})[
+            :12
+        ],
         "class_business_ids": sorted(
             {item["class_business_id"] for item in groups if item["class_business_id"]}
         )[:12],
@@ -344,9 +356,7 @@ def _retry_date_range(
     return start.isoformat(), min(end, start + timedelta(days=span_days - 1)).isoformat()
 
 
-def _retry_scope_clause(
-    scope: dict[str, Any], candidates: dict[str, Any], span_days: int
-) -> str:
+def _retry_scope_clause(scope: dict[str, Any], candidates: dict[str, Any], span_days: int) -> str:
     group = candidates.get("retry_group") or {}
     named = [
         f"{label}「{group[key]}」"
