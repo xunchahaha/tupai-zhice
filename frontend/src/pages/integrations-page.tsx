@@ -54,6 +54,14 @@ const resources = [
   "rules",
   "schedule",
   "public_summary",
+  "public_class_schedule",
+  "public_adjustment_notice",
+] as const;
+
+const publicDisplayResources = [
+  "public_summary",
+  "public_class_schedule",
+  "public_adjustment_notice",
 ] as const;
 
 // 第 5 步只写飞书多维表格；日历和 Aily 权限缺失不应把同步按钮置灰。
@@ -84,6 +92,7 @@ const permissionLabels: Record<string, string> = {
   "base:record:create": "新增记录",
   "base:record:retrieve": "根据条件搜索记录",
   "base:record:update": "更新记录",
+  "base:record:delete": "清理系统识别出的重复公开展示记录",
 };
 
 export function IntegrationsPage() {
@@ -238,6 +247,7 @@ export function IntegrationsPage() {
   useEffect(() => {
     if (!connection.data) return;
     const configured = connection.data.app_configuration;
+    if (connection.data.workspace?.name) setWorkspaceName(connection.data.workspace.name);
     if (configured.configured) {
       if (configured.app_id) setAppId(configured.app_id);
       if (configured.aily_app_id) setAilyAppId(configured.aily_app_id);
@@ -291,6 +301,7 @@ export function IntegrationsPage() {
       missingBitableSyncScopes.length === 0 &&
       workspaceReady,
   );
+  const hasPublicCleanupScope = status.granted_scopes.includes("base:record:delete");
   const syncBlockers = [
     !status.app_configured ? "还没有保存企业自建应用配置" : null,
     !status.authorized ? "还没有授权飞书管理员账号" : null,
@@ -431,6 +442,16 @@ export function IntegrationsPage() {
                   <span className="text-xs text-zinc-400">
                     访问令牌到期：{datetime(status.access_expires_at)}
                   </span>
+                  {!hasPublicCleanupScope ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => authorize.mutate()}
+                      disabled={authorize.isPending}
+                    >
+                      <ShieldCheck className="size-3.5" />补充公开表清理权限
+                    </Button>
+                  ) : null}
                   <Button
                     size="sm"
                     variant="ghost"
@@ -442,6 +463,11 @@ export function IntegrationsPage() {
                 </div>
                 {status.missing_scopes.length > 0 ? (
                   <PermissionWarning scopes={status.missing_scopes} />
+                ) : null}
+                {!hasPublicCleanupScope ? (
+                  <p className="border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                    已有同步仍可使用；点击“补充公开表清理权限”重新授权一次后，系统会在同步“公开展示汇总”时自动删除历史重复记录。
+                  </p>
                 ) : null}
               </div>
             ) : (
@@ -463,7 +489,7 @@ export function IntegrationsPage() {
           <FlowStep
             number={4}
             title="创建排课多维表格"
-            description="系统会为当前课表方案创建独立的内部业务表和脱敏公开汇总表，并保存全部表格标识。"
+            description="系统会为当前课表方案创建独立的内部业务表，以及领导、班级和调课通知三张展示投影表，并保存全部表格标识。"
             state={workspaceReady ? "completed" : status.authorized ? "current" : "pending"}
             icon={Database}
           >
@@ -485,9 +511,13 @@ export function IntegrationsPage() {
                   }
                 >
                   <TableProperties className="size-4" />
-                  {createWorkspace.isPending ? `正在创建 ${resources.length} 张表` : "自动创建排课表格"}
+                  {createWorkspace.isPending
+                    ? `正在补齐 ${resources.length} 张表`
+                    : status.workspace
+                      ? "补齐缺失业务表"
+                      : "自动创建排课表格"}
                 </Button>
-                <p className="text-xs leading-5 text-zinc-500 sm:col-span-2">创建时会自动加上当前课表方案名称，因此第 1、2、3……N 套课表会绑定到不同的飞书多维表格。</p>
+                <p className="text-xs leading-5 text-zinc-500 sm:col-span-2">{status.workspace ? `当前空间已有 ${status.workspace.tables?.length ?? 0} / ${resources.length} 张业务表；用同名空间补齐新增展示表，不会新建另一套课表。` : "创建时会自动加上当前课表方案名称，因此第 1、2、3……N 套课表会绑定到不同的飞书多维表格。"}</p>
               </div>
             )}
           </FlowStep>
@@ -495,7 +525,7 @@ export function IntegrationsPage() {
           <FlowStep
             number={5}
             title="同步业务数据"
-            description="一键同步当前课表方案的 8 类数据；发布或回滚后会自动同步课表和公开展示汇总。单表仍可单独重试，全部按业务标识新增或更新。"
+            description="一键同步当前课表方案的 10 类数据；发布或回滚后会自动同步课表和三张展示投影表。所有表按业务标识新增或更新；公开表会识别并清理历史重复项。"
             state={ready ? "current" : "pending"}
             icon={CloudUpload}
           >
@@ -541,22 +571,24 @@ export function IntegrationsPage() {
           <FlowStep
             number={6}
             title="在飞书内创建妙搭应用"
-            description="公开展示汇总会随一键同步及版本发布/回滚写入当前方案；在飞书内将妙搭的数据源绑定到这张表，搭建并发布展示页。"
+            description="三张展示投影表会随一键同步及版本发布/回滚更新；在飞书内分别绑定到妙搭的领导、班级和通知页面。"
             state={workspaceReady ? "current" : "pending"}
             icon={ExternalLink}
           >
             <div className="space-y-3 text-sm text-zinc-700">
-              <p>每套课表方案都有独立的飞书多维表格，因此也应分别绑定对应的“公开展示汇总”表创建妙搭展示页。系统只同步脱敏汇总数据；妙搭的搭建和发布在飞书内完成。</p>
+              <p>每套课表方案都有独立的飞书多维表格。妙搭应从当前方案的三张展示表取数：领导页使用“公开展示汇总”，班级服务页使用“班级公开课表”，变更页使用“公开调课通知”。</p>
+              <div className="grid gap-2 text-xs text-zinc-600 md:grid-cols-3">
+                <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">领导驾驶舱</div><p className="mt-1 leading-5">当前版本、发布时间、排课覆盖日期、覆盖班级、调整课次、总课次、教室利用率和月度趋势。</p></div>
+                <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">学生 / 家长课表</div><p className="mt-1 leading-5">班级、日期、时段、课程、学科、地点和当前版本；妙搭必须按班级身份或受控链接筛选，不展示全校班级。</p></div>
+                <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">调课通知</div><p className="mt-1 leading-5">只展示已生效的时间、地点、课程变更；不包含教师账号、联系方式和内部调课原因。</p></div>
+              </div>
               <div className="flex flex-wrap gap-2">
                 <Button
                   variant="outline"
-                  onClick={() => {
-                    setResource("public_summary");
-                    sync.mutate({ data: { resource: "public_summary" } });
-                  }}
+                  onClick={() => batchSync.mutate({ data: { resources: [...publicDisplayResources] } })}
                   disabled={!ready || sync.isPending || batchSync.isPending}
                 >
-                  重试公开展示汇总
+                  同步三张展示表
                 </Button>
                 {status.workspace?.url ? <a href={status.workspace.url} target="_blank" rel="noreferrer"><Button variant="outline"><ExternalLink className="size-4" />打开飞书多维表格</Button></a> : null}
               </div>
@@ -972,7 +1004,7 @@ function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string;
                 <td className="h-10 px-4 text-zinc-500">{datetime(item.created_at)}</td>
                 <td className="text-xs text-zinc-500">{syncTriggerLabel(item.detail.trigger)}</td>
                 <td>{resourceLabel(item.resource)}</td>
-                <td><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge>{detailError(item.detail) ? <div className="mt-1 max-w-60 truncate text-xs text-red-600" title={detailError(item.detail) ?? undefined}>{detailError(item.detail)}</div> : null}</td>
+                <td><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge>{detailError(item.detail) ? <div className="mt-1 max-w-60 truncate text-xs text-red-600" title={detailError(item.detail) ?? undefined}>{detailError(item.detail)}</div> : null}{duplicateCleanupMessage(item.detail) ? <div className="mt-1 max-w-64 text-xs text-amber-700">{duplicateCleanupMessage(item.detail)}</div> : null}</td>
                 <td>{item.records_read}</td>
                 <td>{detailNumber(item.detail, "records_created")}</td>
                 <td>{detailNumber(item.detail, "records_updated")}</td>
@@ -1000,6 +1032,7 @@ function BatchSyncResult({ result }: { result: FeishuBatchSyncResponse }) {
             <div className="flex items-center justify-between gap-2"><span className="font-medium">{resourceLabel(item.resource)}</span><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge></div>
             <div className="mt-1 text-zinc-500">写入 {item.records_written} 条</div>
             {detailError(item.detail) ? <div className="mt-1 text-red-600">{detailError(item.detail)}</div> : null}
+            {duplicateCleanupMessage(item.detail) ? <div className="mt-1 text-amber-700">{duplicateCleanupMessage(item.detail)}</div> : null}
           </div>
         ))}
       </div>
@@ -1226,6 +1259,19 @@ function detailNumber(detail: Record<string, unknown>, key: string): number | st
 function detailError(detail: Record<string, unknown>): string | null {
   const value = detail.error;
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function duplicateCleanupMessage(detail: Record<string, unknown>): string | null {
+  const raw = detail.duplicate_cleanup;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const cleanup = raw as Record<string, unknown>;
+  const status = typeof cleanup.status === "string" ? cleanup.status : "";
+  const deleted = typeof cleanup.deleted === "number" ? cleanup.deleted : 0;
+  const candidates = typeof cleanup.managed_candidates === "number" ? cleanup.managed_candidates : 0;
+  if (status === "completed" && deleted) return `已清理 ${deleted} 条历史重复公开记录`;
+  if (status === "skipped_missing_delete_scope" && candidates) return `发现 ${candidates} 条历史重复记录；补充清理权限后可自动删除`;
+  if (status === "failed" && candidates) return `重复记录清理未完成（${candidates} 条待处理）`;
+  return null;
 }
 
 function syncTriggerLabel(value: unknown): string {

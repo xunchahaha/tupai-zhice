@@ -59,7 +59,7 @@ export function VersionsPage() {
     },
     onError: (error) => toast.error(`发布数据同步未完成：${errorMessage(error)}`),
   } });
-  const retryPublishedData = () => syncPublishedData.mutate({ data: { resources: ["schedule", "public_summary"] } });
+  const retryPublishedData = () => syncPublishedData.mutate({ data: { resources: ["schedule", "public_summary", "public_class_schedule", "public_adjustment_notice"] } });
   const publish = usePublishScheduleApiV1SchedulesScheduleIdPublishPost({ mutation: { onSuccess: () => { toast.success("版本已发布为当前课表，已触发发布数据同步"); refresh(); void client.invalidateQueries({ queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey() }); }, onError: (error) => toast.error(errorMessage(error)) } });
   const rollback = useRollbackScheduleApiV1SchedulesScheduleIdRollbackPost({ mutation: { onSuccess: () => { toast.success("已恢复到历史版本，已触发发布数据同步"); refresh(); void client.invalidateQueries({ queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey() }); }, onError: (error) => toast.error(errorMessage(error)) } });
   const remove = useDeleteScheduleApiV1SchedulesScheduleIdDelete({ mutation: {
@@ -76,7 +76,7 @@ export function VersionsPage() {
   if (schedules.isError || (canViewAudit && logs.isError)) return <ErrorState retry={() => { void schedules.refetch(); if (canViewAudit) void logs.refetch(); }} />;
   return <div className="space-y-5">
     <PageHeader title="版本与回滚" actions={canManageVersions ? <Button size="sm" variant="outline" onClick={retryPublishedData} disabled={syncPublishedData.isPending}><Send className="size-3.5" />{syncPublishedData.isPending ? "正在同步发布数据" : "重新同步发布数据"}</Button> : null} />
-    <section className={canManageVersions ? "border border-blue-200 bg-blue-50/40 px-4 py-3 text-sm text-blue-900" : "border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600"}>{canManageVersions ? "发布/回滚会先更新本地当前版本，再自动同步当前方案的“课表”和“公开展示汇总”。同步失败不会撤销本地版本；可在“飞书集成”逐表重试，或在此重新同步发布数据。" : "当前账号可以查看和比较版本记录；发布、回滚、删除等变更操作仅由具备相应权限的账号执行。"}</section>
+    <section className={canManageVersions ? "border border-blue-200 bg-blue-50/40 px-4 py-3 text-sm text-blue-900" : "border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600"}>{canManageVersions ? "发布/回滚会先更新本地当前版本，再自动同步当前方案的“课表”、领导展示汇总、班级公开课表和调课通知。同步失败不会撤销本地版本；可在“飞书集成”逐表重试，或在此重新同步发布数据。" : "当前账号可以查看和比较版本记录；发布、回滚、删除等变更操作仅由具备相应权限的账号执行。"}</section>
     <div className="grid gap-2 xl:grid-cols-[minmax(0,1.4fr)_minmax(340px,0.8fr)]">
       <section className="border border-zinc-200 bg-white">
         <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 p-4"><select aria-label="基准版本" className="h-8 min-w-36 rounded-md border border-zinc-300 px-2 text-xs" value={base} onChange={(event) => setBase(event.target.value)}><option value="">基准版本</option>{versions.map((item) => <option key={item.id} value={item.id}>v{item.version_no} / {statusLabel(item.status)}</option>)}</select><ArrowLeftRight className="size-4 text-zinc-400" /><select aria-label="目标版本" className="h-8 min-w-36 rounded-md border border-zinc-300 px-2 text-xs" value={target} onChange={(event) => setTarget(event.target.value)}><option value="">目标版本</option>{versions.map((item) => <option key={item.id} value={item.id}>v{item.version_no} / {statusLabel(item.status)}</option>)}</select></div>
