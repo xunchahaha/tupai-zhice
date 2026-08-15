@@ -1,14 +1,18 @@
 import { Menu, MoreHorizontal, PanelLeftClose, PanelLeftOpen, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { NavLink, Outlet, useNavigate, useOutletContext } from "react-router-dom";
 
 import { type UserResponse } from "@/api/generated/models";
-import { authStore } from "@/api/http";
+import { scheduleSetApi, type ScheduleSet } from "@/api/schedule-sets";
+import { authStore, scheduleSetStore } from "@/api/http";
 import { type AppOutletContext, isReadOnlyMember } from "@/app/user-context";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/cn";
+import { errorMessage } from "@/lib/format";
 import { roleLabel } from "@/lib/labels";
+import { toast } from "sonner";
 
 const navigation = [
   { to: "/overview", label: "总览", group: "工作台", memberVisible: true },
@@ -45,12 +49,106 @@ function Nav({ user, close, collapsed }: { user: UserResponse; close?: () => voi
 
 export function AppShell() {
   const { user } = useOutletContext<AppOutletContext>();
+  const queryClient = useQueryClient();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
+  const [scheduleSets, setScheduleSets] = useState<ScheduleSet[]>([]);
+  const [scheduleSetId, setScheduleSetId] = useState<string | null>(scheduleSetStore.get());
+  const [scheduleSetsLoading, setScheduleSetsLoading] = useState(true);
+  const [scheduleSetsError, setScheduleSetsError] = useState<string | null>(null);
+  const [scheduleSetDialog, setScheduleSetDialog] = useState<"create" | "rename" | null>(null);
+  const [scheduleSetName, setScheduleSetName] = useState("");
+  const [scheduleSetSaving, setScheduleSetSaving] = useState(false);
   const navigate = useNavigate();
   const signOut = () => { authStore.clear(); window.dispatchEvent(new Event("tupai:unauthorized")); navigate("/login"); };
+
+  const refreshScheduleSets = useCallback(async () => {
+    setScheduleSetsLoading(true);
+    setScheduleSetsError(null);
+    try {
+      const rows = await scheduleSetApi.list();
+      setScheduleSets(rows);
+      if (!rows.length) {
+        scheduleSetStore.clear();
+        setScheduleSetId(null);
+        return;
+      }
+      const persisted = scheduleSetStore.get();
+      const selected = rows.find((item) => item.id === persisted) ?? rows[0];
+      if (selected.id !== persisted) {
+        scheduleSetStore.set(selected.id);
+        // Child pages may have mounted while the first scope was still
+        // unresolved (the API returns 409 when multiple sets are available).
+        // Refetch them now that a concrete scope is selected.
+        void queryClient.invalidateQueries();
+      }
+      setScheduleSetId(selected.id);
+    } catch (error) {
+      setScheduleSetsError(errorMessage(error));
+      // A removed or revoked set can remain in the browser between sessions.
+      // Drop it so the next request can resolve the server's default scope.
+      if (scheduleSetStore.get()) {
+        scheduleSetStore.clear();
+        setScheduleSetId(null);
+      }
+    } finally {
+      setScheduleSetsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshScheduleSets();
+  }, [refreshScheduleSets, user.id]);
+
+  useEffect(() => {
+    const handleChange = (event: Event) => {
+      const detail = event instanceof CustomEvent ? event.detail : null;
+      setScheduleSetId(typeof detail === "string" ? detail : scheduleSetStore.get());
+    };
+    window.addEventListener("tupai:schedule-set-changed", handleChange);
+    return () => window.removeEventListener("tupai:schedule-set-changed", handleChange);
+  }, []);
+
+  const selectScheduleSet = (id: string) => {
+    if (id === scheduleSetId) return;
+    scheduleSetStore.set(id);
+    setScheduleSetId(id);
+    // Existing queries do not include the scope in their generated keys. A
+    // switch must therefore invalidate the cached data before rendering it.
+    void queryClient.invalidateQueries();
+  };
+
+  const submitScheduleSetDialog = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = scheduleSetName.trim();
+    if (name.length < 2) {
+      toast.error("课表名称至少需要 2 个字符");
+      return;
+    }
+    setScheduleSetSaving(true);
+    try {
+      const result = scheduleSetDialog === "create"
+        ? await scheduleSetApi.create(name)
+        : scheduleSetId
+          ? await scheduleSetApi.rename(scheduleSetId, name)
+          : null;
+      if (result) {
+        await refreshScheduleSets();
+        selectScheduleSet(result.id);
+        toast.success(scheduleSetDialog === "create" ? "课表方案已创建" : "课表方案名称已更新");
+      }
+      setScheduleSetDialog(null);
+      setScheduleSetName("");
+    } catch (error) {
+      toast.error(errorMessage(error));
+    } finally {
+      setScheduleSetSaving(false);
+    }
+  };
+
+  const selectedScheduleSet = scheduleSets.find((item) => item.id === scheduleSetId);
   const identity = <div className={cn("relative border-t border-zinc-200 pt-3", sidebarCollapsed ? "flex justify-center" : "flex items-center justify-between")}>
     {!sidebarCollapsed ? <div className="min-w-0"><div className="truncate text-xs font-medium text-zinc-700">{user.username}</div><div className="text-[11px] text-zinc-400">{roleLabel(user.role)}</div></div> : null}
     <Button size="icon" variant="ghost" title="账户菜单" aria-label="账户菜单" onClick={() => setAccountMenuOpen((value) => !value)}><MoreHorizontal className="size-4" /></Button>
@@ -64,9 +162,10 @@ export function AppShell() {
       </div>
       <Nav user={user} collapsed={sidebarCollapsed} />{identity}
     </aside>
-    <header className="sticky top-0 z-20 flex h-12 items-center justify-between border-b border-zinc-200 bg-white px-4 lg:hidden"><Button size="icon" variant="ghost" title="打开导航" onClick={() => setMobileOpen(true)}><Menu className="size-4" /></Button><span className="font-semibold">途排智策</span><span className="w-8" /></header>
+    <header className="sticky top-0 z-20 flex h-12 items-center justify-between border-b border-zinc-200 bg-white px-4 lg:hidden"><Button size="icon" variant="ghost" title="打开导航" onClick={() => setMobileOpen(true)}><Menu className="size-4" /></Button><div className="flex min-w-0 items-center gap-2"><span className="font-semibold">途排智策</span>{scheduleSets.length ? <select aria-label="当前课表方案" className="h-8 max-w-36 rounded-md border border-zinc-300 bg-white px-2 text-xs" value={scheduleSetId ?? ""} onChange={(event) => selectScheduleSet(event.target.value)} disabled={scheduleSetsLoading}><option value="" disabled>选择课表</option>{scheduleSets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select> : null}</div><span className="w-8" /></header>
     {mobileOpen ? <div className="fixed inset-0 z-40 bg-zinc-950/25 lg:hidden" onClick={() => setMobileOpen(false)}><aside className="h-full w-72 bg-white px-3 py-5 shadow-xl" onClick={(event) => event.stopPropagation()}><div className="flex h-8 items-center px-2.5 font-semibold">途排智策</div><Nav user={user} close={() => setMobileOpen(false)} />{identity}</aside></div> : null}
-    <div className={cn("min-h-screen transition-[padding]", sidebarCollapsed ? "lg:pl-16" : "lg:pl-64")}><div className="sticky top-0 z-10 hidden h-12 items-center justify-between border-b border-zinc-200 bg-white px-6 lg:flex"><span className="text-xs text-zinc-400">示范校区 / 2026 秋季排课</span><span className="text-xs text-zinc-500">当前角色：{roleLabel(user.role)}</span></div><main className="mx-auto w-full max-w-[1500px] px-4 py-5 sm:px-6 lg:px-8"><Outlet context={{ user }} /></main></div>
+    <div className={cn("min-h-screen transition-[padding]", sidebarCollapsed ? "lg:pl-16" : "lg:pl-64")}><div className="sticky top-0 z-10 hidden h-12 items-center justify-between border-b border-zinc-200 bg-white px-6 lg:flex"><div className="flex min-w-0 items-center gap-2"><span className="text-xs text-zinc-400">当前课表</span>{scheduleSets.length ? <select aria-label="当前课表方案" className="h-8 max-w-64 rounded-md border border-zinc-300 bg-white px-2 text-xs text-zinc-700" value={scheduleSetId ?? ""} onChange={(event) => selectScheduleSet(event.target.value)} disabled={scheduleSetsLoading}><option value="" disabled>选择课表</option>{scheduleSets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select> : <span className="text-xs text-zinc-500">{scheduleSetsLoading ? "加载中…" : scheduleSetsError ? "课表方案加载失败" : "暂无可见课表"}</span>}{user.role === "admin" ? <><Button size="sm" variant="ghost" onClick={() => { setScheduleSetName(""); setScheduleSetDialog("create"); }}>新建</Button><Button size="sm" variant="ghost" disabled={!selectedScheduleSet} onClick={() => { setScheduleSetName(selectedScheduleSet?.name ?? ""); setScheduleSetDialog("rename"); }}>重命名</Button></> : null}</div><span className="text-xs text-zinc-500">当前角色：{roleLabel(user.role)}</span></div><main className="mx-auto w-full max-w-[1500px] px-4 py-5 sm:px-6 lg:px-8"><Outlet context={{ user }} /></main></div>
+    <Dialog open={scheduleSetDialog !== null} onOpenChange={(open) => { if (!scheduleSetSaving && !open) setScheduleSetDialog(null); }}><DialogContent className="max-w-md"><DialogTitle className="text-base font-semibold">{scheduleSetDialog === "create" ? "新建课表方案" : "重命名课表方案"}</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">每套课表方案拥有独立的数据、版本和飞书同步目标。</DialogDescription><form className="mt-5 space-y-4" onSubmit={submitScheduleSetDialog}><label className="block text-sm text-zinc-700">课表名称<input autoFocus className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2.5 text-sm outline-none focus:border-blue-500" value={scheduleSetName} onChange={(event) => setScheduleSetName(event.target.value)} placeholder="例如：郑州校区师范课表" /></label><div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setScheduleSetDialog(null)} disabled={scheduleSetSaving}>取消</Button><Button type="submit" disabled={scheduleSetSaving}>{scheduleSetSaving ? "保存中" : "保存"}</Button></div></form></DialogContent></Dialog>
     <Dialog open={accountDialogOpen} onOpenChange={setAccountDialogOpen}><DialogContent><DialogTitle className="text-base font-semibold">账户信息</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">当前登录账户与权限身份。</DialogDescription><div className="mt-5 divide-y divide-zinc-100 border-y border-zinc-200 text-sm"><AccountField label="用户名" value={user.username} /><AccountField label="角色" value={roleLabel(user.role)} /><AccountField label="账户 ID" value={user.id} mono /></div><div className="mt-5 flex justify-end"><Button variant="outline" onClick={() => setAccountDialogOpen(false)}>关闭</Button></div></DialogContent></Dialog>
   </div>;
 }

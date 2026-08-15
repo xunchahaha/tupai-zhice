@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Plus, RefreshCw, ShieldCheck, UserCheck, UserMinus, Users } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -12,6 +12,12 @@ import {
   useUpdateUserStatusApiV1UsersUserIdStatusPatch,
 } from "@/api/generated/client";
 import type { UserResponse, UserResponseRole } from "@/api/generated/models";
+import {
+  scheduleSetApi,
+  type ScheduleAccessRole,
+  type ScheduleSet,
+  type ScheduleSetMember,
+} from "@/api/schedule-sets";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,6 +37,26 @@ const ROLES: Array<{ value: UserResponseRole; hint: string }> = [
 const inputClass =
   "mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2.5 text-sm outline-none focus:border-blue-500";
 
+const ACCESS_OPTIONS: Array<{ value: "none" | ScheduleAccessRole; label: string }> = [
+  { value: "none", label: "无权限" },
+  { value: "viewer", label: "只读" },
+  { value: "scheduler", label: "排课" },
+  { value: "approver", label: "审批" },
+];
+
+function maxScheduleAccess(role: UserResponseRole): ScheduleAccessRole | "none" {
+  if (role === "admin") return "approver";
+  if (role === "approver") return "approver";
+  if (role === "scheduler") return "scheduler";
+  return "viewer";
+}
+
+function accessAllowed(role: UserResponseRole, access: "none" | ScheduleAccessRole): boolean {
+  if (access === "none") return true;
+  const order = { none: 0, viewer: 1, scheduler: 2, approver: 3 } as const;
+  return order[access] <= order[maxScheduleAccess(role)];
+}
+
 export function AccountsPage() {
   const currentUser = useAppUser();
   const client = useQueryClient();
@@ -42,10 +68,59 @@ export function AccountsPage() {
   const [resetTarget, setResetTarget] = useState<UserResponse | null>(null);
   const [resetPassword, setResetPassword] = useState("");
   const [statusTarget, setStatusTarget] = useState<UserResponse | null>(null);
+  const [scheduleSets, setScheduleSets] = useState<ScheduleSet[]>([]);
+  const [membersBySet, setMembersBySet] = useState<Record<string, ScheduleSetMember[]>>({});
+  const [scheduleSetsLoading, setScheduleSetsLoading] = useState(true);
+  const [scheduleSetsError, setScheduleSetsError] = useState<string | null>(null);
+  const [memberSavingKey, setMemberSavingKey] = useState<string | null>(null);
 
   const invalidate = () =>
     void client.invalidateQueries({ queryKey: getListUsersApiV1UsersGetQueryKey() });
   const onError = (error: unknown) => toast.error(errorMessage(error));
+
+  const refreshScheduleAccess = async () => {
+    setScheduleSetsLoading(true);
+    setScheduleSetsError(null);
+    try {
+      const sets = await scheduleSetApi.list();
+      const memberEntries = await Promise.all(
+        sets.map(async (item) => [item.id, await scheduleSetApi.listMembers(item.id)] as const),
+      );
+      setScheduleSets(sets);
+      setMembersBySet(Object.fromEntries(memberEntries));
+    } catch (error) {
+      setScheduleSetsError(errorMessage(error));
+    } finally {
+      setScheduleSetsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshScheduleAccess();
+  }, []);
+
+  const updateScheduleAccess = async (
+    account: UserResponse,
+    scheduleSet: ScheduleSet,
+    value: "none" | ScheduleAccessRole,
+  ) => {
+    const key = `${scheduleSet.id}:${account.id}`;
+    setMemberSavingKey(key);
+    try {
+      if (value === "none") {
+        await scheduleSetApi.revokeMember(scheduleSet.id, account.id);
+      } else {
+        await scheduleSetApi.setMember(scheduleSet.id, account.id, value);
+      }
+      const members = await scheduleSetApi.listMembers(scheduleSet.id);
+      setMembersBySet((current) => ({ ...current, [scheduleSet.id]: members }));
+      toast.success(`已更新 ${account.username} 的「${scheduleSet.name}」权限`);
+    } catch (error) {
+      toast.error(errorMessage(error));
+    } finally {
+      setMemberSavingKey(null);
+    }
+  };
 
   const create = useCreateUserApiV1UsersPost({
     mutation: {
@@ -252,6 +327,83 @@ export function AccountsPage() {
         {!rows.length ? (
           <div className="grid min-h-40 place-items-center text-sm text-zinc-400">暂无账号</div>
         ) : null}
+      </section>
+
+      <section className="border border-zinc-200 bg-white">
+        <div className="flex flex-col gap-1 border-b border-zinc-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <ShieldCheck className="size-4 text-blue-600" />
+            课表访问权限
+          </div>
+          <span className="text-xs text-zinc-400">按成员 × 课表方案配置查看、排课和审批权限</span>
+        </div>
+        {scheduleSetsLoading ? (
+          <div className="grid min-h-28 place-items-center text-sm text-zinc-400">课表权限加载中…</div>
+        ) : scheduleSetsError ? (
+          <div className="flex min-h-28 items-center justify-center gap-3 text-sm text-red-500">
+            <span>{scheduleSetsError}</span>
+            <Button size="sm" variant="outline" onClick={() => void refreshScheduleAccess()}>重试</Button>
+          </div>
+        ) : !scheduleSets.length ? (
+          <div className="grid min-h-28 place-items-center text-sm text-zinc-400">暂无课表方案</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[980px] text-left text-sm">
+              <thead className="bg-zinc-50 text-xs text-zinc-500">
+                <tr>
+                  <th className="h-10 min-w-44 px-4 font-medium">成员</th>
+                  {scheduleSets.map((scheduleSet) => (
+                    <th key={scheduleSet.id} className="min-w-40 px-4 font-medium">
+                      <div className="truncate text-zinc-700" title={scheduleSet.name}>{scheduleSet.name}</div>
+                      <div className="mt-0.5 font-mono text-[10px] text-zinc-400">{scheduleSet.code}</div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((account) => (
+                  <tr key={account.id} className="border-t border-zinc-100">
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-zinc-800">{account.username}</div>
+                      <div className="mt-0.5 text-[11px] text-zinc-400">全局角色：{roleLabel(account.role)}</div>
+                    </td>
+                    {scheduleSets.map((scheduleSet) => {
+                      const member = membersBySet[scheduleSet.id]?.find(
+                        (item) => item.user_id === account.id && item.is_active,
+                      );
+                      const value: "none" | ScheduleAccessRole = member?.access_role ?? "none";
+                      const saving = memberSavingKey === `${scheduleSet.id}:${account.id}`;
+                      return (
+                        <td key={scheduleSet.id} className="px-4 py-3">
+                          <select
+                            aria-label={`${account.username} 在 ${scheduleSet.name} 的课表权限`}
+                            className="h-8 w-full rounded-md border border-zinc-300 bg-white px-2 text-xs disabled:opacity-60"
+                            value={value}
+                            disabled={saving || !account.is_active}
+                            onChange={(event) => {
+                              const next = event.target.value as "none" | ScheduleAccessRole;
+                              if (accessAllowed(account.role, next)) {
+                                void updateScheduleAccess(account, scheduleSet, next);
+                              } else {
+                                toast.error("课表权限不能高于成员的全局角色");
+                              }
+                            }}
+                          >
+                            {ACCESS_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value} disabled={!accessAllowed(account.role, option.value)}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <Dialog
