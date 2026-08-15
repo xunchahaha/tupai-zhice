@@ -146,13 +146,31 @@ test("管理员完成排课、调课、回滚和飞书生产接入引导流程",
   // 变更课次现在稳定是个位数，全页搜 "1" 会撞上别的文本，改成只在这块指标里断言。
   await expect(page.getByText("变更课次").locator("..")).toContainText(String(diff.changed_count));
 
-  const candidateCard = page.getByTestId(`version-card-${candidate.id}`);
-  await candidateCard.locator("button").click();
-  await expect(page.getByText("版本已发布")).toBeVisible();
+  // 卡片上现在不止一个按钮（草稿有“发布”和“删除”，归档版本有“回滚”和“删除”），按 aria-label 点。
+  //
+  // 顺序必须是「先发父版本 → 再发候选 → 回滚到父版本」。回滚只接受 archived/rolled_back
+  // 的版本（api.py rollback_schedule），而父版本只有在自己发布过、又被候选顶下去之后
+  // 才会变成 archived。此前这里用 locator("button") 点“卡片上唯一那个按钮”，父版本一直
+  // 停在 draft，实际点到的是“发布”——所以这个叫“回滚”的用例从来没验证过回滚，
+  // 末尾断言 status === "published" 是被发布而不是被回滚满足的。
   const parentResponse = await api.get(`/api/v1/schedules/${event.parent_schedule_id}`);
   const parent = await parentResponse.json();
   const parentCard = page.getByTestId(`version-card-${parent.id}`);
-  await parentCard.locator("button").click();
+  await parentCard.getByRole("button", { name: `发布版本 v${parent.version_no}` }).click();
+  await expect(page.getByText("版本已发布")).toBeVisible();
+
+  const candidateCard = page.getByTestId(`version-card-${candidate.id}`);
+  await candidateCard.getByRole("button", { name: `发布版本 v${candidate.version_no}` }).click();
+  await expect.poll(async () => {
+    const response = await api.get(`/api/v1/schedules/${event.parent_schedule_id}`);
+    return (await response.json()).status;
+  }).toBe("archived");
+
+  await parentCard.getByRole("button", { name: `回滚到版本 v${parent.version_no}` }).click();
+  await expect.poll(async () => {
+    const response = await api.get(`/api/v1/schedules/${candidate.id}`);
+    return (await response.json()).status;
+  }).toBe("rolled_back");
   await expect.poll(async () => {
     const response = await api.get(`/api/v1/schedules/${event.parent_schedule_id}`);
     return (await response.json()).status;
