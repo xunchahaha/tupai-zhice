@@ -6887,7 +6887,9 @@
                 "course_sessions",
                 "rules",
                 "schedule",
-                "public_summary"
+                "public_summary",
+                "public_class_schedule",
+                "public_adjustment_notice"
               ]
             },
             "type": "array",
@@ -7094,7 +7096,9 @@
               "course_sessions",
               "rules",
               "schedule",
-              "public_summary"
+              "public_summary",
+              "public_class_schedule",
+              "public_adjustment_notice"
             ],
             "title": "Resource"
           },

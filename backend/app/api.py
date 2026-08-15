@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import secrets
 import tempfile
 from collections import Counter
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -224,13 +226,16 @@ def _role_allows_access(user: User, access_role: str) -> bool:
 def _visible_schedule_sets(db: Session, user: User) -> list[tuple[ScheduleSet, str]]:
     _ensure_default_schedule_set(db)
     if user.role == "admin":
-        rows = list(db.scalars(select(ScheduleSet).where(ScheduleSet.is_active.is_(True))))
+        schedule_sets = list(
+            db.scalars(select(ScheduleSet).where(ScheduleSet.is_active.is_(True)))
+        )
         return [
             (item, "approver")
-            for item in sorted(rows, key=lambda item: (item.display_order, item.name))
+            for item in sorted(schedule_sets, key=lambda item: (item.display_order, item.name))
         ]
-    rows = list(
-        db.execute(
+    member_rows: list[tuple[ScheduleSet, str]] = [
+        (schedule_set, access_role)
+        for schedule_set, access_role in db.execute(
             select(ScheduleSet, ScheduleSetMember.access_role)
             .join(ScheduleSetMember, ScheduleSetMember.schedule_set_id == ScheduleSet.id)
             .where(
@@ -239,8 +244,8 @@ def _visible_schedule_sets(db: Session, user: User) -> list[tuple[ScheduleSet, s
                 ScheduleSetMember.is_active.is_(True),
             )
         ).all()
-    )
-    return sorted(rows, key=lambda row: (row[0].display_order, row[0].name))
+    ]
+    return sorted(member_rows, key=lambda row: (row[0].display_order, row[0].name))
 
 
 def resolve_schedule_set(
@@ -2716,17 +2721,33 @@ def publish_schedule(
             if conflicts[key]
         )
         raise HTTPException(status_code=409, detail=f"课表存在硬冲突，不能发布：{detail}")
-    for published in db.scalars(
-        select(ScheduleVersion).where(
-            ScheduleVersion.schedule_set_id == scope.id,
-            ScheduleVersion.status == "published",
+    currently_published = list(
+        db.scalars(
+            select(ScheduleVersion)
+            .where(
+                ScheduleVersion.schedule_set_id == scope.id,
+                ScheduleVersion.status == "published",
+            )
+            .order_by(ScheduleVersion.published_at.desc(), ScheduleVersion.version_no.desc())
         )
-    ):
+    )
+    for published in currently_published:
         published.status = "archived"
     schedule.status = "published"
     schedule.approved_by = user.id
     schedule.published_at = utcnow()
-    audit(db, user, "publish", "schedule", schedule.id)
+    audit(
+        db,
+        user,
+        "publish",
+        "schedule",
+        schedule.id,
+        {
+            "replaced_published_schedule_id": (
+                currently_published[0].id if currently_published else None
+            )
+        },
+    )
     db.commit()
     db.refresh(schedule)
     trigger_published_data_sync(db, user, scope.id, event="publish")
@@ -2742,17 +2763,33 @@ def rollback_schedule(
     target = get_scoped_or_404(db, ScheduleVersion, schedule_id, scope)
     if target.status not in {"archived", "rolled_back"}:
         raise HTTPException(status_code=409, detail="只能回滚到已经发布过的历史版本")
-    for published in db.scalars(
-        select(ScheduleVersion).where(
-            ScheduleVersion.schedule_set_id == scope.id,
-            ScheduleVersion.status == "published",
+    currently_published = list(
+        db.scalars(
+            select(ScheduleVersion)
+            .where(
+                ScheduleVersion.schedule_set_id == scope.id,
+                ScheduleVersion.status == "published",
+            )
+            .order_by(ScheduleVersion.published_at.desc(), ScheduleVersion.version_no.desc())
         )
-    ):
+    )
+    for published in currently_published:
         published.status = "rolled_back"
     target.status = "published"
     target.approved_by = user.id
     target.published_at = utcnow()
-    audit(db, user, "rollback", "schedule", target.id)
+    audit(
+        db,
+        user,
+        "rollback",
+        "schedule",
+        target.id,
+        {
+            "replaced_published_schedule_id": (
+                currently_published[0].id if currently_published else None
+            )
+        },
+    )
     db.commit()
     db.refresh(target)
     trigger_published_data_sync(db, user, scope.id, event="rollback")
@@ -3498,6 +3535,288 @@ def disconnect_feishu(db: Db, user: Admin) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+def _public_projection_key(schedule_set_id: str, resource: str, source_id: str) -> str:
+    """Stable opaque record key for a public Bitable projection.
+
+    Public tables need a key so sync can update rather than append, but a
+    course UUID or business ID would become an unnecessary internal identifier
+    in the MiaoDa data source.  A namespaced digest is stable within one
+    timetable and opaque outside the service.
+    """
+
+    value = f"tupai-public|{schedule_set_id}|{resource}|{source_id}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+def _current_published_schedule(
+    db: Session, schedule_set_id: str
+) -> ScheduleVersion | None:
+    return db.scalar(
+        select(ScheduleVersion)
+        .where(
+            ScheduleVersion.schedule_set_id == schedule_set_id,
+            ScheduleVersion.status == "published",
+        )
+        .order_by(ScheduleVersion.published_at.desc(), ScheduleVersion.version_no.desc())
+    )
+
+
+def _assignment_rows(db: Session, schedule_id: str | None) -> list[ScheduleAssignment]:
+    if not schedule_id:
+        return []
+    return list(
+        db.scalars(
+            select(ScheduleAssignment)
+            .where(ScheduleAssignment.schedule_version_id == schedule_id)
+            .order_by(ScheduleAssignment.lesson_date, ScheduleAssignment.course_session_id)
+        )
+    )
+
+
+def _public_release_baseline(
+    db: Session, schedule: ScheduleVersion | None
+) -> ScheduleVersion | None:
+    """Return the timetable that this published release actually replaced.
+
+    ``parent_id`` describes a solver lineage and can point to a draft or an
+    old ancestor.  The publish/rollback audit event records the version that
+    was publicly active immediately before this release, which is the only
+    valid baseline for a parent-facing adjustment notice.
+    """
+
+    if schedule is None:
+        return None
+    release = db.scalar(
+        select(AuditLog)
+        .where(
+            AuditLog.resource_type == "schedule",
+            AuditLog.resource_id == schedule.id,
+            AuditLog.action.in_(("publish", "rollback")),
+        )
+        .order_by(AuditLog.created_at.desc())
+    )
+    baseline_id = (
+        str((release.detail or {}).get("replaced_published_schedule_id") or "")
+        if release
+        else ""
+    )
+    if not baseline_id:
+        return None
+    baseline = db.get(ScheduleVersion, baseline_id)
+    if baseline is None or baseline.schedule_set_id != schedule.schedule_set_id:
+        return None
+    return baseline
+
+
+def _public_schedule_maps(
+    db: Session, schedule_set_id: str
+) -> tuple[
+    list[CourseSession],
+    dict[tuple[str, str], ClassGroup],
+    dict[tuple[str, str], Room],
+    dict[tuple[str, str], TimeSlot],
+]:
+    courses = list(
+        db.scalars(
+            select(CourseSession)
+            .where(CourseSession.schedule_set_id == schedule_set_id)
+            .order_by(CourseSession.business_id)
+        )
+    )
+    classes = list(
+        db.scalars(
+            select(ClassGroup).where(ClassGroup.schedule_set_id == schedule_set_id)
+        )
+    )
+    rooms = list(db.scalars(select(Room).where(Room.schedule_set_id == schedule_set_id)))
+    slots = list(db.scalars(select(TimeSlot).where(TimeSlot.schedule_set_id == schedule_set_id)))
+    return (
+        courses,
+        {(item.campus_id, item.business_id): item for item in classes},
+        {(item.campus_id, item.business_id): item for item in rooms},
+        {(item.campus_id, item.business_id): item for item in slots},
+    )
+
+
+def _public_weekday(value: date | None, slot: TimeSlot | None) -> str:
+    if value is not None:
+        return ("周一", "周二", "周三", "周四", "周五", "周六", "周日")[value.weekday()]
+    return slot.weekday if slot else ""
+
+
+def _public_assignment_snapshot(
+    assignment: ScheduleAssignment | None,
+    course: CourseSession,
+    rooms: dict[tuple[str, str], Room],
+    slots: dict[tuple[str, str], TimeSlot],
+) -> dict[str, str]:
+    if assignment is None:
+        return {"date": "", "weekday": "", "start": "", "end": "", "location": ""}
+    slot = slots.get((course.campus_id, assignment.slot_business_id))
+    room = rooms.get((course.campus_id, assignment.room_business_id))
+    return {
+        "date": assignment.lesson_date.isoformat() if assignment.lesson_date else "",
+        "weekday": _public_weekday(assignment.lesson_date, slot),
+        "start": (slot.start_time if slot else course.fixed_start_time) or "",
+        "end": (slot.end_time if slot else course.fixed_end_time) or "",
+        # Never fall back to a business ID in a public-facing projection.
+        "location": room.name if room else "待定",
+    }
+
+
+def _public_time_text(snapshot: dict[str, str]) -> str:
+    date_text = snapshot["date"]
+    weekday = snapshot["weekday"]
+    clocks = "-".join(item for item in (snapshot["start"], snapshot["end"]) if item)
+    return " ".join(item for item in (date_text, weekday, clocks) if item)
+
+
+def _public_class_schedule_rows(
+    db: Session, schedule_set_id: str
+) -> list[dict[str, Any]]:
+    schedule = _current_published_schedule(db, schedule_set_id)
+    assignments = {
+        item.course_session_id: item
+        for item in _assignment_rows(db, schedule.id if schedule else None)
+    }
+    courses, classes, rooms, slots = _public_schedule_maps(db, schedule_set_id)
+    updated_at = utcnow().isoformat()
+    rows: list[dict[str, Any]] = []
+    for course in courses:
+        assignment = assignments.get(course.id)
+        row: dict[str, Any] = {
+            "业务标识": _public_projection_key(
+                schedule_set_id, "public_class_schedule", course.id
+            ),
+            "是否展示": "是" if assignment else "否",
+            "班级名称": "",
+            "上课日期": "",
+            "星期": "",
+            "开始时间": "",
+            "结束时间": "",
+            "课程名称": "",
+            "学科": "",
+            "上课地点": "",
+            "课表版本": "",
+            "更新时间": updated_at,
+        }
+        if assignment:
+            snapshot = _public_assignment_snapshot(assignment, course, rooms, slots)
+            class_group = classes.get((course.campus_id, course.class_business_id))
+            row.update(
+                {
+                    "班级名称": class_group.name if class_group else "未分班",
+                    "上课日期": snapshot["date"],
+                    "星期": snapshot["weekday"],
+                    "开始时间": snapshot["start"],
+                    "结束时间": snapshot["end"],
+                    "课程名称": course.lesson_name or "课程安排",
+                    "学科": course.subject or "",
+                    "上课地点": snapshot["location"],
+                    "课表版本": f"V{schedule.version_no}" if schedule else "",
+                }
+            )
+        rows.append(row)
+    return rows
+
+
+def _public_adjustment_notice_rows(
+    db: Session, schedule_set_id: str
+) -> list[dict[str, Any]]:
+    schedule = _current_published_schedule(db, schedule_set_id)
+    baseline = _public_release_baseline(db, schedule)
+    current_assignments = {
+        item.course_session_id: item
+        for item in _assignment_rows(db, schedule.id if schedule else None)
+    }
+    parent_assignments = {
+        item.course_session_id: item
+        for item in _assignment_rows(db, baseline.id if baseline else None)
+    }
+    courses, classes, rooms, slots = _public_schedule_maps(db, schedule_set_id)
+    updated_at = utcnow().isoformat()
+    rows: list[dict[str, Any]] = []
+    for course in courses:
+        before_assignment = parent_assignments.get(course.id)
+        after_assignment = current_assignments.get(course.id)
+        before = _public_assignment_snapshot(before_assignment, course, rooms, slots)
+        after = _public_assignment_snapshot(after_assignment, course, rooms, slots)
+        visible = bool(baseline) and before != after
+        if visible and before_assignment is None and after_assignment is not None:
+            change_type = "新增课程"
+        elif visible and before_assignment is not None and after_assignment is None:
+            change_type = "取消课程"
+        elif visible and (
+            before["date"], before["start"], before["end"]
+        ) != (
+            after["date"], after["start"], after["end"]
+        ) and before["location"] != after["location"]:
+            change_type = "时间及地点调整"
+        elif visible and (
+            before["date"], before["start"], before["end"]
+        ) != (
+            after["date"], after["start"], after["end"]
+        ):
+            change_type = "时间调整"
+        elif visible:
+            change_type = "地点调整"
+        else:
+            change_type = ""
+        row: dict[str, Any] = {
+            "业务标识": _public_projection_key(
+                schedule_set_id, "public_adjustment_notice", course.id
+            ),
+            "是否展示": "是" if visible else "否",
+            "公告状态": "已生效" if visible else "不展示",
+            "通用提示": "",
+            "调整类型": "",
+            "班级名称": "",
+            "课程名称": "",
+            "原上课时间": "",
+            "新上课时间": "",
+            "原上课地点": "",
+            "新上课地点": "",
+            "生效版本": "",
+            "更新时间": updated_at,
+        }
+        if visible:
+            class_group = classes.get((course.campus_id, course.class_business_id))
+            row.update(
+                {
+                    "通用提示": "课程安排已更新，请以本表为准",
+                    "调整类型": change_type,
+                    "班级名称": class_group.name if class_group else "未分班",
+                    "课程名称": course.lesson_name or "课程安排",
+                    "原上课时间": _public_time_text(before),
+                    "新上课时间": _public_time_text(after),
+                    "原上课地点": before["location"],
+                    "新上课地点": after["location"],
+                    "生效版本": f"V{schedule.version_no}" if schedule else "",
+                }
+            )
+        rows.append(row)
+    return rows
+
+
+def _published_adjustment_count(db: Session, schedule_set_id: str) -> int:
+    schedule = _current_published_schedule(db, schedule_set_id)
+    baseline = _public_release_baseline(db, schedule)
+    if schedule is None or baseline is None:
+        return 0
+    before = {
+        item.course_session_id: (item.lesson_date, item.slot_business_id, item.room_business_id)
+        for item in _assignment_rows(db, baseline.id)
+    }
+    after = {
+        item.course_session_id: (item.lesson_date, item.slot_business_id, item.room_business_id)
+        for item in _assignment_rows(db, schedule.id)
+    }
+    return sum(
+        before.get(course_id) != after.get(course_id)
+        for course_id in set(before) | set(after)
+    )
+
+
 def export_resource_rows(
     db: Session, resource: str, schedule_set_id: str = DEFAULT_SCHEDULE_SET_ID
 ) -> list[dict[str, Any]]:
@@ -3734,7 +4053,75 @@ def export_resource_rows(
     if resource == "public_summary":
         summary = _public_summary(db, schedule_set_id)
         updated_at = utcnow().isoformat()
+        published = _current_published_schedule(db, schedule_set_id)
+        assignments = _assignment_rows(db, published.id if published else None)
+        courses = {
+            item.id: item
+            for item in db.scalars(
+                select(CourseSession).where(CourseSession.schedule_set_id == schedule_set_id)
+            )
+        }
+        assignment_dates = sorted(
+            item.lesson_date for item in assignments if item.lesson_date is not None
+        )
+        covered_classes = {
+            (course.campus_id, course.class_business_id)
+            for item in assignments
+            if (course := courses.get(item.course_session_id)) is not None
+            and course.class_business_id
+        }
+        coverage = (
+            assignment_dates[0].isoformat()
+            if len(assignment_dates) == 1
+            else (
+                f"{assignment_dates[0].isoformat()} 至 {assignment_dates[-1].isoformat()}"
+                if assignment_dates
+                else ""
+            )
+        )
         public_rows: list[dict[str, Any]] = [
+            {
+                "业务标识": "published_version",
+                "指标名称": "当前发布版本",
+                "指标值": f"V{published.version_no}" if published else "未发布",
+                "月份": "",
+                "产品线匿名标签": "",
+                "更新时间": updated_at,
+            },
+            {
+                "业务标识": "published_at",
+                "指标名称": "发布时间",
+                "指标值": published.published_at.isoformat()
+                if published and published.published_at
+                else "",
+                "月份": "",
+                "产品线匿名标签": "",
+                "更新时间": updated_at,
+            },
+            {
+                "业务标识": "coverage_dates",
+                "指标名称": "排课覆盖日期",
+                "指标值": coverage,
+                "月份": "",
+                "产品线匿名标签": "",
+                "更新时间": updated_at,
+            },
+            {
+                "业务标识": "covered_classes",
+                "指标名称": "覆盖班级数",
+                "指标值": str(len(covered_classes)),
+                "月份": "",
+                "产品线匿名标签": "",
+                "更新时间": updated_at,
+            },
+            {
+                "业务标识": "adjusted_sessions",
+                "指标名称": "调整课次",
+                "指标值": str(_published_adjustment_count(db, schedule_set_id)),
+                "月份": "",
+                "产品线匿名标签": "",
+                "更新时间": updated_at,
+            },
             {
                 "业务标识": "total_sessions",
                 "指标名称": "总课次",
@@ -3775,6 +4162,10 @@ def export_resource_rows(
             for month, count in summary.monthly_sessions.items()
         )
         return public_rows
+    if resource == "public_class_schedule":
+        return _public_class_schedule_rows(db, schedule_set_id)
+    if resource == "public_adjustment_notice":
+        return _public_adjustment_notice_rows(db, schedule_set_id)
     return []
 
 
@@ -3800,7 +4191,7 @@ def sync_feishu_resources(
     db: Session,
     user: User,
     schedule_set_id: str,
-    resources: list[str] | tuple[str, ...],
+    resources: Sequence[str],
     *,
     workspace_id: str | None = None,
     trigger: str,
@@ -3902,7 +4293,12 @@ def trigger_published_data_sync(
             db,
             user,
             schedule_set_id,
-            ("schedule", "public_summary"),
+            (
+                "schedule",
+                "public_summary",
+                "public_class_schedule",
+                "public_adjustment_notice",
+            ),
             trigger=f"version_{event}",
         )
         if result.failed_count:

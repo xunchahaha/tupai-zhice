@@ -754,7 +754,24 @@ FeishuSyncResource = Literal[
     "rules",
     "schedule",
     "public_summary",
+    "public_class_schedule",
+    "public_adjustment_notice",
 ]
+
+
+def default_feishu_sync_resources() -> list[FeishuSyncResource]:
+    return [
+        "teachers",
+        "class_groups",
+        "rooms",
+        "time_slots",
+        "course_sessions",
+        "rules",
+        "schedule",
+        "public_summary",
+        "public_class_schedule",
+        "public_adjustment_notice",
+    ]
 
 
 class FeishuSyncRequest(BaseModel):
@@ -781,16 +798,7 @@ class FeishuBatchSyncRequest(BaseModel):
 
     direction: Literal["export"] = "export"
     resources: list[FeishuSyncResource] = Field(
-        default_factory=lambda: [
-            "teachers",
-            "class_groups",
-            "rooms",
-            "time_slots",
-            "course_sessions",
-            "rules",
-            "schedule",
-            "public_summary",
-        ],
+        default_factory=default_feishu_sync_resources,
         min_length=1,
     )
     workspace_id: str | None = None

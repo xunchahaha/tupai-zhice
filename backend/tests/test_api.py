@@ -1,15 +1,26 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from io import BytesIO
 from typing import Any
 
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db import SessionLocal
-from app.models import CourseSession, ScheduleAssignment, SolverRun, Teacher, TimeSlot
+from app.models import (
+    AuditLog,
+    CourseSession,
+    DataSnapshot,
+    RescheduleEvent,
+    Room,
+    ScheduleAssignment,
+    ScheduleVersion,
+    SolverRun,
+    Teacher,
+    TimeSlot,
+)
 
 
 def solve(client: TestClient, headers: dict[str, str]) -> dict:
@@ -184,7 +195,12 @@ def test_publish_keeps_local_version_when_published_data_sync_partially_fails(
     )
     assert published.status_code == 200, published.text
     assert published.json()["status"] == "published"
-    assert calls == [("schedule", "default"), ("public_summary", "default")]
+    assert calls == [
+        ("schedule", "default"),
+        ("public_summary", "default"),
+        ("public_class_schedule", "default"),
+        ("public_adjustment_notice", "default"),
+    ]
 
     syncs = client.get("/api/v1/integrations/feishu/syncs", headers=auth_headers)
     assert syncs.status_code == 200
@@ -193,7 +209,12 @@ def test_publish_keeps_local_version_when_published_data_sync_partially_fails(
         for item in syncs.json()
         if item["detail"].get("trigger") == "version_publish"
     ]
-    assert {item["resource"] for item in automatic} == {"schedule", "public_summary"}
+    assert {item["resource"] for item in automatic} == {
+        "schedule",
+        "public_summary",
+        "public_class_schedule",
+        "public_adjustment_notice",
+    }
     assert {item["status"] for item in automatic} == {"completed", "failed"}
     assert all(item["detail"]["schedule_set_id"] == "default" for item in automatic)
 
@@ -591,6 +612,224 @@ def test_product_loop_calendar_assistant_export_and_public_summary(
     assert any(item["指标名称"] == "总课次" for item in public_rows)
     assert "内部业务线" not in str(public_rows)
     assert "内部产品班型" not in str(public_rows)
+
+
+def test_public_bitable_projections_use_only_current_schedule_and_safe_fields(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    run = solve(client, auth_headers)
+    initial = next(
+        item
+        for item in client.get("/api/v1/schedules", headers=auth_headers).json()
+        if item["solver_run_id"] == run["id"]
+    )
+    assert client.post(
+        f"/api/v1/schedules/{initial['id']}/publish", headers=auth_headers
+    ).status_code == 200
+
+    from app.api import _public_projection_key, export_resource_rows
+
+    with SessionLocal() as db:
+        previous = db.get(ScheduleVersion, initial["id"])
+        assert previous is not None
+        previous_assignments = list(
+            db.scalars(
+                select(ScheduleAssignment)
+                .where(ScheduleAssignment.schedule_version_id == previous.id)
+                .order_by(ScheduleAssignment.course_session_id)
+            )
+        )
+        assert previous_assignments
+        changed = previous_assignments[0]
+        course = db.get(CourseSession, changed.course_session_id)
+        assert course is not None
+        teacher = db.scalar(
+            select(Teacher).where(Teacher.business_id == course.teacher_business_id)
+        )
+        assert teacher is not None
+        alternate_room = db.scalar(
+            select(Room)
+            .where(Room.business_id != changed.room_business_id)
+            .order_by(Room.business_id)
+        )
+        assert alternate_room is not None
+        course.business_line = "不可公开的业务线"
+        course.product_type = "不可公开的产品班型"
+        teacher.calendar_user_id = "ou_private_calendar_account"
+        snapshot = DataSnapshot(
+            schedule_set_id=previous.schedule_set_id,
+            revision=999,
+            checksum="public-projection-regression",
+            payload={},
+        )
+        db.add(snapshot)
+        db.flush()
+        solver_run = SolverRun(
+            schedule_set_id=previous.schedule_set_id,
+            snapshot_id=snapshot.id,
+            status="completed",
+            request_payload={},
+            result_payload={},
+        )
+        db.add(solver_run)
+        db.flush()
+        next_version_no = int(
+            db.scalar(
+                select(func.max(ScheduleVersion.version_no)).where(
+                    ScheduleVersion.schedule_set_id == previous.schedule_set_id
+                )
+            )
+            or 0
+        ) + 1
+        current = ScheduleVersion(
+            schedule_set_id=previous.schedule_set_id,
+            version_no=next_version_no,
+            name="公开投影调课版本",
+            status="published",
+            parent_id=previous.id,
+            solver_run_id=solver_run.id,
+            metrics={},
+            published_at=datetime.now(UTC),
+        )
+        db.add(current)
+        db.flush()
+        for assignment in previous_assignments:
+            db.add(
+                ScheduleAssignment(
+                    schedule_version_id=current.id,
+                    course_session_id=assignment.course_session_id,
+                    lesson_date=(
+                        date(2026, 10, 1)
+                        if assignment.id == changed.id
+                        else assignment.lesson_date
+                    ),
+                    slot_business_id=assignment.slot_business_id,
+                    room_business_id=(
+                        alternate_room.business_id
+                        if assignment.id == changed.id
+                        else assignment.room_business_id
+                    ),
+                    change_kind="moved" if assignment.id == changed.id else "unchanged",
+                )
+            )
+        previous.status = "archived"
+        db.add(
+            RescheduleEvent(
+                schedule_set_id=previous.schedule_set_id,
+                event_type="teacher_leave",
+                description="王老师请假与联系方式属于内部信息",
+                payload={"teacher_business_id": teacher.business_id},
+                status="completed",
+                parent_schedule_id=previous.id,
+                candidate_schedule_id=current.id,
+            )
+        )
+        db.add(
+            AuditLog(
+                action="publish",
+                resource_type="schedule",
+                resource_id=current.id,
+                detail={"replaced_published_schedule_id": previous.id},
+            )
+        )
+        hidden_course = CourseSession(
+            schedule_set_id=previous.schedule_set_id,
+            campus_id=course.campus_id,
+            business_id=f"PUBLIC-HIDDEN-{current.id[:8]}",
+            class_business_id=course.class_business_id,
+            teacher_business_id=course.teacher_business_id,
+            lesson_name="不应在隐藏行泄露的课程",
+            subject="内部学科",
+        )
+        db.add(hidden_course)
+        db.commit()
+
+        class_rows = export_resource_rows(db, "public_class_schedule")
+        notices = export_resource_rows(db, "public_adjustment_notice")
+        summary = export_resource_rows(db, "public_summary")
+        changed_notice_key = _public_projection_key(
+            previous.schedule_set_id, "public_adjustment_notice", course.id
+        )
+        hidden_class_key = _public_projection_key(
+            previous.schedule_set_id, "public_class_schedule", hidden_course.id
+        )
+        hidden_notice_key = _public_projection_key(
+            previous.schedule_set_id, "public_adjustment_notice", hidden_course.id
+        )
+        previous_id = previous.id
+        forbidden_values = (
+            teacher.name,
+            teacher.business_id,
+            teacher.calendar_user_id,
+            course.id,
+            course.business_id,
+            "王老师请假与联系方式属于内部信息",
+            "不可公开的业务线",
+            "不可公开的产品班型",
+            "不应在隐藏行泄露的课程",
+            "内部学科",
+        )
+
+    active_class_rows = [item for item in class_rows if item["是否展示"] == "是"]
+    assert active_class_rows
+    assert {item["课表版本"] for item in active_class_rows} == {f"V{next_version_no}"}
+    changed_notice = next(item for item in notices if item["业务标识"] == changed_notice_key)
+    assert changed_notice["是否展示"] == "是"
+    assert changed_notice["调整类型"] == "时间及地点调整"
+    assert changed_notice["公告状态"] == "已生效"
+    assert changed_notice["通用提示"] == "课程安排已更新，请以本表为准"
+    hidden_class = next(item for item in class_rows if item["业务标识"] == hidden_class_key)
+    assert hidden_class["是否展示"] == "否"
+    assert all(
+        hidden_class[field] == ""
+        for field in (
+            "班级名称",
+            "上课日期",
+            "星期",
+            "开始时间",
+            "结束时间",
+            "课程名称",
+            "学科",
+            "上课地点",
+            "课表版本",
+        )
+    )
+    hidden_notice = next(item for item in notices if item["业务标识"] == hidden_notice_key)
+    assert hidden_notice["是否展示"] == "否"
+    assert all(
+        hidden_notice[field] == ""
+        for field in (
+            "通用提示",
+            "调整类型",
+            "班级名称",
+            "课程名称",
+            "原上课时间",
+            "新上课时间",
+            "原上课地点",
+            "新上课地点",
+            "生效版本",
+        )
+    )
+    assert any(item["指标名称"] == "当前发布版本" for item in summary)
+    assert any(item["指标名称"] == "调整课次" for item in summary)
+
+    public_text = str([*class_rows, *notices, *summary])
+    for forbidden in forbidden_values:
+        assert forbidden not in public_text
+
+    # V1 has no solver parent. A rollback must still compare it with V2, the
+    # version it just replaced, rather than hiding the public adjustment.
+    rolled_back = client.post(
+        f"/api/v1/schedules/{previous_id}/rollback", headers=auth_headers
+    )
+    assert rolled_back.status_code == 200, rolled_back.text
+    with SessionLocal() as db:
+        rollback_notices = export_resource_rows(db, "public_adjustment_notice")
+    rollback_notice = next(
+        item for item in rollback_notices if item["业务标识"] == changed_notice_key
+    )
+    assert rollback_notice["是否展示"] == "是"
+    assert rollback_notice["调整类型"] == "时间及地点调整"
 
 
 def test_assistant_rejects_unknown_scope(

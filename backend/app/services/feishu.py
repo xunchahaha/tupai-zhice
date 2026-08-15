@@ -15,7 +15,13 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from ..config import AILY_OPTIONAL_SCOPES, FEISHU_REQUIRED_SCOPES, FEISHU_RESOURCES, Settings
+from ..config import (
+    AILY_OPTIONAL_SCOPES,
+    FEISHU_OPTIONAL_CLEANUP_SCOPES,
+    FEISHU_REQUIRED_SCOPES,
+    FEISHU_RESOURCES,
+    Settings,
+)
 from ..models import (
     FeishuAppConfiguration,
     FeishuConnection,
@@ -29,6 +35,9 @@ AUTHORIZATION_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
 TOKEN_URL = "https://accounts.feishu.cn/oauth/v3/token"
 OPEN_API_URL = "https://open.feishu.cn/open-apis"
 BUSINESS_KEY_FIELD = "业务标识"
+SYSTEM_OWNED_PUBLIC_RESOURCES = frozenset(
+    {"public_summary", "public_class_schedule", "public_adjustment_notice"}
+)
 _refresh_locks: dict[str, threading.Lock] = {}
 _refresh_locks_guard = threading.Lock()
 
@@ -153,11 +162,87 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
             ("更新时间", 1),
         ],
     ),
+    "public_class_schedule": (
+        "班级公开课表",
+        [
+            (BUSINESS_KEY_FIELD, 1),
+            ("是否展示", 1),
+            ("班级名称", 1),
+            ("上课日期", 1),
+            ("星期", 1),
+            ("开始时间", 1),
+            ("结束时间", 1),
+            ("课程名称", 1),
+            ("学科", 1),
+            ("上课地点", 1),
+            ("课表版本", 1),
+            ("更新时间", 1),
+        ],
+    ),
+    "public_adjustment_notice": (
+        "公开调课通知",
+        [
+            (BUSINESS_KEY_FIELD, 1),
+            ("是否展示", 1),
+            ("公告状态", 1),
+            ("通用提示", 1),
+            ("调整类型", 1),
+            ("班级名称", 1),
+            ("课程名称", 1),
+            ("原上课时间", 1),
+            ("新上课时间", 1),
+            ("原上课地点", 1),
+            ("新上课地点", 1),
+            ("生效版本", 1),
+            ("更新时间", 1),
+        ],
+    ),
 }
 
 
 class FeishuServiceError(RuntimeError):
     pass
+
+
+_ZERO_WIDTH_KEY_CHARACTERS = "\ufeff\u200b\u200c\u200d\u2060"
+
+
+def normalize_business_key(value: object) -> str:
+    """Turn Bitable's plain/rich-text key shape into one stable local key.
+
+    A Bitable text field is returned as a list of rich-text fragments rather
+    than the plain string sent during a write.  Converting that list with
+    ``str(value)`` creates a different key on every read and used to cause an
+    idempotent sync to create a fresh record.  This parser deliberately keeps
+    ordinary internal whitespace/case intact; only invisible transport marks
+    and outer whitespace are removed.
+    """
+
+    def text_from(candidate: object) -> str:
+        if candidate is None:
+            return ""
+        if isinstance(candidate, str):
+            return candidate
+        if isinstance(candidate, list):
+            parts: list[str] = []
+            for item in candidate:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(str(item["text"]))
+                    continue
+                raise FeishuServiceError("飞书“业务标识”字段格式不正确")
+            return "".join(parts)
+        if isinstance(candidate, dict):
+            if isinstance(candidate.get("text"), str):
+                return str(candidate["text"])
+            for key in ("value", "content"):
+                if key in candidate:
+                    return text_from(candidate[key])
+        raise FeishuServiceError("飞书“业务标识”字段格式不正确")
+
+    return text_from(value).translate(str.maketrans("", "", _ZERO_WIDTH_KEY_CHARACTERS)).strip()
 
 
 @dataclass(frozen=True)
@@ -437,7 +522,7 @@ class FeishuService:
 
     def create_oauth_start(self, user_id: str) -> dict[str, Any]:
         app = self._app_configuration()
-        scopes = list(FEISHU_REQUIRED_SCOPES)
+        scopes = [*FEISHU_REQUIRED_SCOPES, *FEISHU_OPTIONAL_CLEANUP_SCOPES]
         if self.configuration_view()["aily_configured"]:
             scopes.extend(AILY_OPTIONAL_SCOPES)
         state = secrets.token_urlsafe(32)
@@ -1086,6 +1171,85 @@ class FeishuService:
                 log_ids.append(log_id)
         return log_ids
 
+    def _batch_delete(
+        self,
+        token: str,
+        workspace: FeishuWorkspace,
+        table_id: str,
+        record_ids: list[str],
+    ) -> tuple[set[str], set[str], list[str], str | None]:
+        """Best-effort removal for records owned by our binding ledger only.
+
+        Deletion is intentionally separate from the core upsert path.  A
+        legacy OAuth grant may not yet contain ``base:record:delete`` and a
+        table can have extra sharing rules, neither of which should turn a
+        successful export into a failed timetable publication.
+        """
+
+        deleted: set[str] = set()
+        failed: set[str] = set()
+        log_ids: list[str] = []
+        error: str | None = None
+        for start in range(0, len(record_ids), 500):
+            batch = record_ids[start : start + 500]
+            try:
+                data, log_id = self._request(
+                    "POST",
+                    f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                    f"{table_id}/records/batch_delete",
+                    token=token,
+                    json_body={"records": batch},
+                )
+            except (FeishuServiceError, httpx.HTTPError) as exc:
+                failed.update(record_ids[start:])
+                error = str(exc)
+                break
+            if log_id:
+                log_ids.append(log_id)
+            records = data.get("records", data.get("items", []))
+            if not isinstance(records, list):
+                failed.update(batch)
+                error = "飞书删除记录响应缺少逐条删除状态"
+                continue
+            status_by_record_id = {
+                str(item.get("record_id") or ""): item
+                for item in records
+                if isinstance(item, dict) and item.get("record_id")
+            }
+            for record_id in batch:
+                item = status_by_record_id.get(record_id)
+                if item and item.get("deleted") is True:
+                    deleted.add(record_id)
+                else:
+                    failed.add(record_id)
+                    if error is None:
+                        error = "飞书未确认全部重复记录已删除"
+        return deleted, failed, log_ids, error
+
+    @staticmethod
+    def _remote_record_index(
+        records: list[dict[str, Any]],
+    ) -> tuple[dict[str, list[str]], set[str]]:
+        """Index remote records without collapsing duplicate business keys."""
+
+        by_key: dict[str, list[str]] = {}
+        record_ids: set[str] = set()
+        for record in records:
+            record_id = str(record.get("record_id") or "").strip()
+            if not record_id:
+                continue
+            record_ids.add(record_id)
+            fields = record.get("fields")
+            if not isinstance(fields, dict):
+                continue
+            key = normalize_business_key(fields.get(BUSINESS_KEY_FIELD))
+            if not key:
+                continue
+            candidates = by_key.setdefault(key, [])
+            if record_id not in candidates:
+                candidates.append(record_id)
+        return by_key, record_ids
+
     def sync_rows(
         self,
         user_id: str,
@@ -1123,33 +1287,69 @@ class FeishuService:
         local_keys: set[str] = set()
         for row in rows:
             fields = {key: value for key, value in row.items() if value is not None}
-            business_key = str(fields.get(BUSINESS_KEY_FIELD) or "").strip()
+            business_key = normalize_business_key(fields.get(BUSINESS_KEY_FIELD))
             if not business_key:
                 raise FeishuServiceError("同步数据缺少“业务标识”")
             if business_key in local_keys:
                 raise FeishuServiceError(f"本地同步数据存在重复业务标识：{business_key}")
             local_keys.add(business_key)
+            # Always write a plain string back.  It is important for both new
+            # Bitable records and records that were previously rich-text.
+            fields[BUSINESS_KEY_FIELD] = business_key
             normalized.append(fields)
 
         remote_records, log_ids = self._list_records(token, workspace, table.table_id)
-        remote_by_key: dict[str, str] = {}
-        for record in remote_records:
-            fields = record.get("fields", {})
-            if not isinstance(fields, dict):
-                continue
-            key = str(fields.get(BUSINESS_KEY_FIELD) or "").strip()
-            record_id = str(record.get("record_id") or "")
-            if not key or not record_id:
-                continue
-            if key in remote_by_key and remote_by_key[key] != record_id:
-                raise FeishuServiceError(f"飞书数据表存在重复业务标识：{key}")
-            remote_by_key[key] = record_id
+        remote_by_key, remote_record_ids = self._remote_record_index(remote_records)
+        bindings = list(
+            self.db.scalars(
+                select(FeishuRecordBinding).where(FeishuRecordBinding.table_binding_id == table.id)
+            )
+        )
+        # A search response can be restricted by Bitable sharing or return an
+        # incomplete page after a transient failure.  Keep every local binding
+        # as the ownership ledger; only use it as a remote update target when
+        # its record is actually present in this response.
+        bindings_by_key = {item.business_key: item for item in bindings}
+        bindings_by_record_id = {
+            item.record_id: item for item in bindings if item.record_id in remote_record_ids
+        }
+        canonical_by_key: dict[str, str] = {}
+        canonical_record_ids: set[str] = set()
 
-        to_create = [row for row in normalized if str(row[BUSINESS_KEY_FIELD]) not in remote_by_key]
+        def canonical_record(key: str) -> str | None:
+            binding = bindings_by_key.get(key)
+            if (
+                binding
+                and binding.record_id in remote_record_ids
+                and binding.record_id not in canonical_record_ids
+            ):
+                canonical_record_ids.add(binding.record_id)
+                return binding.record_id
+            for record_id in remote_by_key.get(key, []):
+                owner = bindings_by_record_id.get(record_id)
+                if record_id in canonical_record_ids:
+                    continue
+                # Do not silently take a record owned by a different current
+                # business key when someone edits its Bitable cell by hand.
+                if owner is not None and owner.business_key != key:
+                    continue
+                canonical_record_ids.add(record_id)
+                return record_id
+            return None
+
+        for row in normalized:
+            key = str(row[BUSINESS_KEY_FIELD])
+            record_id = canonical_record(key)
+            if record_id:
+                canonical_by_key[key] = record_id
+
+        to_create = [
+            row for row in normalized if str(row[BUSINESS_KEY_FIELD]) not in canonical_by_key
+        ]
         to_update = [
-            (remote_by_key[str(row[BUSINESS_KEY_FIELD])], row)
+            (canonical_by_key[str(row[BUSINESS_KEY_FIELD])], row)
             for row in normalized
-            if str(row[BUSINESS_KEY_FIELD]) in remote_by_key
+            if str(row[BUSINESS_KEY_FIELD]) in canonical_by_key
         ]
         created_records, create_logs = self._batch_create(
             token, workspace, table.table_id, to_create
@@ -1160,40 +1360,146 @@ class FeishuService:
                 for row, record in zip(to_create, created_records, strict=True):
                     record_id = str(record.get("record_id") or "")
                     if record_id:
-                        remote_by_key[str(row[BUSINESS_KEY_FIELD])] = record_id
-            if any(str(row[BUSINESS_KEY_FIELD]) not in remote_by_key for row in to_create):
+                        key = str(row[BUSINESS_KEY_FIELD])
+                        canonical_by_key[key] = record_id
+                        canonical_record_ids.add(record_id)
+                        remote_record_ids.add(record_id)
+                        remote_by_key.setdefault(key, []).append(record_id)
+            if any(str(row[BUSINESS_KEY_FIELD]) not in canonical_by_key for row in to_create):
                 refreshed, refresh_logs = self._list_records(token, workspace, table.table_id)
                 log_ids.extend(refresh_logs)
-                for record in refreshed:
-                    fields = record.get("fields", {})
-                    if isinstance(fields, dict) and record.get("record_id"):
-                        key = str(fields.get(BUSINESS_KEY_FIELD) or "").strip()
-                        if key:
-                            remote_by_key[key] = str(record["record_id"])
+                remote_by_key, remote_record_ids = self._remote_record_index(refreshed)
+                for row in to_create:
+                    key = str(row[BUSINESS_KEY_FIELD])
+                    if key not in canonical_by_key:
+                        record_id = canonical_record(key)
+                        if record_id:
+                            canonical_by_key[key] = record_id
+        missing_bindings = [
+            str(row[BUSINESS_KEY_FIELD])
+            for row in normalized
+            if str(row[BUSINESS_KEY_FIELD]) not in canonical_by_key
+        ]
+        if missing_bindings:
+            raise FeishuServiceError(
+                f"飞书写入后未找到记录绑定：{missing_bindings[0]}"
+            )
         log_ids.extend(self._batch_update(token, workspace, table.table_id, to_update))
 
-        bindings = {
-            item.business_key: item
-            for item in self.db.scalars(
-                select(FeishuRecordBinding).where(FeishuRecordBinding.table_binding_id == table.id)
-            )
-        }
+        # Public projection tables are exclusively generated by this service.
+        # Their old rich-text bug created an unbound rec1 and then moved the
+        # sole binding to rec2, so a binding-only policy could never repair the
+        # exact visible duplicate.  Internal master-data tables stay
+        # conservative because users may keep hand-authored records there.
+        system_owned_public_table = resource in SYSTEM_OWNED_PUBLIC_RESOURCES
+        cleanup_candidate_ids: set[str] = set()
+        cleanup_bindings_by_record_id: dict[str, FeishuRecordBinding] = {}
+        duplicate_candidates = 0
+        stale_candidates = 0
+        unmanaged_duplicates = 0
+        unmanaged_stale_records = 0
+
+        def add_cleanup_candidate(record_id: str, *, stale: bool = False) -> None:
+            nonlocal duplicate_candidates, stale_candidates
+            if record_id in cleanup_candidate_ids:
+                return
+            cleanup_candidate_ids.add(record_id)
+            if stale:
+                stale_candidates += 1
+            else:
+                duplicate_candidates += 1
+            binding = bindings_by_record_id.get(record_id)
+            if binding is not None:
+                cleanup_bindings_by_record_id[record_id] = binding
+
+        if system_owned_public_table:
+            # Public projection tables are fully generated resources.  Delete
+            # every remote record that is not a canonical current projection:
+            # this repairs unbound historical rich-text duplicates, stale
+            # months, removed course rows, and malformed no-key remnants.
+            local_remote_ids = {
+                record_id
+                for key in local_keys
+                for record_id in remote_by_key.get(key, [])
+            }
+            for record_id in sorted(remote_record_ids - canonical_record_ids):
+                add_cleanup_candidate(record_id, stale=record_id not in local_remote_ids)
+        else:
+            for key in local_keys:
+                canonical_id = canonical_by_key[key]
+                for record_id in remote_by_key.get(key, []):
+                    # A malformed remote key can overlap another local key's
+                    # bound canonical record. Never delete any such record.
+                    if record_id == canonical_id or record_id in canonical_record_ids:
+                        continue
+                    binding = bindings_by_record_id.get(record_id)
+                    if binding is not None and binding.business_key not in local_keys:
+                        add_cleanup_candidate(record_id)
+                    else:
+                        unmanaged_duplicates += 1
+
         for row in normalized:
             key = str(row[BUSINESS_KEY_FIELD])
-            bound_record_id = remote_by_key.get(key)
-            if not bound_record_id:
-                raise FeishuServiceError(f"飞书写入后未找到记录绑定：{key}")
-            binding = bindings.get(key)
+            bound_record_id = canonical_by_key[key]
+            binding = bindings_by_key.get(key)
             if binding is None:
-                self.db.add(
-                    FeishuRecordBinding(
-                        table_binding_id=table.id,
-                        business_key=key,
-                        record_id=bound_record_id,
-                    )
+                binding = FeishuRecordBinding(
+                    table_binding_id=table.id,
+                    business_key=key,
+                    record_id=bound_record_id,
+                )
+                self.db.add(binding)
+                bindings_by_key[key] = binding
+                bindings_by_record_id[bound_record_id] = binding
+            else:
+                if binding.record_id != bound_record_id:
+                    bindings_by_record_id.pop(binding.record_id, None)
+                binding.record_id = bound_record_id
+                bindings_by_record_id[bound_record_id] = binding
+
+        duplicate_cleanup: dict[str, Any] = {
+            "status": "not_needed",
+            "system_owned_public_table": system_owned_public_table,
+            "managed_candidates": len(cleanup_candidate_ids),
+            "duplicate_candidates": duplicate_candidates,
+            "stale_candidates": stale_candidates,
+            "deleted": 0,
+            "failed": 0,
+            "skipped_missing_delete_scope": 0,
+            "unmanaged_duplicates": unmanaged_duplicates,
+            "unmanaged_stale_records": unmanaged_stale_records,
+            "error": None,
+        }
+        if cleanup_candidate_ids:
+            if "base:record:delete" not in connection.scopes:
+                duplicate_cleanup.update(
+                    {
+                        "status": "skipped_missing_delete_scope",
+                        "skipped_missing_delete_scope": len(cleanup_candidate_ids),
+                        "error": "飞书授权缺少权限：base:record:delete",
+                    }
                 )
             else:
-                binding.record_id = bound_record_id
+                deleted_ids, failed_ids, delete_logs, cleanup_error = self._batch_delete(
+                    token,
+                    workspace,
+                    table.table_id,
+                    sorted(cleanup_candidate_ids),
+                )
+                log_ids.extend(delete_logs)
+                duplicate_cleanup.update(
+                    {
+                        "status": "completed" if not failed_ids else "failed",
+                        "deleted": len(deleted_ids),
+                        "failed": len(failed_ids),
+                        "error": cleanup_error,
+                    }
+                )
+                for record_id, binding in cleanup_bindings_by_record_id.items():
+                    if record_id in deleted_ids:
+                        self.db.delete(binding)
+        elif unmanaged_duplicates or unmanaged_stale_records:
+            duplicate_cleanup["status"] = "unmanaged_duplicates"
         self.db.commit()
         return {
             "workspace_id": workspace.id,
@@ -1203,6 +1509,7 @@ class FeishuService:
             "records_created": len(to_create),
             "records_updated": len(to_update),
             "records_written": len(to_create) + len(to_update),
+            "duplicate_cleanup": duplicate_cleanup,
             "request_log_ids": list(dict.fromkeys(log_ids)),
         }
 

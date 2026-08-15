@@ -11,16 +11,24 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select
 
 from app.api import settings
-from app.config import FEISHU_REQUIRED_SCOPES
+from app.config import FEISHU_OPTIONAL_CLEANUP_SCOPES, FEISHU_REQUIRED_SCOPES
 from app.db import SessionLocal
 from app.models import (
     FeishuAppConfiguration,
     FeishuConnection,
     FeishuOAuthState,
     FeishuRecordBinding,
+    FeishuTableBinding,
+    FeishuWorkspace,
     User,
 )
-from app.services.feishu import TABLE_SCHEMAS, FeishuService, FeishuServiceError, TokenCipher
+from app.services.feishu import (
+    TABLE_SCHEMAS,
+    FeishuService,
+    FeishuServiceError,
+    TokenCipher,
+    normalize_business_key,
+)
 
 
 def response(
@@ -79,7 +87,9 @@ def complete_authorization(
     assert "code_challenge" not in query
     assert "code_challenge_method" not in query
     assert "offline_access" in query["scope"][0]
-    assert set(FEISHU_REQUIRED_SCOPES) == set(query["scope"][0].split())
+    assert set(FEISHU_REQUIRED_SCOPES) | set(FEISHU_OPTIONAL_CLEANUP_SCOPES) == set(
+        query["scope"][0].split()
+    )
     assert {
         "calendar:calendar.event:create",
         "calendar:calendar.event:update",
@@ -370,6 +380,8 @@ def test_auto_create_workspace_and_sync_idempotently(
         "规则",
         "课表",
         "公开展示汇总",
+        "班级公开课表",
+        "公开调课通知",
     ]
     assert all(table["fields"][0]["field_name"] == "业务标识" for table in created_tables)
 
@@ -422,10 +434,357 @@ def test_auto_create_workspace_and_sync_idempotently(
         assert db.scalar(select(func.count(FeishuRecordBinding.id))) >= 6
 
 
+def test_public_sync_normalizes_rich_text_and_repairs_historical_duplicate(
+    monkeypatch: Any,
+) -> None:
+    """The old bug left rec-old unbound after replacing its binding with rec-new."""
+
+    with SessionLocal() as db:
+        user = User(
+            username="public_dedupe_fixture",
+            password_hash="not-used-in-this-test",
+            role="admin",
+        )
+        db.add(user)
+        db.flush()
+        connection = FeishuConnection(
+            user_id=user.id,
+            access_token_encrypted="test-access",
+            refresh_token_encrypted="test-refresh",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            scopes=[
+                "base:record:create",
+                "base:record:retrieve",
+                "base:record:update",
+                "base:record:delete",
+            ],
+            status="active",
+        )
+        db.add(connection)
+        db.flush()
+        workspace = FeishuWorkspace(
+            connection_id=connection.id,
+            schedule_set_id="default",
+            name="公开去重回归",
+            app_token="app-public-dedupe",
+            default_table_id="tbl-default",
+            url="https://example.test/public-dedupe",
+            status="active",
+        )
+        db.add(workspace)
+        db.flush()
+        table = FeishuTableBinding(
+            workspace_id=workspace.id,
+            resource="public_summary",
+            table_name="公开展示汇总",
+            table_id="tbl-public-summary",
+        )
+        db.add(table)
+        db.flush()
+        binding = FeishuRecordBinding(
+            table_binding_id=table.id,
+            business_key="total_sessions",
+            record_id="rec-new",
+        )
+        db.add(binding)
+        other_binding = FeishuRecordBinding(
+            table_binding_id=table.id,
+            business_key="room_utilization",
+            record_id="rec-foreign-canonical",
+        )
+        db.add(other_binding)
+        db.commit()
+
+        assert normalize_business_key(
+            [{"type": "text", "text": "total_"}, {"type": "text", "text": "sessions"}]
+        ) == "total_sessions"
+        remote_records = [
+            {
+                "record_id": "rec-old",
+                "fields": {
+                    "业务标识": [
+                        {"type": "text", "text": "total_"},
+                        {"type": "text", "text": "sessions"},
+                    ]
+                },
+            },
+            {
+                "record_id": "rec-new",
+                "fields": {"业务标识": [{"type": "text", "text": "total_sessions"}]},
+            },
+            {
+                "record_id": "rec-stale",
+                "fields": {"业务标识": [{"type": "text", "text": "old_month_metric"}]},
+            },
+            {
+                # This record belongs to a second current key but its remote
+                # text was manually changed to the first key. It is still a
+                # canonical record and must not be deleted as a duplicate.
+                "record_id": "rec-foreign-canonical",
+                "fields": {"业务标识": [{"type": "text", "text": "total_sessions"}]},
+            },
+        ]
+        service = FeishuService(settings, db)
+        monkeypatch.setattr(service, "_app_configuration", lambda: None)
+        monkeypatch.setattr(service, "access_token", lambda _user_id: (connection, "token"))
+        monkeypatch.setattr(
+            service,
+            "_list_records",
+            lambda _token, _workspace, _table_id: (remote_records, ["log-list"]),
+        )
+        updates: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            service,
+            "_batch_update",
+            lambda _token, _workspace, _table_id, rows: updates.extend(rows) or ["log-update"],
+        )
+        deleted: list[str] = []
+        monkeypatch.setattr(
+            service,
+            "_batch_delete",
+            lambda _token, _workspace, _table_id, record_ids: (
+                deleted.extend(record_ids) or set(record_ids),
+                set(),
+                ["log-delete"],
+                None,
+            ),
+        )
+
+        result = service.sync_rows(
+            user.id,
+            "public_summary",
+            [
+                {"业务标识": "total_sessions", "指标名称": "总课次", "指标值": "12"},
+                {
+                    "业务标识": "room_utilization",
+                    "指标名称": "教室利用率",
+                    "指标值": "0.6",
+                },
+            ],
+        )
+        assert result["records_created"] == 0
+        assert result["records_updated"] == 2
+        assert updates == [
+            ("rec-new", {"业务标识": "total_sessions", "指标名称": "总课次", "指标值": "12"}),
+            (
+                "rec-foreign-canonical",
+                {
+                    "业务标识": "room_utilization",
+                    "指标名称": "教室利用率",
+                    "指标值": "0.6",
+                },
+            ),
+        ]
+        assert deleted == ["rec-old", "rec-stale"]
+        assert result["duplicate_cleanup"] == {
+            "status": "completed",
+            "system_owned_public_table": True,
+            "managed_candidates": 2,
+            "duplicate_candidates": 1,
+            "stale_candidates": 1,
+            "deleted": 2,
+            "failed": 0,
+            "skipped_missing_delete_scope": 0,
+            "unmanaged_duplicates": 0,
+            "unmanaged_stale_records": 0,
+            "error": None,
+        }
+        db.refresh(binding)
+        assert binding.record_id == "rec-new"
+        db.refresh(other_binding)
+        assert other_binding.record_id == "rec-foreign-canonical"
+        db.delete(binding)
+        db.delete(other_binding)
+        db.delete(table)
+        db.delete(workspace)
+        db.delete(connection)
+        db.delete(user)
+        db.commit()
+
+
+def test_duplicate_cleanup_without_optional_delete_scope_keeps_primary_upsert(
+    monkeypatch: Any,
+) -> None:
+    with SessionLocal() as db:
+        user = User(
+            username="public_dedupe_no_delete_fixture",
+            password_hash="not-used-in-this-test",
+            role="admin",
+        )
+        db.add(user)
+        db.flush()
+        connection = FeishuConnection(
+            user_id=user.id,
+            access_token_encrypted="test-access-no-delete",
+            refresh_token_encrypted="test-refresh-no-delete",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            scopes=["base:record:create", "base:record:retrieve", "base:record:update"],
+            status="active",
+        )
+        db.add(connection)
+        db.flush()
+        workspace = FeishuWorkspace(
+            connection_id=connection.id,
+            schedule_set_id="default",
+            name="公开去重缺少删除权限",
+            app_token="app-public-no-delete",
+            default_table_id="tbl-default",
+            url="https://example.test/public-no-delete",
+            status="active",
+        )
+        db.add(workspace)
+        db.flush()
+        table = FeishuTableBinding(
+            workspace_id=workspace.id,
+            resource="public_summary",
+            table_name="公开展示汇总",
+            table_id="tbl-public-summary-no-delete",
+        )
+        db.add(table)
+        db.flush()
+        binding = FeishuRecordBinding(
+            table_binding_id=table.id,
+            business_key="total_sessions",
+            record_id="rec-new-no-delete",
+        )
+        db.add(binding)
+        db.commit()
+
+        service = FeishuService(settings, db)
+        monkeypatch.setattr(service, "_app_configuration", lambda: None)
+        monkeypatch.setattr(service, "access_token", lambda _user_id: (connection, "token"))
+        monkeypatch.setattr(
+            service,
+            "_list_records",
+            lambda _token, _workspace, _table_id: (
+                [
+                    {
+                        "record_id": "rec-old-no-delete",
+                        "fields": {"业务标识": [{"type": "text", "text": "total_sessions"}]},
+                    },
+                    {
+                        "record_id": "rec-new-no-delete",
+                        "fields": {"业务标识": [{"type": "text", "text": "total_sessions"}]},
+                    },
+                ],
+                [],
+            ),
+        )
+        monkeypatch.setattr(service, "_batch_update", lambda *_args: [])
+        monkeypatch.setattr(
+            service,
+            "_batch_delete",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("delete must remain optional")),
+        )
+
+        result = service.sync_rows(
+            user.id,
+            "public_summary",
+            [{"业务标识": "total_sessions", "指标名称": "总课次", "指标值": "12"}],
+        )
+        cleanup = result["duplicate_cleanup"]
+        assert cleanup["status"] == "skipped_missing_delete_scope"
+        assert cleanup["skipped_missing_delete_scope"] == 1
+        assert result["records_updated"] == 1
+        db.delete(binding)
+        db.delete(table)
+        db.delete(workspace)
+        db.delete(connection)
+        db.delete(user)
+        db.commit()
+
+
+def test_sync_keeps_binding_when_remote_search_temporarily_omits_record(
+    monkeypatch: Any,
+) -> None:
+    with SessionLocal() as db:
+        user = User(
+            username="binding_reconcile_fixture",
+            password_hash="not-used-in-this-test",
+            role="admin",
+        )
+        db.add(user)
+        db.flush()
+        connection = FeishuConnection(
+            user_id=user.id,
+            access_token_encrypted="test-access-reconcile",
+            refresh_token_encrypted="test-refresh-reconcile",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            scopes=["base:record:create", "base:record:retrieve", "base:record:update"],
+            status="active",
+        )
+        db.add(connection)
+        db.flush()
+        workspace = FeishuWorkspace(
+            connection_id=connection.id,
+            schedule_set_id="default",
+            name="绑定对账回归",
+            app_token="app-binding-reconcile",
+            default_table_id="tbl-default",
+            url="https://example.test/binding-reconcile",
+            status="active",
+        )
+        db.add(workspace)
+        db.flush()
+        table = FeishuTableBinding(
+            workspace_id=workspace.id,
+            resource="teachers",
+            table_name="教师",
+            table_id="tbl-teachers-reconcile",
+        )
+        db.add(table)
+        db.flush()
+        binding = FeishuRecordBinding(
+            table_binding_id=table.id,
+            business_key="T-RECONCILE",
+            record_id="rec-search-omitted",
+        )
+        db.add(binding)
+        db.commit()
+        binding_id = binding.id
+
+        service = FeishuService(settings, db)
+        monkeypatch.setattr(service, "_app_configuration", lambda: None)
+        monkeypatch.setattr(service, "access_token", lambda _user_id: (connection, "token"))
+        monkeypatch.setattr(service, "_list_records", lambda *_args: ([], []))
+        monkeypatch.setattr(
+            service,
+            "_batch_create",
+            lambda *_args: ([{"record_id": "rec-recreated"}], []),
+        )
+        monkeypatch.setattr(service, "_batch_update", lambda *_args: [])
+
+        result = service.sync_rows(
+            user.id,
+            "teachers",
+            [{"业务标识": "T-RECONCILE", "教师名称": "对账教师"}],
+        )
+        assert result["records_created"] == 1
+        refreshed = db.get(FeishuRecordBinding, binding_id)
+        assert refreshed is not None
+        assert refreshed.record_id == "rec-recreated"
+        assert (
+            db.scalar(
+                select(func.count(FeishuRecordBinding.id)).where(
+                    FeishuRecordBinding.table_binding_id == table.id
+                )
+            )
+            == 1
+        )
+        db.delete(refreshed)
+        db.delete(table)
+        db.delete(workspace)
+        db.delete(connection)
+        db.delete(user)
+        db.commit()
+
+
 def test_calendar_table_schemas_include_binding_and_fixed_time_fields() -> None:
     teacher_fields = {name for name, _ in TABLE_SCHEMAS["teachers"][1]}
     session_fields = {name for name, _ in TABLE_SCHEMAS["course_sessions"][1]}
     schedule_fields = {name for name, _ in TABLE_SCHEMAS["schedule"][1]}
+    public_class_fields = {name for name, _ in TABLE_SCHEMAS["public_class_schedule"][1]}
+    notice_fields = {name for name, _ in TABLE_SCHEMAS["public_adjustment_notice"][1]}
 
     assert "飞书用户标识" in teacher_fields
     assert {
@@ -437,6 +796,21 @@ def test_calendar_table_schemas_include_binding_and_fixed_time_fields() -> None:
         "具体日程账号",
     } <= session_fields
     assert {"上课日期", "固定开始时间", "固定结束时间"} <= schedule_fields
+    assert {
+        "是否展示",
+        "班级名称",
+        "上课日期",
+        "上课地点",
+        "课表版本",
+    } <= public_class_fields
+    assert {
+        "是否展示",
+        "通用提示",
+        "调整类型",
+        "原上课时间",
+        "新上课时间",
+        "生效版本",
+    } <= notice_fields
 
 
 def test_calendar_requests_use_user_token_and_official_payloads(monkeypatch: Any) -> None:

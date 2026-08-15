@@ -18,6 +18,8 @@ FEISHU_RESOURCES = (
     "rules",
     "schedule",
     "public_summary",
+    "public_class_schedule",
+    "public_adjustment_notice",
 )
 
 FEISHU_REQUIRED_SCOPES = (
@@ -34,6 +36,11 @@ FEISHU_REQUIRED_SCOPES = (
     "calendar:calendar.event:update",
     "calendar:calendar.free_busy:read",
 )
+
+# Requested on a new OAuth grant but never treated as a prerequisite for the
+# normal create/retrieve/update sync path. This keeps old authorizations ready
+# while making duplicate cleanup available after a one-time reauthorization.
+FEISHU_OPTIONAL_CLEANUP_SCOPES = ("base:record:delete",)
 
 AILY_OPTIONAL_SCOPES = ("aily:skill:write",)
 
