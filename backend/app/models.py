@@ -175,6 +175,14 @@ class Teacher(TimestampMixin, Base):
 
 
 class ClassGroup(TimestampMixin, Base):
+    """班级只保留身份。
+
+    走班制下一个班级里同时存在若干条轨道（选数学的和不选的分流），班型/业务线/教师
+    都是课次的属性在班级上的投影，不是班级自己的属性。以前用众数把多值压成单值，
+    压出来的组合彼此不保证来自同一批课次（会出现「班型=无数学 + 教师=数学教研组」
+    这种自相矛盾的行）。现在改为从 course_sessions 实时聚合，不留第二份真相。
+    """
+
     __tablename__ = "class_groups"
     __table_args__ = (UniqueConstraint("campus_id", "business_id"),)
 
@@ -182,9 +190,6 @@ class ClassGroup(TimestampMixin, Base):
     campus_id: Mapped[str] = mapped_column(ForeignKey("campuses.id"), index=True)
     business_id: Mapped[str] = mapped_column(String(40), index=True)
     name: Mapped[str] = mapped_column(String(120))
-    grade: Mapped[str] = mapped_column(String(50), default="")
-    subject: Mapped[str] = mapped_column(String(80), default="")
-    teacher_business_id: Mapped[str] = mapped_column(String(40))
 
 
 class Room(TimestampMixin, Base):
@@ -223,8 +228,9 @@ class CourseSession(TimestampMixin, Base):
     source_row_id: Mapped[str] = mapped_column(String(64), default="", index=True)
     business_line: Mapped[str] = mapped_column(String(40), default="", index=True)
     product_type: Mapped[str] = mapped_column(String(120), default="", index=True)
-    class_business_id: Mapped[str] = mapped_column(String(40))
-    teacher_business_id: Mapped[str] = mapped_column(String(40))
+    # 这三列是「按筛选条件批量」和班级聚合的过滤/分组键，全表扫在真实数据量下太慢。
+    class_business_id: Mapped[str] = mapped_column(String(40), index=True)
+    teacher_business_id: Mapped[str] = mapped_column(String(40), index=True)
     calendar_user_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     subject: Mapped[str] = mapped_column(String(80), default="")
     lesson_name: Mapped[str] = mapped_column(String(120), default="")
@@ -233,7 +239,7 @@ class CourseSession(TimestampMixin, Base):
     planned_sessions: Mapped[int] = mapped_column(Integer, default=0)
     planned_hours: Mapped[float] = mapped_column(Float, default=0)
     session_no: Mapped[int] = mapped_column(Integer, default=0)
-    lesson_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    lesson_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     duration_minutes: Mapped[int] = mapped_column(Integer, default=90)
     suggested_slot_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     fixed_start_time: Mapped[str] = mapped_column(String(10), default="")
@@ -324,7 +330,8 @@ class ScheduleAssignment(TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     schedule_version_id: Mapped[str] = mapped_column(ForeignKey("schedule_versions.id"), index=True)
-    course_session_id: Mapped[str] = mapped_column(ForeignKey("course_sessions.id"))
+    # 删课次/删版本前都要反查「这条课次被哪些版本引用」，唯一约束建的是复合索引，单列查不走。
+    course_session_id: Mapped[str] = mapped_column(ForeignKey("course_sessions.id"), index=True)
     lesson_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     slot_business_id: Mapped[str] = mapped_column(String(40))
     room_business_id: Mapped[str] = mapped_column(String(40))

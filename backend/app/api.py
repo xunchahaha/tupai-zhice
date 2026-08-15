@@ -25,7 +25,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, delete, func, literal, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -66,12 +66,13 @@ from .schemas import (
     CalendarPublishResponse,
     CampusCreate,
     CampusResponse,
-    ClassGroupBatchUpdate,
     ClassGroupPayload,
     ClassGroupResponse,
+    ClassGroupTrack,
     ConstraintCatalogEntry,
     CourseSessionBatchDelete,
     CourseSessionBatchUpdate,
+    CourseSessionFilter,
     CourseSessionPayload,
     CourseSessionResponse,
     CourseSessionUpdate,
@@ -128,6 +129,7 @@ from .services.ai import AIService, AIServiceError
 from .services.converter_zhengzhou import (
     CAMPUS_BUSINESS_ID,
     CAMPUS_NAME,
+    OFFICIAL_VERSION_SUFFIX,
     WorkbookFormatError,
     import_schedule_workbook,
 )
@@ -555,18 +557,14 @@ def raise_reference_conflict(
 
 
 def ensure_teachers_deletable(db: Session, teachers: list[Teacher]) -> None:
+    """课次是教师的唯一引用源。
+
+    班级不再存 teacher_business_id——班级上的教师本来就是从课次聚合出来的，
+    再拿它当第二个引用源只是把同一条事实数两遍。
+    """
     identities = {(item.campus_id, item.business_id) for item in teachers}
     campus_ids = {item[0] for item in identities}
     business_ids = {item[1] for item in identities}
-    class_references = {
-        (campus_id, business_id)
-        for campus_id, business_id in db.execute(
-            select(ClassGroup.campus_id, ClassGroup.teacher_business_id).where(
-                ClassGroup.campus_id.in_(campus_ids),
-                ClassGroup.teacher_business_id.in_(business_ids),
-            )
-        )
-    }
     course_references = {
         (campus_id, business_id)
         for campus_id, business_id in db.execute(
@@ -576,12 +574,7 @@ def ensure_teachers_deletable(db: Session, teachers: list[Teacher]) -> None:
             )
         )
     }
-    raise_reference_conflict(
-        teachers,
-        identities & (class_references | course_references),
-        "教师",
-        "班级或课程",
-    )
+    raise_reference_conflict(teachers, identities & course_references, "教师", "课程")
 
 
 def ensure_class_groups_deletable(db: Session, classes: list[ClassGroup]) -> None:
@@ -741,79 +734,115 @@ def batch_delete_teachers(
     return BatchOperationResponse(affected_count=len(teachers))
 
 
+def class_group_track_index(db: Session) -> dict[tuple[str, str], list[ClassGroupTrack]]:
+    """一条 GROUP BY 把全部班级的走班轨道算出来，按 (校区, 班级标识) 挂好。
+
+    郑州真实数据下 9000 多条课次会收敛到一百多组，所以整表分组比按班级 N+1 查更便宜；
+    也不用把班级标识拼成巨大的 IN 列表去撞 SQLite 的绑定变量上限。
+    """
+    index: dict[tuple[str, str], list[ClassGroupTrack]] = {}
+    rows = db.execute(
+        select(
+            CourseSession.campus_id,
+            CourseSession.class_business_id,
+            CourseSession.business_line,
+            CourseSession.product_type,
+            CourseSession.subject,
+            CourseSession.teacher_business_id,
+            func.count(CourseSession.id),
+        )
+        .group_by(
+            CourseSession.campus_id,
+            CourseSession.class_business_id,
+            CourseSession.business_line,
+            CourseSession.product_type,
+            CourseSession.subject,
+            CourseSession.teacher_business_id,
+        )
+        .order_by(
+            CourseSession.business_line,
+            CourseSession.product_type,
+            CourseSession.subject,
+            CourseSession.teacher_business_id,
+        )
+    )
+    for campus_id, class_business_id, business_line, product_type, subject, teacher, count in rows:
+        index.setdefault((campus_id, class_business_id), []).append(
+            ClassGroupTrack(
+                business_line=business_line or "",
+                product_type=product_type or "",
+                subject=subject or "",
+                teacher_business_id=teacher or "",
+                session_count=int(count),
+            )
+        )
+    return index
+
+
+def class_group_response(
+    item: ClassGroup, tracks: list[ClassGroupTrack]
+) -> ClassGroupResponse:
+    def distinct(values: list[str]) -> list[str]:
+        # 空串不是一个班型/教师，只是课次上没填，别让它占一个 chip。
+        return sorted({value for value in values if value})
+
+    return ClassGroupResponse(
+        id=item.id,
+        campus_id=item.campus_id,
+        business_id=item.business_id,
+        name=item.name,
+        business_lines=distinct([track.business_line for track in tracks]),
+        product_types=distinct([track.product_type for track in tracks]),
+        subjects=distinct([track.subject for track in tracks]),
+        teacher_business_ids=distinct([track.teacher_business_id for track in tracks]),
+        session_count=sum(track.session_count for track in tracks),
+        tracks=tracks,
+    )
+
+
+def class_group_responses(db: Session, classes: list[ClassGroup]) -> list[ClassGroupResponse]:
+    index = class_group_track_index(db)
+    return [
+        class_group_response(item, index.get((item.campus_id, item.business_id), []))
+        for item in classes
+    ]
+
+
 @router.get("/class-groups", response_model=list[ClassGroupResponse], tags=["master-data"])
-def list_class_groups(db: Db, user: CurrentUser) -> list[ClassGroup]:
-    return list(db.scalars(select(ClassGroup).order_by(ClassGroup.business_id)))
+def list_class_groups(db: Db, user: CurrentUser) -> list[ClassGroupResponse]:
+    classes = list(db.scalars(select(ClassGroup).order_by(ClassGroup.business_id)))
+    return class_group_responses(db, classes)
 
 
 @router.post(
     "/class-groups", response_model=ClassGroupResponse, status_code=201, tags=["master-data"]
 )
-def create_class_group(payload: ClassGroupPayload, db: Db, user: AdminOrScheduler) -> ClassGroup:
+def create_class_group(
+    payload: ClassGroupPayload, db: Db, user: AdminOrScheduler
+) -> ClassGroupResponse:
     instance = ClassGroup(**payload.model_dump())
     db.add(instance)
-    db.commit()
+    try:
+        audit(db, user, "create", "class_group", instance.id, payload.model_dump())
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="业务 ID 已存在") from exc
     db.refresh(instance)
-    return instance
+    return class_group_responses(db, [instance])[0]
 
 
 @router.put("/class-groups/{object_id}", response_model=ClassGroupResponse, tags=["master-data"])
 def update_class_group(
     object_id: str, payload: ClassGroupPayload, db: Db, user: AdminOrScheduler
-) -> ClassGroup:
+) -> ClassGroupResponse:
     instance = get_or_404(db, ClassGroup, object_id)
     for key, value in payload.model_dump().items():
         setattr(instance, key, value)
     audit(db, user, "update", "class_group", object_id)
     db.commit()
     db.refresh(instance)
-    return instance
-
-
-def validate_class_group_teacher(
-    db: Session, classes: list[ClassGroup], teacher_business_id: str
-) -> None:
-    campus_ids = {item.campus_id for item in classes}
-    matched_campuses = set(
-        db.scalars(
-            select(Teacher.campus_id).where(
-                Teacher.business_id == teacher_business_id,
-                Teacher.campus_id.in_(campus_ids),
-            )
-        )
-    )
-    if matched_campuses != campus_ids:
-        raise HTTPException(status_code=422, detail="指定教师不属于所选班级的校区")
-
-
-@router.post(
-    "/class-groups/batch-update",
-    response_model=BatchOperationResponse,
-    tags=["master-data"],
-)
-def batch_update_class_groups(
-    payload: ClassGroupBatchUpdate, db: Db, user: AdminOrScheduler
-) -> BatchOperationResponse:
-    classes: list[ClassGroup] = selected_master_rows(
-        db, ClassGroup, payload.object_ids, "班级"
-    )
-    changes = payload.model_dump(exclude={"object_ids"}, exclude_unset=True)
-    teacher_business_id = changes.get("teacher_business_id")
-    if teacher_business_id is not None:
-        validate_class_group_teacher(db, classes, teacher_business_id)
-    for class_group in classes:
-        for key, value in changes.items():
-            setattr(class_group, key, value)
-    audit(
-        db,
-        user,
-        "batch_update",
-        "class_group",
-        None,
-        {"count": len(classes), "fields": sorted(changes)},
-    )
-    db.commit()
-    return BatchOperationResponse(affected_count=len(classes))
+    return class_group_responses(db, [instance])[0]
 
 
 @router.post(
@@ -1012,12 +1041,97 @@ def selected_course_sessions(db: Session, object_ids: list[str]) -> list[CourseS
     return rows
 
 
+# 与主数据页 filteredCourses 的搜索口径逐字段对齐，顺序不能改：跨字段的查询词
+# （例如「考研 暑期」）只有拼接顺序一致，服务端和前端才会命中同一批行。
+COURSE_SEARCH_COLUMNS = (
+    CourseSession.business_id,
+    CourseSession.class_business_id,
+    CourseSession.teacher_business_id,
+    CourseSession.lesson_name,
+    CourseSession.subject,
+    CourseSession.business_line,
+    CourseSession.product_type,
+    CourseSession.original_room_business_id,
+)
+
+
+def _like_pattern(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def course_session_criteria(
+    spec: CourseSessionFilter | None, object_ids: list[str] | None
+) -> list[ColumnElement[bool]]:
+    """把两种选择方式统一成一组 where 条件。
+
+    条件形态（而不是 id 列表）是刻意的：按条件删两万条时，引用检查和删除都能写成
+    子查询，不用把两万个绑定变量塞进 IN——SQLite 的变量上限只有三万出头。
+    """
+    if object_ids is not None:
+        return [CourseSession.id.in_(object_ids)]
+    if spec is None:
+        return []
+
+    criteria: list[ColumnElement[bool]] = []
+    equality = (
+        (CourseSession.campus_id, spec.campus_id),
+        (CourseSession.business_line, spec.business_line),
+        (CourseSession.product_type, spec.product_type),
+        (CourseSession.class_business_id, spec.class_business_id),
+        (CourseSession.teacher_business_id, spec.teacher_business_id),
+        (CourseSession.subject, spec.subject),
+        (CourseSession.original_room_business_id, spec.original_room_business_id),
+        (CourseSession.lesson_date, spec.lesson_date),
+    )
+    for column, value in equality:
+        if value is not None:
+            criteria.append(column == value)
+    if spec.lesson_date_from is not None:
+        criteria.append(CourseSession.lesson_date >= spec.lesson_date_from)
+    if spec.lesson_date_to is not None:
+        criteria.append(CourseSession.lesson_date <= spec.lesson_date_to)
+    if spec.search:
+        blob: ColumnElement[str] = func.coalesce(COURSE_SEARCH_COLUMNS[0], "")
+        for column in COURSE_SEARCH_COLUMNS[1:]:
+            blob = blob + literal(" ") + func.coalesce(column, "")
+        criteria.append(
+            func.lower(blob).like(_like_pattern(spec.search.strip().lower()), escape="\\")
+        )
+    return criteria
+
+
+def count_course_sessions(db: Session, criteria: list[ColumnElement[bool]]) -> int:
+    return int(
+        db.scalar(select(func.count()).select_from(CourseSession).where(*criteria)) or 0
+    )
+
+
+def ensure_expected_count(actual: int, expected: int | None) -> None:
+    """防呆：界面上看到多少条就必须命中多少条。
+
+    筛选条件在两次请求之间可能漂移（别人刚导入了一批课次，或自己刚改过日期），
+    此时按旧的判断继续删就是误删。对不上一律拒绝，让前端刷新后重来。
+    """
+    if expected is None or actual == expected:
+        return
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            f"筛选结果已变化：预期命中 {expected} 条，实际命中 {actual} 条。"
+            "请刷新课程列表后重新确认再操作。"
+        ),
+    )
+
+
 def validate_course_room(
-    db: Session, courses: list[CourseSession], room_business_id: str | None
+    db: Session, criteria: list[ColumnElement[bool]], room_business_id: str | None
 ) -> None:
     if room_business_id is None:
         return
-    campus_ids = {item.campus_id for item in courses}
+    campus_ids = set(
+        db.scalars(select(CourseSession.campus_id).where(*criteria).distinct())
+    )
     matched_campuses = set(
         db.scalars(
             select(Room.campus_id).where(
@@ -1030,33 +1144,37 @@ def validate_course_room(
         raise HTTPException(status_code=422, detail="指定教室不属于所选课程的校区")
 
 
-def ensure_course_sessions_deletable(db: Session, courses: list[CourseSession]) -> None:
-    course_ids = [item.id for item in courses]
-    referenced_ids = set(
-        db.scalars(
-            select(ScheduleAssignment.course_session_id).where(
-                ScheduleAssignment.course_session_id.in_(course_ids)
-            )
-        )
-    )
-    referenced_ids.update(
-        db.scalars(
-            select(CalendarEventBinding.course_session_id).where(
-                CalendarEventBinding.course_session_id.in_(course_ids)
-            )
-        )
-    )
-    if referenced_ids:
-        labels = [item.business_id for item in courses if item.id in referenced_ids]
-        preview = "、".join(labels[:5])
-        suffix = "等" if len(labels) > 5 else ""
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{len(labels)} 条课程已被课表版本或飞书日程引用，"
-                f"不能直接删除：{preview}{suffix}"
+def ensure_course_sessions_deletable(
+    db: Session, criteria: list[ColumnElement[bool]]
+) -> None:
+    """被课表版本或飞书日程引用的课次一条都不能删，整批拒绝。
+
+    用半连接而不是 id 列表：按条件删的场景下 id 列表可能上万条，撑爆绑定变量上限。
+    """
+    selected_ids = select(CourseSession.id).where(*criteria)
+    referenced = (
+        select(CourseSession.business_id)
+        .where(
+            CourseSession.id.in_(selected_ids),
+            or_(
+                CourseSession.id.in_(select(ScheduleAssignment.course_session_id)),
+                CourseSession.id.in_(select(CalendarEventBinding.course_session_id)),
             ),
         )
+        .order_by(CourseSession.business_id)
+    )
+    labels = list(db.scalars(referenced.limit(6)))
+    if not labels:
+        return
+    total = int(db.scalar(select(func.count()).select_from(referenced.subquery())) or 0)
+    preview = "、".join(labels[:5])
+    suffix = "等" if total > 5 else ""
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"{total} 条课程已被课表版本或飞书日程引用，不能直接删除：{preview}{suffix}"
+        ),
+    )
 
 
 @router.post(
@@ -1067,23 +1185,40 @@ def ensure_course_sessions_deletable(db: Session, courses: list[CourseSession]) 
 def batch_update_course_sessions(
     payload: CourseSessionBatchUpdate, db: Db, user: AdminOrScheduler
 ) -> BatchOperationResponse:
-    courses = selected_course_sessions(db, payload.object_ids)
-    changes = payload.model_dump(exclude={"object_ids"}, exclude_unset=True)
+    if payload.object_ids is not None:
+        selected_course_sessions(db, payload.object_ids)
+    criteria = course_session_criteria(payload.filter, payload.object_ids)
+    matched = count_course_sessions(db, criteria)
+    ensure_expected_count(matched, payload.expected_count)
+    changes = payload.model_dump(
+        exclude={"object_ids", "filter", "expected_count"}, exclude_unset=True
+    )
     if "original_room_business_id" in changes:
-        validate_course_room(db, courses, changes["original_room_business_id"])
-    for course in courses:
-        for key, value in changes.items():
-            setattr(course, key, value)
+        validate_course_room(db, criteria, changes["original_room_business_id"])
+    if matched:
+        db.execute(
+            update(CourseSession)
+            .where(*criteria)
+            .values(**changes, updated_at=utcnow())
+            .execution_options(synchronize_session=False)
+        )
     audit(
         db,
         user,
         "batch_update",
         "course_session",
         None,
-        {"count": len(courses), "fields": sorted(changes)},
+        {
+            "count": matched,
+            "fields": sorted(changes),
+            "selection": "filter" if payload.filter is not None else "object_ids",
+            "filter": payload.filter.model_dump(mode="json", exclude_none=True)
+            if payload.filter is not None
+            else None,
+        },
     )
     db.commit()
-    return BatchOperationResponse(affected_count=len(courses))
+    return BatchOperationResponse(affected_count=matched)
 
 
 @router.post(
@@ -1094,13 +1229,34 @@ def batch_update_course_sessions(
 def batch_delete_course_sessions(
     payload: CourseSessionBatchDelete, db: Db, user: AdminOrScheduler
 ) -> BatchOperationResponse:
-    courses = selected_course_sessions(db, payload.object_ids)
-    ensure_course_sessions_deletable(db, courses)
-    for course in courses:
-        db.delete(course)
-    audit(db, user, "batch_delete", "course_session", None, {"count": len(courses)})
+    if payload.object_ids is not None:
+        selected_course_sessions(db, payload.object_ids)
+    criteria = course_session_criteria(payload.filter, payload.object_ids)
+    matched = count_course_sessions(db, criteria)
+    ensure_expected_count(matched, payload.expected_count)
+    ensure_course_sessions_deletable(db, criteria)
+    if matched:
+        db.execute(
+            delete(CourseSession)
+            .where(*criteria)
+            .execution_options(synchronize_session=False)
+        )
+    audit(
+        db,
+        user,
+        "batch_delete",
+        "course_session",
+        None,
+        {
+            "count": matched,
+            "selection": "filter" if payload.filter is not None else "object_ids",
+            "filter": payload.filter.model_dump(mode="json", exclude_none=True)
+            if payload.filter is not None
+            else None,
+        },
+    )
     db.commit()
-    return BatchOperationResponse(affected_count=len(courses))
+    return BatchOperationResponse(affected_count=matched)
 
 
 MASTER_MODELS = {
@@ -1127,7 +1283,7 @@ def delete_master_data(resource: str, object_id: str, db: Db, user: AdminOrSched
     elif resource == "time-slots":
         ensure_time_slots_deletable(db, [instance])
     elif resource == "course-sessions":
-        ensure_course_sessions_deletable(db, [instance])
+        ensure_course_sessions_deletable(db, [CourseSession.id == instance.id])
     db.delete(instance)
     audit(db, user, "delete", resource, object_id)
     db.commit()
@@ -1839,6 +1995,120 @@ def rollback_schedule(schedule_id: str, db: Db, user: Approver) -> ScheduleRespo
     return schedule_response(db, target)
 
 
+def ensure_schedule_deletable(db: Session, schedule: ScheduleVersion) -> None:
+    """四条硬拦。全部返回 409，话术要说清楚拦的是什么、下一步该做什么。
+
+    最贵的一条是日历绑定：飞书侧只有建日程没有删日程的能力，
+    CalendarEventBinding.idempotency_key 是我们和真实日程之间唯一的映射。删掉绑定行，
+    老师日历里就留下一批谁也收不回的日程，而且下次发布还会重复创建。所以无条件拦。
+    """
+    if schedule.status == "published":
+        raise HTTPException(
+            status_code=409, detail="当前正在使用的版本不能删除，请先回滚到其他版本"
+        )
+    if schedule.name.endswith(OFFICIAL_VERSION_SUFFIX):
+        raise HTTPException(status_code=409, detail="官方原始课表是导入基线，不能删除")
+
+    children = list(
+        db.scalars(
+            select(ScheduleVersion.version_no)
+            .where(ScheduleVersion.parent_id == schedule.id)
+            .order_by(ScheduleVersion.version_no)
+        )
+    )
+    if children:
+        labels = "、".join(f"v{item}" for item in children)
+        raise HTTPException(
+            status_code=409,
+            detail=f"该版本是 {labels} 的来源版本，请先删除这些版本",
+        )
+
+    parent_events = int(
+        db.scalar(
+            select(func.count())
+            .select_from(RescheduleEvent)
+            .where(RescheduleEvent.parent_schedule_id == schedule.id)
+        )
+        or 0
+    )
+    if parent_events:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该版本被 {parent_events} 条调课事件引用，删除会断掉调课审计链",
+        )
+
+    bindings = int(
+        db.scalar(
+            select(func.count())
+            .select_from(CalendarEventBinding)
+            .where(CalendarEventBinding.schedule_version_id == schedule.id)
+        )
+        or 0
+    )
+    if bindings:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"该版本已下发飞书日历（{bindings} 条日程），"
+                "删除后无法回收已创建的日程，不允许删除"
+            ),
+        )
+
+
+@router.delete("/schedules/{schedule_id}", status_code=204, tags=["schedules"])
+def delete_schedule(schedule_id: str, db: Db, user: Approver) -> Response:
+    """删除课表版本。删除是发布/回滚的破坏性孪生操作，权限同为 Approver。
+
+    SolverRun 与 DataSnapshot 一律保留——求解痕迹是审计链，不随版本消失。
+    """
+    schedule = get_or_404(db, ScheduleVersion, schedule_id)
+    ensure_schedule_deletable(db, schedule)
+
+    assignment_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(ScheduleAssignment)
+            .where(ScheduleAssignment.schedule_version_id == schedule.id)
+        )
+        or 0
+    )
+    # 被当作候选的版本正是最该能删的东西（调课跑出来的废候选）。这一列可空，
+    # 同事务里置空并把事件状态改掉——留在 candidate_ready 会让调课页显示
+    # 「候选已生成」却点不开。
+    discarded_events = list(
+        db.scalars(
+            select(RescheduleEvent).where(RescheduleEvent.candidate_schedule_id == schedule.id)
+        )
+    )
+    for event in discarded_events:
+        event.candidate_schedule_id = None
+        event.status = "candidate_discarded"
+
+    # 上万行 assignment 走 ORM 级联是逐行 DELETE，这里直接批量删。
+    db.execute(
+        delete(ScheduleAssignment).where(ScheduleAssignment.schedule_version_id == schedule.id)
+    )
+    # 行删掉之后 resource_id 那个 UUID 什么都查不回来，detail 是唯一幸存的记录。
+    audit(
+        db,
+        user,
+        "delete",
+        "schedule",
+        schedule.id,
+        {
+            "version_no": schedule.version_no,
+            "name": schedule.name,
+            "status": schedule.status,
+            "assignment_count": assignment_count,
+            "solver_run_id": schedule.solver_run_id,
+            "discarded_candidate_events": [item.id for item in discarded_events],
+        },
+    )
+    db.delete(schedule)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/schedules/{schedule_id}/export.xlsx", tags=["schedules"])
 def export_schedule(schedule_id: str, db: Db, user: CurrentUser) -> Response:
     schedule = get_or_404(db, ScheduleVersion, schedule_id)
@@ -2438,15 +2708,18 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
             for item in db.scalars(select(Teacher).order_by(Teacher.business_id))
         ]
     if resource == "class_groups":
+        # 飞书「班级」表的班型/业务线/教师标识都是单值文本字段，多值只能拼串。
+        # 字段名保持不变，避免已同步过的表被迫重建。
+        classes = list(db.scalars(select(ClassGroup).order_by(ClassGroup.business_id)))
         return [
             {
                 "业务标识": item.business_id,
                 "班级名称": item.name,
-                "班型": item.grade,
-                "业务线": item.subject,
-                "教师标识": item.teacher_business_id,
+                "班型": " / ".join(item.product_types),
+                "业务线": " / ".join(item.business_lines),
+                "教师标识": " / ".join(item.teacher_business_ids),
             }
-            for item in db.scalars(select(ClassGroup).order_by(ClassGroup.business_id))
+            for item in class_group_responses(db, classes)
         ]
     if resource == "rooms":
         return [
@@ -2823,8 +3096,15 @@ def aily_context(db: Db) -> AilyContextResponse:
                 for item in db.scalars(select(Teacher).order_by(Teacher.business_id))
             ],
             "classes": [
-                {"business_id": item.business_id, "name": item.name, "grade": item.grade}
-                for item in db.scalars(select(ClassGroup).order_by(ClassGroup.business_id))
+                {
+                    "business_id": item.business_id,
+                    "name": item.name,
+                    "product_types": item.product_types,
+                    "teacher_business_ids": item.teacher_business_ids,
+                }
+                for item in class_group_responses(
+                    db, list(db.scalars(select(ClassGroup).order_by(ClassGroup.business_id)))
+                )
             ],
             "rooms": [
                 {

@@ -118,34 +118,48 @@ class TeacherBatchUpdate(BaseModel):
 
 
 class ClassGroupPayload(BaseModel):
+    """班级的可写字段只有身份。班型/业务线/教师是课次的属性，不在这里填。
+
+    extra="forbid" 是刻意的：留一个「看起来能填班型」的入口，等于允许有人手填一个和
+    课次矛盾的值，而界面上显示的又是聚合结果，两边对不上却谁都不报错。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     campus_id: str
     business_id: str
     name: str
-    grade: str = ""
-    subject: str = ""
+
+
+class ClassGroupTrack(BaseModel):
+    """走班轨道：这个班里「哪条业务线的哪种班型、上什么课、谁教」的一条真实分流。
+
+    (班级, 班型, 科目) → 教师 在源数据里是个函数，所以轨道能把「哪门课谁教」说清楚，
+    而两个互相断了关系的平铺数组说不清。
+    """
+
+    business_line: str
+    product_type: str
+    subject: str
     teacher_business_id: str
+    session_count: int = Field(ge=0)
 
 
 class ClassGroupResponse(ClassGroupPayload, ORMModel):
+    """班型/业务线/教师全部由 course_sessions 实时聚合，库里不存这三个单值列。
+
+    手工新建、还没有任何课次的班级，这些数组一律为空、session_count 为 0——
+    这不是数据丢了，是这个班还没排课。
+    """
+
+    # 全部必填：服务端每次都算得出来，声明成可选只会让前端多写一圈 ?? [] 的兜底。
     id: str
-
-
-class ClassGroupBatchUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    object_ids: list[str] = Field(min_length=1, max_length=1000)
-    grade: str = ""
-    subject: str = ""
-    teacher_business_id: str = Field(default="", min_length=1)
-
-    @model_validator(mode="after")
-    def validate_requested_changes(self) -> ClassGroupBatchUpdate:
-        if len(set(self.object_ids)) != len(self.object_ids):
-            raise ValueError("班级记录不能重复选择")
-        editable_fields = {"grade", "subject", "teacher_business_id"}
-        if not (self.model_fields_set & editable_fields):
-            raise ValueError("请至少指定一个要批量修改的字段")
-        return self
+    business_lines: list[str]
+    product_types: list[str]
+    subjects: list[str]
+    teacher_business_ids: list[str]
+    session_count: int = Field(ge=0)
+    tracks: list[ClassGroupTrack]
 
 
 class RoomPayload(BaseModel):
@@ -249,32 +263,85 @@ class CourseSessionUpdate(BaseModel):
     calendar_user_id: str | None = None
 
 
-class CourseSessionBatchUpdate(BaseModel):
+COURSE_BATCH_ID_LIMIT = 1000
+
+
+class CourseSessionFilter(BaseModel):
+    """课程场次的筛选条件，与主数据页课程页签的筛选器一一对应。
+
+    `search` 复刻前端的跨字段子串匹配：八个字段按固定顺序用空格拼接后做包含判断，
+    顺序不能改——「考研 暑期」这种跨字段的查询词只有拼接顺序一致才命中同一批行。
+    全部字段留空表示「全部课程」，这正是「全选筛选结果」在没有任何筛选时的语义。
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    object_ids: list[str] = Field(min_length=1, max_length=1000)
+    campus_id: str | None = None
+    business_line: str | None = None
+    product_type: str | None = None
+    class_business_id: str | None = None
+    teacher_business_id: str | None = None
+    subject: str | None = None
+    original_room_business_id: str | None = None
+    lesson_date: date | None = None
+    lesson_date_from: date | None = None
+    lesson_date_to: date | None = None
+    search: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_date_window(self) -> CourseSessionFilter:
+        if (
+            self.lesson_date_from is not None
+            and self.lesson_date_to is not None
+            and self.lesson_date_from > self.lesson_date_to
+        ):
+            raise ValueError("日期范围的起始日不能晚于结束日")
+        return self
+
+
+class CourseSessionSelection(BaseModel):
+    """批量操作的选择方式：按 id 逐条选，或按筛选条件整批选，二选一。
+
+    保留 object_ids 是为了兼容既有调用；加 filter 是为了让「全选两万条」不必把两万个
+    id 塞进请求体。expected_count 是防呆：前端把界面上看到的条数一起报上来，服务端
+    命中数对不上就拒绝——筛选结果在两次请求之间漂移过，就不该按旧的判断继续删。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    object_ids: list[str] | None = Field(default=None, max_length=COURSE_BATCH_ID_LIMIT)
+    filter: CourseSessionFilter | None = None
+    expected_count: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> CourseSessionSelection:
+        if (self.object_ids is None) == (self.filter is None):
+            raise ValueError("请二选一：传 object_ids 逐条选择，或传 filter 按筛选条件选择")
+        if self.object_ids is not None:
+            if not self.object_ids:
+                raise ValueError("请至少选择一条课程记录")
+            if len(set(self.object_ids)) != len(self.object_ids):
+                raise ValueError("课程记录不能重复选择")
+        return self
+
+
+class CourseSessionBatchUpdate(CourseSessionSelection):
     lesson_date: date | None = None
     original_room_business_id: str | None = None
 
     @model_validator(mode="after")
     def validate_requested_changes(self) -> CourseSessionBatchUpdate:
-        if len(set(self.object_ids)) != len(self.object_ids):
-            raise ValueError("课程记录不能重复选择")
         editable_fields = {"lesson_date", "original_room_business_id"}
         if not (self.model_fields_set & editable_fields):
             raise ValueError("请至少指定一个要批量修改的字段")
         return self
 
 
-class CourseSessionBatchDelete(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    object_ids: list[str] = Field(min_length=1, max_length=1000)
-
+class CourseSessionBatchDelete(CourseSessionSelection):
     @model_validator(mode="after")
-    def validate_selected_courses(self) -> CourseSessionBatchDelete:
-        if len(set(self.object_ids)) != len(self.object_ids):
-            raise ValueError("课程记录不能重复选择")
+    def validate_delete_guard(self) -> CourseSessionBatchDelete:
+        if self.filter is not None and self.expected_count is None:
+            raise ValueError("按筛选条件删除必须提供 expected_count，用于校验命中条数")
         return self
 
 

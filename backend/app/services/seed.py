@@ -56,17 +56,9 @@ def seed_demo_data(db: Session) -> None:
         ("B11", "初三语文B", "初三", "语文", "T05"),
         ("B12", "高中编程B", "高一", "编程", "T06"),
     ]
-    for business_id, name, grade, subject, teacher_business_id in class_rows:
-        db.add(
-            ClassGroup(
-                campus_id=campus.id,
-                business_id=business_id,
-                name=name,
-                grade=grade,
-                subject=subject,
-                teacher_business_id=teacher_business_id,
-            )
-        )
+    for business_id, name, _grade, _subject, _teacher_business_id in class_rows:
+        # 班级只存身份，班型/业务线/教师由课次聚合。
+        db.add(ClassGroup(campus_id=campus.id, business_id=business_id, name=name))
 
     room_names = [
         ("R01", "小班教室1"),

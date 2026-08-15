@@ -66,13 +66,14 @@ def test_master_data_batch_update_delete_and_reference_guards(
                 "campus_id": campus_id,
                 "business_id": f"BATCH-C{i}",
                 "name": f"批量班级{i}",
-                "grade": "原班型",
-                "subject": "原业务线",
-                "teacher_business_id": teachers[i - 1]["business_id"],
             },
         )
         for i in (1, 2)
     ]
+    # 还没有课次的班级：聚合字段一律为空，不是数据丢了，是这个班还没排课。
+    assert all(item["product_types"] == [] for item in classes)
+    assert all(item["teacher_business_ids"] == [] for item in classes)
+    assert all(item["session_count"] == 0 for item in classes)
     rooms = [
         create_master_record(
             client,
@@ -118,18 +119,13 @@ def test_master_data_batch_update_delete_and_reference_guards(
     assert teacher_update.status_code == 200
     assert teacher_update.json()["affected_count"] == 2
 
+    # 班型/业务线/教师都是课次的属性，班级上没有可批量修改的字段，端点已经取消。
     class_update = client.post(
         "/api/v1/class-groups/batch-update",
         headers=auth_headers,
-        json={
-            "object_ids": [item["id"] for item in classes],
-            "subject": "批量新业务线",
-            "grade": "批量新班型",
-            "teacher_business_id": replacement_teacher["business_id"],
-        },
+        json={"object_ids": [item["id"] for item in classes], "grade": "批量新班型"},
     )
-    assert class_update.status_code == 200
-    assert class_update.json()["affected_count"] == 2
+    assert class_update.status_code == 405
 
     room_update = client.post(
         "/api/v1/rooms/batch-update",
@@ -154,17 +150,6 @@ def test_master_data_batch_update_delete_and_reference_guards(
     assert all(
         teacher_rows[item["id"]]["calendar_user_id"] == "ou_batch_teacher"
         for item in teachers
-    )
-    class_rows = {
-        item["id"]: item
-        for item in client.get("/api/v1/class-groups", headers=auth_headers).json()
-    }
-    assert all(class_rows[item["id"]]["subject"] == "批量新业务线" for item in classes)
-    assert all(class_rows[item["id"]]["grade"] == "批量新班型" for item in classes)
-    assert all(
-        class_rows[item["id"]]["teacher_business_id"]
-        == replacement_teacher["business_id"]
-        for item in classes
     )
 
     courses = [

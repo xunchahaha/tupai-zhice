@@ -568,19 +568,14 @@ def import_schedule_workbook(
 
     class_labels = sorted({row["班级标签"] for row in rows})
     for label in class_labels:
-        class_rows = [row for row in rows if row["班级标签"] == label]
+        # 班级只写身份。班型/业务线/教师以前是各自取众数猜出来的，三个众数彼此不保证
+        # 来自同一批行，能猜出「班型=无数学 + 教师=数学教研组」这种自相矛盾的组合。
+        # 现在由接口从 course_sessions 实时聚合，导入侧不再猜。
         _upsert(
             db,
             ClassGroup,
             {"campus_id": campus.id, "business_id": label},
-            {
-                "name": label,
-                "grade": Counter(row["产品班型"] for row in class_rows).most_common(1)[0][0],
-                "subject": Counter(row["业务线"] for row in class_rows).most_common(1)[0][0],
-                "teacher_business_id": Counter(
-                    row["授课教师"] for row in class_rows
-                ).most_common(1)[0][0],
-            },
+            {"name": label},
         )
 
     room_labels = sorted({row["教室标签"] for row in rows if row["教室标签"]})

@@ -48,11 +48,10 @@ def build_snapshot_payload(db: Session) -> dict[str, object]:
             )
             for item in teachers
         ],
+        # 班级只剩身份。班型/业务线/教师是课次的属性，course_sessions 那一段已经带着，
+        # 不在这里再存一份聚合快照——存了就要跟着漂。
         "class_groups": [
-            _model_dict(
-                item,
-                ["id", "business_id", "name", "grade", "subject", "teacher_business_id"],
-            )
+            _model_dict(item, ["id", "business_id", "name"])
             for item in classes
         ],
         "rooms": [

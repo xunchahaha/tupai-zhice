@@ -949,52 +949,6 @@
         }
       }
     },
-    "/api/v1/class-groups/batch-update": {
-      "post": {
-        "tags": [
-          "master-data"
-        ],
-        "summary": "Batch Update Class Groups",
-        "operationId": "batch_update_class_groups_api_v1_class_groups_batch_update_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ClassGroupBatchUpdate"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BatchOperationResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ]
-      }
-    },
     "/api/v1/class-groups/batch-delete": {
       "post": {
         "tags": [
@@ -2295,6 +2249,45 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "schedules"
+        ],
+        "summary": "Delete Schedule",
+        "description": "删除课表版本。删除是发布/回滚的破坏性孪生操作，权限同为 Approver。\n\nSolverRun 与 DataSnapshot 一律保留——求解痕迹是审计链，不随版本消失。",
+        "operationId": "delete_schedule_api_v1_schedules__schedule_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -4268,41 +4261,6 @@
         ],
         "title": "CampusResponse"
       },
-      "ClassGroupBatchUpdate": {
-        "properties": {
-          "object_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "maxItems": 1000,
-            "minItems": 1,
-            "title": "Object Ids"
-          },
-          "grade": {
-            "type": "string",
-            "title": "Grade",
-            "default": ""
-          },
-          "subject": {
-            "type": "string",
-            "title": "Subject",
-            "default": ""
-          },
-          "teacher_business_id": {
-            "type": "string",
-            "minLength": 1,
-            "title": "Teacher Business Id",
-            "default": ""
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "object_ids"
-        ],
-        "title": "ClassGroupBatchUpdate"
-      },
       "ClassGroupPayload": {
         "properties": {
           "campus_id": {
@@ -4316,30 +4274,17 @@
           "name": {
             "type": "string",
             "title": "Name"
-          },
-          "grade": {
-            "type": "string",
-            "title": "Grade",
-            "default": ""
-          },
-          "subject": {
-            "type": "string",
-            "title": "Subject",
-            "default": ""
-          },
-          "teacher_business_id": {
-            "type": "string",
-            "title": "Teacher Business Id"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "campus_id",
           "business_id",
-          "name",
-          "teacher_business_id"
+          "name"
         ],
-        "title": "ClassGroupPayload"
+        "title": "ClassGroupPayload",
+        "description": "班级的可写字段只有身份。班型/业务线/教师是课次的属性，不在这里填。\n\nextra=\"forbid\" 是刻意的：留一个「看起来能填班型」的入口，等于允许有人手填一个和\n课次矛盾的值，而界面上显示的又是聚合结果，两边对不上却谁都不报错。"
       },
       "ClassGroupResponse": {
         "properties": {
@@ -4355,34 +4300,102 @@
             "type": "string",
             "title": "Name"
           },
-          "grade": {
-            "type": "string",
-            "title": "Grade",
-            "default": ""
-          },
-          "subject": {
-            "type": "string",
-            "title": "Subject",
-            "default": ""
-          },
-          "teacher_business_id": {
-            "type": "string",
-            "title": "Teacher Business Id"
-          },
           "id": {
             "type": "string",
             "title": "Id"
+          },
+          "business_lines": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Business Lines"
+          },
+          "product_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Product Types"
+          },
+          "subjects": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Subjects"
+          },
+          "teacher_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Teacher Business Ids"
+          },
+          "session_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Session Count"
+          },
+          "tracks": {
+            "items": {
+              "$ref": "#/components/schemas/ClassGroupTrack"
+            },
+            "type": "array",
+            "title": "Tracks"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "campus_id",
           "business_id",
           "name",
-          "teacher_business_id",
-          "id"
+          "id",
+          "business_lines",
+          "product_types",
+          "subjects",
+          "teacher_business_ids",
+          "session_count",
+          "tracks"
         ],
-        "title": "ClassGroupResponse"
+        "title": "ClassGroupResponse",
+        "description": "班型/业务线/教师全部由 course_sessions 实时聚合，库里不存这三个单值列。\n\n手工新建、还没有任何课次的班级，这些数组一律为空、session_count 为 0——\n这不是数据丢了，是这个班还没排课。"
+      },
+      "ClassGroupTrack": {
+        "properties": {
+          "business_line": {
+            "type": "string",
+            "title": "Business Line"
+          },
+          "product_type": {
+            "type": "string",
+            "title": "Product Type"
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "teacher_business_id": {
+            "type": "string",
+            "title": "Teacher Business Id"
+          },
+          "session_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Session Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "business_line",
+          "product_type",
+          "subject",
+          "teacher_business_id",
+          "session_count"
+        ],
+        "title": "ClassGroupTrack",
+        "description": "走班轨道：这个班里「哪条业务线的哪种班型、上什么课、谁教」的一条真实分流。\n\n(班级, 班型, 科目) → 教师 在源数据里是个函数，所以轨道能把「哪门课谁教」说清楚，\n而两个互相断了关系的平铺数组说不清。"
       },
       "ConstraintCatalogEntry": {
         "properties": {
@@ -4529,32 +4542,85 @@
       "CourseSessionBatchDelete": {
         "properties": {
           "object_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "maxItems": 1000,
-            "minItems": 1,
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Object Ids"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CourseSessionFilter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expected_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Count"
           }
         },
         "additionalProperties": false,
         "type": "object",
-        "required": [
-          "object_ids"
-        ],
         "title": "CourseSessionBatchDelete"
       },
       "CourseSessionBatchUpdate": {
         "properties": {
           "object_ids": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "maxItems": 1000,
-            "minItems": 1,
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Object Ids"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CourseSessionFilter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expected_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Count"
           },
           "lesson_date": {
             "anyOf": [
@@ -4582,10 +4648,140 @@
         },
         "additionalProperties": false,
         "type": "object",
-        "required": [
-          "object_ids"
-        ],
         "title": "CourseSessionBatchUpdate"
+      },
+      "CourseSessionFilter": {
+        "properties": {
+          "campus_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campus Id"
+          },
+          "business_line": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Business Line"
+          },
+          "product_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Type"
+          },
+          "class_business_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Class Business Id"
+          },
+          "teacher_business_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Teacher Business Id"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "original_room_business_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Room Business Id"
+          },
+          "lesson_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lesson Date"
+          },
+          "lesson_date_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lesson Date From"
+          },
+          "lesson_date_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lesson Date To"
+          },
+          "search": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Search"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "CourseSessionFilter",
+        "description": "课程场次的筛选条件，与主数据页课程页签的筛选器一一对应。\n\n`search` 复刻前端的跨字段子串匹配：八个字段按固定顺序用空格拼接后做包含判断，\n顺序不能改——「考研 暑期」这种跨字段的查询词只有拼接顺序一致才命中同一批行。\n全部字段留空表示「全部课程」，这正是「全选筛选结果」在没有任何筛选时的语义。"
       },
       "CourseSessionPayload": {
         "properties": {
