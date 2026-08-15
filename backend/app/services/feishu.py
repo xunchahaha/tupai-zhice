@@ -43,9 +43,17 @@ BUSINESS_KEY_FIELD = "业务标识"
 SYSTEM_OWNED_PUBLIC_RESOURCES = frozenset(
     {"public_summary", "public_class_schedule", "public_adjustment_notice"}
 )
-SYNC_RECORD_PAGE_SIZE = 200
-SYNC_BATCH_SIZE = 200
+# Keep metadata reads below the endpoint's 500-row page limit.  This matters
+# on repeat syncs: a 9,000-row table is read in 18 pages instead of 45.
+SYNC_RECORD_PAGE_SIZE = 500
+# Feishu's batch record endpoints accept up to 1,000 records per request.
+# Keep deletion at 500: that endpoint has a lower documented limit.  Keeping
+# these limits separate avoids the old 200-row bottleneck for a 9,000-row
+# timetable while still honoring the delete API contract.
+SYNC_BATCH_SIZE = 1000
+SYNC_DELETE_BATCH_SIZE = 500
 SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
+SYNC_MUTATION_TIMEOUT_SECONDS = 30.0
 SYNC_RETRY_ATTEMPTS = 2
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 _RETRYABLE_FEISHU_ERROR_CODES = frozenset({1254290, 1255001, 1255002})
@@ -1605,23 +1613,157 @@ class FeishuService:
     def _batch_create(
         self, token: str, workspace: FeishuWorkspace, table_id: str, rows: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], list[str]]:
-        created: list[dict[str, Any]] = []
+        # Keep records keyed by our idempotency field.  A transport failure can
+        # happen after Feishu committed the mutation but before it sent the
+        # response (the pasted ``RemoteProtocolError`` is exactly that case).
+        # Re-reading the keys before retrying lets us retry only rows that are
+        # genuinely absent, avoiding duplicate records while retaining the
+        # speed of the larger request batches.
+        created_by_key: dict[str, dict[str, Any]] = {}
         log_ids: list[str] = []
         for start in range(0, len(rows), SYNC_BATCH_SIZE):
-            batch = rows[start : start + SYNC_BATCH_SIZE]
-            data, log_id = self._request(
-                "POST",
-                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
-                f"{table_id}/records/batch_create",
-                token=token,
-                json_body={"records": [{"fields": item} for item in batch]},
-            )
-            if log_id:
-                log_ids.append(log_id)
-            records = data.get("records", data.get("items", []))
-            if isinstance(records, list):
-                created.extend(item for item in records if isinstance(item, dict))
+            pending = list(rows[start : start + SYNC_BATCH_SIZE])
+            retry_count = 0
+            while pending:
+                try:
+                    data, log_id = self._request(
+                        "POST",
+                        f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                        f"{table_id}/records/batch_create",
+                        token=token,
+                        json_body={"records": [{"fields": item} for item in pending]},
+                        timeout=SYNC_MUTATION_TIMEOUT_SECONDS,
+                        # Creation is reconciled below instead of blindly
+                        # replaying an ambiguous mutation in _request.
+                        retry_attempts=1,
+                    )
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    found, reconcile_logs = self._reconcile_created_batch(
+                        token,
+                        workspace,
+                        table_id,
+                        pending,
+                    )
+                    created_by_key.update(found)
+                    log_ids.extend(reconcile_logs)
+                    pending = [
+                        row
+                        for row in pending
+                        if normalize_business_key(row.get(BUSINESS_KEY_FIELD))
+                        not in found
+                    ]
+                    if not pending:
+                        break
+                    if retry_count + 1 >= SYNC_RETRY_ATTEMPTS:
+                        # Preserve the original transport error.  The next
+                        # manual sync can reconcile any eventual Feishu write.
+                        raise exc
+                    retry_count += 1
+                    self._retry_request(
+                        "POST",
+                        f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                        f"{table_id}/records/batch_create",
+                        retry_count,
+                        SYNC_RETRY_ATTEMPTS,
+                        str(exc),
+                    )
+                    continue
+
+                if log_id:
+                    log_ids.append(log_id)
+                records = data.get("records", data.get("items", []))
+                if isinstance(records, list):
+                    for item in records:
+                        if not isinstance(item, dict):
+                            continue
+                        fields = item.get("fields")
+                        if not isinstance(fields, dict):
+                            continue
+                        key = normalize_business_key(fields.get(BUSINESS_KEY_FIELD))
+                        if key and item.get("record_id"):
+                            created_by_key[key] = item
+
+                # A successful HTTP response can still omit a failed row from
+                # the per-record result.  Reconcile only those missing keys;
+                # never resend rows Feishu already acknowledged.
+                pending = [
+                    row
+                    for row in pending
+                    if normalize_business_key(row.get(BUSINESS_KEY_FIELD))
+                    not in created_by_key
+                ]
+                if not pending:
+                    break
+                found, reconcile_logs = self._reconcile_created_batch(
+                    token,
+                    workspace,
+                    table_id,
+                    pending,
+                )
+                created_by_key.update(found)
+                log_ids.extend(reconcile_logs)
+                pending = [
+                    row
+                    for row in pending
+                    if normalize_business_key(row.get(BUSINESS_KEY_FIELD))
+                    not in found
+                ]
+                if not pending:
+                    break
+                if retry_count + 1 >= SYNC_RETRY_ATTEMPTS:
+                    # Keep the existing sync_rows refresh/error path for a
+                    # genuinely missing row rather than duplicating records.
+                    break
+                retry_count += 1
+                self._retry_request(
+                    "POST",
+                    f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                    f"{table_id}/records/batch_create",
+                    retry_count,
+                    SYNC_RETRY_ATTEMPTS,
+                    "batch_create 未返回全部记录",
+                )
+
+        # Preserve caller order; sync_rows uses this list to bind returned
+        # record ids back to local rows when the API returns a normal response.
+        created = [
+            created_by_key[key]
+            for row in rows
+            if (key := normalize_business_key(row.get(BUSINESS_KEY_FIELD))) in created_by_key
+        ]
         return created, log_ids
+
+    def _reconcile_created_batch(
+        self,
+        token: str,
+        workspace: FeishuWorkspace,
+        table_id: str,
+        rows: list[dict[str, Any]],
+    ) -> tuple[dict[str, dict[str, Any]], list[str]]:
+        """Find keys already committed when a create response was lost."""
+
+        if not rows:
+            return {}, []
+        remote_records, log_ids = self._list_records(
+            token,
+            workspace,
+            table_id,
+            [BUSINESS_KEY_FIELD],
+        )
+        found: dict[str, dict[str, Any]] = {}
+        requested_keys = {
+            normalize_business_key(row.get(BUSINESS_KEY_FIELD)) for row in rows
+        }
+        for record in remote_records:
+            if not isinstance(record, dict) or not record.get("record_id"):
+                continue
+            fields = record.get("fields")
+            if not isinstance(fields, dict):
+                continue
+            key = normalize_business_key(fields.get(BUSINESS_KEY_FIELD))
+            if key in requested_keys:
+                found.setdefault(key, record)
+        return found, log_ids
 
     def _batch_update(
         self,
@@ -1643,7 +1785,7 @@ class FeishuService:
                         {"record_id": record_id, "fields": fields} for record_id, fields in batch
                     ]
                 },
-                timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
+                timeout=SYNC_MUTATION_TIMEOUT_SECONDS,
                 retry_attempts=SYNC_RETRY_ATTEMPTS,
             )
             if log_id:
@@ -1669,8 +1811,8 @@ class FeishuService:
         failed: set[str] = set()
         log_ids: list[str] = []
         error: str | None = None
-        for start in range(0, len(record_ids), SYNC_BATCH_SIZE):
-            batch = record_ids[start : start + SYNC_BATCH_SIZE]
+        for start in range(0, len(record_ids), SYNC_DELETE_BATCH_SIZE):
+            batch = record_ids[start : start + SYNC_DELETE_BATCH_SIZE]
             try:
                 data, log_id = self._request(
                     "POST",
@@ -1679,7 +1821,7 @@ class FeishuService:
                     token=token,
                     json_body={"records": batch},
                     params={"ignore_consistency_check": True},
-                    timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
+                    timeout=SYNC_MUTATION_TIMEOUT_SECONDS,
                 )
             except (FeishuServiceError, httpx.HTTPError) as exc:
                 failed.update(record_ids[start:])

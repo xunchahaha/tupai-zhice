@@ -697,6 +697,71 @@ def test_sync_request_retries_a_transient_transport_failure(monkeypatch: Any) ->
     assert calls == 2
 
 
+def test_batch_create_uses_large_batches_for_timetable_exports(monkeypatch: Any) -> None:
+    service = FeishuService(settings, object())  # type: ignore[arg-type]
+    workspace = type("Workspace", (), {"app_token": "app-batch"})()
+    rows = [{"业务标识": f"course-{index}", "课节名称": "数学"} for index in range(2501)]
+    calls: list[dict[str, Any]] = []
+
+    def request(method: str, url: str, **kwargs: Any) -> tuple[dict[str, Any], str]:
+        assert method == "POST"
+        assert url.endswith("/records/batch_create")
+        calls.append(kwargs)
+        records = [
+            {"record_id": f"rec-{item['fields']['业务标识']}", "fields": item["fields"]}
+            for item in kwargs["json_body"]["records"]
+        ]
+        return {"records": records}, f"log-{len(calls)}"
+
+    monkeypatch.setattr(service, "_request", request)
+    created, logs = service._batch_create("token", workspace, "tbl-courses", rows)
+
+    assert [len(item["json_body"]["records"]) for item in calls] == [1000, 1000, 501]
+    assert all(item["timeout"] == 30.0 and item["retry_attempts"] == 1 for item in calls)
+    assert len(created) == len(rows)
+    assert logs == ["log-1", "log-2", "log-3"]
+
+
+def test_batch_create_reconciles_a_dropped_response_before_retry(monkeypatch: Any) -> None:
+    service = FeishuService(settings, object())  # type: ignore[arg-type]
+    workspace = type("Workspace", (), {"app_token": "app-batch"})()
+    rows = [{"业务标识": "course-a"}, {"业务标识": "course-b"}]
+    requests: list[list[str]] = []
+
+    def request(method: str, url: str, **kwargs: Any) -> tuple[dict[str, Any], str]:
+        assert method == "POST"
+        assert url.endswith("/records/batch_create")
+        batch = kwargs["json_body"]["records"]
+        requests.append([item["fields"]["业务标识"] for item in batch])
+        if len(requests) == 1:
+            raise httpx.RemoteProtocolError(
+                "proxy disconnected after commit",
+                request=httpx.Request(method, url),
+            )
+        return {
+            "records": [
+                {"record_id": "rec-course-b", "fields": batch[0]["fields"]}
+            ]
+        }, "log-create"
+
+    monkeypatch.setattr(service, "_request", request)
+    monkeypatch.setattr(service, "_retry_request", lambda *_args: None)
+    monkeypatch.setattr(
+        service,
+        "_reconcile_created_batch",
+        lambda *_args: (
+            {"course-a": {"record_id": "rec-course-a", "fields": rows[0]}},
+            ["log-reconcile"],
+        ),
+    )
+
+    created, logs = service._batch_create("token", workspace, "tbl-courses", rows)
+
+    assert requests == [["course-a", "course-b"], ["course-b"]]
+    assert [item["record_id"] for item in created] == ["rec-course-a", "rec-course-b"]
+    assert logs == ["log-reconcile", "log-create"]
+
+
 def test_field_comparison_ignores_volatile_projection_update_time() -> None:
     field_types = dict(TABLE_SCHEMAS["public_summary"][1])
     remote = {
