@@ -712,14 +712,18 @@ class FeishuService:
                 select(FeishuWorkspace)
                 .where(
                     FeishuWorkspace.schedule_set_id == schedule_set_id,
+                    FeishuWorkspace.status == "active",
                 )
-                .order_by(FeishuWorkspace.created_at.desc())
+                .order_by(FeishuWorkspace.created_at.asc())
             )
         elif personal_connection is not None:
             workspace = self.db.scalar(
                 select(FeishuWorkspace)
-                .where(FeishuWorkspace.connection_id == personal_connection.id)
-                .order_by(FeishuWorkspace.created_at.desc())
+                .where(
+                    FeishuWorkspace.connection_id == personal_connection.id,
+                    FeishuWorkspace.status == "active",
+                )
+                .order_by(FeishuWorkspace.created_at.asc())
             )
 
         # The Bitable target is bound to the timetable, not to the operator who
@@ -975,14 +979,18 @@ class FeishuService:
             connection,
             {"base:app:create", "base:table:create", "base:table:update"},
         )
+        # A timetable owns exactly one working Bitable.  The name is a label,
+        # not a second identity: old workspaces created before the timetable
+        # name was added must be repaired in place rather than silently
+        # creating a second Base and disconnecting existing MiaoDa views.
         workspace = self.db.scalar(
             select(FeishuWorkspace)
             .where(
                 FeishuWorkspace.connection_id == connection.id,
                 FeishuWorkspace.schedule_set_id == schedule_set_id,
-                FeishuWorkspace.name == name,
+                FeishuWorkspace.status.in_(("active", "creating", "failed")),
             )
-            .order_by(FeishuWorkspace.created_at.desc())
+            .order_by(FeishuWorkspace.created_at.asc())
         )
         try:
             if workspace is None:
@@ -1081,6 +1089,7 @@ class FeishuService:
         self,
         workspace_id: str | None,
         schedule_set_id: str = "default",
+        owner_user_id: str | None = None,
     ) -> FeishuWorkspace:
         statement = select(FeishuWorkspace).where(
             FeishuWorkspace.schedule_set_id == schedule_set_id,
@@ -1089,7 +1098,25 @@ class FeishuService:
         if workspace_id:
             statement = statement.where(FeishuWorkspace.id == workspace_id)
         else:
-            statement = statement.order_by(FeishuWorkspace.created_at.desc())
+            # The administrator who owns the current OAuth connection should
+            # get their timetable Base first.  The fallback below preserves
+            # scheduler/approver access to a workspace created by an admin.
+            if owner_user_id:
+                owned_workspace = self.db.scalar(
+                    statement.join(
+                        FeishuConnection,
+                        FeishuConnection.id == FeishuWorkspace.connection_id,
+                    )
+                    .where(FeishuConnection.user_id == owner_user_id)
+                    .order_by(FeishuWorkspace.created_at.asc())
+                )
+                if owned_workspace is not None:
+                    return owned_workspace
+            # Prefer the original timetable workspace.  This also repairs
+            # installations that once created a duplicate Base due to a later
+            # display-name change; automatic publish/sync must never jump to
+            # the newest one behind the user's back.
+            statement = statement.order_by(FeishuWorkspace.created_at.asc())
         workspace = self.db.scalar(statement)
         if workspace is None:
             raise FeishuServiceError("请先创建排课多维表格")
@@ -1265,7 +1292,11 @@ class FeishuService:
         # “sync”.  An approver or scheduler can therefore update the timetable
         # workspace created by its administrator, while API scope checks remain
         # the responsibility of the caller before this service is entered.
-        workspace = self._active_workspace(workspace_id, schedule_set_id)
+        workspace = self._active_workspace(
+            workspace_id,
+            schedule_set_id,
+            owner_user_id=user_id,
+        )
         workspace_connection = self.db.get(FeishuConnection, workspace.connection_id)
         if workspace_connection is None:
             raise FeishuServiceError("当前多维表格缺少飞书授权连接")

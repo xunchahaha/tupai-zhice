@@ -393,6 +393,17 @@ def test_auto_create_workspace_and_sync_idempotently(
     assert repeated_workspace.status_code == 201
     assert app_create_count == 1
 
+    # A later display-name change must repair the established timetable Base,
+    # not create a second Bitable and break the MiaoDa page already bound to it.
+    renamed_workspace = client.post(
+        "/api/v1/integrations/feishu/workspaces",
+        headers=auth_headers,
+        json={"name": "展示名称已调整"},
+    )
+    assert renamed_workspace.status_code == 201
+    assert renamed_workspace.json()["id"] == workspace.json()["id"]
+    assert app_create_count == 1
+
     first = client.post(
         "/api/v1/integrations/feishu/sync",
         headers=auth_headers,
