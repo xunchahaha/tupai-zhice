@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Role = Literal["admin", "scheduler", "approver", "viewer"]
+ScheduleAccessRole = Literal["viewer", "scheduler", "approver"]
 RuleStatus = Literal["draft", "awaiting_confirmation", "active", "rejected", "retired"]
 SolverRule = Literal[
     "fixed_time",
@@ -85,6 +86,49 @@ class UserPasswordReset(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     password: str = Field(min_length=8, max_length=128)
+
+
+class ScheduleSetCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    name: str = Field(min_length=2, max_length=160)
+
+
+class ScheduleSetUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    name: str = Field(min_length=2, max_length=160)
+
+
+class ScheduleSetResponse(ORMModel):
+    id: str
+    code: str
+    name: str
+    display_order: int
+    is_active: bool
+    access_role: ScheduleAccessRole
+    current_version_id: str | None = None
+    current_version_name: str | None = None
+    current_version_no: int | None = None
+
+
+class ScheduleSetMemberUpsert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+    access_role: ScheduleAccessRole
+
+
+class ScheduleSetMemberResponse(ORMModel):
+    id: str
+    schedule_set_id: str
+    user_id: str
+    username: str
+    user_role: Role
+    access_role: ScheduleAccessRole
+    is_active: bool
+    granted_by: str | None = None
+    created_at: datetime
 
 
 class CampusCreate(BaseModel):

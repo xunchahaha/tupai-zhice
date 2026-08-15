@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session
 from .config import PROJECT_ROOT, get_settings
 from .db import get_db
 from .models import (
+    DEFAULT_SCHEDULE_SET_ID,
     AuditLog,
     CalendarEventBinding,
     Campus,
@@ -54,6 +55,8 @@ from .models import (
     Room,
     Rule,
     ScheduleAssignment,
+    ScheduleSet,
+    ScheduleSetMember,
     ScheduleVersion,
     SolverRun,
     Teacher,
@@ -113,6 +116,11 @@ from .schemas import (
     ScheduleDiffItem,
     ScheduleDiffResponse,
     ScheduleResponse,
+    ScheduleSetCreate,
+    ScheduleSetMemberResponse,
+    ScheduleSetMemberUpsert,
+    ScheduleSetResponse,
+    ScheduleSetUpdate,
     ScheduleSummaryResponse,
     SolveRequest,
     SolverRunExplanation,
@@ -180,6 +188,131 @@ Approver = Annotated[User, Depends(require_roles("admin", "approver"))]
 Admin = Annotated[User, Depends(require_roles("admin"))]
 
 
+SCHEDULE_SET_HEADER = "X-Schedule-Set-Id"
+ACCESS_ORDER = {"viewer": 1, "scheduler": 2, "approver": 3}
+
+
+def _ensure_default_schedule_set(db: Session) -> ScheduleSet:
+    default = db.get(ScheduleSet, "default")
+    if default is None:
+        default = ScheduleSet(
+            id="default",
+            code="SET001",
+            name="第一套课表",
+            display_order=0,
+            is_active=True,
+        )
+        db.add(default)
+        db.flush()
+    return default
+
+
+def _role_allows_access(user: User, access_role: str) -> bool:
+    if user.role == "admin":
+        return True
+    if access_role not in ACCESS_ORDER:
+        return False
+    if user.role == "viewer":
+        return access_role == "viewer"
+    if user.role == "scheduler":
+        return access_role in {"viewer", "scheduler"}
+    if user.role == "approver":
+        return access_role in {"viewer", "scheduler", "approver"}
+    return False
+
+
+def _visible_schedule_sets(db: Session, user: User) -> list[tuple[ScheduleSet, str]]:
+    _ensure_default_schedule_set(db)
+    if user.role == "admin":
+        rows = list(db.scalars(select(ScheduleSet).where(ScheduleSet.is_active.is_(True))))
+        return [
+            (item, "approver")
+            for item in sorted(rows, key=lambda item: (item.display_order, item.name))
+        ]
+    rows = list(
+        db.execute(
+            select(ScheduleSet, ScheduleSetMember.access_role)
+            .join(ScheduleSetMember, ScheduleSetMember.schedule_set_id == ScheduleSet.id)
+            .where(
+                ScheduleSet.is_active.is_(True),
+                ScheduleSetMember.user_id == user.id,
+                ScheduleSetMember.is_active.is_(True),
+            )
+        ).all()
+    )
+    return sorted(rows, key=lambda row: (row[0].display_order, row[0].name))
+
+
+def resolve_schedule_set(
+    db: Db,
+    user: CurrentUser,
+    header_id: Annotated[str | None, Header(alias=SCHEDULE_SET_HEADER)] = None,
+) -> ScheduleSet:
+    visible = _visible_schedule_sets(db, user)
+    by_id = {item.id: (item, access) for item, access in visible}
+    if header_id:
+        selected = by_id.get(header_id.strip())
+        if selected is None:
+            raise HTTPException(status_code=404, detail="当前账号没有该课表的访问权限")
+        return selected[0]
+    if len(visible) == 1:
+        return visible[0][0]
+    # Preserve existing integrations and bookmarked API calls during the upgrade
+    # from a single timetable: when the legacy/default set is visible, it is the
+    # deterministic fallback.  The web client still always sends the header once
+    # its top-bar selector has loaded.
+    if DEFAULT_SCHEDULE_SET_ID in by_id:
+        return by_id[DEFAULT_SCHEDULE_SET_ID][0]
+    if not visible:
+        raise HTTPException(status_code=403, detail="当前账号尚未分配任何课表")
+    raise HTTPException(status_code=409, detail="当前账号可访问多套课表，请先选择课表")
+
+
+ScheduleScope = Annotated[ScheduleSet, Depends(resolve_schedule_set)]
+
+
+def _schedule_access(db: Session, user: User, schedule_set_id: str) -> str:
+    if user.role == "admin":
+        return "approver"
+    member = db.scalar(
+        select(ScheduleSetMember).where(
+            ScheduleSetMember.schedule_set_id == schedule_set_id,
+            ScheduleSetMember.user_id == user.id,
+            ScheduleSetMember.is_active.is_(True),
+        )
+    )
+    if member is None or not _role_allows_access(user, member.access_role):
+        raise HTTPException(status_code=404, detail="当前账号没有该课表的访问权限")
+    return member.access_role
+
+
+def _require_schedule_access(db: Session, user: User, schedule_set_id: str, required: str) -> str:
+    actual = _schedule_access(db, user, schedule_set_id)
+    if ACCESS_ORDER[actual] < ACCESS_ORDER[required]:
+        raise HTTPException(status_code=403, detail="当前账号没有执行该课表操作的权限")
+    return actual
+
+
+def resolve_viewer_scope(db: Db, user: CurrentUser, scope: ScheduleScope) -> ScheduleSet:
+    _require_schedule_access(db, user, scope.id, "viewer")
+    return scope
+
+
+def resolve_scheduler_scope(db: Db, user: AdminOrScheduler, scope: ScheduleScope) -> ScheduleSet:
+    _require_schedule_access(db, user, scope.id, "scheduler")
+    return scope
+
+
+def resolve_approver_scope(db: Db, user: Approver, scope: ScheduleScope) -> ScheduleSet:
+    _require_schedule_access(db, user, scope.id, "approver")
+    return scope
+
+
+ViewerScope = Annotated[ScheduleSet, Depends(resolve_viewer_scope)]
+SchedulerScope = Annotated[ScheduleSet, Depends(resolve_scheduler_scope)]
+ApproverScope = Annotated[ScheduleSet, Depends(resolve_approver_scope)]
+
+
 def audit(
     db: Session,
     actor: User | None,
@@ -204,6 +337,22 @@ def get_or_404(db: Session, model: type[Any], object_id: str) -> Any:
     if instance is None:
         raise HTTPException(status_code=404, detail="资源不存在")
     return instance
+
+
+def get_scoped_or_404(
+    db: Session, model: type[Any], object_id: str, schedule_set: ScheduleSet
+) -> Any:
+    """Fetch a per-schedule-set object without trusting the request header alone."""
+    instance = get_or_404(db, model, object_id)
+    if getattr(instance, "schedule_set_id", schedule_set.id) != schedule_set.id:
+        # Deliberately return the same shape as a missing object: IDs must not be
+        # usable as a side channel for discovering another operator's schedules.
+        raise HTTPException(status_code=404, detail="资源不存在")
+    return instance
+
+
+def require_scope_access(db: Session, user: User, scope: ScheduleSet, required: str) -> None:
+    _require_schedule_access(db, user, scope.id, required)
 
 
 def schedule_response(db: Session, schedule: ScheduleVersion) -> ScheduleResponse:
@@ -278,6 +427,219 @@ def current_user(user: CurrentUser) -> UserResponse:
     return UserResponse.model_validate(user)
 
 
+def _schedule_set_response(db: Session, item: ScheduleSet, access_role: str) -> dict[str, Any]:
+    current = db.scalar(
+        select(ScheduleVersion)
+        .where(
+            ScheduleVersion.schedule_set_id == item.id,
+            ScheduleVersion.status == "published",
+        )
+        .order_by(ScheduleVersion.published_at.desc(), ScheduleVersion.version_no.desc())
+    )
+    return {
+        "id": item.id,
+        "code": item.code,
+        "name": item.name,
+        "display_order": item.display_order,
+        "is_active": item.is_active,
+        "access_role": access_role,
+        "current_version_id": current.id if current else None,
+        "current_version_name": current.name if current else None,
+        "current_version_no": current.version_no if current else None,
+    }
+
+
+@router.get("/schedule-sets", response_model=list[ScheduleSetResponse], tags=["schedule-sets"])
+def list_schedule_sets(db: Db, user: CurrentUser) -> list[dict[str, Any]]:
+    return [
+        _schedule_set_response(db, item, access)
+        for item, access in _visible_schedule_sets(db, user)
+    ]
+
+
+@router.post(
+    "/schedule-sets",
+    response_model=ScheduleSetResponse,
+    status_code=201,
+    tags=["schedule-sets"],
+)
+def create_schedule_set(payload: ScheduleSetCreate, db: Db, user: Admin) -> dict[str, Any]:
+    _ensure_default_schedule_set(db)
+    count = int(db.scalar(select(func.count(ScheduleSet.id))) or 0)
+    code = f"SET{count + 1:03d}"
+    while db.scalar(select(ScheduleSet.id).where(ScheduleSet.code == code)):
+        count += 1
+        code = f"SET{count + 1:03d}"
+    instance = ScheduleSet(
+        code=code,
+        name=payload.name,
+        display_order=count,
+        is_active=True,
+        created_by=user.id,
+    )
+    db.add(instance)
+    try:
+        db.flush()
+        audit(
+            db,
+            user,
+            "create",
+            "schedule_set",
+            instance.id,
+            {"name": instance.name, "code": code},
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="课表名称已存在") from exc
+    db.refresh(instance)
+    return _schedule_set_response(db, instance, "approver")
+
+
+@router.patch(
+    "/schedule-sets/{schedule_set_id}",
+    response_model=ScheduleSetResponse,
+    tags=["schedule-sets"],
+)
+def rename_schedule_set(
+    schedule_set_id: str, payload: ScheduleSetUpdate, db: Db, user: Admin
+) -> dict[str, Any]:
+    instance = get_or_404(db, ScheduleSet, schedule_set_id)
+    instance.name = payload.name
+    audit(db, user, "rename", "schedule_set", instance.id, {"name": payload.name})
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="课表名称已存在") from exc
+    db.refresh(instance)
+    return _schedule_set_response(db, instance, "approver")
+
+
+@router.get(
+    "/schedule-sets/{schedule_set_id}/members",
+    response_model=list[ScheduleSetMemberResponse],
+    tags=["schedule-sets"],
+)
+def list_schedule_set_members(
+    schedule_set_id: str, db: Db, user: Admin
+) -> list[dict[str, Any]]:
+    get_or_404(db, ScheduleSet, schedule_set_id)
+    rows = db.execute(
+        select(ScheduleSetMember, User)
+        .join(User, User.id == ScheduleSetMember.user_id)
+        .where(ScheduleSetMember.schedule_set_id == schedule_set_id)
+        .order_by(User.username)
+    ).all()
+    return [
+        {
+            "id": member.id,
+            "schedule_set_id": member.schedule_set_id,
+            "user_id": member.user_id,
+            "username": target.username,
+            "user_role": target.role,
+            "access_role": member.access_role,
+            "is_active": member.is_active,
+            "granted_by": member.granted_by,
+            "created_at": member.created_at,
+        }
+        for member, target in rows
+    ]
+
+
+@router.put(
+    "/schedule-sets/{schedule_set_id}/members/{user_id}",
+    response_model=ScheduleSetMemberResponse,
+    tags=["schedule-sets"],
+)
+def upsert_schedule_set_member(
+    schedule_set_id: str,
+    user_id: str,
+    payload: ScheduleSetMemberUpsert,
+    db: Db,
+    user: Admin,
+) -> dict[str, Any]:
+    if payload.user_id != user_id:
+        raise HTTPException(status_code=422, detail="路径用户与请求体用户不一致")
+    get_or_404(db, ScheduleSet, schedule_set_id)
+    target = get_or_404(db, User, user_id)
+    if target.role == "admin":
+        raise HTTPException(status_code=409, detail="管理员默认可管理全部课表，无需单独分配")
+    if not target.is_active:
+        raise HTTPException(status_code=409, detail="停用账号不能分配课表权限")
+    if not _role_allows_access(target, payload.access_role):
+        raise HTTPException(status_code=422, detail="课表权限不能高于成员的全局角色")
+    member = db.scalar(
+        select(ScheduleSetMember).where(
+            ScheduleSetMember.schedule_set_id == schedule_set_id,
+            ScheduleSetMember.user_id == user_id,
+        )
+    )
+    if member is None:
+        member = ScheduleSetMember(
+            schedule_set_id=schedule_set_id,
+            user_id=user_id,
+            granted_by=user.id,
+        )
+        db.add(member)
+    member.access_role = payload.access_role
+    member.is_active = True
+    member.granted_by = user.id
+    audit(
+        db,
+        user,
+        "grant_schedule_access",
+        "schedule_set_member",
+        member.id,
+        {
+            "schedule_set_id": schedule_set_id,
+            "user_id": user_id,
+            "access_role": payload.access_role,
+        },
+    )
+    db.commit()
+    db.refresh(member)
+    return {
+        "id": member.id,
+        "schedule_set_id": member.schedule_set_id,
+        "user_id": member.user_id,
+        "username": target.username,
+        "user_role": target.role,
+        "access_role": member.access_role,
+        "is_active": member.is_active,
+        "granted_by": member.granted_by,
+        "created_at": member.created_at,
+    }
+
+
+@router.delete(
+    "/schedule-sets/{schedule_set_id}/members/{user_id}",
+    status_code=204,
+    tags=["schedule-sets"],
+)
+def revoke_schedule_set_member(schedule_set_id: str, user_id: str, db: Db, user: Admin) -> Response:
+    get_or_404(db, ScheduleSet, schedule_set_id)
+    member = db.scalar(
+        select(ScheduleSetMember).where(
+            ScheduleSetMember.schedule_set_id == schedule_set_id,
+            ScheduleSetMember.user_id == user_id,
+        )
+    )
+    if member is None:
+        return Response(status_code=204)
+    member.is_active = False
+    audit(
+        db,
+        user,
+        "revoke_schedule_access",
+        "schedule_set_member",
+        member.id,
+        {"schedule_set_id": schedule_set_id, "user_id": user_id},
+    )
+    db.commit()
+    return Response(status_code=204)
+
+
 @router.get("/users", response_model=list[UserResponse], tags=["accounts"])
 def list_users(db: Db, user: Admin) -> list[User]:
     return list(db.scalars(select(User).order_by(User.created_at, User.username)))
@@ -295,6 +657,16 @@ def create_user(payload: UserCreate, db: Db, user: Admin) -> User:
     db.add(instance)
     try:
         db.flush()
+        default_set = _ensure_default_schedule_set(db)
+        if payload.role != "admin":
+            db.add(
+                ScheduleSetMember(
+                    schedule_set_id=default_set.id,
+                    user_id=instance.id,
+                    access_role=("approver" if payload.role == "approver" else payload.role),
+                    granted_by=user.id,
+                )
+            )
         audit(
             db,
             user,
@@ -355,13 +727,34 @@ def update_user_role(user_id: str, payload: UserRoleUpdate, db: Db, user: Admin)
             raise HTTPException(status_code=409, detail="至少需要保留一个启用中的管理员")
     previous = target.role
     target.role = payload.role
+    access_ceiling = {
+        "viewer": "viewer",
+        "scheduler": "scheduler",
+        "approver": "approver",
+    }.get(payload.role)
+    adjusted_memberships = 0
+    if access_ceiling is not None:
+        for membership in db.scalars(
+            select(ScheduleSetMember).where(
+                ScheduleSetMember.user_id == target.id,
+                ScheduleSetMember.is_active.is_(True),
+            )
+        ):
+            if ACCESS_ORDER[membership.access_role] > ACCESS_ORDER[access_ceiling]:
+                membership.access_role = access_ceiling
+                adjusted_memberships += 1
     audit(
         db,
         user,
         "update_role",
         "user",
         target.id,
-        {"username": target.username, "from": previous, "to": payload.role},
+        {
+            "username": target.username,
+            "from": previous,
+            "to": payload.role,
+            "adjusted_schedule_memberships": adjusted_memberships,
+        },
     )
     db.commit()
     db.refresh(target)
@@ -409,29 +802,54 @@ def health_ready(db: Db) -> dict[str, str]:
 
 
 @router.get("/overview", response_model=OverviewResponse, tags=["overview"])
-def overview(db: Db, user: CurrentUser) -> OverviewResponse:
-    latest_run = db.scalar(select(SolverRun).order_by(SolverRun.created_at.desc()))
-    latest_schedule = db.scalar(select(ScheduleVersion).order_by(ScheduleVersion.version_no.desc()))
-    latest_sync = db.scalar(select(IntegrationSync).order_by(IntegrationSync.created_at.desc()))
+def overview(db: Db, user: CurrentUser, scope: ViewerScope) -> OverviewResponse:
+    latest_run = db.scalar(
+        select(SolverRun)
+        .where(SolverRun.schedule_set_id == scope.id)
+        .order_by(SolverRun.created_at.desc())
+    )
+    latest_schedule = db.scalar(
+        select(ScheduleVersion)
+        .where(ScheduleVersion.schedule_set_id == scope.id)
+        .order_by(ScheduleVersion.version_no.desc())
+    )
+    latest_sync = db.scalar(
+        select(IntegrationSync)
+        .where(IntegrationSync.schedule_set_id == scope.id)
+        .order_by(IntegrationSync.created_at.desc())
+    )
     counts = {
         "teachers": int(db.scalar(select(func.count(Teacher.id))) or 0),
         "class_groups": int(db.scalar(select(func.count(ClassGroup.id))) or 0),
         "rooms": int(db.scalar(select(func.count(Room.id))) or 0),
         "time_slots": int(db.scalar(select(func.count(TimeSlot.id))) or 0),
         "course_sessions": int(db.scalar(select(func.count(CourseSession.id))) or 0),
-        "schedule_versions": int(db.scalar(select(func.count(ScheduleVersion.id))) or 0),
+        "schedule_versions": int(
+            db.scalar(
+                select(func.count(ScheduleVersion.id)).where(
+                    ScheduleVersion.schedule_set_id == scope.id
+                )
+            )
+            or 0
+        ),
     }
     return OverviewResponse(
         counts=counts,
         latest_run=SolverRunResponse.model_validate(latest_run) if latest_run else None,
         latest_schedule=schedule_response(db, latest_schedule) if latest_schedule else None,
         pending_rules=int(
-            db.scalar(select(func.count(Rule.id)).where(Rule.status == "awaiting_confirmation"))
+            db.scalar(
+                select(func.count(Rule.id)).where(
+                    Rule.schedule_set_id == scope.id,
+                    Rule.status == "awaiting_confirmation",
+                )
+            )
             or 0
         ),
         pending_reschedules=int(
             db.scalar(
                 select(func.count(RescheduleEvent.id)).where(
+                    RescheduleEvent.schedule_set_id == scope.id,
                     RescheduleEvent.status.in_(["pending", "candidate_ready"])
                 )
             )
@@ -460,6 +878,7 @@ MAX_IMPORT_BYTES = 64 * 1024 * 1024
 def import_xlsx(
     db: Db,
     user: AdminOrScheduler,
+    scope: SchedulerScope,
     file: Annotated[UploadFile, File(...)],
     campus_business_id: Annotated[str, Query(max_length=40)] = CAMPUS_BUSINESS_ID,
     campus_name: Annotated[str, Query(max_length=120)] = CAMPUS_NAME,
@@ -484,6 +903,7 @@ def import_xlsx(
                 target,
                 campus_business_id=campus_business_id.strip() or CAMPUS_BUSINESS_ID,
                 campus_name=campus_name.strip() or CAMPUS_NAME,
+                schedule_set_id=scope.id,
             )
         except WorkbookFormatError as exc:
             db.rollback()
@@ -524,12 +944,14 @@ def import_xlsx(
 
 
 @router.get("/campuses", response_model=list[CampusResponse], tags=["master-data"])
-def list_campuses(db: Db, user: CurrentUser) -> list[Campus]:
+def list_campuses(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[Campus]:
     return list(db.scalars(select(Campus).order_by(Campus.business_id)))
 
 
 @router.post("/campuses", response_model=CampusResponse, status_code=201, tags=["master-data"])
-def create_campus(payload: CampusCreate, db: Db, user: AdminOrScheduler) -> Campus:
+def create_campus(
+    payload: CampusCreate, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+) -> Campus:
     instance = Campus(**payload.model_dump())
     db.add(instance)
     try:
@@ -681,12 +1103,14 @@ def ensure_time_slots_deletable(db: Session, slots: list[TimeSlot]) -> None:
 
 
 @router.get("/teachers", response_model=list[TeacherResponse], tags=["master-data"])
-def list_teachers(db: Db, user: CurrentUser) -> list[Teacher]:
+def list_teachers(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[Teacher]:
     return list(db.scalars(select(Teacher).order_by(Teacher.business_id)))
 
 
 @router.post("/teachers", response_model=TeacherResponse, status_code=201, tags=["master-data"])
-def create_teacher(payload: TeacherPayload, db: Db, user: AdminOrScheduler) -> Teacher:
+def create_teacher(
+    payload: TeacherPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+) -> Teacher:
     instance = Teacher(**payload.model_dump())
     db.add(instance)
     db.commit()
@@ -696,7 +1120,7 @@ def create_teacher(payload: TeacherPayload, db: Db, user: AdminOrScheduler) -> T
 
 @router.put("/teachers/{object_id}", response_model=TeacherResponse, tags=["master-data"])
 def update_teacher(
-    object_id: str, payload: TeacherPayload, db: Db, user: AdminOrScheduler
+    object_id: str, payload: TeacherPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> Teacher:
     instance = get_or_404(db, Teacher, object_id)
     for key, value in payload.model_dump().items():
@@ -713,7 +1137,7 @@ def update_teacher(
     tags=["master-data"],
 )
 def batch_update_teachers(
-    payload: TeacherBatchUpdate, db: Db, user: AdminOrScheduler
+    payload: TeacherBatchUpdate, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> BatchOperationResponse:
     teachers: list[Teacher] = selected_master_rows(db, Teacher, payload.object_ids, "教师")
     changes = payload.model_dump(exclude={"object_ids"}, exclude_unset=True)
@@ -738,7 +1162,7 @@ def batch_update_teachers(
     tags=["master-data"],
 )
 def batch_delete_teachers(
-    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler
+    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> BatchOperationResponse:
     teachers: list[Teacher] = selected_master_rows(db, Teacher, payload.object_ids, "教师")
     ensure_teachers_deletable(db, teachers)
@@ -814,7 +1238,7 @@ def class_group_responses(db: Session, classes: list[ClassGroup]) -> list[ClassG
 
 
 @router.get("/class-groups", response_model=list[ClassGroupResponse], tags=["master-data"])
-def list_class_groups(db: Db, user: CurrentUser) -> list[ClassGroupResponse]:
+def list_class_groups(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[ClassGroupResponse]:
     classes = list(db.scalars(select(ClassGroup).order_by(ClassGroup.business_id)))
     return class_group_responses(db, classes)
 
@@ -823,7 +1247,7 @@ def list_class_groups(db: Db, user: CurrentUser) -> list[ClassGroupResponse]:
     "/class-groups", response_model=ClassGroupResponse, status_code=201, tags=["master-data"]
 )
 def create_class_group(
-    payload: ClassGroupPayload, db: Db, user: AdminOrScheduler
+    payload: ClassGroupPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> ClassGroupResponse:
     instance = ClassGroup(**payload.model_dump())
     db.add(instance)
@@ -839,7 +1263,11 @@ def create_class_group(
 
 @router.put("/class-groups/{object_id}", response_model=ClassGroupResponse, tags=["master-data"])
 def update_class_group(
-    object_id: str, payload: ClassGroupPayload, db: Db, user: AdminOrScheduler
+    object_id: str,
+    payload: ClassGroupPayload,
+    db: Db,
+    user: AdminOrScheduler,
+    _scope: SchedulerScope,
 ) -> ClassGroupResponse:
     instance = get_or_404(db, ClassGroup, object_id)
     for key, value in payload.model_dump().items():
@@ -856,7 +1284,7 @@ def update_class_group(
     tags=["master-data"],
 )
 def batch_delete_class_groups(
-    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler
+    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> BatchOperationResponse:
     classes: list[ClassGroup] = selected_master_rows(db, ClassGroup, payload.object_ids, "班级")
     ensure_class_groups_deletable(db, classes)
@@ -868,12 +1296,14 @@ def batch_delete_class_groups(
 
 
 @router.get("/rooms", response_model=list[RoomResponse], tags=["master-data"])
-def list_rooms(db: Db, user: CurrentUser) -> list[Room]:
+def list_rooms(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[Room]:
     return list(db.scalars(select(Room).order_by(Room.business_id)))
 
 
 @router.post("/rooms", response_model=RoomResponse, status_code=201, tags=["master-data"])
-def create_room(payload: RoomPayload, db: Db, user: AdminOrScheduler) -> Room:
+def create_room(
+    payload: RoomPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+) -> Room:
     instance = Room(**payload.model_dump())
     db.add(instance)
     db.commit()
@@ -882,7 +1312,9 @@ def create_room(payload: RoomPayload, db: Db, user: AdminOrScheduler) -> Room:
 
 
 @router.put("/rooms/{object_id}", response_model=RoomResponse, tags=["master-data"])
-def update_room(object_id: str, payload: RoomPayload, db: Db, user: AdminOrScheduler) -> Room:
+def update_room(
+    object_id: str, payload: RoomPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+) -> Room:
     instance = get_or_404(db, Room, object_id)
     for key, value in payload.model_dump().items():
         setattr(instance, key, value)
@@ -898,7 +1330,7 @@ def update_room(object_id: str, payload: RoomPayload, db: Db, user: AdminOrSched
     tags=["master-data"],
 )
 def batch_update_rooms(
-    payload: RoomBatchUpdate, db: Db, user: AdminOrScheduler
+    payload: RoomBatchUpdate, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> BatchOperationResponse:
     rooms: list[Room] = selected_master_rows(db, Room, payload.object_ids, "教室")
     for room in rooms:
@@ -921,7 +1353,7 @@ def batch_update_rooms(
     tags=["master-data"],
 )
 def batch_delete_rooms(
-    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler
+    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> BatchOperationResponse:
     rooms: list[Room] = selected_master_rows(db, Room, payload.object_ids, "教室")
     ensure_rooms_deletable(db, rooms)
@@ -933,12 +1365,14 @@ def batch_delete_rooms(
 
 
 @router.get("/time-slots", response_model=list[TimeSlotResponse], tags=["master-data"])
-def list_time_slots(db: Db, user: CurrentUser) -> list[TimeSlot]:
+def list_time_slots(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[TimeSlot]:
     return list(db.scalars(select(TimeSlot).order_by(TimeSlot.sequence)))
 
 
 @router.post("/time-slots", response_model=TimeSlotResponse, status_code=201, tags=["master-data"])
-def create_time_slot(payload: TimeSlotPayload, db: Db, user: AdminOrScheduler) -> TimeSlot:
+def create_time_slot(
+    payload: TimeSlotPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
+) -> TimeSlot:
     instance = TimeSlot(**payload.model_dump())
     db.add(instance)
     db.commit()
@@ -948,7 +1382,11 @@ def create_time_slot(payload: TimeSlotPayload, db: Db, user: AdminOrScheduler) -
 
 @router.put("/time-slots/{object_id}", response_model=TimeSlotResponse, tags=["master-data"])
 def update_time_slot(
-    object_id: str, payload: TimeSlotPayload, db: Db, user: AdminOrScheduler
+    object_id: str,
+    payload: TimeSlotPayload,
+    db: Db,
+    user: AdminOrScheduler,
+    _scope: SchedulerScope,
 ) -> TimeSlot:
     instance = get_or_404(db, TimeSlot, object_id)
     for key, value in payload.model_dump().items():
@@ -965,7 +1403,7 @@ def update_time_slot(
     tags=["master-data"],
 )
 def batch_update_time_slots(
-    payload: TimeSlotBatchUpdate, db: Db, user: AdminOrScheduler
+    payload: TimeSlotBatchUpdate, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> BatchOperationResponse:
     slots: list[TimeSlot] = selected_master_rows(db, TimeSlot, payload.object_ids, "时段")
     for slot in slots:
@@ -988,7 +1426,7 @@ def batch_update_time_slots(
     tags=["master-data"],
 )
 def batch_delete_time_slots(
-    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler
+    payload: MasterDataBatchDelete, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> BatchOperationResponse:
     slots: list[TimeSlot] = selected_master_rows(db, TimeSlot, payload.object_ids, "时段")
     ensure_time_slots_deletable(db, slots)
@@ -1000,7 +1438,7 @@ def batch_delete_time_slots(
 
 
 @router.get("/course-sessions", response_model=list[CourseSessionResponse], tags=["master-data"])
-def list_course_sessions(db: Db, user: CurrentUser) -> list[CourseSession]:
+def list_course_sessions(db: Db, user: CurrentUser, _scope: ViewerScope) -> list[CourseSession]:
     return list(db.scalars(select(CourseSession).order_by(CourseSession.business_id)))
 
 
@@ -1011,7 +1449,7 @@ def list_course_sessions(db: Db, user: CurrentUser) -> list[CourseSession]:
     tags=["master-data"],
 )
 def create_course_session(
-    payload: CourseSessionPayload, db: Db, user: AdminOrScheduler
+    payload: CourseSessionPayload, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> CourseSession:
     values = payload.model_dump()
     if values["product_type"] and not values["product_types"]:
@@ -1048,7 +1486,11 @@ def create_course_session(
     "/course-sessions/{object_id}", response_model=CourseSessionResponse, tags=["master-data"]
 )
 def update_course_session(
-    object_id: str, payload: CourseSessionUpdate, db: Db, user: AdminOrScheduler
+    object_id: str,
+    payload: CourseSessionUpdate,
+    db: Db,
+    user: AdminOrScheduler,
+    _scope: SchedulerScope,
 ) -> CourseSession:
     instance = get_or_404(db, CourseSession, object_id)
     changes = payload.model_dump(exclude_unset=True)
@@ -1264,7 +1706,7 @@ def ensure_course_sessions_deletable(db: Session, criteria: list[ColumnElement[b
     tags=["master-data"],
 )
 def batch_update_course_sessions(
-    payload: CourseSessionBatchUpdate, db: Db, user: AdminOrScheduler
+    payload: CourseSessionBatchUpdate, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> BatchOperationResponse:
     if payload.object_ids is not None:
         selected_course_sessions(db, payload.object_ids)
@@ -1311,7 +1753,7 @@ def batch_update_course_sessions(
     tags=["master-data"],
 )
 def batch_delete_course_sessions(
-    payload: CourseSessionBatchDelete, db: Db, user: AdminOrScheduler
+    payload: CourseSessionBatchDelete, db: Db, user: AdminOrScheduler, _scope: SchedulerScope
 ) -> BatchOperationResponse:
     if payload.object_ids is not None:
         selected_course_sessions(db, payload.object_ids)
@@ -1351,7 +1793,13 @@ MASTER_MODELS = {
 
 
 @router.delete("/master-data/{resource}/{object_id}", status_code=204, tags=["master-data"])
-def delete_master_data(resource: str, object_id: str, db: Db, user: AdminOrScheduler) -> Response:
+def delete_master_data(
+    resource: str,
+    object_id: str,
+    db: Db,
+    user: AdminOrScheduler,
+    _scope: SchedulerScope,
+) -> Response:
     model = MASTER_MODELS.get(resource)
     if model is None:
         raise HTTPException(status_code=404, detail="未知主数据资源")
@@ -1675,23 +2123,37 @@ def list_constraint_catalog(user: CurrentUser) -> list[dict[str, Any]]:
 
 @router.get("/rules", response_model=list[RuleResponse], tags=["rules"])
 def list_rules(
-    db: Db, user: CurrentUser, rule_status: str | None = Query(default=None, alias="status")
+    db: Db,
+    user: CurrentUser,
+    scope: ViewerScope,
+    rule_status: str | None = Query(default=None, alias="status"),
 ) -> list[Rule]:
-    statement = select(Rule).order_by(Rule.business_id)
+    statement = select(Rule).where(Rule.schedule_set_id == scope.id).order_by(Rule.business_id)
     if rule_status:
         statement = statement.where(Rule.status == rule_status)
     return list(db.scalars(statement))
 
 
 @router.post("/rules", response_model=RuleResponse, status_code=201, tags=["rules"])
-def create_rule(payload: RuleCreate, db: Db, user: AdminOrScheduler) -> Rule:
+def create_rule(
+    payload: RuleCreate, db: Db, user: AdminOrScheduler, scope: SchedulerScope
+) -> Rule:
     validate_rule_entities(db, payload)
+    rule_count = db.scalar(
+        select(func.count(Rule.id)).where(Rule.schedule_set_id == scope.id)
+    )
     business_id = (
-        payload.business_id or f"RL-{int(db.scalar(select(func.count(Rule.id))) or 0) + 1:04d}"
+        payload.business_id
+        or f"RL-{int(rule_count or 0) + 1:04d}"
     )
     data = payload.model_dump(exclude={"business_id"})
     # 状态只能由 transition 端点推进，接口不接受调用方直接写 active。
-    instance = Rule(business_id=business_id, status="awaiting_confirmation", **data)
+    instance = Rule(
+        schedule_set_id=scope.id,
+        business_id=business_id,
+        status="awaiting_confirmation",
+        **data,
+    )
     db.add(instance)
     audit(db, user, "create", "rule", business_id, data)
     db.commit()
@@ -1700,8 +2162,10 @@ def create_rule(payload: RuleCreate, db: Db, user: AdminOrScheduler) -> Rule:
 
 
 @router.put("/rules/{rule_id}", response_model=RuleResponse, tags=["rules"])
-def update_rule(rule_id: str, payload: RuleUpdate, db: Db, user: AdminOrScheduler) -> Rule:
-    rule = get_or_404(db, Rule, rule_id)
+def update_rule(
+    rule_id: str, payload: RuleUpdate, db: Db, user: AdminOrScheduler, scope: SchedulerScope
+) -> Rule:
+    rule = get_scoped_or_404(db, Rule, rule_id, scope)
     if rule.status not in {"draft", "awaiting_confirmation"}:
         raise HTTPException(status_code=409, detail="只有待确认规则可以编辑")
     validate_rule_entities(db, payload)
@@ -1715,8 +2179,14 @@ def update_rule(rule_id: str, payload: RuleUpdate, db: Db, user: AdminOrSchedule
 
 
 @router.post("/rules/{rule_id}/transition", response_model=RuleResponse, tags=["rules"])
-def transition_rule(rule_id: str, payload: RuleTransition, db: Db, user: AdminOrScheduler) -> Rule:
-    rule = get_or_404(db, Rule, rule_id)
+def transition_rule(
+    rule_id: str,
+    payload: RuleTransition,
+    db: Db,
+    user: AdminOrScheduler,
+    scope: SchedulerScope,
+) -> Rule:
+    rule = get_scoped_or_404(db, Rule, rule_id, scope)
     allowed = {
         "draft": {"active", "rejected"},
         "awaiting_confirmation": {"active", "rejected"},
@@ -1740,10 +2210,11 @@ def create_solver_run(
     db: Session,
     user_id: str | None,
     request: SolveRequest | AilySolveRequest,
+    schedule_set_id: str = DEFAULT_SCHEDULE_SET_ID,
     run_type: str = "initial",
     extra: dict[str, Any] | None = None,
 ) -> SolverRun:
-    snapshot = create_snapshot(db, user_id)
+    snapshot = create_snapshot(db, user_id, schedule_set_id)
     payload = {
         "time_limit_seconds": request.time_limit_seconds,
         "change_weight": getattr(request, "change_weight", 100000),
@@ -1771,7 +2242,10 @@ def create_solver_run(
     if is_partial_scope and "parent_schedule_id" not in run_extra:
         parent = db.scalar(
             select(ScheduleVersion)
-            .where(ScheduleVersion.status == "published")
+            .where(
+                ScheduleVersion.schedule_set_id == schedule_set_id,
+                ScheduleVersion.status == "published",
+            )
             .order_by(ScheduleVersion.version_no.desc())
         )
         if parent:
@@ -1782,6 +2256,7 @@ def create_solver_run(
             ]
     payload.update(run_extra)
     run = SolverRun(
+        schedule_set_id=schedule_set_id,
         snapshot_id=snapshot.id,
         run_type=run_type,
         status="queued",
@@ -1817,8 +2292,10 @@ class SolverRunDetailResponse(SolverRunResponse):
 @router.post(
     "/solver-runs", response_model=SolverRunDetailResponse, status_code=202, tags=["solver"]
 )
-def submit_solver_run(request: SolveRequest, db: Db, user: AdminOrScheduler) -> SolverRun:
-    run = create_solver_run(db, user.id, request)
+def submit_solver_run(
+    request: SolveRequest, db: Db, user: AdminOrScheduler, scope: SchedulerScope
+) -> SolverRun:
+    run = create_solver_run(db, user.id, request, scope.id)
     audit(db, user, "submit", "solver_run", run.id)
     db.commit()
     if request.wait:
@@ -1830,13 +2307,20 @@ def submit_solver_run(request: SolveRequest, db: Db, user: AdminOrScheduler) -> 
 
 
 @router.get("/solver-runs", response_model=list[SolverRunDetailResponse], tags=["solver"])
-def list_solver_runs(db: Db, user: CurrentUser) -> list[SolverRun]:
-    return list(db.scalars(select(SolverRun).order_by(SolverRun.created_at.desc()).limit(50)))
+def list_solver_runs(db: Db, user: CurrentUser, scope: ViewerScope) -> list[SolverRun]:
+    return list(
+        db.scalars(
+            select(SolverRun)
+            .where(SolverRun.schedule_set_id == scope.id)
+            .order_by(SolverRun.created_at.desc())
+            .limit(50)
+        )
+    )
 
 
 @router.get("/solver-runs/{run_id}", response_model=SolverRunDetailResponse, tags=["solver"])
-def get_solver_run(run_id: str, db: Db, user: CurrentUser) -> SolverRun:
-    return get_or_404(db, SolverRun, run_id)
+def get_solver_run(run_id: str, db: Db, user: CurrentUser, scope: ViewerScope) -> SolverRun:
+    return get_scoped_or_404(db, SolverRun, run_id, scope)
 
 
 @router.post(
@@ -1848,6 +2332,7 @@ def explain_solver_run(
     run_id: str,
     db: Db,
     user: AdminOrScheduler,
+    scope: SchedulerScope,
     refresh: bool = Query(default=False, description="忽略已存解释，重新调用 AI 生成"),
 ) -> dict[str, Any]:
     """把求解结论翻译成教务读得懂的话，并做一次意图核对。
@@ -1855,7 +2340,7 @@ def explain_solver_run(
     事实包由代码算，AI 只负责措辞与意图核对；模型不可用时退回确定性兜底解释，
     界面仍然拿得到 SYSTEM-* 的业务口径翻译，而不是裸标识。
     """
-    run = get_or_404(db, SolverRun, run_id)
+    run = get_scoped_or_404(db, SolverRun, run_id, scope)
     if run.status not in {"completed", "failed"}:
         raise HTTPException(status_code=409, detail="求解尚未结束，暂时无法解释结果")
     if run.explanation and not refresh:
@@ -1892,14 +2377,21 @@ def explain_solver_run(
 
 
 @router.get("/solver-runs/{run_id}/events", tags=["solver"])
-async def solver_run_events(run_id: str, user: CurrentUser) -> StreamingResponse:
+async def solver_run_events(
+    run_id: str, user: CurrentUser, scope: ViewerScope
+) -> StreamingResponse:
     async def event_stream():
         last_payload = ""
         while True:
             from .db import SessionLocal
 
             with SessionLocal() as db:
-                run = db.get(SolverRun, run_id)
+                run = db.scalar(
+                    select(SolverRun).where(
+                        SolverRun.id == run_id,
+                        SolverRun.schedule_set_id == scope.id,
+                    )
+                )
                 if run is None:
                     yield 'event: error\ndata: {"detail":"资源不存在"}\n\n'
                     return
@@ -1930,17 +2422,30 @@ async def solver_run_events(run_id: str, user: CurrentUser) -> StreamingResponse
 
 
 @router.get("/schedules", response_model=list[ScheduleSummaryResponse], tags=["schedules"])
-def list_schedules(db: Db, user: CurrentUser) -> list[ScheduleSummaryResponse]:
-    versions = list(db.scalars(select(ScheduleVersion).order_by(ScheduleVersion.version_no.desc())))
-    counts: dict[str, int] = {
-        str(version_id): int(total)
-        for version_id, total in db.execute(
-            select(
-                ScheduleAssignment.schedule_version_id,
-                func.count(ScheduleAssignment.id),
-            ).group_by(ScheduleAssignment.schedule_version_id)
-        ).all()
-    }
+def list_schedules(db: Db, user: CurrentUser, scope: ViewerScope) -> list[ScheduleSummaryResponse]:
+    versions = list(
+        db.scalars(
+            select(ScheduleVersion)
+            .where(ScheduleVersion.schedule_set_id == scope.id)
+            .order_by(ScheduleVersion.version_no.desc())
+        )
+    )
+    version_ids = [item.id for item in versions]
+    counts: dict[str, int] = (
+        {
+            str(version_id): int(total)
+            for version_id, total in db.execute(
+                select(
+                    ScheduleAssignment.schedule_version_id,
+                    func.count(ScheduleAssignment.id),
+                )
+                .where(ScheduleAssignment.schedule_version_id.in_(version_ids))
+                .group_by(ScheduleAssignment.schedule_version_id)
+            ).all()
+        }
+        if version_ids
+        else {}
+    )
     return [
         ScheduleSummaryResponse(
             id=item.id,
@@ -1959,8 +2464,10 @@ def list_schedules(db: Db, user: CurrentUser) -> list[ScheduleSummaryResponse]:
 
 
 @router.get("/schedules/{schedule_id}", response_model=ScheduleResponse, tags=["schedules"])
-def get_schedule(schedule_id: str, db: Db, user: CurrentUser) -> ScheduleResponse:
-    return schedule_response(db, get_or_404(db, ScheduleVersion, schedule_id))
+def get_schedule(
+    schedule_id: str, db: Db, user: CurrentUser, scope: ViewerScope
+) -> ScheduleResponse:
+    return schedule_response(db, get_scoped_or_404(db, ScheduleVersion, schedule_id, scope))
 
 
 @router.get(
@@ -1969,10 +2476,16 @@ def get_schedule(schedule_id: str, db: Db, user: CurrentUser) -> ScheduleRespons
     tags=["schedules"],
 )
 def diff_schedules(
-    schedule_id: str, target_schedule_id: str, db: Db, user: CurrentUser
+    schedule_id: str,
+    target_schedule_id: str,
+    db: Db,
+    user: CurrentUser,
+    scope: ViewerScope,
 ) -> ScheduleDiffResponse:
-    base = schedule_response(db, get_or_404(db, ScheduleVersion, schedule_id))
-    target = schedule_response(db, get_or_404(db, ScheduleVersion, target_schedule_id))
+    base = schedule_response(db, get_scoped_or_404(db, ScheduleVersion, schedule_id, scope))
+    target = schedule_response(
+        db, get_scoped_or_404(db, ScheduleVersion, target_schedule_id, scope)
+    )
     before = {item.course_business_id: item for item in base.assignments}
     after = {item.course_business_id: item for item in target.assignments}
     items: list[ScheduleDiffItem] = []
@@ -2020,8 +2533,10 @@ def diff_schedules(
 @router.post(
     "/schedules/{schedule_id}/publish", response_model=ScheduleResponse, tags=["schedules"]
 )
-def publish_schedule(schedule_id: str, db: Db, user: Approver) -> ScheduleResponse:
-    schedule = get_or_404(db, ScheduleVersion, schedule_id)
+def publish_schedule(
+    schedule_id: str, db: Db, user: Approver, scope: ApproverScope
+) -> ScheduleResponse:
+    schedule = get_scoped_or_404(db, ScheduleVersion, schedule_id, scope)
     if schedule.status != "draft":
         raise HTTPException(status_code=409, detail="只有草稿版本可以发布")
     # 发布门禁：独立于求解器重算一遍硬冲突，求解器建模有误时在这里兜住。
@@ -2042,7 +2557,10 @@ def publish_schedule(schedule_id: str, db: Db, user: Approver) -> ScheduleRespon
         )
         raise HTTPException(status_code=409, detail=f"课表存在硬冲突，不能发布：{detail}")
     for published in db.scalars(
-        select(ScheduleVersion).where(ScheduleVersion.status == "published")
+        select(ScheduleVersion).where(
+            ScheduleVersion.schedule_set_id == scope.id,
+            ScheduleVersion.status == "published",
+        )
     ):
         published.status = "archived"
     schedule.status = "published"
@@ -2057,12 +2575,17 @@ def publish_schedule(schedule_id: str, db: Db, user: Approver) -> ScheduleRespon
 @router.post(
     "/schedules/{schedule_id}/rollback", response_model=ScheduleResponse, tags=["schedules"]
 )
-def rollback_schedule(schedule_id: str, db: Db, user: Approver) -> ScheduleResponse:
-    target = get_or_404(db, ScheduleVersion, schedule_id)
+def rollback_schedule(
+    schedule_id: str, db: Db, user: Approver, scope: ApproverScope
+) -> ScheduleResponse:
+    target = get_scoped_or_404(db, ScheduleVersion, schedule_id, scope)
     if target.status not in {"archived", "rolled_back"}:
         raise HTTPException(status_code=409, detail="只能回滚到已经发布过的历史版本")
     for published in db.scalars(
-        select(ScheduleVersion).where(ScheduleVersion.status == "published")
+        select(ScheduleVersion).where(
+            ScheduleVersion.schedule_set_id == scope.id,
+            ScheduleVersion.status == "published",
+        )
     ):
         published.status = "rolled_back"
     target.status = "published"
@@ -2134,12 +2657,14 @@ def ensure_schedule_deletable(db: Session, schedule: ScheduleVersion) -> None:
 
 
 @router.delete("/schedules/{schedule_id}", status_code=204, tags=["schedules"])
-def delete_schedule(schedule_id: str, db: Db, user: Approver) -> Response:
+def delete_schedule(
+    schedule_id: str, db: Db, user: Approver, scope: ApproverScope
+) -> Response:
     """删除课表版本。删除是发布/回滚的破坏性孪生操作，权限同为 Approver。
 
     SolverRun 与 DataSnapshot 一律保留——求解痕迹是审计链，不随版本消失。
     """
-    schedule = get_or_404(db, ScheduleVersion, schedule_id)
+    schedule = get_scoped_or_404(db, ScheduleVersion, schedule_id, scope)
     ensure_schedule_deletable(db, schedule)
 
     assignment_count = int(
@@ -2155,7 +2680,10 @@ def delete_schedule(schedule_id: str, db: Db, user: Approver) -> Response:
     # 「候选已生成」却点不开。
     discarded_events = list(
         db.scalars(
-            select(RescheduleEvent).where(RescheduleEvent.candidate_schedule_id == schedule.id)
+            select(RescheduleEvent).where(
+                RescheduleEvent.schedule_set_id == scope.id,
+                RescheduleEvent.candidate_schedule_id == schedule.id,
+            )
         )
     )
     for event in discarded_events:
@@ -2188,8 +2716,10 @@ def delete_schedule(schedule_id: str, db: Db, user: Approver) -> Response:
 
 
 @router.get("/schedules/{schedule_id}/export.xlsx", tags=["schedules"])
-def export_schedule(schedule_id: str, db: Db, user: CurrentUser) -> Response:
-    schedule = get_or_404(db, ScheduleVersion, schedule_id)
+def export_schedule(
+    schedule_id: str, db: Db, user: CurrentUser, scope: ViewerScope
+) -> Response:
+    schedule = get_scoped_or_404(db, ScheduleVersion, schedule_id, scope)
     content = export_schedule_xlsx(db, schedule)
     filename = f"tupai-schedule-v{schedule.version_no}.xlsx"
     return Response(
@@ -2205,9 +2735,9 @@ def export_schedule(schedule_id: str, db: Db, user: CurrentUser) -> Response:
     tags=["schedules", "integrations"],
 )
 def list_calendar_bindings(
-    schedule_id: str, db: Db, user: CurrentUser
+    schedule_id: str, db: Db, user: CurrentUser, scope: ViewerScope
 ) -> list[CalendarEventBinding]:
-    get_or_404(db, ScheduleVersion, schedule_id)
+    get_scoped_or_404(db, ScheduleVersion, schedule_id, scope)
     return list(
         db.scalars(
             select(CalendarEventBinding)
@@ -2227,8 +2757,9 @@ def publish_schedule_to_calendar(
     request: CalendarPublishRequest,
     db: Db,
     user: AdminOrScheduler,
+    scope: SchedulerScope,
 ) -> CalendarPublishResponse:
-    schedule = get_or_404(db, ScheduleVersion, schedule_id)
+    schedule = get_scoped_or_404(db, ScheduleVersion, schedule_id, scope)
     assignments = list(
         db.scalars(
             select(ScheduleAssignment)
@@ -2539,17 +3070,25 @@ def reschedule_neighborhood(
 
 
 @router.get("/reschedule-events", response_model=list[RescheduleResponse], tags=["reschedule"])
-def list_reschedule_events(db: Db, user: CurrentUser) -> list[RescheduleEvent]:
-    return list(db.scalars(select(RescheduleEvent).order_by(RescheduleEvent.created_at.desc())))
+def list_reschedule_events(
+    db: Db, user: CurrentUser, scope: ViewerScope
+) -> list[RescheduleEvent]:
+    return list(
+        db.scalars(
+            select(RescheduleEvent)
+            .where(RescheduleEvent.schedule_set_id == scope.id)
+            .order_by(RescheduleEvent.created_at.desc())
+        )
+    )
 
 
 @router.post(
     "/reschedule-events", response_model=RescheduleResponse, status_code=202, tags=["reschedule"]
 )
 def create_reschedule_event(
-    request: RescheduleCreate, db: Db, user: AdminOrScheduler
+    request: RescheduleCreate, db: Db, user: AdminOrScheduler, scope: SchedulerScope
 ) -> RescheduleEvent:
-    parent = get_or_404(db, ScheduleVersion, request.parent_schedule_id)
+    parent = get_scoped_or_404(db, ScheduleVersion, request.parent_schedule_id, scope)
     if request.event_type == "teacher_leave" and not (
         request.slot_business_ids or request.date_from
     ):
@@ -2562,6 +3101,7 @@ def create_reschedule_event(
         exclude={"parent_schedule_id", "description", "time_limit_seconds"}
     )
     event = RescheduleEvent(
+        schedule_set_id=scope.id,
         event_type=request.event_type,
         description=request.description,
         payload=event_payload,
@@ -2576,6 +3116,7 @@ def create_reschedule_event(
         db,
         user.id,
         AilySolveRequest(time_limit_seconds=request.time_limit_seconds),
+        scope.id,
         run_type="reschedule",
         extra={
             "parent_schedule_id": parent.id,
@@ -2661,8 +3202,8 @@ def configure_ai_provider(
     response_model=FeishuConnectionResponse,
     tags=["integrations"],
 )
-def feishu_connection(db: Db, user: CurrentUser) -> dict[str, Any]:
-    return FeishuService(settings, db).connection_view(user.id)
+def feishu_connection(db: Db, user: CurrentUser, scope: ViewerScope) -> dict[str, Any]:
+    return FeishuService(settings, db).connection_view(user.id, scope.id)
 
 
 @router.post(
@@ -2745,13 +3286,28 @@ def complete_feishu_oauth(
     status_code=status.HTTP_201_CREATED,
     tags=["integrations"],
 )
-def create_feishu_workspace(request: FeishuWorkspaceCreate, db: Db, user: Admin) -> dict[str, Any]:
+def create_feishu_workspace(
+    request: FeishuWorkspaceCreate, db: Db, user: Admin, scope: ViewerScope
+) -> dict[str, Any]:
     service = FeishuService(settings, db)
+    requested_name = request.name.strip()
+    workspace_name = (
+        requested_name
+        if scope.name in requested_name
+        else f"{scope.name}｜{requested_name}"
+    )
     try:
-        workspace = service.create_workspace(user.id, request.name)
+        workspace = service.create_workspace(user.id, workspace_name, scope.id)
     except FeishuServiceError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    audit(db, user, "create", "feishu_workspace", workspace.id, {"name": workspace.name})
+    audit(
+        db,
+        user,
+        "create",
+        "feishu_workspace",
+        workspace.id,
+        {"name": workspace.name, "schedule_set_id": scope.id},
+    )
     db.commit()
     return service.workspace_view(workspace)
 
@@ -2769,7 +3325,9 @@ def disconnect_feishu(db: Db, user: Admin) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
+def export_resource_rows(
+    db: Session, resource: str, schedule_set_id: str = DEFAULT_SCHEDULE_SET_ID
+) -> list[dict[str, Any]]:
     if resource == "teachers":
         return [
             {
@@ -2881,13 +3439,20 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
                 "版本": item.version,
                 "来源文档": item.source_doc or "",
             }
-            for item in db.scalars(select(Rule).order_by(Rule.business_id))
+            for item in db.scalars(
+                select(Rule)
+                .where(Rule.schedule_set_id == schedule_set_id)
+                .order_by(Rule.business_id)
+            )
         ]
     if resource == "schedule":
         versions = list(
             db.scalars(
                 select(ScheduleVersion)
-                .where(ScheduleVersion.published_at.is_not(None))
+                .where(
+                    ScheduleVersion.schedule_set_id == schedule_set_id,
+                    ScheduleVersion.published_at.is_not(None),
+                )
                 .order_by(ScheduleVersion.version_no)
             )
         )
@@ -2953,7 +3518,7 @@ def export_resource_rows(db: Session, resource: str) -> list[dict[str, Any]]:
                 )
         return rows
     if resource == "public_summary":
-        summary = _public_summary(db)
+        summary = _public_summary(db, schedule_set_id)
         updated_at = utcnow().isoformat()
         public_rows: list[dict[str, Any]] = [
             {
@@ -3082,8 +3647,15 @@ def _event_id(payload: dict[str, Any]) -> str:
     response_model=IntegrationSyncResponse,
     tags=["integrations"],
 )
-def feishu_sync(request: FeishuSyncRequest, db: Db, user: IntegrationOperator) -> IntegrationSync:
+def feishu_sync(
+    request: FeishuSyncRequest,
+    db: Db,
+    user: IntegrationOperator,
+    scope: ViewerScope,
+) -> IntegrationSync:
+    require_scope_access(db, user, scope, "scheduler")
     sync = IntegrationSync(
+        schedule_set_id=scope.id,
         direction=request.direction,
         resource=request.resource,
         status="running",
@@ -3092,12 +3664,13 @@ def feishu_sync(request: FeishuSyncRequest, db: Db, user: IntegrationOperator) -
     db.add(sync)
     db.flush()
     try:
-        rows = export_resource_rows(db, request.resource)
+        rows = export_resource_rows(db, request.resource, scope.id)
         result = FeishuService(settings, db).sync_rows(
             user.id,
             request.resource,
             rows,
             request.workspace_id,
+            scope.id,
         )
         sync.records_read = int(result["records_read"])
         sync.records_written = int(result["records_written"])
@@ -3125,9 +3698,14 @@ def feishu_sync(request: FeishuSyncRequest, db: Db, user: IntegrationOperator) -
     response_model=list[IntegrationSyncResponse],
     tags=["integrations"],
 )
-def list_feishu_syncs(db: Db, user: CurrentUser) -> list[IntegrationSync]:
+def list_feishu_syncs(db: Db, user: CurrentUser, scope: ViewerScope) -> list[IntegrationSync]:
     return list(
-        db.scalars(select(IntegrationSync).order_by(IntegrationSync.created_at.desc()).limit(50))
+        db.scalars(
+            select(IntegrationSync)
+            .where(IntegrationSync.schedule_set_id == scope.id)
+            .order_by(IntegrationSync.created_at.desc())
+            .limit(50)
+        )
     )
 
 
@@ -3313,7 +3891,10 @@ def _validated_assistant_scope(db: Session, parsed: dict[str, Any]) -> dict[str,
     tags=["aily", "assistant"],
 )
 def assistant_interpret(
-    request: AssistantInterpretRequest, db: Db, user: AdminOrScheduler
+    request: AssistantInterpretRequest,
+    db: Db,
+    user: AdminOrScheduler,
+    _schedule_scope: SchedulerScope,
 ) -> AssistantInterpretResponse:
     ai_service = AIService(settings, db)
     ai_configuration = ai_service.configuration_view()
@@ -3429,7 +4010,12 @@ def assistant_interpret(
     status_code=202,
     tags=["aily", "assistant"],
 )
-def assistant_solve(request: AssistantSolveRequest, db: Db, user: AdminOrScheduler) -> SolverRun:
+def assistant_solve(
+    request: AssistantSolveRequest,
+    db: Db,
+    user: AdminOrScheduler,
+    schedule_scope: SchedulerScope,
+) -> SolverRun:
     """Login-session entry point for Aily's natural-language scheduling skill.
 
     Aily may call this endpoint after turning the instruction into structured
@@ -3460,7 +4046,13 @@ def assistant_solve(request: AssistantSolveRequest, db: Db, user: AdminOrSchedul
     )
     if not selected_count:
         raise HTTPException(status_code=422, detail="确认的排课范围没有匹配到课次")
-    run = create_solver_run(db, user.id, request, extra={"assistant_entry": True})
+    run = create_solver_run(
+        db,
+        user.id,
+        request,
+        schedule_scope.id,
+        extra={"assistant_entry": True},
+    )
     audit(db, user, "assistant_solve", "solver_run", run.id, {"instruction": request.instruction})
     db.commit()
     if request.wait:
@@ -3471,10 +4063,15 @@ def assistant_solve(request: AssistantSolveRequest, db: Db, user: AdminOrSchedul
     return run
 
 
-def _public_summary(db: Session) -> PublicScheduleSummary:
+def _public_summary(
+    db: Session, schedule_set_id: str = DEFAULT_SCHEDULE_SET_ID
+) -> PublicScheduleSummary:
     schedule = db.scalar(
         select(ScheduleVersion)
-        .where(ScheduleVersion.status == "published")
+        .where(
+            ScheduleVersion.schedule_set_id == schedule_set_id,
+            ScheduleVersion.status == "published",
+        )
         .order_by(ScheduleVersion.version_no.desc())
     )
     assignments = (

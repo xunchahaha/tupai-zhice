@@ -3,7 +3,17 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Campus, ClassGroup, CourseSession, Room, Teacher, TimeSlot, User
+from ..models import (
+    Campus,
+    ClassGroup,
+    CourseSession,
+    Room,
+    ScheduleSet,
+    ScheduleSetMember,
+    Teacher,
+    TimeSlot,
+    User,
+)
 from ..security import hash_password
 
 
@@ -16,6 +26,40 @@ def bootstrap_admin(db: Session, username: str, password: str) -> User:
     db.commit()
     db.refresh(user)
     return user
+
+
+def ensure_default_schedule_set(db: Session, user: User | None = None) -> ScheduleSet:
+    schedule_set = db.get(ScheduleSet, "default")
+    if schedule_set is None:
+        schedule_set = ScheduleSet(
+            id="default",
+            code="SET001",
+            name="第一套课表",
+            display_order=0,
+            is_active=True,
+            created_by=user.id if user else None,
+        )
+        db.add(schedule_set)
+        db.flush()
+    if user is not None and user.role != "admin":
+        member = db.scalar(
+            select(ScheduleSetMember).where(
+                ScheduleSetMember.schedule_set_id == schedule_set.id,
+                ScheduleSetMember.user_id == user.id,
+            )
+        )
+        if member is None:
+            db.add(
+                ScheduleSetMember(
+                    schedule_set_id=schedule_set.id,
+                    user_id=user.id,
+                    access_role=("approver" if user.role == "approver" else user.role),
+                    granted_by=user.id,
+                )
+            )
+    db.commit()
+    db.refresh(schedule_set)
+    return schedule_set
 
 
 def seed_demo_data(db: Session) -> None:

@@ -20,6 +20,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 
+DEFAULT_SCHEDULE_SET_ID = "default"
+
 
 def new_id() -> str:
     return str(uuid.uuid4())
@@ -56,6 +58,43 @@ class User(TimestampMixin, Base):
     locked_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class ScheduleSet(TimestampMixin, Base):
+    """A named scheduling scope shown in the top bar.
+
+    Versions remain separate objects inside a schedule set.  The default row keeps
+    the existing single-schedule installation backwards compatible.
+    """
+
+    __tablename__ = "schedule_sets"
+    __table_args__ = (UniqueConstraint("name"), UniqueConstraint("code"))
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(160), index=True)
+    display_order: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class ScheduleSetMember(TimestampMixin, Base):
+    """Per-schedule-set visibility and operation permission."""
+
+    __tablename__ = "schedule_set_members"
+    __table_args__ = (
+        UniqueConstraint("schedule_set_id", "user_id"),
+        # Keep both lookup directions fast for the top-bar list and admin matrix.
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    access_role: Mapped[str] = mapped_column(String(20), default="viewer")
+    granted_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
 
 class FeishuAppConfiguration(TimestampMixin, Base):
@@ -114,6 +153,11 @@ class FeishuWorkspace(TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     connection_id: Mapped[str] = mapped_column(ForeignKey("feishu_connections.id"), index=True)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(160))
     app_token: Mapped[str] = mapped_column(String(100), unique=True)
     default_table_id: Mapped[str] = mapped_column(String(100))
@@ -262,9 +306,15 @@ class CourseSession(TimestampMixin, Base):
 
 class Rule(TimestampMixin, Base):
     __tablename__ = "rules"
+    __table_args__ = (UniqueConstraint("schedule_set_id", "business_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    business_id: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
+    business_id: Mapped[str] = mapped_column(String(50), index=True)
     source_text: Mapped[str] = mapped_column(Text)
     actor_type: Mapped[str] = mapped_column(String(40), default="system")
     actor_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -284,6 +334,11 @@ class DataSnapshot(TimestampMixin, Base):
     __tablename__ = "data_snapshots"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
     revision: Mapped[int] = mapped_column(Integer, index=True)
     checksum: Mapped[str] = mapped_column(String(64), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
@@ -294,6 +349,11 @@ class SolverRun(TimestampMixin, Base):
     __tablename__ = "solver_runs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
     snapshot_id: Mapped[str] = mapped_column(ForeignKey("data_snapshots.id"))
     run_type: Mapped[str] = mapped_column(String(30), default="initial")
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
@@ -319,9 +379,15 @@ class SolverRun(TimestampMixin, Base):
 
 class ScheduleVersion(TimestampMixin, Base):
     __tablename__ = "schedule_versions"
+    __table_args__ = (UniqueConstraint("schedule_set_id", "version_no"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    version_no: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
+    version_no: Mapped[int] = mapped_column(Integer, index=True)
     name: Mapped[str] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(30), default="draft")
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("schedule_versions.id"), nullable=True)
@@ -375,6 +441,11 @@ class RescheduleEvent(TimestampMixin, Base):
     __tablename__ = "reschedule_events"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
     event_type: Mapped[str] = mapped_column(String(40))
     description: Mapped[str] = mapped_column(Text)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -391,6 +462,11 @@ class IntegrationSync(TimestampMixin, Base):
     __tablename__ = "integration_syncs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
     provider: Mapped[str] = mapped_column(String(30), default="feishu")
     direction: Mapped[str] = mapped_column(String(20))
     resource: Mapped[str] = mapped_column(String(40))

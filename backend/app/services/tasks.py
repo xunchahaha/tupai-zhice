@@ -220,7 +220,14 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
         run.status = "completed"
         if result["model_status"] in {"OPTIMAL", "FEASIBLE"}:
             version_no = (
-                int(db.scalar(select(func.coalesce(func.max(ScheduleVersion.version_no), 0))) or 0)
+                int(
+                    db.scalar(
+                        select(func.coalesce(func.max(ScheduleVersion.version_no), 0)).where(
+                            ScheduleVersion.schedule_set_id == run.schedule_set_id
+                        )
+                    )
+                    or 0
+                )
                 + 1
             )
             parent_id = run.request_payload.get("parent_schedule_id")
@@ -294,6 +301,7 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
                 != (item.get("lesson_date"), item["room_business_id"], item["slot_business_id"])
             )
             schedule = ScheduleVersion(
+                schedule_set_id=run.schedule_set_id,
                 version_no=version_no,
                 name=f"课表版本 V{version_no}",
                 status="draft",
@@ -323,7 +331,10 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
                     )
                 )
             event = db.scalar(
-                select(RescheduleEvent).where(RescheduleEvent.solver_run_id == run.id)
+                select(RescheduleEvent).where(
+                    RescheduleEvent.schedule_set_id == run.schedule_set_id,
+                    RescheduleEvent.solver_run_id == run.id,
+                )
             )
             if event:
                 event.status = "candidate_ready"
@@ -348,6 +359,8 @@ def execute_solver_run(run_id: str) -> dict[str, Any]:
         snapshot = db.get(DataSnapshot, run.snapshot_id)
         if snapshot is None:
             raise ValueError(f"Missing data snapshot: {run.snapshot_id}")
+        if snapshot.schedule_set_id != run.schedule_set_id:
+            raise ValueError("Solver run and data snapshot belong to different schedule sets")
         run.status = "running"
         db.commit()
         payload = dict(snapshot.payload)
@@ -369,6 +382,8 @@ def enqueue_solver_run(run_id: str) -> None:
         snapshot = db.get(DataSnapshot, run.snapshot_id)
         if snapshot is None:
             raise ValueError(f"Missing data snapshot: {run.snapshot_id}")
+        if snapshot.schedule_set_id != run.schedule_set_id:
+            raise ValueError("Solver run and data snapshot belong to different schedule sets")
         run.status = "running"
         db.commit()
         payload = dict(snapshot.payload)

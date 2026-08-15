@@ -33,13 +33,19 @@ def _json_default(value: Any) -> str:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def build_snapshot_payload(db: Session) -> dict[str, object]:
+def build_snapshot_payload(db: Session, schedule_set_id: str) -> dict[str, object]:
     teachers = list(db.scalars(select(Teacher).order_by(Teacher.business_id)))
     classes = list(db.scalars(select(ClassGroup).order_by(ClassGroup.business_id)))
     rooms = list(db.scalars(select(Room).order_by(Room.business_id)))
     slots = list(db.scalars(select(TimeSlot).order_by(TimeSlot.sequence)))
     sessions = list(db.scalars(select(CourseSession).order_by(CourseSession.business_id)))
-    rules = list(db.scalars(select(Rule).where(Rule.status == "active").order_by(Rule.business_id)))
+    rules = list(
+        db.scalars(
+            select(Rule)
+            .where(Rule.schedule_set_id == schedule_set_id, Rule.status == "active")
+            .order_by(Rule.business_id)
+        )
+    )
     return {
         "teachers": [
             _model_dict(
@@ -140,8 +146,10 @@ def build_snapshot_payload(db: Session) -> dict[str, object]:
     }
 
 
-def create_snapshot(db: Session, created_by: str | None) -> DataSnapshot:
-    payload = build_snapshot_payload(db)
+def create_snapshot(
+    db: Session, created_by: str | None, schedule_set_id: str = "default"
+) -> DataSnapshot:
+    payload = build_snapshot_payload(db, schedule_set_id)
     serialized = json.dumps(
         payload,
         ensure_ascii=False,
@@ -151,12 +159,28 @@ def create_snapshot(db: Session, created_by: str | None) -> DataSnapshot:
     )
     payload = json.loads(serialized)
     checksum = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-    existing = db.scalar(select(DataSnapshot).where(DataSnapshot.checksum == checksum))
+    existing = db.scalar(
+        select(DataSnapshot).where(
+            DataSnapshot.schedule_set_id == schedule_set_id,
+            DataSnapshot.checksum == checksum,
+        )
+    )
     if existing:
         return existing
-    revision = int(db.scalar(select(func.coalesce(func.max(DataSnapshot.revision), 0))) or 0) + 1
+    revision = int(
+        db.scalar(
+            select(func.coalesce(func.max(DataSnapshot.revision), 0)).where(
+                DataSnapshot.schedule_set_id == schedule_set_id
+            )
+        )
+        or 0
+    ) + 1
     snapshot = DataSnapshot(
-        revision=revision, checksum=checksum, payload=payload, created_by=created_by
+        schedule_set_id=schedule_set_id,
+        revision=revision,
+        checksum=checksum,
+        payload=payload,
+        created_by=created_by,
     )
     db.add(snapshot)
     db.commit()

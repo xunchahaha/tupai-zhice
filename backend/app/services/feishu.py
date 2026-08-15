@@ -615,7 +615,7 @@ class FeishuService:
             "created_at": _aware(workspace.created_at),
         }
 
-    def connection_view(self, user_id: str) -> dict[str, Any]:
+    def connection_view(self, user_id: str, schedule_set_id: str | None = None) -> dict[str, Any]:
         app_configuration = self.configuration_view()
         missing_fields = [] if app_configuration["configured"] else ["应用编号", "应用密钥"]
         connection = self.db.scalar(
@@ -625,7 +625,14 @@ class FeishuService:
         if connection is not None:
             workspace = self.db.scalar(
                 select(FeishuWorkspace)
-                .where(FeishuWorkspace.connection_id == connection.id)
+                .where(
+                    FeishuWorkspace.connection_id == connection.id,
+                    *(
+                        [FeishuWorkspace.schedule_set_id == schedule_set_id]
+                        if schedule_set_id
+                        else []
+                    ),
+                )
                 .order_by(FeishuWorkspace.created_at.desc())
             )
         granted = connection.scopes if connection else []
@@ -861,7 +868,9 @@ class FeishuService:
             raise FeishuServiceError("Aily 技能 output 必须是 JSON 对象")
         return decoded
 
-    def create_workspace(self, user_id: str, name: str) -> FeishuWorkspace:
+    def create_workspace(
+        self, user_id: str, name: str, schedule_set_id: str = "default"
+    ) -> FeishuWorkspace:
         connection, token = self.access_token(user_id)
         self._require_scopes(
             connection,
@@ -871,6 +880,7 @@ class FeishuService:
             select(FeishuWorkspace)
             .where(
                 FeishuWorkspace.connection_id == connection.id,
+                FeishuWorkspace.schedule_set_id == schedule_set_id,
                 FeishuWorkspace.name == name,
             )
             .order_by(FeishuWorkspace.created_at.desc())
@@ -892,6 +902,7 @@ class FeishuService:
                     raise FeishuServiceError("创建多维表格响应缺少表格标识")
                 workspace = FeishuWorkspace(
                     connection_id=connection.id,
+                    schedule_set_id=schedule_set_id,
                     name=name,
                     app_token=app_token,
                     default_table_id=default_table_id,
@@ -967,9 +978,15 @@ class FeishuService:
                 raise
             raise FeishuServiceError(f"飞书多维表格创建失败：{exc}") from exc
 
-    def _active_workspace(self, connection_id: str, workspace_id: str | None) -> FeishuWorkspace:
+    def _active_workspace(
+        self,
+        connection_id: str,
+        workspace_id: str | None,
+        schedule_set_id: str = "default",
+    ) -> FeishuWorkspace:
         statement = select(FeishuWorkspace).where(
             FeishuWorkspace.connection_id == connection_id,
+            FeishuWorkspace.schedule_set_id == schedule_set_id,
             FeishuWorkspace.status == "active",
         )
         if workspace_id:
@@ -1063,13 +1080,14 @@ class FeishuService:
         resource: str,
         rows: list[dict[str, Any]],
         workspace_id: str | None = None,
+        schedule_set_id: str = "default",
     ) -> dict[str, Any]:
         connection, token = self.access_token(user_id)
         self._require_scopes(
             connection,
             {"base:record:create", "base:record:retrieve", "base:record:update"},
         )
-        workspace = self._active_workspace(connection.id, workspace_id)
+        workspace = self._active_workspace(connection.id, workspace_id, schedule_set_id)
         table = self.db.scalar(
             select(FeishuTableBinding).where(
                 FeishuTableBinding.workspace_id == workspace.id,

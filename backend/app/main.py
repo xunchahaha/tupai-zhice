@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api import router
 from .config import get_settings
 from .db import SessionLocal, create_all
-from .services.seed import bootstrap_admin
+from .services.seed import bootstrap_admin, ensure_default_schedule_set
 
 settings = get_settings()
 
@@ -29,7 +29,8 @@ async def lifespan(app: FastAPI):
         logger.warning("当前使用示例密钥，部署前必须更换：%s", message)
     create_all()
     with SessionLocal() as db:
-        bootstrap_admin(db, settings.bootstrap_admin_username, settings.bootstrap_admin_password)
+        admin = bootstrap_admin(db, settings.bootstrap_admin_username, settings.bootstrap_admin_password)
+        ensure_default_schedule_set(db, admin)
     yield
 
 

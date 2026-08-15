@@ -557,7 +557,11 @@ def _product_subject_mismatches(session_rows: dict[str, dict[str, Any]]) -> dict
 
 
 def _remove_orphan_sessions(
-    db: Session, campus_id: str, keep_business_ids: set[str], official_version_name: str
+    db: Session,
+    campus_id: str,
+    keep_business_ids: set[str],
+    official_version_name: str,
+    schedule_set_id: str = "default",
 ) -> dict[str, Any]:
     """删除源表里已经不存在的课次，让导入收敛到工作簿的当前状态。
 
@@ -573,7 +577,10 @@ def _remove_orphan_sessions(
         return {"deleted": 0, "retained_by_schedule": 0, "retained_examples": []}
 
     official_version_id = db.scalar(
-        select(ScheduleVersion.id).where(ScheduleVersion.name == official_version_name)
+        select(ScheduleVersion.id).where(
+            ScheduleVersion.schedule_set_id == schedule_set_id,
+            ScheduleVersion.name == official_version_name,
+        )
     )
     orphan_ids = {item.id for item in orphans}
     referenced_elsewhere = set(
@@ -614,6 +621,7 @@ def import_schedule_workbook(
     workbook_path: Path,
     campus_business_id: str = CAMPUS_BUSINESS_ID,
     campus_name: str = CAMPUS_NAME,
+    schedule_set_id: str = "default",
 ) -> dict[str, Any]:
     source_rows, skipped_rows = _read_rows(workbook_path)
     if not source_rows:
@@ -769,7 +777,11 @@ def import_schedule_workbook(
         db.flush()
 
     orphan_report = _remove_orphan_sessions(
-        db, campus.id, set(session_rows), official_version_name(campus_name)
+        db,
+        campus.id,
+        set(session_rows),
+        official_version_name(campus_name),
+        schedule_set_id,
     )
 
     session_ids: dict[str, str] = {
@@ -782,8 +794,16 @@ def import_schedule_workbook(
     }
 
     checksum = hashlib.sha256(workbook_path.read_bytes()).hexdigest()
-    revision = (db.scalar(select(func.max(DataSnapshot.revision))) or 0) + 1
+    revision = (
+        db.scalar(
+            select(func.max(DataSnapshot.revision)).where(
+                DataSnapshot.schedule_set_id == schedule_set_id
+            )
+        )
+        or 0
+    ) + 1
     snapshot = DataSnapshot(
+        schedule_set_id=schedule_set_id,
         revision=revision,
         checksum=checksum,
         payload={
@@ -802,9 +822,15 @@ def import_schedule_workbook(
     version_stats: list[dict[str, Any]] = []
     now = datetime.now(UTC)
     version_name = official_version_name(campus_name)
-    version = db.scalar(select(ScheduleVersion).where(ScheduleVersion.name == version_name))
+    version = db.scalar(
+        select(ScheduleVersion).where(
+            ScheduleVersion.schedule_set_id == schedule_set_id,
+            ScheduleVersion.name == version_name,
+        )
+    )
     if version is None:
         run = SolverRun(
+            schedule_set_id=schedule_set_id,
             snapshot_id=snapshot.id,
             run_type="import",
             status="completed",
@@ -817,8 +843,16 @@ def import_schedule_workbook(
         )
         db.add(run)
         db.flush()
-        version_no = (db.scalar(select(func.max(ScheduleVersion.version_no))) or 0) + 1
+        version_no = (
+            db.scalar(
+                select(func.max(ScheduleVersion.version_no)).where(
+                    ScheduleVersion.schedule_set_id == schedule_set_id
+                )
+            )
+            or 0
+        ) + 1
         version = ScheduleVersion(
+            schedule_set_id=schedule_set_id,
             version_no=version_no,
             name=version_name,
             status="published",
