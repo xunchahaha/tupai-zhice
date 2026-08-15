@@ -11,7 +11,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select
 
 from app.api import settings
-from app.config import FEISHU_OPTIONAL_CLEANUP_SCOPES, FEISHU_REQUIRED_SCOPES
+from app.config import (
+    FEISHU_OPTIONAL_CLEANUP_SCOPES,
+    FEISHU_OPTIONAL_VIEW_SCOPES,
+    FEISHU_REQUIRED_SCOPES,
+)
 from app.db import SessionLocal
 from app.models import (
     FeishuAppConfiguration,
@@ -87,9 +91,11 @@ def complete_authorization(
     assert "code_challenge" not in query
     assert "code_challenge_method" not in query
     assert "offline_access" in query["scope"][0]
-    assert set(FEISHU_REQUIRED_SCOPES) | set(FEISHU_OPTIONAL_CLEANUP_SCOPES) == set(
-        query["scope"][0].split()
-    )
+    assert (
+        set(FEISHU_REQUIRED_SCOPES)
+        | set(FEISHU_OPTIONAL_CLEANUP_SCOPES)
+        | set(FEISHU_OPTIONAL_VIEW_SCOPES)
+    ) == set(query["scope"][0].split())
     assert {
         "calendar:calendar.event:create",
         "calendar:calendar.event:update",
@@ -342,6 +348,72 @@ def test_bitable_app_scope_accepts_either_feishu_read_variant(
     assert payload["status"] == "connected"
     assert payload["authorized"] is True
     assert "bitable:app:readonly" not in payload["missing_scopes"]
+    assert "base:view:write_only" not in payload["missing_scopes"]
+
+
+def test_class_view_projection_is_optional_without_write_scope() -> None:
+    service = FeishuService(settings, object())  # type: ignore[arg-type]
+    connection = type("Connection", (), {"scopes": []})()
+    workspace = type("Workspace", (), {"app_token": "app-class-view"})()
+
+    result = service._reconcile_class_views(
+        connection,
+        "token",
+        workspace,
+        "tbl-class-schedule",
+        [{"班级名称": "一班"}],
+    )
+
+    assert result == {
+        "status": "skipped_missing_scope",
+        "missing_scope": "base:view:write_only 或 bitable:app",
+        "created": 0,
+        "updated": 0,
+        "deleted": 0,
+    }
+
+
+def test_class_view_projection_reconciles_with_write_only_scope(monkeypatch: Any) -> None:
+    service = FeishuService(settings, object())  # type: ignore[arg-type]
+    connection = type("Connection", (), {"scopes": ["base:view:write_only"]})()
+    workspace = type("Workspace", (), {"app_token": "app-class-view"})()
+    created_names: list[str] = []
+    patched_names: list[str] = []
+
+    monkeypatch.setattr(
+        service,
+        "_list_fields",
+        lambda *_args: ([{"field_name": "班级名称", "field_id": "fld-class"}], ["log-fields"]),
+    )
+    monkeypatch.setattr(service, "_list_views", lambda *_args: ([], ["log-views"]))
+
+    def create_view(*args: Any) -> tuple[str, str]:
+        view_name = str(args[-1])
+        created_names.append(view_name)
+        return f"view-{len(created_names)}", f"log-create-{len(created_names)}"
+
+    def patch_view(*args: Any) -> str:
+        patched_names.append(str(args[4]))
+        return f"log-patch-{len(patched_names)}"
+
+    monkeypatch.setattr(service, "_create_view", create_view)
+    monkeypatch.setattr(service, "_patch_class_view", patch_view)
+
+    result = service._reconcile_class_views(
+        connection,
+        "token",
+        workspace,
+        "tbl-class-schedule",
+        [{"班级名称": "一班"}, {"班级名称": "二班"}, {"班级名称": "一班"}],
+    )
+
+    assert result["status"] == "completed"
+    assert result["classes"] == 2
+    assert result["created"] == 2
+    assert result["updated"] == 0
+    assert result["deleted"] == 0
+    assert created_names == ["班级｜一班", "班级｜二班"]
+    assert patched_names == created_names
 
 
 def test_remote_99991679_marks_user_connection_for_reauthorization(

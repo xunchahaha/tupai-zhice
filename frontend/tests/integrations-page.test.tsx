@@ -146,6 +146,7 @@ describe("飞书生产接入页", () => {
     renderPage();
 
     expect(await screen.findByText("需要申请的用户身份权限")).toBeVisible();
+    expect(screen.getByText("base:view:write_only")).toBeVisible();
     await user.clear(screen.getByLabelText("飞书应用编号"));
     await user.type(screen.getByLabelText("飞书应用编号"), "cli_frontend_test");
     await user.clear(screen.getByLabelText("飞书应用密钥"));

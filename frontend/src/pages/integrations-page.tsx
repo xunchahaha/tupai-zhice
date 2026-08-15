@@ -94,6 +94,7 @@ const permissionLabels: Record<string, string> = {
   "base:table:update": "更新数据表",
   "base:field:read": "读取数据表字段",
   "bitable:app:readonly": "读取多维表格应用与字段",
+  "base:view:write_only": "创建和更新班级筛选视图（可选）",
   "base:record:create": "新增记录",
   "base:record:retrieve": "根据条件搜索记录",
   "base:record:update": "更新记录",
