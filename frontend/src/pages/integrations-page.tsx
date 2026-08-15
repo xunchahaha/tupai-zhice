@@ -325,7 +325,9 @@ export function IntegrationsPage() {
     status.workspace?.status === "active" && status.workspace.tables?.length === resources.length,
   );
   const missingBitableSyncScopes = bitableSyncScopes.filter(
-    (scope) => !status.granted_scopes.includes(scope),
+    (scope) => scope === "bitable:app:readonly"
+      ? !status.granted_scopes.some((item) => item === "bitable:app" || item === "bitable:app:readonly")
+      : !status.granted_scopes.includes(scope),
   );
   const ready = Boolean(
     status.app_configured &&

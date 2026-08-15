@@ -308,6 +308,42 @@ def test_connection_status_requires_reauthorization_when_scope_grant_is_stale(
     assert "重新授权管理员账号" in payload["message"]
 
 
+def test_bitable_app_scope_accepts_either_feishu_read_variant(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: Any,
+) -> None:
+    configure_feishu(monkeypatch)
+    complete_authorization(client, auth_headers, monkeypatch)
+    with SessionLocal() as db:
+        connection = db.scalar(select(FeishuConnection))
+        assert connection is not None
+        connection.scopes = [
+            "offline_access",
+            "base:app:create",
+            "base:app:read",
+            "base:table:create",
+            "base:table:read",
+            "base:table:update",
+            "base:field:read",
+            "bitable:app",
+            "base:record:create",
+            "base:record:retrieve",
+            "base:record:update",
+            "calendar:calendar.event:create",
+            "calendar:calendar.event:update",
+            "calendar:calendar.free_busy:read",
+        ]
+        db.commit()
+
+    status = client.get("/api/v1/integrations/feishu/connection", headers=auth_headers)
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["status"] == "connected"
+    assert payload["authorized"] is True
+    assert "bitable:app:readonly" not in payload["missing_scopes"]
+
+
 def test_remote_99991679_marks_user_connection_for_reauthorization(
     client: TestClient,
     auth_headers: dict[str, str],

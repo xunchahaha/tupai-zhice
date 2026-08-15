@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..config import (
     AILY_OPTIONAL_SCOPES,
+    FEISHU_BITABLE_APP_READ_SCOPES,
     FEISHU_OPTIONAL_CLEANUP_SCOPES,
     FEISHU_REQUIRED_SCOPES,
     FEISHU_RESOURCES,
@@ -656,6 +657,20 @@ class FeishuService:
             scopes.update(AILY_OPTIONAL_SCOPES)
         return scopes
 
+    @staticmethod
+    def _missing_scopes(granted: list[str] | set[str], required: set[str]) -> list[str]:
+        """Return canonical missing scopes while honoring Feishu OR grants."""
+
+        granted_set = set(granted)
+        missing = set(required) - granted_set
+        if FEISHU_BITABLE_APP_READ_SCOPES & required:
+            missing.difference_update(FEISHU_BITABLE_APP_READ_SCOPES)
+            if not (FEISHU_BITABLE_APP_READ_SCOPES & granted_set):
+                # Keep one stable, actionable label in the API/UI even though
+                # the Feishu console accepts either scope in this group.
+                missing.add("bitable:app:readonly")
+        return sorted(missing)
+
     def create_oauth_start(self, user_id: str) -> dict[str, Any]:
         app = self._app_configuration()
         scopes = sorted(self._required_user_scopes() | set(FEISHU_OPTIONAL_CLEANUP_SCOPES))
@@ -735,7 +750,7 @@ class FeishuService:
             else None
         )
         connection.scopes = _scope_list(data.get("scope"))
-        missing_scopes = sorted(self._required_user_scopes() - set(connection.scopes))
+        missing_scopes = self._missing_scopes(connection.scopes, self._required_user_scopes())
         if missing_scopes:
             connection.status = "reauthorization_required"
             connection.last_error = (
@@ -879,7 +894,7 @@ class FeishuService:
             workspace_connection = self.db.get(FeishuConnection, workspace.connection_id)
         connection = workspace_connection or personal_connection
         granted = connection.scopes if connection else []
-        missing_scopes = sorted(self._required_user_scopes() - set(granted))
+        missing_scopes = self._missing_scopes(granted, self._required_user_scopes())
         if (
             connection is not None
             and connection.status == "active"
@@ -940,7 +955,7 @@ class FeishuService:
         }
 
     def _require_scopes(self, connection: FeishuConnection, scopes: set[str]) -> None:
-        missing = sorted(scopes - set(connection.scopes))
+        missing = self._missing_scopes(connection.scopes, scopes)
         if missing:
             reason = f"飞书授权缺少权限：{'、'.join(missing)}，请重新授权管理员账号。"
             self._mark_reauthorization_required(connection, reason)

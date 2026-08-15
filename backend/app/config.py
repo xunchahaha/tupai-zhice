@@ -44,6 +44,12 @@ FEISHU_REQUIRED_SCOPES = (
     "calendar:calendar.free_busy:read",
 )
 
+# Feishu exposes the Base metadata read grant under two user-identity scope
+# names across app versions.  Either one is sufficient; the service treats
+# them as an OR group instead of requiring the exact scope requested in the
+# latest OAuth URL.
+FEISHU_BITABLE_APP_READ_SCOPES = frozenset({"bitable:app", "bitable:app:readonly"})
+
 # Requested on a new OAuth grant but never treated as a prerequisite for the
 # normal create/retrieve/update sync path. This keeps old authorizations ready
 # while making duplicate cleanup available after a one-time reauthorization.
