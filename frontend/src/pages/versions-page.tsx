@@ -324,20 +324,27 @@ export function VersionsPage() {
                 </div>
               </div>
 
-              {/* Dynamic Scrollable Diff Table */}
+              {/* Dynamic Scrollable Diff Table - Fixed 100% width, no horizontal scroll */}
               <div
                 ref={scrollContainerRef}
                 onScroll={handleScroll}
-                className="max-h-[480px] overflow-y-auto overflow-x-auto scrollbar-thin"
+                className="max-h-[500px] overflow-y-auto overflow-x-hidden scrollbar-thin"
               >
-                <table className="w-full text-left text-sm table-auto">
-                  <thead className="sticky top-0 z-10 bg-zinc-50 text-xs font-medium text-zinc-500 shadow-2xs">
+                <table className="w-full text-left text-xs table-fixed">
+                  <colgroup>
+                    <col className="w-[28%]" />
+                    <col className="w-[31%]" />
+                    <col className="w-[4%]" />
+                    <col className="w-[30%]" />
+                    <col className="w-[7%]" />
+                  </colgroup>
+                  <thead className="sticky top-0 z-10 bg-zinc-50 text-[11px] font-medium text-zinc-500 shadow-2xs">
                     <tr>
-                      <th className="h-9 px-4 whitespace-nowrap min-w-[150px]">班级 / 教师</th>
-                      <th className="px-3 whitespace-nowrap min-w-[170px]">变更前安排</th>
-                      <th className="px-1 text-center w-6 shrink-0"></th>
-                      <th className="px-3 whitespace-nowrap min-w-[180px]">变更后安排</th>
-                      <th className="px-4 text-right whitespace-nowrap min-w-[90px] w-24">变更类型</th>
+                      <th className="h-8 px-3">班级 / 教师</th>
+                      <th className="px-2">变更前安排</th>
+                      <th className="px-0.5 text-center"></th>
+                      <th className="px-2">变更后安排</th>
+                      <th className="px-3 text-right">类型</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-100">
@@ -360,40 +367,39 @@ export function VersionsPage() {
                             key={item.course_business_id}
                             className="transition-colors hover:bg-blue-50/20"
                           >
-                            <td className="px-4 py-2.5">
+                            <td className="px-3 py-2.5">
                               <div
-                                className="font-medium text-zinc-900 truncate max-w-[180px]"
+                                className="font-medium text-zinc-900 leading-snug break-words"
                                 title={item.course_business_id}
                               >
                                 {item.class_business_id || "未指定班级"}
                               </div>
-                              <div className="text-xs text-zinc-500 truncate max-w-[180px]">
+                              <div className="text-[11px] text-zinc-500 mt-0.5 leading-snug break-words">
                                 {item.teacher_business_id || "未指定教师"}
                               </div>
                             </td>
-                            <td className="px-3 py-2.5 text-xs text-zinc-600 whitespace-nowrap">
+                            <td className="px-2 py-2.5 text-zinc-600">
                               <div className="font-medium text-zinc-700">{item.before_lesson_date ?? "-"}</div>
-                              <div className="text-zinc-400 mt-0.5 whitespace-nowrap">
+                              <div className="text-[11px] text-zinc-400 mt-0.5 leading-tight">
                                 {formatSlot(item.before_slot_id)} · {formatRoom(item.before_room_id)}教室
                               </div>
                             </td>
-                            <td className="px-1 py-2.5 text-center shrink-0">
-                              <ArrowRight className="inline-block size-3.5 text-zinc-400" />
+                            <td className="px-0.5 py-2.5 text-center">
+                              <ArrowRight className="inline-block size-3 text-zinc-400" />
                             </td>
-                            <td className="px-3 py-2.5 text-xs whitespace-nowrap">
+                            <td className="px-2 py-2.5">
                               <div
                                 className={cn(
-                                  "font-medium whitespace-nowrap",
+                                  "font-medium",
                                   dateDiff ? "text-amber-700 font-semibold" : "text-blue-700",
                                 )}
                               >
                                 {item.after_lesson_date ?? "-"}
-                                {dateDiff && <span className="ml-1 text-[11px] text-amber-600 font-normal">(已挪期)</span>}
+                                {dateDiff && <span className="ml-1 text-[10px] text-amber-600 font-normal">(已挪期)</span>}
                               </div>
-                              <div className="mt-0.5 whitespace-nowrap flex items-center gap-1.5 text-zinc-600">
+                              <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] leading-tight">
                                 <span
                                   className={cn(
-                                    "whitespace-nowrap inline-block",
                                     slotDiff
                                       ? "font-semibold text-blue-700 bg-blue-50 px-1 py-0.2 rounded"
                                       : "text-zinc-500",
@@ -404,7 +410,6 @@ export function VersionsPage() {
                                 <span className="text-zinc-300">·</span>
                                 <span
                                   className={cn(
-                                    "whitespace-nowrap inline-block",
                                     roomDiff
                                       ? "font-semibold text-purple-700 bg-purple-50 px-1 py-0.2 rounded"
                                       : "text-zinc-500",
@@ -414,8 +419,8 @@ export function VersionsPage() {
                                 </span>
                               </div>
                             </td>
-                            <td className="px-4 py-2.5 text-right whitespace-nowrap w-24">
-                              <Badge tone="blue" className="whitespace-nowrap shrink-0">
+                            <td className="px-3 py-2.5 text-right">
+                              <Badge tone="blue" className="text-[10px] px-1.5 py-0.5 whitespace-nowrap">
                                 {diffKindLabel(item.change_kind)}
                               </Badge>
                             </td>

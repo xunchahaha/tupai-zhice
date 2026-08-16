@@ -334,38 +334,38 @@ export function SchedulePage() {
                             : "border-blue-200/80 bg-blue-50/60 text-blue-950 hover:bg-blue-50 hover:border-blue-300",
                         )}
                       >
-                        {/* Context-aware primary header */}
+                        {/* Context-aware primary header - Fully legible without truncate ellipsis */}
                         {mode === "class" ? (
                           <>
-                            <div className="flex items-center gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700">
-                              <User className="size-3 text-blue-600 shrink-0" />
-                              <span className="truncate">{assignment.teacher_business_id || "未定教师"}</span>
+                            <div className="flex items-start gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700 leading-tight">
+                              <User className="size-3 text-blue-600 shrink-0 mt-0.5" />
+                              <span className="break-words">{assignment.teacher_business_id || "未定教师"}</span>
                             </div>
                             <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-500">
                               <DoorOpen className="size-3 text-zinc-400 shrink-0" />
-                              <span className="truncate">{formatRoom(assignment.room_business_id)}</span>
+                              <span className="break-words font-medium">{formatRoom(assignment.room_business_id)}教室</span>
                             </div>
                           </>
                         ) : mode === "teacher" ? (
                           <>
-                            <div className="flex items-center gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700">
-                              <Users className="size-3 text-indigo-600 shrink-0" />
-                              <span className="truncate">{assignment.class_business_id || "未定班级"}</span>
+                            <div className="flex items-start gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700 leading-tight">
+                              <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
+                              <span className="break-words">{assignment.class_business_id || "未定班级"}</span>
                             </div>
                             <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-500">
                               <DoorOpen className="size-3 text-zinc-400 shrink-0" />
-                              <span className="truncate">{formatRoom(assignment.room_business_id)}</span>
+                              <span className="break-words font-medium">{formatRoom(assignment.room_business_id)}教室</span>
                             </div>
                           </>
                         ) : (
                           <>
-                            <div className="flex items-center gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700">
-                              <Users className="size-3 text-indigo-600 shrink-0" />
-                              <span className="truncate">{assignment.class_business_id || "未定班级"}</span>
+                            <div className="flex items-start gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700 leading-tight">
+                              <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
+                              <span className="break-words">{assignment.class_business_id || "未定班级"}</span>
                             </div>
-                            <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-500">
-                              <User className="size-3 text-zinc-400 shrink-0" />
-                              <span className="truncate">{assignment.teacher_business_id || "未定教师"}</span>
+                            <div className="mt-1 flex items-start gap-1 text-[11px] text-zinc-500 leading-tight">
+                              <User className="size-3 text-zinc-400 shrink-0 mt-0.5" />
+                              <span className="break-words">{assignment.teacher_business_id || "未定教师"}</span>
                             </div>
                           </>
                         )}
