@@ -152,9 +152,12 @@ export function DiagnosticsPage() {
                       ))}
                     </div>
                   ) : (
-                    <div className="rounded-lg border border-dashed border-zinc-200 p-6 text-center text-xs text-zinc-500">
-                      <HelpCircle className="mx-auto mb-1.5 size-5 text-zinc-400" />
-                      当前无解主要由系统级固定约束（如固定时段锁定、班级不重叠、教室场地冲突）引起，未关联用户自定义规则。
+                    <div className="flex items-start gap-3 rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-4 text-xs leading-5 text-zinc-600">
+                      <HelpCircle className="mt-0.5 size-4 shrink-0 text-blue-600" />
+                      <div>
+                        <span className="font-semibold text-zinc-800">系统内置硬约束生效提示：</span>
+                        当前无解主要由系统级固定约束（如固定时段锁定、班级时间不重叠、教室场地不重叠）引起，未直接关联用户自定义的业务规则。
+                      </div>
                     </div>
                   )}
                 </div>

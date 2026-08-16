@@ -2,8 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeftRight,
   ArrowRight,
-  ChevronLeft,
-  ChevronRight,
+  ChevronDown,
   FileSpreadsheet,
   Filter,
   History,
@@ -13,7 +12,7 @@ import {
   Trash2,
   Zap,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -44,7 +43,8 @@ const VERSION_WRITE_ROLES: readonly UserResponseRole[] = [UserResponseRole.admin
 const OFFICIAL_VERSION_SUFFIX = "官方原始课表";
 const localActionLabels: Record<string, string> = { delete: "删除" };
 
-const PAGE_SIZE = 50;
+const INITIAL_CHUNK_SIZE = 50;
+const INCREMENT_CHUNK_SIZE = 40;
 
 export function VersionsPage() {
   const user = useAppUser();
@@ -61,10 +61,11 @@ export function VersionsPage() {
   const [removedIds, setRemovedIds] = useState<readonly string[]>([]);
   const [pendingDelete, setPendingDelete] = useState<ScheduleSummaryResponse | null>(null);
 
-  // Search & Pagination for Diff Table
+  // Search & Dynamic Infinite Scroll for Diff Table
   const [diffSearch, setDiffSearch] = useState("");
   const [diffKindFilter, setDiffKindFilter] = useState("all");
-  const [page, setPage] = useState(1);
+  const [visibleLimit, setVisibleLimit] = useState(INITIAL_CHUNK_SIZE);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const versions = useMemo(
     () => (schedules.data ?? []).filter((item) => !removedIds.includes(item.id)),
@@ -142,7 +143,7 @@ export function VersionsPage() {
     },
   });
 
-  // Filtered & Paginated Diff Items
+  // Filtered Diff Items
   const filteredDiffItems = useMemo(() => {
     if (!diff.data) return [];
     let items = diff.data.items.filter((item) => item.change_kind !== "unchanged");
@@ -169,16 +170,33 @@ export function VersionsPage() {
     return items;
   }, [diff.data, diffKindFilter, diffSearch]);
 
-  const totalPages = Math.ceil(filteredDiffItems.length / PAGE_SIZE) || 1;
-  const paginatedItems = useMemo(() => {
-    const start = (page - 1) * PAGE_SIZE;
-    return filteredDiffItems.slice(start, start + PAGE_SIZE);
-  }, [filteredDiffItems, page]);
-
-  // Reset page to 1 when filters change
+  // Reset visible limit on search/filter/version change
   useEffect(() => {
-    setPage(1);
+    setVisibleLimit(INITIAL_CHUNK_SIZE);
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = 0;
+    }
   }, [diffSearch, diffKindFilter, base, target]);
+
+  // Handle Dynamic Scroll Loading (Infinite Scroll)
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const { scrollTop, scrollHeight, clientHeight } = el;
+    // When user scrolls within 180px of the bottom, load more items
+    if (scrollTop + clientHeight >= scrollHeight - 180) {
+      setVisibleLimit((current) => {
+        if (current < filteredDiffItems.length) {
+          return Math.min(current + INCREMENT_CHUNK_SIZE, filteredDiffItems.length);
+        }
+        return current;
+      });
+    }
+  }, [filteredDiffItems.length]);
+
+  const visibleItems = useMemo(() => {
+    return filteredDiffItems.slice(0, visibleLimit);
+  }, [filteredDiffItems, visibleLimit]);
 
   if (schedules.isPending || (canViewAudit && logs.isPending)) return <LoadingState />;
   if (schedules.isError || (canViewAudit && logs.isError))
@@ -219,7 +237,7 @@ export function VersionsPage() {
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(340px,0.85fr)]">
         {/* Left: Version Diff Panel */}
-        <section className="rounded-lg border border-zinc-200 bg-white shadow-2xs flex flex-col">
+        <section className="rounded-lg border border-zinc-200 bg-white shadow-2xs flex flex-col min-h-0">
           {/* Header Version Selectors */}
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 p-4">
             <div className="flex flex-wrap items-center gap-2">
@@ -274,7 +292,7 @@ export function VersionsPage() {
           ) : diff.isError ? (
             <ErrorState retry={() => void diff.refetch()} />
           ) : diff.data ? (
-            <div className="flex-1 flex flex-col">
+            <div className="flex-1 flex flex-col min-h-0">
               {/* Search & Filter Bar */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 bg-zinc-50/50 p-3 text-xs">
                 <div className="relative min-w-[200px] flex-1 max-w-sm">
@@ -307,10 +325,14 @@ export function VersionsPage() {
                 </div>
               </div>
 
-              {/* Diff Table */}
-              <div className="flex-1 overflow-x-auto">
+              {/* Dynamic Scrollable Diff Table */}
+              <div
+                ref={scrollContainerRef}
+                onScroll={handleScroll}
+                className="max-h-[440px] overflow-y-auto overflow-x-auto scrollbar-thin"
+              >
                 <table className="w-full text-left text-sm">
-                  <thead className="sticky top-0 bg-zinc-50 text-xs font-medium text-zinc-500">
+                  <thead className="sticky top-0 z-10 bg-zinc-50 text-xs font-medium text-zinc-500 shadow-2xs">
                     <tr>
                       <th className="h-9 px-4">班级 / 教师</th>
                       <th className="px-3">变更前安排</th>
@@ -320,14 +342,16 @@ export function VersionsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-100">
-                    {paginatedItems.length === 0 ? (
+                    {visibleItems.length === 0 ? (
                       <tr>
                         <td colSpan={5} className="py-12 text-center text-xs text-zinc-400">
-                          {diffSearch || diffKindFilter !== "all" ? "未找到符合筛选条件的差异记录" : "本次对比两个版本之间没有发生变动"}
+                          {diffSearch || diffKindFilter !== "all"
+                            ? "未找到符合筛选条件的差异记录"
+                            : "本次对比两个版本之间没有发生变动"}
                         </td>
                       </tr>
                     ) : (
-                      paginatedItems.map((item) => {
+                      visibleItems.map((item) => {
                         const dateDiff = item.before_lesson_date !== item.after_lesson_date;
                         const slotDiff = item.before_slot_id !== item.after_slot_id;
                         const roomDiff = item.before_room_id !== item.after_room_id;
@@ -358,15 +382,32 @@ export function VersionsPage() {
                               <ArrowRight className="inline-block size-3.5 text-zinc-400" />
                             </td>
                             <td className="px-3 py-3 text-xs">
-                              <div className={cn("font-medium", dateDiff ? "text-amber-700 font-semibold" : "text-blue-700")}>
+                              <div
+                                className={cn(
+                                  "font-medium",
+                                  dateDiff ? "text-amber-700 font-semibold" : "text-blue-700",
+                                )}
+                              >
                                 {item.after_lesson_date ?? "-"}
                               </div>
                               <div className="mt-0.5">
-                                <span className={cn(slotDiff ? "font-medium text-blue-700 bg-blue-50 px-1 rounded" : "text-zinc-500")}>
+                                <span
+                                  className={cn(
+                                    slotDiff
+                                      ? "font-medium text-blue-700 bg-blue-50 px-1 rounded"
+                                      : "text-zinc-500",
+                                  )}
+                                >
                                   {formatSlot(item.after_slot_id)}
                                 </span>
                                 <span className="text-zinc-300 mx-1">·</span>
-                                <span className={cn(roomDiff ? "font-medium text-purple-700 bg-purple-50 px-1 rounded" : "text-zinc-500")}>
+                                <span
+                                  className={cn(
+                                    roomDiff
+                                      ? "font-medium text-purple-700 bg-purple-50 px-1 rounded"
+                                      : "text-zinc-500",
+                                  )}
+                                >
                                   {formatRoom(item.after_room_id)}
                                 </span>
                               </div>
@@ -382,37 +423,40 @@ export function VersionsPage() {
                 </table>
               </div>
 
-              {/* Pagination Controls */}
-              {totalPages > 1 && (
-                <div className="flex items-center justify-between border-t border-zinc-200 bg-zinc-50/60 px-4 py-2.5 text-xs text-zinc-600">
+              {/* Dynamic Scroll Footer Status Indicator */}
+              {filteredDiffItems.length > 0 && (
+                <div className="flex items-center justify-between border-t border-zinc-200 bg-zinc-50/70 px-4 py-2.5 text-xs text-zinc-500">
                   <div className="tabular-nums">
-                    第 {page} / {totalPages} 页 · 每页 {PAGE_SIZE} 条
+                    已加载 <strong className="font-semibold text-zinc-800">{visibleItems.length}</strong> / 共{" "}
+                    {filteredDiffItems.length} 条差异
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={page <= 1}
-                      onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    >
-                      <ChevronLeft className="size-3.5" />
-                      上一页
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={page >= totalPages}
-                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                    >
-                      下一页
-                      <ChevronRight className="size-3.5" />
-                    </Button>
-                  </div>
+                  {visibleLimit < filteredDiffItems.length ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-zinc-400">向下滚动自动加载更多</span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50"
+                        onClick={() =>
+                          setVisibleLimit((current) =>
+                            Math.min(current + INCREMENT_CHUNK_SIZE * 2, filteredDiffItems.length),
+                          )
+                        }
+                      >
+                        <ChevronDown className="size-3.5" />
+                        快速加载更多
+                      </Button>
+                    </div>
+                  ) : (
+                    <span className="text-[11px] text-zinc-400">已加载全部差异内容</span>
+                  )}
                 </div>
               )}
             </div>
           ) : (
-            <div className="grid min-h-60 place-items-center text-sm text-zinc-400">选择两个不同版本进行对比</div>
+            <div className="grid min-h-60 place-items-center text-sm text-zinc-400">
+              选择两个不同版本进行对比
+            </div>
           )}
         </section>
 
@@ -425,7 +469,7 @@ export function VersionsPage() {
             </span>
             <span className="text-xs font-normal text-zinc-400">共 {versions.length} 个版本</span>
           </div>
-          <div className="divide-y divide-zinc-100">
+          <div className="divide-y divide-zinc-100 max-h-[520px] overflow-y-auto scrollbar-thin">
             {versions.map((item) => {
               const canPublish = canManageVersions && item.status === "draft";
               const canRollback =
@@ -433,11 +477,18 @@ export function VersionsPage() {
               const canDelete =
                 canManageVersions && item.status !== "published" && !item.name.endsWith(OFFICIAL_VERSION_SUFFIX);
               return (
-                <div key={item.id} data-testid={`version-card-${item.id}`} className="p-4 transition-colors hover:bg-zinc-50/50">
+                <div
+                  key={item.id}
+                  data-testid={`version-card-${item.id}`}
+                  className="p-4 transition-colors hover:bg-zinc-50/50"
+                >
                   <div className="flex items-center justify-between">
                     <div>
                       <span className="font-semibold text-zinc-900">v{item.version_no}</span>
-                      <span className="ml-2 font-normal text-zinc-600 text-xs truncate max-w-[140px] inline-block align-bottom" title={item.name}>
+                      <span
+                        className="ml-2 font-normal text-zinc-600 text-xs truncate max-w-[140px] inline-block align-bottom"
+                        title={item.name}
+                      >
                         {item.name}
                       </span>
                     </div>
@@ -498,24 +549,38 @@ export function VersionsPage() {
         </section>
       </div>
 
+      {/* Bottom: Audit Logs with Overflow Prevention */}
       {canViewAudit ? (
-        <section className="rounded-lg border border-zinc-200 bg-white shadow-2xs">
+        <section className="rounded-lg border border-zinc-200 bg-white shadow-2xs overflow-hidden">
           <div className="flex items-center gap-2 border-b border-zinc-200 px-4 py-3 text-sm font-semibold">
             <History className="size-4 text-zinc-600" />
             审计日志
           </div>
-          <div className="divide-y divide-zinc-100">
-            {logs.data?.map((log) => (
-              <div key={log.id} className="flex flex-wrap items-center gap-4 px-4 py-2.5 text-sm">
-                <span className="min-w-32 text-xs text-zinc-400">{datetime(log.created_at)}</span>
-                <span className="font-mono text-xs text-zinc-600">{actionLabel(log.action)}</span>
-                <span className="text-zinc-700 text-xs">{resourceLabel(log.resource_type)}</span>
-                <span className="font-mono text-xs text-zinc-400">{log.resource_id ?? "-"}</span>
-                {Object.keys(log.detail ?? {}).length ? (
-                  <span className="text-xs text-zinc-500 font-mono">{JSON.stringify(log.detail)}</span>
-                ) : null}
-              </div>
-            ))}
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-zinc-50 text-zinc-500 border-b border-zinc-100">
+                <tr>
+                  <th className="py-2.5 px-4 font-medium w-36">时间</th>
+                  <th className="py-2.5 px-3 font-medium w-24">动作</th>
+                  <th className="py-2.5 px-3 font-medium w-28">资源类型</th>
+                  <th className="py-2.5 px-3 font-medium w-28">资源 ID</th>
+                  <th className="py-2.5 px-4 font-medium">详情明细</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100">
+                {logs.data?.map((log) => (
+                  <tr key={log.id} className="hover:bg-zinc-50/60 transition-colors">
+                    <td className="py-2.5 px-4 text-zinc-400 whitespace-nowrap">{datetime(log.created_at)}</td>
+                    <td className="py-2.5 px-3 font-medium text-zinc-700 whitespace-nowrap">{actionLabel(log.action)}</td>
+                    <td className="py-2.5 px-3 text-zinc-600 whitespace-nowrap">{resourceLabel(log.resource_type)}</td>
+                    <td className="py-2.5 px-3 font-mono text-zinc-500 whitespace-nowrap">{log.resource_id ?? "-"}</td>
+                    <td className="py-2.5 px-4 font-mono text-zinc-500 break-all max-w-xl">
+                      {Object.keys(log.detail ?? {}).length ? JSON.stringify(log.detail) : "-"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </section>
       ) : (
