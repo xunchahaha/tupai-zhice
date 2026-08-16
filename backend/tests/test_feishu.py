@@ -837,6 +837,36 @@ def test_batch_create_reconciles_a_dropped_response_before_retry(monkeypatch: An
     assert logs == ["log-reconcile", "log-create"]
 
 
+def test_batch_delete_retries_and_continues_after_a_failed_batch(monkeypatch: Any) -> None:
+    service = FeishuService(settings, object())  # type: ignore[arg-type]
+    workspace = type("Workspace", (), {"app_token": "app-batch"})()
+    record_ids = [f"rec-{index}" for index in range(1001)]
+    calls: list[dict[str, Any]] = []
+
+    def request(method: str, url: str, **kwargs: Any) -> tuple[dict[str, Any], str]:
+        assert method == "POST"
+        assert url.endswith("/records/batch_delete")
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("temporary disconnect", request=httpx.Request(method, url))
+        batch = kwargs["json_body"]["records"]
+        return {
+            "records": [{"record_id": record_id, "deleted": True} for record_id in batch]
+        }, "log-delete"
+
+    monkeypatch.setattr(service, "_request", request)
+    deleted, failed, logs, error = service._batch_delete(
+        "token", workspace, "tbl-schedule", record_ids
+    )
+
+    assert len(calls) == 3
+    assert all(item["retry_attempts"] == 2 for item in calls)
+    assert len(failed) == 500
+    assert len(deleted) == 501
+    assert error is not None
+    assert logs == ["log-delete", "log-delete"]
+
+
 def test_field_comparison_ignores_volatile_projection_update_time() -> None:
     field_types = dict(TABLE_SCHEMAS["public_summary"][1])
     remote = {

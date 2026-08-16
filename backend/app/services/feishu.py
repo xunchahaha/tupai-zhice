@@ -2114,11 +2114,19 @@ class FeishuService:
                     json_body={"records": batch},
                     params={"ignore_consistency_check": True},
                     timeout=SYNC_MUTATION_TIMEOUT_SECONDS,
+                    # Batch delete is idempotent: retry a transient transport
+                    # failure instead of leaving the entire remaining tail of
+                    # a 9,000-row projection pending after one disconnect.
+                    retry_attempts=SYNC_RETRY_ATTEMPTS,
                 )
             except (FeishuServiceError, httpx.HTTPError) as exc:
-                failed.update(record_ids[start:])
-                error = str(exc)
-                break
+                # A failed batch must not prevent later batches from being
+                # attempted.  Feishu may reject or disconnect one request
+                # transiently while the rest of the cleanup can still finish.
+                failed.update(batch)
+                if error is None:
+                    error = str(exc)
+                continue
             if log_id:
                 log_ids.append(log_id)
             records = data.get("records", data.get("items", []))

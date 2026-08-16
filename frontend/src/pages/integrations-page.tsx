@@ -1054,6 +1054,15 @@ function WorkspaceDetails({ workspace }: { workspace: NonNullable<FeishuConnecti
 }
 
 function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string; resource: string; status: string; records_read: number; records_written: number; detail: Record<string, unknown> }> }) {
+  // The API returns newest-first.  A later successful reconciliation makes an
+  // older transient cleanup failure historical, not an outstanding task.
+  // Keep the row for auditability, but only show cleanup warnings on the
+  // current row for each resource so users are not asked to clean an already
+  // repaired table themselves.
+  const latestByResource = new Map<string, string>();
+  for (const item of syncs) {
+    if (!latestByResource.has(item.resource)) latestByResource.set(item.resource, item.id);
+  }
   return (
     <section className="border border-zinc-200 bg-white">
       <div className="border-b border-zinc-200 px-4 py-3 text-sm font-semibold">飞书同步记录</div>
@@ -1066,7 +1075,7 @@ function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string;
                 <td className="h-10 px-4 text-zinc-500">{datetime(item.created_at)}</td>
                 <td className="text-xs text-zinc-500">{syncTriggerLabel(item.detail.trigger)}</td>
                 <td>{resourceLabel(item.resource)}</td>
-                <td><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge>{detailError(item.detail) ? <div className="mt-1 max-w-60 truncate text-xs text-red-600" title={detailError(item.detail) ?? undefined}>{detailError(item.detail)}</div> : null}{duplicateCleanupMessage(item.detail) ? <div className="mt-1 max-w-64 text-xs text-amber-700">{duplicateCleanupMessage(item.detail)}</div> : null}</td>
+                <td><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge>{detailError(item.detail) ? <div className="mt-1 max-w-60 truncate text-xs text-red-600" title={detailError(item.detail) ?? undefined}>{detailError(item.detail)}</div> : null}{latestByResource.get(item.resource) === item.id && duplicateCleanupMessage(item.detail) ? <div className="mt-1 max-w-64 text-xs text-amber-700">{duplicateCleanupMessage(item.detail)}</div> : null}</td>
                 <td>{item.records_read}</td>
                 <td>{detailNumber(item.detail, "records_created")}</td>
                 <td>{detailNumber(item.detail, "records_updated")}</td>
@@ -1390,9 +1399,10 @@ function duplicateCleanupMessage(detail: Record<string, unknown>): string | null
   const status = typeof cleanup.status === "string" ? cleanup.status : "";
   const deleted = typeof cleanup.deleted === "number" ? cleanup.deleted : 0;
   const candidates = typeof cleanup.managed_candidates === "number" ? cleanup.managed_candidates : 0;
+  const failed = typeof cleanup.failed === "number" ? cleanup.failed : 0;
   if (status === "completed" && deleted) return `已清理 ${deleted} 条历史重复记录`;
   if (status === "skipped_missing_delete_scope" && candidates) return `发现 ${candidates} 条历史重复记录；补充清理权限后可自动删除`;
-  if (status === "failed" && candidates) return `重复记录清理未完成（${candidates} 条待处理）`;
+  if (status === "failed" && (failed || candidates)) return `重复记录清理未完成（${failed || candidates} 条待处理）`;
   return null;
 }
 
