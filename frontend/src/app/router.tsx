@@ -2,6 +2,7 @@ import { Navigate, createBrowserRouter } from "react-router-dom";
 
 import { AppShell } from "@/app/app-shell";
 import { AuthBoundary } from "@/app/auth-boundary";
+import { RouteErrorElement } from "@/app/error-boundary";
 import { RoleRoute } from "@/app/role-route";
 import { AccountsPage } from "@/pages/accounts-page";
 import { DiagnosticsPage } from "@/pages/diagnostics-page";
@@ -16,9 +17,12 @@ import { SolverPage } from "@/pages/solver-page";
 import { VersionsPage } from "@/pages/versions-page";
 
 export const router = createBrowserRouter([
-  { path: "/login", element: <LoginPage /> },
-  { element: <AuthBoundary />, children: [{ element: <AppShell />, children: [
-    { path: "/overview", element: <OverviewPage /> },
+  { path: "/login", element: <LoginPage />, errorElement: <RouteErrorElement /> },
+  {
+    element: <AuthBoundary />,
+    errorElement: <RouteErrorElement />,
+    children: [{ element: <AppShell />, errorElement: <RouteErrorElement />, children: [
+      { path: "/overview", element: <OverviewPage /> },
     { path: "/master-data", element: <MasterDataPage /> },
     { path: "/rules", element: <RulesPage /> },
     { path: "/solver", element: <RoleRoute roles={["admin", "scheduler"]}><SolverPage /></RoleRoute> },

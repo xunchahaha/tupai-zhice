@@ -278,12 +278,12 @@ export function IntegrationsPage() {
     if (!connection.data) return;
     const configured = connection.data.app_configuration;
     if (connection.data.workspace?.name) setWorkspaceName(connection.data.workspace.name);
-    if (configured.configured) {
+    if (configured?.configured) {
       if (configured.app_id) setAppId(configured.app_id);
       if (configured.aily_app_id) setAilyAppId(configured.aily_app_id);
       if (configured.aily_skill_id) setAilySkillId(configured.aily_skill_id);
-      setRedirectUri(configured.oauth_redirect_uri);
-      setFrontendUrl(configured.frontend_url);
+      setRedirectUri(configured.oauth_redirect_uri || "");
+      setFrontendUrl(configured.frontend_url || "");
       if (new URLSearchParams(window.location.search).get("section") === "aily") {
         setEditingApp(true);
         window.requestAnimationFrame(() => {
@@ -326,39 +326,43 @@ export function IntegrationsPage() {
   if (connection.isError || syncs.isError || aiConfiguration.isError || !connection.data || !aiConfiguration.data) return <ErrorState retry={() => void refresh()} />;
 
   const status = connection.data;
+  const grantedScopes = Array.isArray(status?.granted_scopes) ? status.granted_scopes : [];
+  const missingScopes = Array.isArray(status?.missing_scopes) ? status.missing_scopes : [];
   const workspaceReady = Boolean(
-    status.workspace?.status === "active" && status.workspace.tables?.length === resources.length,
+    status?.workspace?.status === "active" &&
+      Array.isArray(status.workspace.tables) &&
+      status.workspace.tables.length === resources.length,
   );
-  const hasFullBitableAppScope = status.granted_scopes.includes("bitable:app");
+  const hasFullBitableAppScope = grantedScopes.includes("bitable:app");
   const missingBitableSyncScopes = bitableSyncScopes.filter(
     (scope) => hasFullBitableAppScope
       ? false
       : scope === "bitable:app:readonly"
-      ? !status.granted_scopes.some((item) => item === "bitable:app" || item === "bitable:app:readonly")
-      : !status.granted_scopes.includes(scope),
+      ? !grantedScopes.some((item) => item === "bitable:app" || item === "bitable:app:readonly")
+      : !grantedScopes.includes(scope),
   );
   const ready = Boolean(
-    status.app_configured &&
-      status.authorized &&
+    status?.app_configured &&
+      status?.authorized &&
       missingBitableSyncScopes.length === 0 &&
       workspaceReady,
   );
-  const hasPublicCleanupScope = status.granted_scopes.includes("base:record:delete");
+  const hasPublicCleanupScope = grantedScopes.includes("base:record:delete");
   const syncBlockers = [
-    !status.app_configured ? "还没有保存企业自建应用配置" : null,
-    !status.authorized ? "还没有授权飞书管理员账号" : null,
+    !status?.app_configured ? "还没有保存企业自建应用配置" : null,
+    !status?.authorized ? "还没有授权飞书管理员账号" : null,
     missingBitableSyncScopes.length > 0 ? `还缺少 ${missingBitableSyncScopes.length} 项多维表格写入权限（请在第 3 步查看）` : null,
     !workspaceReady
-      ? status.workspace?.status === "error"
+      ? status?.workspace?.status === "error"
         ? `排课多维表格创建失败：${status.workspace.last_error ?? "请重试第 4 步"}`
-        : `排课多维表格尚未完成（当前 ${status.workspace?.tables?.length ?? 0} / ${resources.length} 张业务表）`
+        : `排课多维表格尚未完成（当前 ${status?.workspace?.tables?.length ?? 0} / ${resources.length} 张业务表）`
       : null,
   ].filter((item): item is string => Boolean(item));
-  const currentStep = !status.app_configured
+  const currentStep = !status?.app_configured
     ? 0
-    : !aiConfiguration.data.configured
+    : !aiConfiguration.data?.configured
       ? 1
-    : !status.authorized
+    : !status?.authorized
       ? 2
       : !workspaceReady
         ? 3
@@ -503,8 +507,8 @@ export function IntegrationsPage() {
                     <LogOut className="size-3.5" />解除连接
                   </Button>
                 </div>
-                {status.missing_scopes.length > 0 ? (
-                  <PermissionWarning scopes={status.missing_scopes} />
+                {missingScopes.length > 0 ? (
+                  <PermissionWarning scopes={missingScopes} />
                 ) : null}
                 {!hasPublicCleanupScope ? (
                   <p className="border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
@@ -530,8 +534,8 @@ export function IntegrationsPage() {
                       ? "重新授权管理员账号"
                       : "授权飞书管理员账号"}
                 </Button>
-                {status.missing_scopes.length > 0 ? (
-                  <PermissionWarning scopes={status.missing_scopes} />
+                {missingScopes.length > 0 ? (
+                  <PermissionWarning scopes={missingScopes} />
                 ) : null}
               </div>
             )}
@@ -869,8 +873,8 @@ function ApplicationConfiguration({
   copiedCallback: boolean;
   copyCallback: () => void;
 }) {
-  const configured = status.app_configuration.configured;
-  const environmentManaged = status.app_configuration.source === "environment";
+  const configured = Boolean(status?.app_configuration?.configured);
+  const environmentManaged = status?.app_configuration?.source === "environment";
   if (configured && !editing) {
     return (
       <div className="space-y-3">
@@ -878,15 +882,15 @@ function ApplicationConfiguration({
           <span className="text-sm font-medium text-emerald-700">飞书应用已配置</span>
           <Badge tone="green">应用密钥已加密</Badge>
           <span className="font-mono text-xs text-zinc-500">
-            {status.app_configuration.app_id}
+            {status?.app_configuration?.app_id}
           </span>
         </div>
         <div className="text-xs leading-5 text-zinc-500">
-          授权回调地址：{status.app_configuration.oauth_redirect_uri}
+          授权回调地址：{status?.app_configuration?.oauth_redirect_uri}
         </div>
         <div className="text-xs leading-5 text-zinc-500">
-          Aily Workflow 高级通道：{status.app_configuration.aily_configured
-            ? `${status.app_configuration.aily_app_id} / ${status.app_configuration.aily_skill_id}`
+          Aily Workflow 高级通道：{status?.app_configuration?.aily_configured
+            ? `${status?.app_configuration?.aily_app_id} / ${status?.app_configuration?.aily_skill_id}`
             : "未启用（不影响一句话排课）"}
         </div>
         {environmentManaged ? (
@@ -1023,26 +1027,32 @@ function PermissionList() {
   );
 }
 
-function PermissionWarning({ scopes }: { scopes: string[] }) {
+function PermissionWarning({ scopes }: { scopes?: unknown }) {
+  const list = Array.isArray(scopes) ? scopes : [];
+  if (list.length === 0) return null;
   return (
     <div className="border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-      尚缺权限：{scopes.map((scope) => permissionLabels[scope] ?? scope).join("、")}。请在开放平台补充权限、发布最新应用版本，再重新授权管理员账号。
+      尚缺权限：{list.map((scope) => permissionLabels[scope] ?? scope).join("、")}。请在开放平台补充权限、发布最新应用版本，再重新授权管理员账号。
     </div>
   );
 }
 
-function WorkspaceDetails({ workspace }: { workspace: NonNullable<FeishuConnectionResponse["workspace"]> }) {
+function WorkspaceDetails({ workspace }: { workspace?: FeishuConnectionResponse["workspace"] }) {
+  if (!workspace) return null;
+  const tables = Array.isArray(workspace.tables) ? workspace.tables : [];
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-sm font-medium text-zinc-900">{workspace.name}</span>
         <Badge tone="green">已创建</Badge>
-        <a href={workspace.url} target="_blank" rel="noreferrer">
-          <Button size="sm" variant="outline"><ExternalLink className="size-3.5" />打开多维表格</Button>
-        </a>
+        {workspace.url ? (
+          <a href={workspace.url} target="_blank" rel="noreferrer">
+            <Button size="sm" variant="outline"><ExternalLink className="size-3.5" />打开多维表格</Button>
+          </a>
+        ) : null}
       </div>
       <div className="flex flex-wrap gap-2">
-        {workspace.tables?.map((table) => (
+        {tables.map((table) => (
           <span key={table.resource} className="inline-flex items-center gap-1.5 rounded border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-700">
             <CheckCircle2 className="size-3 text-emerald-600" />{table.table_name}
           </span>
@@ -1052,15 +1062,18 @@ function WorkspaceDetails({ workspace }: { workspace: NonNullable<FeishuConnecti
   );
 }
 
-function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string; resource: string; status: string; records_read: number; records_written: number; detail: Record<string, unknown> }> }) {
-  // The API returns newest-first.  A later successful reconciliation makes an
+function SyncHistory({ syncs }: { syncs?: unknown }) {
+  // The API returns newest-first. A later successful reconciliation makes an
   // older transient cleanup failure historical, not an outstanding task.
   // Keep the row for auditability, but only show cleanup warnings on the
   // current row for each resource so users are not asked to clean an already
   // repaired table themselves.
+  const list = Array.isArray(syncs) ? syncs : [];
   const latestByResource = new Map<string, string>();
-  for (const item of syncs) {
-    if (!latestByResource.has(item.resource)) latestByResource.set(item.resource, item.id);
+  for (const item of list) {
+    if (item && item.resource && !latestByResource.has(item.resource)) {
+      latestByResource.set(item.resource, item.id);
+    }
   }
   return (
     <section className="border border-zinc-200 bg-white">
@@ -1069,10 +1082,10 @@ function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string;
         <table className="w-full min-w-[930px] text-left text-sm">
           <thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="h-9 px-4">时间</th><th>来源</th><th>业务数据</th><th>结果</th><th>飞书已有</th><th>新增</th><th>更新</th><th>跳过</th><th>本次写入</th></tr></thead>
           <tbody>
-            {syncs.map((item) => (
+            {list.map((item) => (
               <tr key={item.id} className="border-t border-zinc-100">
                 <td className="h-10 px-4 text-zinc-500">{datetime(item.created_at)}</td>
-                <td className="text-xs text-zinc-500">{syncTriggerLabel(item.detail.trigger)}</td>
+                <td className="text-xs text-zinc-500">{syncTriggerLabel(item.detail?.trigger)}</td>
                 <td>{resourceLabel(item.resource)}</td>
                 <td><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge>{detailError(item.detail) ? <div className="mt-1 max-w-60 truncate text-xs text-red-600" title={detailError(item.detail) ?? undefined}>{detailError(item.detail)}</div> : null}{latestByResource.get(item.resource) === item.id && duplicateCleanupMessage(item.detail) ? <div className="mt-1 max-w-64 text-xs text-amber-700">{duplicateCleanupMessage(item.detail)}</div> : null}</td>
                 <td>{item.records_read}</td>
@@ -1085,7 +1098,7 @@ function SyncHistory({ syncs }: { syncs: Array<{ id: string; created_at: string;
           </tbody>
         </table>
       </div>
-      {syncs.length === 0 ? <div className="p-6 text-center text-sm text-zinc-400">暂无飞书同步记录</div> : null}
+      {list.length === 0 ? <div className="p-6 text-center text-sm text-zinc-400">暂无飞书同步记录</div> : null}
     </section>
   );
 }
@@ -1116,6 +1129,7 @@ function BatchSyncResult({
   authorize: () => void;
   authorizing: boolean;
 }) {
+  const items = Array.isArray(result?.results) ? result.results : [];
   const skipped = batchSkippedCount(result);
   const reauthorizationRequired = batchRequiresFeishuReauthorization(result);
   const summary = result.failed_count === 0
@@ -1127,7 +1141,7 @@ function BatchSyncResult({
     <div aria-live="polite" className="mt-3 border border-zinc-200 bg-zinc-50 p-3 text-sm">
       <div className="flex flex-wrap items-center gap-2"><span className="font-medium">本次一键同步</span><Badge tone={statusTone(result.status)}>{statusLabel(result.status)}</Badge><span className="text-xs text-zinc-500">{summary}</span></div>
       <div className="mt-2 grid gap-1 sm:grid-cols-2 xl:grid-cols-4">
-        {result.results.map((item) => (
+        {items.map((item) => (
           <div key={item.id} className="border border-zinc-200 bg-white px-2.5 py-2 text-xs">
             <div className="flex items-center justify-between gap-2"><span className="font-medium">{resourceLabel(item.resource)}</span><Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge></div>
             <div className="mt-1 text-zinc-500">写入 {item.records_written} 条{detailNumberValue(item.detail, "records_skipped") ? `，跳过 ${detailNumberValue(item.detail, "records_skipped")} 条` : ""}</div>
@@ -1294,7 +1308,7 @@ function GuideAuthorize({ status, authorize, authorizing }: { status: FeishuConn
       <Button onClick={authorize} disabled={!status.app_configured || authorizing}>
         <ShieldCheck className="size-4" />{authorizing ? "正在跳转" : status.status === "reauthorization_required" ? "重新授权管理员账号" : "授权飞书管理员账号"}
       </Button>
-      {status.missing_scopes.length > 0 ? <PermissionWarning scopes={status.missing_scopes} /> : null}
+      {Array.isArray(status.missing_scopes) && status.missing_scopes.length > 0 ? <PermissionWarning scopes={status.missing_scopes} /> : null}
       {!status.app_configured ? <p className="text-xs text-amber-700">请先完成上一页的应用配置。</p> : null}
     </div>
   );
@@ -1316,7 +1330,7 @@ function GuideWorkspace({
   if (status.workspace?.status === "active") return <WorkspaceDetails workspace={status.workspace} />;
   return (
     <div className="space-y-4">
-      {status.missing_scopes.length > 0 ? <PermissionWarning scopes={status.missing_scopes} /> : null}
+      {Array.isArray(status.missing_scopes) && status.missing_scopes.length > 0 ? <PermissionWarning scopes={status.missing_scopes} /> : null}
       <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
         {resources.map((item) => <div key={item} className="border border-zinc-200 px-3 py-2">{resourceLabel(item)}</div>)}
       </div>
@@ -1354,24 +1368,28 @@ function SummaryItem({ label, value }: { label: string; value: string }) {
   return <div className="border border-black/5 bg-white/70 p-3"><div className="text-xs text-zinc-500">{label}</div><div className="mt-1 text-sm font-medium text-zinc-900">{value}</div></div>;
 }
 
-function detailNumber(detail: Record<string, unknown>, key: string): number | string {
+function detailNumber(detail: Record<string, unknown> | undefined | null, key: string): number | string {
+  if (!detail || typeof detail !== "object") return "-";
   const value = detail[key];
   return typeof value === "number" ? value : "-";
 }
 
-function detailNumberValue(detail: Record<string, unknown>, key: string): number {
+function detailNumberValue(detail: Record<string, unknown> | undefined | null, key: string): number {
+  if (!detail || typeof detail !== "object") return 0;
   const value = detail[key];
   return typeof value === "number" ? value : 0;
 }
 
-function batchSkippedCount(result: FeishuBatchSyncResponse): number {
-  return result.results.reduce(
+function batchSkippedCount(result: FeishuBatchSyncResponse | null | undefined): number {
+  const items = Array.isArray(result?.results) ? result.results : [];
+  return items.reduce(
     (total, item) => total + detailNumberValue(item.detail, "records_skipped"),
     0,
   );
 }
 
-function detailError(detail: Record<string, unknown>): string | null {
+function detailError(detail: Record<string, unknown> | undefined | null): string | null {
+  if (!detail || typeof detail !== "object") return null;
   const value = detail.error;
   return typeof value === "string" && value.trim() ? value : null;
 }
@@ -1383,15 +1401,17 @@ function requiresFeishuReauthorization(message: string): boolean {
     || message.includes("授权已经失效");
 }
 
-function batchRequiresFeishuReauthorization(result: FeishuBatchSyncResponse): boolean {
-  return result.results.some((item) => {
-    if (item.detail.reauthorization_required === true) return true;
+function batchRequiresFeishuReauthorization(result: FeishuBatchSyncResponse | null | undefined): boolean {
+  const items = Array.isArray(result?.results) ? result.results : [];
+  return items.some((item) => {
+    if (item.detail?.reauthorization_required === true) return true;
     const error = detailError(item.detail);
     return error ? requiresFeishuReauthorization(error) : false;
   });
 }
 
-function duplicateCleanupMessage(detail: Record<string, unknown>): string | null {
+function duplicateCleanupMessage(detail: Record<string, unknown> | undefined | null): string | null {
+  if (!detail || typeof detail !== "object") return null;
   const raw = detail.duplicate_cleanup;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const cleanup = raw as Record<string, unknown>;

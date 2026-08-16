@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
@@ -14,9 +15,12 @@ vi.mock("@/api/generated/client", () => ({ loginApiV1AuthTokenPost: login }));
 vi.mock("@/api/http", () => ({ authStore: { set: setToken } }));
 
 describe("LoginPage", () => {
+  let queryClient: QueryClient;
+
   afterEach(cleanup);
 
   beforeEach(() => {
+    queryClient = new QueryClient();
     login.mockReset();
     setToken.mockReset();
   });
@@ -24,7 +28,13 @@ describe("LoginPage", () => {
   it("submits the default demo credentials and stores the access token", async () => {
     login.mockResolvedValue({ access_token: "test-token" });
     const user = userEvent.setup();
-    render(<MemoryRouter><LoginPage /></MemoryRouter>);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <LoginPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
 
     expect(screen.getByLabelText("用户名")).toHaveValue("admin");
     expect(screen.getByLabelText("密码")).toHaveValue("tupai-demo-admin-2026!");
@@ -36,7 +46,13 @@ describe("LoginPage", () => {
 
   it("shows validation feedback before an empty form is submitted", async () => {
     const user = userEvent.setup();
-    render(<MemoryRouter><LoginPage /></MemoryRouter>);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <LoginPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
 
     await user.clear(screen.getByLabelText("用户名"));
     await user.clear(screen.getByLabelText("密码"));
