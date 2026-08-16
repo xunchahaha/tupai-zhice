@@ -3818,7 +3818,7 @@ def _public_schedule_sort_key(row: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
-def _public_class_schedule_rows(
+def _public_class_index_rows(
     db: Session, schedule_set_id: str
 ) -> list[dict[str, Any]]:
     schedule = _current_published_schedule(db, schedule_set_id)
@@ -3903,6 +3903,14 @@ def _public_class_schedule_rows(
     return sorted(rows, key=_public_schedule_sort_key)
 
 
+def _public_class_schedule_rows(
+    db: Session, schedule_set_id: str
+) -> list[dict[str, Any]]:
+    """Return the retired class projection for compatibility exports only."""
+
+    return _public_class_index_rows(db, schedule_set_id)
+
+
 def _public_class_links_rows(
     db: Session, schedule_set_id: str
 ) -> list[dict[str, Any]]:
@@ -3914,7 +3922,7 @@ def _public_class_links_rows(
     """
 
     schedule = _current_published_schedule(db, schedule_set_id)
-    class_rows = _public_class_schedule_rows(db, schedule_set_id)
+    class_rows = _public_class_index_rows(db, schedule_set_id)
     updated_at = _public_projection_updated_at(schedule)
     version = f"V{schedule.version_no}" if schedule else ""
     return [

@@ -264,12 +264,8 @@ describe("飞书生产接入页", () => {
     );
     await user.click(screen.getByRole("button", { name: "一键同步当前方案" }));
     expect(mocks.batchSync).toHaveBeenCalledWith({ data: {} });
-    await user.click(screen.getByRole("button", { name: "同步展示数据与班级链接目录" }));
-    expect(mocks.batchSync).toHaveBeenLastCalledWith({
-      data: {
-        resources: ["public_summary", "public_adjustment_notice", "public_class_links"],
-      },
-    });
+    expect(screen.queryByText("在飞书内创建妙搭应用")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "同步展示数据与班级链接目录" })).not.toBeInTheDocument();
     await user.selectOptions(screen.getByLabelText("同步资源"), "teachers");
     await user.click(screen.getByRole("button", { name: "重试单表" }));
     expect(mocks.sync).toHaveBeenCalledWith({ data: { resource: "teachers" } });

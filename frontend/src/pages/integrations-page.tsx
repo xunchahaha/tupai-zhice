@@ -74,12 +74,6 @@ function workspaceHasAllResources(workspace?: FeishuWorkspace): boolean {
   return workspace?.status === "active" && workspaceResourceCount(workspace) === resources.length;
 }
 
-const publicDisplayResources = [
-  "public_summary",
-  "public_adjustment_notice",
-  "public_class_links",
-] as const;
-
 // 第 5 步只写飞书多维表格；日历和 Aily 权限缺失不应把同步按钮置灰。
 const bitableSyncScopes = [
   "base:table:read",
@@ -644,33 +638,6 @@ export function IntegrationsPage() {
             ) : null}
           </FlowStep>
 
-          <FlowStep
-            number={6}
-            title="在飞书内创建妙搭应用"
-            description="三张展示投影表和班级链接目录会随一键同步及版本发布/回滚更新；在飞书内分别绑定到妙搭的领导、班级和通知页面。"
-            state={workspaceReady ? "current" : "pending"}
-            icon={ExternalLink}
-          >
-            <div className="space-y-3 text-sm text-zinc-700">
-              <p>每套课表方案都有独立的飞书多维表格。妙搭应从当前方案的展示数据和“班级链接索引”取数：领导页使用“公开展示汇总”，班级服务页使用“课表”并按班级筛选，入口目录使用“班级链接索引”，变更页使用“公开调课通知”。</p>
-              <div className="grid gap-2 text-xs text-zinc-600 md:grid-cols-4">
-                <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">领导驾驶舱</div><p className="mt-1 leading-5">当前版本、发布时间、排课覆盖日期、覆盖班级、调整课次、总课次、教室利用率和月度趋势。</p></div>
-                <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">学生 / 家长课表</div><p className="mt-1 leading-5">从“课表”读取明细，按班级标识筛选；不把全校课表直接暴露给学生。</p></div>
-                <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">班级入口目录</div><p className="mt-1 leading-5">每个班级一行，登记学生/家长妙搭链接、公开视图链接、访问模式和链接状态。</p></div>
-                <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">调课通知</div><p className="mt-1 leading-5">只展示已生效的时间、地点、课程变更；不包含教师账号、联系方式和内部调课原因。</p></div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() => batchSync.mutate({ data: { resources: [...publicDisplayResources] } })}
-                  disabled={!ready || sync.isPending || batchSync.isPending}
-                >
-                  同步展示数据与班级链接目录
-                </Button>
-                {status.workspace?.url ? <a href={status.workspace.url} target="_blank" rel="noreferrer"><Button variant="outline"><ExternalLink className="size-4" />打开飞书多维表格</Button></a> : null}
-              </div>
-            </div>
-          </FlowStep>
         </div>
       </section>
 
