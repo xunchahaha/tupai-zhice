@@ -1,13 +1,5 @@
 import axios, { type AxiosRequestConfig } from "axios";
 
-function productionApiBaseUrl(): string {
-  // The deployment runs the static frontend and FastAPI on separate ports.
-  // Keep an explicit VITE_API_BASE_URL override, but make the default work
-  // for both the cluster DNS name and localhost without requiring a proxy.
-  if (typeof window === "undefined" || !window.location.hostname) return "";
-  return `${window.location.protocol}//${window.location.hostname}:8000`;
-}
-
 const configuredApiBaseUrl =
   typeof import.meta.env.VITE_API_BASE_URL === "string"
     ? import.meta.env.VITE_API_BASE_URL.trim()
@@ -15,7 +7,7 @@ const configuredApiBaseUrl =
 
 export const API_BASE_URL =
   configuredApiBaseUrl ||
-  (import.meta.env.PROD ? productionApiBaseUrl() : "http://127.0.0.1:8000");
+  (import.meta.env.PROD ? "" : "http://127.0.0.1:8000");
 const TOKEN_KEY = "tupai:access-token";
 const SCHEDULE_SET_KEY = "tupai:schedule-set-id";
 
