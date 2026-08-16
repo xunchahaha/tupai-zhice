@@ -1,4 +1,6 @@
 import {
+  Calendar,
+  CalendarCheck2,
   CalendarDays,
   ChevronLeft,
   ChevronRight,
@@ -6,9 +8,12 @@ import {
   DoorOpen,
   Download,
   GraduationCap,
+  LayoutGrid,
+  ListFilter,
   Sparkles,
   User,
   Users,
+  Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -27,12 +32,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
-import { errorMessage, formatRoom } from "@/lib/format";
+import { errorMessage, formatRoom, formatSlot } from "@/lib/format";
 import { statusLabel } from "@/lib/labels";
 import { preferredSchedule } from "@/lib/schedule";
 import { cn } from "@/lib/cn";
 
 type ViewMode = "class" | "teacher" | "room";
+type LayoutStyle = "timeline" | "matrix";
 
 const MODES: Array<{ value: ViewMode; label: string; icon: typeof Users }> = [
   { value: "class", label: "班级课表", icon: Users },
@@ -42,7 +48,6 @@ const MODES: Array<{ value: ViewMode; label: string; icon: typeof Users }> = [
 
 const COLUMNS_PER_PAGE = 7;
 
-/** 一行代表一个上课时刻。日期感知的课表按「日期 × 时刻」排布，不能用星期。 */
 function clockRows(slots: TimeSlotResponse[]): Array<{ key: string; start: string; end: string }> {
   const seen = new Map<string, { key: string; start: string; end: string }>();
   for (const slot of slots) {
@@ -75,9 +80,23 @@ function formatColumnHeader(col: string, dated: boolean): { main: string; sub?: 
   return { main: col };
 }
 
+function formatWeekday(dateStr: string): string {
+  try {
+    const d = new Date(dateStr);
+    if (!Number.isNaN(d.getTime())) {
+      const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+      return weekdays[d.getDay()];
+    }
+  } catch {
+    // ignore
+  }
+  return "";
+}
+
 export function SchedulePage() {
   const [scheduleId, setScheduleId] = useState("");
   const [mode, setMode] = useState<ViewMode>("class");
+  const [layout, setLayout] = useState<LayoutStyle>("timeline");
   const [subject, setSubject] = useState("");
   const [page, setPage] = useState(0);
 
@@ -98,7 +117,6 @@ export function SchedulePage() {
     setPage(0);
   }, [classes.data, mode, rooms.data, teachers.data]);
 
-  // 列表接口只给概要，排课行按需从详情接口取——真实数据下每个版本上万行。
   const detail = useGetScheduleApiV1SchedulesScheduleIdGet(scheduleId, {
     query: { enabled: Boolean(scheduleId) },
   });
@@ -117,7 +135,43 @@ export function SchedulePage() {
     [mode, schedule, subject],
   );
 
-  // 有日期就按日期排布；没有日期的经典时段课表退回按星期排布。
+  // Sort assignments chronologically
+  const sortedAssignments = useMemo(() => {
+    return [...filtered].sort((a, b) => {
+      const dateA = a.lesson_date ?? "";
+      const dateB = b.lesson_date ?? "";
+      if (dateA !== dateB) return dateA.localeCompare(dateB);
+      const slotA = slotRows.find((s) => s.business_id === a.slot_business_id)?.start_time ?? "";
+      const slotB = slotRows.find((s) => s.business_id === b.slot_business_id)?.start_time ?? "";
+      return slotA.localeCompare(slotB);
+    });
+  }, [filtered, slotRows]);
+
+  // Group assignments by month for Timeline view
+  const groupedByMonth = useMemo(() => {
+    const groups: Array<{ monthKey: string; monthLabel: string; items: AssignmentResponse[] }> = [];
+    const map = new Map<string, AssignmentResponse[]>();
+
+    for (const item of sortedAssignments) {
+      let key = "全部日程";
+      let label = "全部课次安排";
+      if (item.lesson_date) {
+        const parts = item.lesson_date.split("-");
+        if (parts.length >= 2) {
+          key = `${parts[0]}-${parts[1]}`;
+          label = `${parts[0]}年 ${Number(parts[1])}月`;
+        }
+      }
+      if (!map.has(key)) {
+        map.set(key, []);
+        groups.push({ monthKey: key, monthLabel: label, items: map.get(key)! });
+      }
+      map.get(key)!.push(item);
+    }
+
+    return groups;
+  }, [sortedAssignments]);
+
   const dated = filtered.some((item) => item.lesson_date);
   const columns = useMemo(() => {
     if (dated) {
@@ -174,7 +228,6 @@ export function SchedulePage() {
     }
   };
 
-  // Dynamic Grid Template: 76px time column + equal flexible 1fr for each visible day column
   const gridTemplate = {
     gridTemplateColumns: `76px repeat(${Math.max(visible.length, 1)}, minmax(0, 1fr))`,
   };
@@ -207,189 +260,391 @@ export function SchedulePage() {
       />
 
       {/* View Mode Switcher and Subject Select Bar */}
-      <section className="flex flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-4 shadow-2xs sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-1.5 rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-1">
-          {MODES.map(({ value, label, icon: Icon }) => (
-            <button
-              key={value}
-              type="button"
-              className={cn(
-                "flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-xs font-medium transition-all duration-150",
-                mode === value
-                  ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/60"
-                  : "text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100/60",
-              )}
-              onClick={() => setMode(value)}
-            >
-              <Icon className="size-3.5" />
-              {label}
-            </button>
-          ))}
+      <section className="flex flex-col gap-3.5 rounded-xl border border-zinc-200 bg-white p-4 shadow-2xs">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          {/* View Category: Class / Teacher / Room */}
+          <div className="flex items-center gap-1.5 rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-1">
+            {MODES.map(({ value, label, icon: Icon }) => (
+              <button
+                key={value}
+                type="button"
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-xs font-medium transition-all duration-150",
+                  mode === value
+                    ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/60"
+                    : "text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100/60",
+                )}
+                onClick={() => setMode(value)}
+              >
+                <Icon className="size-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Layout Style Toggle: Timeline (All Courses) vs Matrix (Weekly Grid) */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-zinc-400 font-medium">展示模式:</span>
+            <div className="flex items-center rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-0.5">
+              <button
+                type="button"
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-all",
+                  layout === "timeline"
+                    ? "bg-white text-blue-700 shadow-2xs font-semibold"
+                    : "text-zinc-600 hover:text-zinc-900",
+                )}
+                onClick={() => setLayout("timeline")}
+              >
+                <CalendarCheck2 className="size-3.5" />
+                全部课次流 ({filtered.length}节)
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-all",
+                  layout === "matrix"
+                    ? "bg-white text-blue-700 shadow-2xs font-semibold"
+                    : "text-zinc-600 hover:text-zinc-900",
+                )}
+                onClick={() => setLayout("matrix")}
+              >
+                <LayoutGrid className="size-3.5" />
+                首尾周/矩阵视图
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-zinc-500 font-medium">查看对象:</span>
-          <Select
-            aria-label="排课对象"
-            selectSize="sm"
-            containerClassName="w-64"
-            value={subject}
-            onChange={(event) => setSubject(event.target.value)}
-          >
-            {options.map((item) => (
-              <option key={item.id} value={item.business_id}>
-                {item.name} {item.business_id !== item.name ? `(${item.business_id})` : ""}
-              </option>
-            ))}
-          </Select>
+        {/* Target Subject Selector */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-100 pt-3 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-zinc-500 font-medium">
+              选择{mode === "class" ? "班级" : mode === "teacher" ? "教师" : "教室"}:
+            </span>
+            <Select
+              aria-label="排课对象"
+              selectSize="sm"
+              containerClassName="w-72"
+              value={subject}
+              onChange={(event) => setSubject(event.target.value)}
+            >
+              {options.map((item) => (
+                <option key={item.id} value={item.business_id}>
+                  {item.name} {item.business_id !== item.name ? `(${item.business_id})` : ""}
+                </option>
+              ))}
+            </Select>
+          </div>
+
+          <div className="flex items-center gap-3 text-zinc-500">
+            <span>
+              已安排: <strong className="font-semibold text-zinc-900">{filtered.length}</strong> 节课次
+            </span>
+            {columns.length > 0 && (
+              <span>
+                跨越: <strong className="font-semibold text-zinc-900">{columns.length}</strong> 个上课日
+              </span>
+            )}
+          </div>
         </div>
       </section>
 
-      {/* Date Pagination Bar if multi-page */}
-      {columns.length > COLUMNS_PER_PAGE ? (
-        <div className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white px-4 py-2.5 text-xs text-zinc-600 shadow-2xs">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setPage((current) => Math.max(0, current - 1))}
-            disabled={safePage === 0}
-          >
-            <ChevronLeft className="size-3.5" />
-            上一周 / 段
-          </Button>
-          <div className="flex items-center gap-2 font-medium tabular-nums text-zinc-800">
-            <CalendarDays className="size-4 text-blue-600" />
-            <span>
-              {visible[0]} ~ {visible[visible.length - 1]}
-            </span>
-            <span className="text-xs font-normal text-zinc-400">
-              （第 {safePage + 1} / {pageCount} 页，当前对象共 {columns.length} 天有课）
-            </span>
-          </div>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))}
-            disabled={safePage >= pageCount - 1}
-          >
-            下一周 / 段
-            <ChevronRight className="size-3.5" />
-          </Button>
-        </div>
-      ) : null}
-
-      {/* Responsive Timetable Grid (No horizontal scroll on standard width!) */}
-      <section className="rounded-xl border border-zinc-200 bg-white shadow-2xs overflow-hidden">
-        <div className="w-full">
-          {/* Header Dates */}
-          <div className="grid border-b border-zinc-200 bg-zinc-50/80" style={gridTemplate}>
-            <div className="flex items-center justify-center p-3 text-xs font-medium text-zinc-400">
-              <Clock className="size-3.5 mr-1" />
-              时段
-            </div>
-            {visible.map((column) => {
-              const { main, sub } = formatColumnHeader(column, dated);
-              return (
-                <div
-                  key={column}
-                  className="border-l border-zinc-200/80 p-2.5 text-center transition-colors hover:bg-zinc-100/50"
-                >
-                  <div className="text-xs font-semibold text-zinc-900 tabular-nums">{main}</div>
-                  {sub && <div className="text-[11px] font-medium text-blue-600 mt-0.5">{sub}</div>}
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Timetable Rows */}
-          {rows.map((row) => (
-            <div
-              key={row.key}
-              className="grid border-b border-zinc-100 last:border-0 hover:bg-zinc-50/30 transition-colors"
-              style={gridTemplate}
-            >
-              {/* Time Column */}
-              <div className="flex flex-col justify-center p-2 text-center text-xs tabular-nums text-zinc-500 border-r border-zinc-100 bg-zinc-50/30">
-                <span className="font-semibold text-zinc-700">{row.start}</span>
-                <span className="text-[10px] text-zinc-400 mt-0.5">至</span>
-                <span className="font-semibold text-zinc-700">{row.end}</span>
+      {/* VIEW 1: Timeline / Session Flow View (Shows ALL sessions grouped by month, zero gaps!) */}
+      {layout === "timeline" && (
+        <section className="space-y-4">
+          {sortedAssignments.length === 0 ? (
+            <div className="grid min-h-60 place-items-center rounded-xl border border-zinc-200 bg-white p-8 text-center text-sm text-zinc-400 shadow-2xs">
+              <div>
+                <Calendar className="mx-auto mb-2 size-8 text-zinc-300" />
+                <p>当前对象在所选版本中暂无排课记录</p>
               </div>
+            </div>
+          ) : (
+            groupedByMonth.map((group, groupIndex) => (
+              <div
+                key={group.monthKey}
+                className="rounded-xl border border-zinc-200/90 bg-white p-5 shadow-2xs"
+              >
+                {/* Month Header */}
+                <div className="flex items-center justify-between border-b border-zinc-100 pb-3">
+                  <div className="flex items-center gap-2">
+                    <CalendarDays className="size-4 text-blue-600" />
+                    <h3 className="font-semibold text-zinc-900 text-sm">{group.monthLabel}</h3>
+                  </div>
+                  <span className="text-xs text-zinc-400 font-medium">
+                    本阶段共 {group.items.length} 节课
+                  </span>
+                </div>
 
-              {/* Day Slot Cells */}
-              {visible.map((column) => {
-                const items = cells.get(`${column}|${row.key}`) ?? [];
-                return (
-                  <div
-                    key={column}
-                    className="min-h-24 space-y-1.5 border-l border-zinc-100 p-2 flex flex-col justify-start"
-                  >
-                    {items.map((assignment) => (
+                {/* Session Cards Grid */}
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {group.items.map((item, index) => {
+                    const globalIndex = sortedAssignments.indexOf(item);
+                    const isFirst = globalIndex === 0;
+                    const isLast = globalIndex === sortedAssignments.length - 1;
+                    const weekday = item.lesson_date ? formatWeekday(item.lesson_date) : "";
+
+                    return (
                       <div
-                        key={assignment.course_session_id}
-                        title={`课次编号: ${assignment.course_business_id}`}
+                        key={item.course_session_id}
                         className={cn(
-                          "group rounded-lg border p-2.5 text-left transition-all duration-150 shadow-2xs hover:shadow-xs",
-                          items.length > 1
-                            ? "border-red-200 bg-red-50/90 text-red-900"
-                            : "border-blue-200/80 bg-blue-50/60 text-blue-950 hover:bg-blue-50 hover:border-blue-300",
+                          "relative rounded-xl border p-4 transition-all duration-150 shadow-2xs hover:shadow-xs",
+                          isFirst
+                            ? "border-emerald-300 bg-emerald-50/40"
+                            : isLast
+                              ? "border-purple-300 bg-purple-50/40"
+                              : "border-zinc-200/80 bg-zinc-50/50 hover:bg-blue-50/30 hover:border-blue-200",
                         )}
                       >
-                        {/* Context-aware primary header - Fully legible without truncate ellipsis */}
-                        {mode === "class" ? (
-                          <>
-                            <div className="flex items-start gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700 leading-tight">
-                              <User className="size-3 text-blue-600 shrink-0 mt-0.5" />
-                              <span className="break-words">{assignment.teacher_business_id || "未定教师"}</span>
-                            </div>
-                            <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-500">
-                              <DoorOpen className="size-3 text-zinc-400 shrink-0" />
-                              <span className="break-words font-medium">{formatRoom(assignment.room_business_id)}教室</span>
-                            </div>
-                          </>
-                        ) : mode === "teacher" ? (
-                          <>
-                            <div className="flex items-start gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700 leading-tight">
-                              <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
-                              <span className="break-words">{assignment.class_business_id || "未定班级"}</span>
-                            </div>
-                            <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-500">
-                              <DoorOpen className="size-3 text-zinc-400 shrink-0" />
-                              <span className="break-words font-medium">{formatRoom(assignment.room_business_id)}教室</span>
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <div className="flex items-start gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700 leading-tight">
-                              <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
-                              <span className="break-words">{assignment.class_business_id || "未定班级"}</span>
-                            </div>
-                            <div className="mt-1 flex items-start gap-1 text-[11px] text-zinc-500 leading-tight">
-                              <User className="size-3 text-zinc-400 shrink-0 mt-0.5" />
-                              <span className="break-words">{assignment.teacher_business_id || "未定教师"}</span>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    ))}
+                        {/* Session Order Badge */}
+                        <div className="flex items-center justify-between mb-2">
+                          <span
+                            className={cn(
+                              "text-[10px] font-semibold px-2 py-0.5 rounded-full",
+                              isFirst
+                                ? "bg-emerald-100 text-emerald-800"
+                                : isLast
+                                  ? "bg-purple-100 text-purple-800"
+                                  : "bg-zinc-200/70 text-zinc-600",
+                            )}
+                          >
+                            {isFirst ? "⚡ 开营首课" : isLast ? "🏁 结营尾课" : `第 ${globalIndex + 1} 节`}
+                          </span>
+                          <span className="font-mono text-xs text-zinc-400">
+                            {formatSlot(item.slot_business_id)}
+                          </span>
+                        </div>
 
-                    {items.length > 1 ? (
-                      <div className="rounded bg-red-100 px-1.5 py-0.5 text-center text-[10px] font-semibold text-red-700">
-                        ⚠ 此时段冲突 ({items.length} 节)
+                        {/* Date & Weekday */}
+                        <div className="text-sm font-bold text-zinc-900">
+                          {item.lesson_date ?? "时段循环"}
+                          {weekday && (
+                            <span className="ml-1.5 text-xs font-medium text-blue-600">({weekday})</span>
+                          )}
+                        </div>
+
+                        {/* Details */}
+                        <div className="mt-3 space-y-1.5 border-t border-zinc-200/60 pt-2.5 text-xs">
+                          {mode !== "class" && (
+                            <div className="flex items-start gap-1.5 text-zinc-700">
+                              <Users className="size-3.5 text-indigo-600 shrink-0 mt-0.5" />
+                              <span className="font-medium break-words leading-tight">
+                                {item.class_business_id}
+                              </span>
+                            </div>
+                          )}
+
+                          {mode !== "teacher" && (
+                            <div className="flex items-start gap-1.5 text-zinc-700">
+                              <User className="size-3.5 text-blue-600 shrink-0 mt-0.5" />
+                              <span className="font-medium break-words leading-tight">
+                                {item.teacher_business_id}
+                              </span>
+                            </div>
+                          )}
+
+                          {mode !== "room" && (
+                            <div className="flex items-center gap-1.5 text-zinc-500">
+                              <DoorOpen className="size-3.5 text-zinc-400 shrink-0" />
+                              <span className="font-medium text-zinc-600">
+                                {formatRoom(item.room_business_id)}教室
+                              </span>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    ) : null}
+                    );
+                  })}
+                </div>
+              </div>
+            ))
+          )}
+        </section>
+      )}
+
+      {/* VIEW 2: Matrix View with First/Last Week Jumpers */}
+      {layout === "matrix" && (
+        <section className="space-y-4">
+          {/* Quick Jumper Toolbar for Active Weeks */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-zinc-200 bg-white p-3 text-xs shadow-2xs">
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                onClick={() => setPage(0)}
+                disabled={safePage === 0}
+              >
+                <Zap className="size-3 text-emerald-600" />
+                跳转首周 (开营)
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                onClick={() => setPage(pageCount - 1)}
+                disabled={safePage === pageCount - 1}
+              >
+                <Zap className="size-3 text-purple-600" />
+                跳转尾周 (结营)
+              </Button>
+            </div>
+
+            {columns.length > COLUMNS_PER_PAGE && (
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs"
+                  onClick={() => setPage((current) => Math.max(0, current - 1))}
+                  disabled={safePage === 0}
+                >
+                  <ChevronLeft className="size-3" />
+                  上一段
+                </Button>
+                <span className="tabular-nums font-medium text-zinc-700">
+                  第 {safePage + 1} / {pageCount} 段 ({visible[0]} ~ {visible[visible.length - 1]})
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs"
+                  onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))}
+                  disabled={safePage >= pageCount - 1}
+                >
+                  下一段
+                  <ChevronRight className="size-3" />
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {/* Timetable Grid (100% full width, no horizontal scrollbar!) */}
+          <div className="rounded-xl border border-zinc-200 bg-white shadow-2xs overflow-hidden">
+            <div className="w-full">
+              {/* Header Dates */}
+              <div className="grid border-b border-zinc-200 bg-zinc-50/80" style={gridTemplate}>
+                <div className="flex items-center justify-center p-3 text-xs font-medium text-zinc-400">
+                  <Clock className="size-3.5 mr-1" />
+                  时段
+                </div>
+                {visible.map((column) => {
+                  const { main, sub } = formatColumnHeader(column, dated);
+                  return (
+                    <div
+                      key={column}
+                      className="border-l border-zinc-200/80 p-2.5 text-center transition-colors hover:bg-zinc-100/50"
+                    >
+                      <div className="text-xs font-semibold text-zinc-900 tabular-nums">{main}</div>
+                      {sub && <div className="text-[11px] font-medium text-blue-600 mt-0.5">{sub}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Timetable Rows */}
+              {rows.map((row) => (
+                <div
+                  key={row.key}
+                  className="grid border-b border-zinc-100 last:border-0 hover:bg-zinc-50/30 transition-colors"
+                  style={gridTemplate}
+                >
+                  {/* Time Column */}
+                  <div className="flex flex-col justify-center p-2 text-center text-xs tabular-nums text-zinc-500 border-r border-zinc-100 bg-zinc-50/30">
+                    <span className="font-semibold text-zinc-700">{row.start}</span>
+                    <span className="text-[10px] text-zinc-400 mt-0.5">至</span>
+                    <span className="font-semibold text-zinc-700">{row.end}</span>
                   </div>
-                );
-              })}
-            </div>
-          ))}
 
-          {!rows.length ? (
-            <div className="grid min-h-48 place-items-center p-8 text-sm text-zinc-400">
-              当前主数据里还没有时段信息
+                  {/* Day Slot Cells */}
+                  {visible.map((column) => {
+                    const items = cells.get(`${column}|${row.key}`) ?? [];
+                    return (
+                      <div
+                        key={column}
+                        className="min-h-24 space-y-1.5 border-l border-zinc-100 p-2 flex flex-col justify-start"
+                      >
+                        {items.map((assignment) => (
+                          <div
+                            key={assignment.course_session_id}
+                            title={`课次编号: ${assignment.course_business_id}`}
+                            className={cn(
+                              "group rounded-lg border p-2.5 text-left transition-all duration-150 shadow-2xs hover:shadow-xs",
+                              items.length > 1
+                                ? "border-red-200 bg-red-50/90 text-red-900"
+                                : "border-blue-200/80 bg-blue-50/60 text-blue-950 hover:bg-blue-50 hover:border-blue-300",
+                            )}
+                          >
+                            {mode === "class" ? (
+                              <>
+                                <div className="flex items-start gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700 leading-tight">
+                                  <User className="size-3 text-blue-600 shrink-0 mt-0.5" />
+                                  <span className="break-words">
+                                    {assignment.teacher_business_id || "未定教师"}
+                                  </span>
+                                </div>
+                                <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-500">
+                                  <DoorOpen className="size-3 text-zinc-400 shrink-0" />
+                                  <span className="break-words font-medium">
+                                    {formatRoom(assignment.room_business_id)}教室
+                                  </span>
+                                </div>
+                              </>
+                            ) : mode === "teacher" ? (
+                              <>
+                                <div className="flex items-start gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700 leading-tight">
+                                  <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
+                                  <span className="break-words">
+                                    {assignment.class_business_id || "未定班级"}
+                                  </span>
+                                </div>
+                                <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-500">
+                                  <DoorOpen className="size-3 text-zinc-400 shrink-0" />
+                                  <span className="break-words font-medium">
+                                    {formatRoom(assignment.room_business_id)}教室
+                                  </span>
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="flex items-start gap-1 text-xs font-semibold text-zinc-900 group-hover:text-blue-700 leading-tight">
+                                  <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
+                                  <span className="break-words">
+                                    {assignment.class_business_id || "未定班级"}
+                                  </span>
+                                </div>
+                                <div className="mt-1 flex items-start gap-1 text-[11px] text-zinc-500 leading-tight">
+                                  <User className="size-3 text-zinc-400 shrink-0 mt-0.5" />
+                                  <span className="break-words">
+                                    {assignment.teacher_business_id || "未定教师"}
+                                  </span>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        ))}
+
+                        {items.length > 1 ? (
+                          <div className="rounded bg-red-100 px-1.5 py-0.5 text-center text-[10px] font-semibold text-red-700">
+                            ⚠ 此时段冲突 ({items.length} 节)
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+
+              {!rows.length ? (
+                <div className="grid min-h-48 place-items-center p-8 text-sm text-zinc-400">
+                  当前主数据里还没有时段信息
+                </div>
+              ) : null}
             </div>
-          ) : null}
-        </div>
-      </section>
+          </div>
+        </section>
+      )}
 
       {/* Footer Info Legend */}
       <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-500 bg-zinc-50/60 p-3 rounded-lg border border-zinc-200/80">
@@ -406,7 +661,7 @@ export function SchedulePage() {
         </div>
         <div className="flex items-center gap-2">
           <span className="inline-block size-2 rounded-full bg-blue-500"></span>
-          <span>{dated ? "按真实上课日期自适应排布" : "按星期循环排布"}</span>
+          <span>{layout === "timeline" ? "按月份阶段呈现完整课次流" : "按有课时段呈现周历矩阵"}</span>
         </div>
       </div>
     </div>

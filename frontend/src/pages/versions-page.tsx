@@ -332,19 +332,19 @@ export function VersionsPage() {
               >
                 <table className="w-full text-left text-xs table-fixed">
                   <colgroup>
-                    <col className="w-[28%]" />
-                    <col className="w-[31%]" />
-                    <col className="w-[4%]" />
+                    <col className="w-[26%]" />
+                    <col className="w-[26%]" />
+                    <col className="w-[3%]" />
                     <col className="w-[30%]" />
-                    <col className="w-[7%]" />
+                    <col className="w-[15%]" />
                   </colgroup>
                   <thead className="sticky top-0 z-10 bg-zinc-50 text-[11px] font-medium text-zinc-500 shadow-2xs">
                     <tr>
                       <th className="h-8 px-3">班级 / 教师</th>
                       <th className="px-2">变更前安排</th>
-                      <th className="px-0.5 text-center"></th>
+                      <th className="px-0 text-center"></th>
                       <th className="px-2">变更后安排</th>
-                      <th className="px-3 text-right">类型</th>
+                      <th className="px-3 text-right whitespace-nowrap">变更类型</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-100">
@@ -384,8 +384,8 @@ export function VersionsPage() {
                                 {formatSlot(item.before_slot_id)} · {formatRoom(item.before_room_id)}教室
                               </div>
                             </td>
-                            <td className="px-0.5 py-2.5 text-center">
-                              <ArrowRight className="inline-block size-3 text-zinc-400" />
+                            <td className="px-0 py-2.5 text-center">
+                              <ArrowRight className="inline-block size-3 text-zinc-300" />
                             </td>
                             <td className="px-2 py-2.5">
                               <div
@@ -419,8 +419,8 @@ export function VersionsPage() {
                                 </span>
                               </div>
                             </td>
-                            <td className="px-3 py-2.5 text-right">
-                              <Badge tone="blue" className="text-[10px] px-1.5 py-0.5 whitespace-nowrap">
+                            <td className="px-3 py-2.5 text-right whitespace-nowrap">
+                              <Badge tone="blue" className="text-xs px-2 py-0.5 whitespace-nowrap">
                                 {diffKindLabel(item.change_kind)}
                               </Badge>
                             </td>
