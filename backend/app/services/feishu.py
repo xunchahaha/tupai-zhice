@@ -79,6 +79,11 @@ _RETRYABLE_FEISHU_ERROR_CODES = frozenset({1254290, 1255001, 1255002})
 _REAUTHORIZATION_REQUIRED_ERROR_CODES = frozenset({99991679})
 _refresh_locks: dict[str, threading.Lock] = {}
 _refresh_locks_guard = threading.Lock()
+# View properties are immutable from the scheduler's point of view.  Keep a
+# process-local signature after one successful reconciliation so every later
+# timetable sync does not issue one GET per class.  A fresh process performs a
+# one-time audit, which also repairs views left by an interrupted/old sync.
+_CLASS_VIEW_PROJECTION_READY: dict[tuple[str, str], str] = {}
 logger = logging.getLogger(__name__)
 
 TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
@@ -1496,6 +1501,26 @@ class FeishuService:
             if not page_token:
                 raise FeishuServiceError("飞书视图分页响应缺少下一页标识")
 
+    def _get_view(
+        self,
+        token: str,
+        workspace: FeishuWorkspace,
+        table_id: str,
+        view_id: str,
+    ) -> tuple[dict[str, Any], str | None]:
+        data, log_id = self._request(
+            "GET",
+            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+            f"{table_id}/views/{view_id}",
+            token=token,
+            timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
+            retry_attempts=SYNC_RETRY_ATTEMPTS,
+        )
+        view = data.get("view", data)
+        if not isinstance(view, dict) or not view.get("view_id"):
+            raise FeishuServiceError("飞书视图详情格式不正确")
+        return view, log_id
+
     def _create_view(
         self,
         token: str,
@@ -1526,7 +1551,6 @@ class FeishuService:
         class_field_id: str,
         class_name: str,
         hidden_field_ids: list[str] | None = None,
-        sort_field_id: str | None = None,
     ) -> str | None:
         property_payload: dict[str, Any] = {
             "filter_info": {
@@ -1542,10 +1566,6 @@ class FeishuService:
         }
         if hidden_field_ids:
             property_payload["hidden_fields"] = hidden_field_ids
-        if sort_field_id:
-            property_payload["sort_info"] = {
-                "sorters": [{"field_id": sort_field_id, "desc": False}]
-            }
         _, log_id = self._request(
             "PATCH",
             f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
@@ -1558,6 +1578,54 @@ class FeishuService:
             timeout=SYNC_MUTATION_TIMEOUT_SECONDS,
         )
         return log_id
+
+    @staticmethod
+    def _class_view_matches(
+        view: dict[str, Any],
+        class_field_id: str,
+        class_name: str,
+        hidden_field_ids: list[str],
+    ) -> bool:
+        """Check the documented filter/hidden-column projection exactly.
+
+        The list-views endpoint does not return view properties, so existing
+        namespaced views are fetched individually.  This also repairs a view
+        left behind when creation succeeded but the following PATCH failed.
+        """
+
+        property_payload = view.get("property")
+        if not isinstance(property_payload, dict):
+            return False
+        filter_info = property_payload.get("filter_info")
+        if not isinstance(filter_info, dict) or filter_info.get("conjunction") != "and":
+            return False
+        conditions = filter_info.get("conditions")
+        if not isinstance(conditions, list) or len(conditions) != 1:
+            return False
+        condition = conditions[0]
+        if not isinstance(condition, dict):
+            return False
+        if (
+            str(condition.get("field_id") or "") != class_field_id
+            or condition.get("operator") != "is"
+        ):
+            return False
+        raw_value = condition.get("value")
+        if not isinstance(raw_value, str):
+            return False
+        try:
+            decoded_value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            return False
+        if decoded_value != [class_name]:
+            return False
+        hidden_fields = property_payload.get("hidden_fields")
+        actual_hidden_fields = (
+            {str(field_id) for field_id in hidden_fields if str(field_id)}
+            if isinstance(hidden_fields, list)
+            else set()
+        )
+        return actual_hidden_fields == set(hidden_field_ids)
 
     def _delete_view(
         self,
@@ -1637,14 +1705,6 @@ class FeishuService:
             ),
             "",
         )
-        sort_field_id = next(
-            (
-                str(item.get("field_id") or "")
-                for item in fields
-                if str(item.get("field_name") or "").strip() == "排序键"
-            ),
-            "",
-        )
         if not class_identity_field_id and not class_name_field_id:
             raise FeishuServiceError("课表缺少“班级标识”字段，无法创建班级视图")
         views, view_logs = self._list_views(token, workspace, table_id)
@@ -1684,14 +1744,37 @@ class FeishuService:
             "课程名称",
             "学科",
             "教室名称",
-            "课表版本",
+            "版本号",
+            "版本名称",
         }
         hidden_public_field_ids = [
             str(item.get("field_id") or "")
             for item in fields
             if str(item.get("field_id") or "")
+            # Bitable rejects a view PATCH with 1254001 when the primary
+            # field is included in hidden_fields.
+            and not bool(item.get("is_primary"))
+            and str(item.get("field_name") or "").strip() != BUSINESS_KEY_FIELD
             and str(item.get("field_name") or "").strip() not in public_field_names
         ]
+        projection_key: tuple[str, str] | None = None
+        workspace_id = str(getattr(workspace, "id", "") or "")
+        if workspace_id:
+            projection_key = (workspace_id, table_id)
+        projection_signature = json.dumps(
+            {
+                "classes": sorted(expected_names.items()),
+                "hidden_fields": sorted(hidden_public_field_ids),
+                "class_field_id": class_identity_field_id or class_name_field_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        projection_ready = bool(
+            projection_key
+            and _CLASS_VIEW_PROJECTION_READY.get(projection_key) == projection_signature
+            and set(expected_names).issubset(owned_views)
+        )
         created = updated = deleted = 0
         log_ids = [*field_logs, *view_logs]
         class_view_links: dict[str, str] = {}
@@ -1710,7 +1793,6 @@ class FeishuService:
                     class_identity_field_id or class_name_field_id,
                     class_identity if class_identity_field_id else class_name,
                     hidden_public_field_ids,
-                    sort_field_id,
                 )
                 if log_id:
                     log_ids.append(log_id)
@@ -1719,16 +1801,39 @@ class FeishuService:
                     workspace, table_id, view_id
                 )
             else:
-                # Namespaced views created by this service are immutable in
-                # meaning; avoid PATCHing all 36 views on every sync because
-                # Bitable serializes table/view writes.
                 view_id = str(existing["view_id"])
                 if not view_id:
                     continue
+                class_field_id = class_identity_field_id or class_name_field_id
+                class_filter_value = (
+                    class_identity if class_identity_field_id else class_name
+                )
+                if not projection_ready:
+                    view, log_id = self._get_view(token, workspace, table_id, view_id)
+                    if log_id:
+                        log_ids.append(log_id)
+                    if not self._class_view_matches(
+                        view,
+                        class_field_id,
+                        class_filter_value,
+                        hidden_public_field_ids,
+                    ):
+                        log_id = self._patch_class_view(
+                            token,
+                            workspace,
+                            table_id,
+                            view_id,
+                            view_name,
+                            class_field_id,
+                            class_filter_value,
+                            hidden_public_field_ids,
+                        )
+                        if log_id:
+                            log_ids.append(log_id)
+                        updated += 1
                 class_view_links[class_identity] = self._class_view_url(
                     workspace, table_id, view_id
                 )
-                updated += 0
         for view_name, view in owned_views.items():
             if view_name in expected_names:
                 continue
@@ -1738,6 +1843,8 @@ class FeishuService:
                 if log_id:
                     log_ids.append(log_id)
                 deleted += 1
+        if projection_key:
+            _CLASS_VIEW_PROJECTION_READY[projection_key] = projection_signature
         return {
             "status": "completed",
             "classes": len(class_entries),

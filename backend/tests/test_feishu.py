@@ -378,6 +378,54 @@ def test_class_view_projection_is_optional_without_write_scope() -> None:
     }
 
 
+def test_patch_class_view_uses_documented_filter_property(monkeypatch: Any) -> None:
+    service = FeishuService(settings, object())  # type: ignore[arg-type]
+    workspace = type("Workspace", (), {"app_token": "app-class-view"})()
+    requests: list[dict[str, Any]] = []
+
+    def request(method: str, url: str, **kwargs: Any) -> tuple[dict[str, Any], str]:
+        requests.append({"method": method, "url": url, **kwargs})
+        return {"view": {"view_id": "view-1"}}, "log-patch"
+
+    monkeypatch.setattr(service, "_request", request)
+
+    log_id = service._patch_class_view(
+        "token",
+        workspace,
+        "tbl-class-schedule",
+        "view-1",
+        "班级｜一班",
+        "fld-class",
+        "campus-a:class-a",
+        ["fld-internal", "fld-teacher"],
+    )
+
+    assert log_id == "log-patch"
+    assert len(requests) == 1
+    sent = requests[0]
+    assert sent["method"] == "PATCH"
+    assert sent["url"].endswith(
+        "/bitable/v1/apps/app-class-view/tables/tbl-class-schedule/views/view-1"
+    )
+    assert sent["json_body"] == {
+        "view_name": "班级｜一班",
+        "property": {
+            "filter_info": {
+                "conjunction": "and",
+                "conditions": [
+                    {
+                        "field_id": "fld-class",
+                        "operator": "is",
+                        "value": '["campus-a:class-a"]',
+                    }
+                ],
+            },
+            "hidden_fields": ["fld-internal", "fld-teacher"],
+        },
+    }
+    assert "sort_info" not in sent["json_body"]["property"]
+
+
 def test_class_view_projection_reconciles_with_write_only_scope(monkeypatch: Any) -> None:
     service = FeishuService(settings, object())  # type: ignore[arg-type]
     connection = type("Connection", (), {"scopes": ["base:view:write_only"]})()
@@ -419,6 +467,175 @@ def test_class_view_projection_reconciles_with_write_only_scope(monkeypatch: Any
     assert result["deleted"] == 0
     assert created_names == ["班级｜一班", "班级｜二班"]
     assert patched_names == created_names
+
+
+def test_class_view_projection_repairs_view_left_by_failed_patch(monkeypatch: Any) -> None:
+    service = FeishuService(settings, object())  # type: ignore[arg-type]
+    connection = type("Connection", (), {"scopes": ["base:view:write_only"]})()
+    workspace = type(
+        "Workspace",
+        (),
+        {
+            "app_token": "app-class-view",
+            "url": "https://example.feishu.cn/base/app-class-view",
+        },
+    )()
+    patched: list[tuple[Any, ...]] = []
+
+    monkeypatch.setattr(
+        service,
+        "_list_fields",
+        lambda *_args: (
+            [
+                {
+                    "field_name": "业务标识",
+                    "field_id": "fld-primary",
+                    "is_primary": True,
+                },
+                {"field_name": "班级标识", "field_id": "fld-class-id"},
+                {"field_name": "班级名称", "field_id": "fld-class-name"},
+                {"field_name": "上课日期", "field_id": "fld-date"},
+                {"field_name": "教师标识", "field_id": "fld-teacher"},
+            ],
+            ["log-fields"],
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_list_views",
+        lambda *_args: (
+            [
+                {
+                    "view_name": "班级｜一班",
+                    "view_id": "view-orphan",
+                    "view_type": "grid",
+                }
+            ],
+            ["log-views"],
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_get_view",
+        lambda *_args: (
+            {
+                "view_id": "view-orphan",
+                "view_name": "班级｜一班",
+                "view_type": "grid",
+                "property": {},
+            },
+            "log-get",
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_patch_class_view",
+        lambda *args: patched.append(args) or "log-patch",
+    )
+
+    result = service._reconcile_class_views(
+        connection,
+        "token",
+        workspace,
+        "tbl-class-schedule",
+        [{"班级标识": "campus-a:class-a", "班级名称": "一班"}],
+    )
+
+    assert result["status"] == "completed"
+    assert result["created"] == 0
+    assert result["updated"] == 1
+    assert result["deleted"] == 0
+    assert result["links"] == {
+        "campus-a:class-a": (
+            "https://example.feishu.cn/base/app-class-view"
+            "?table=tbl-class-schedule&view=view-orphan"
+        )
+    }
+    assert result["request_log_ids"] == [
+        "log-fields",
+        "log-views",
+        "log-get",
+        "log-patch",
+    ]
+    assert len(patched) == 1
+    assert patched[0][5:] == (
+        "fld-class-id",
+        "campus-a:class-a",
+        ["fld-class-id", "fld-teacher"],
+    )
+
+
+def test_class_view_projection_skips_already_configured_view(monkeypatch: Any) -> None:
+    service = FeishuService(settings, object())  # type: ignore[arg-type]
+    connection = type("Connection", (), {"scopes": ["base:view:write_only"]})()
+    workspace = type("Workspace", (), {"app_token": "app-class-view", "url": ""})()
+
+    monkeypatch.setattr(
+        service,
+        "_list_fields",
+        lambda *_args: (
+            [
+                {
+                    "field_name": "业务标识",
+                    "field_id": "fld-primary",
+                    "is_primary": True,
+                },
+                {"field_name": "班级标识", "field_id": "fld-class-id"},
+                {"field_name": "班级名称", "field_id": "fld-class-name"},
+                {"field_name": "教师标识", "field_id": "fld-teacher"},
+            ],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_list_views",
+        lambda *_args: (
+            [{"view_name": "班级｜一班", "view_id": "view-ready"}],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_get_view",
+        lambda *_args: (
+            {
+                "view_id": "view-ready",
+                "property": {
+                    "filter_info": {
+                        "conjunction": "and",
+                        "conditions": [
+                            {
+                                "field_id": "fld-class-id",
+                                "operator": "is",
+                                "value": '["campus-a:class-a"]',
+                            }
+                        ],
+                    },
+                    "hidden_fields": ["fld-class-id", "fld-teacher"],
+                },
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_patch_class_view",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not patch unchanged view")),
+    )
+
+    result = service._reconcile_class_views(
+        connection,
+        "token",
+        workspace,
+        "tbl-class-schedule",
+        [{"班级标识": "campus-a:class-a", "班级名称": "一班"}],
+    )
+
+    assert result["status"] == "completed"
+    assert result["created"] == 0
+    assert result["updated"] == 0
+    assert result["deleted"] == 0
 
 
 def test_remote_99991679_marks_user_connection_for_reauthorization(
