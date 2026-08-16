@@ -77,6 +77,7 @@ from .schemas import (
     AssistantSolveRequest,
     AuditLogResponse,
     BatchOperationResponse,
+    CalendarConflict,
     CalendarEventBindingResponse,
     CalendarPublishRequest,
     CalendarPublishResponse,
@@ -106,6 +107,7 @@ from .schemas import (
     MasterDataBatchDelete,
     OverviewResponse,
     PasswordChange,
+    PublicScheduleShareItem,
     PublicScheduleSummary,
     RescheduleCreate,
     RescheduleResponse,
@@ -2712,7 +2714,7 @@ def diff_schedules(
         old = before.get(course_id)
         new = after.get(course_id)
         if old is None:
-            kind = "added"
+            kind: Literal["added", "removed", "moved", "unchanged"] = "added"
         elif new is None:
             kind = "removed"
         elif (old.lesson_date, old.slot_business_id, old.room_business_id) != (
@@ -3123,7 +3125,7 @@ def publish_schedule_to_calendar(
                     for target_user in user_chunk:
                         busy_by_user.setdefault(target_user, []).extend(intervals)
 
-    conflicts = []
+    conflicts: list[CalendarConflict] = []
     conflicted_course_ids: set[str] = set()
     for assignment, course, calendar_user_id, start, end in publishable:
         if any(
@@ -3132,14 +3134,14 @@ def publish_schedule_to_calendar(
         ):
             conflicted_course_ids.add(course.id)
             conflicts.append(
-                {
-                    "course_session_id": course.id,
-                    "calendar_user_id": calendar_user_id,
-                    "lesson_date": assignment.lesson_date,
-                    "start_time": start.strftime("%H:%M"),
-                    "end_time": end.strftime("%H:%M"),
-                    "source": "feishu_freebusy",
-                }
+                CalendarConflict(
+                    course_session_id=course.id,
+                    calendar_user_id=calendar_user_id,
+                    lesson_date=assignment.lesson_date,
+                    start_time=start.strftime("%H:%M"),
+                    end_time=end.strftime("%H:%M"),
+                    source="feishu_freebusy",
+                )
             )
     by_calendar_user: dict[
         str, list[tuple[ScheduleAssignment, CourseSession, datetime, datetime]]
@@ -3157,14 +3159,14 @@ def publish_schedule_to_calendar(
                         continue
                     conflicted_course_ids.add(course.id)
                     conflicts.append(
-                        {
-                            "course_session_id": course.id,
-                            "calendar_user_id": calendar_user_id,
-                            "lesson_date": assignment.lesson_date,
-                            "start_time": start.strftime("%H:%M"),
-                            "end_time": end.strftime("%H:%M"),
-                            "source": "schedule_overlap",
-                        }
+                        CalendarConflict(
+                            course_session_id=course.id,
+                            calendar_user_id=calendar_user_id,
+                            lesson_date=assignment.lesson_date,
+                            start_time=start.strftime("%H:%M"),
+                            end_time=end.strftime("%H:%M"),
+                            source="schedule_overlap",
+                        )
                     )
 
     published = 0
@@ -5108,24 +5110,24 @@ def _public_summary(
     active_rooms = max(sum(1 for item in rooms.values() if item.is_active), 1)
     capacity = active_rooms * max(len(date_period_keys), 1)
     # Only anonymous labels and coarse time categories are exposed publicly.
-    preview: list[dict[str, str]] = []
+    preview: list[PublicScheduleShareItem] = []
     for index, assignment in enumerate(assignments[:6], start=1):
         course = courses.get(assignment.course_session_id)
         fixed_start = course.fixed_start_time if course else ""
         start_hour = _parse_clock(fixed_start).hour if fixed_start else 12
         preview.append(
-            {
-                "class_label": f"班级{chr(64 + index)}",
-                "room_label": f"教室{chr(64 + index)}",
-                "month": (
+            PublicScheduleShareItem(
+                class_label=f"班级{chr(64 + index)}",
+                room_label=f"教室{chr(64 + index)}",
+                month=(
                     "月份"
                     if assignment.lesson_date is None
                     else assignment.lesson_date.strftime("%Y-%m")
                 ),
-                "time_period": (
+                time_period=(
                     "上午" if start_hour < 12 else ("下午" if start_hour < 18 else "晚间")
                 ),
-            }
+            )
         )
     return PublicScheduleSummary(
         data_policy="仅公开匿名汇总与脱敏投影，不包含原始班型、班级、教室、教研组、课节或完整日期明细",
