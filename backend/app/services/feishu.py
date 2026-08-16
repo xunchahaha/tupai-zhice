@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from ..config import (
     AILY_OPTIONAL_SCOPES,
     FEISHU_BITABLE_APP_READ_SCOPES,
+    FEISHU_OPTIONAL_BITABLE_APP_SCOPES,
     FEISHU_OPTIONAL_CLEANUP_SCOPES,
     FEISHU_OPTIONAL_VIEW_SCOPES,
     FEISHU_REQUIRED_SCOPES,
@@ -680,22 +681,46 @@ class FeishuService:
 
     @staticmethod
     def _missing_scopes(granted: list[str] | set[str], required: set[str]) -> list[str]:
-        """Return canonical missing scopes while honoring Feishu OR grants."""
+        """Return canonical missing scopes while honoring Feishu OR grants.
+
+        Feishu's user-identity API accepts the full ``bitable:app`` grant as
+        an alternative to granular ``base:*`` grants.  A token may therefore
+        legitimately contain only ``bitable:app`` even when the OAuth URL
+        requested the granular scopes.  Keep the status/API preflight aligned
+        with that behavior so a stale token is reported as reauthorization
+        required instead of failing later on ``POST /fields`` with 99991679.
+        """
 
         granted_set = set(granted)
         missing = set(required) - granted_set
+        if "bitable:app" in granted_set:
+            missing.difference_update(
+                scope
+                for scope in required
+                if scope.startswith("base:") or scope.startswith("bitable:app")
+            )
         if FEISHU_BITABLE_APP_READ_SCOPES & required:
             missing.difference_update(FEISHU_BITABLE_APP_READ_SCOPES)
-            if not (FEISHU_BITABLE_APP_READ_SCOPES & granted_set):
+            if "bitable:app" not in granted_set and not (
+                FEISHU_BITABLE_APP_READ_SCOPES & granted_set
+            ):
                 # Keep one stable, actionable label in the API/UI even though
                 # the Feishu console accepts either scope in this group.
                 missing.add("bitable:app:readonly")
+        # Field creation is accepted with either ``base:field:create`` or the
+        # full Bitable grant.  Expose one stable label in the UI when neither
+        # is present, matching the 99991679 error returned by Feishu.
+        if "base:field:create" in required:
+            missing.discard("base:field:create")
+            if "bitable:app" not in granted_set and "base:field:create" not in granted_set:
+                missing.add("base:field:create")
         return sorted(missing)
 
     def create_oauth_start(self, user_id: str) -> dict[str, Any]:
         app = self._app_configuration()
         scopes = sorted(
             self._required_user_scopes()
+            | set(FEISHU_OPTIONAL_BITABLE_APP_SCOPES)
             | set(FEISHU_OPTIONAL_CLEANUP_SCOPES)
             | set(FEISHU_OPTIONAL_VIEW_SCOPES)
         )
@@ -1778,7 +1803,10 @@ class FeishuService:
                 if field_name not in fields_by_name
             ]
             if missing_fields:
-                self._require_scopes(connection, {"base:table:update"})
+                # ``POST /fields`` requires ``base:field:create`` or the
+                # full ``bitable:app`` grant.  ``base:table:update`` alone is
+                # insufficient and causes Feishu error 99991679.
+                self._require_scopes(connection, {"base:field:create"})
                 for field_name, field_type in missing_fields:
                     self._create_field(token, workspace, table_id, field_name, field_type)
             prepared[resource] = binding

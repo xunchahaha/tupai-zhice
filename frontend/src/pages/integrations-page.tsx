@@ -68,6 +68,7 @@ const publicDisplayResources = [
 const bitableSyncScopes = [
   "base:table:read",
   "base:field:read",
+  "base:field:create",
   "bitable:app:readonly",
   "base:record:create",
   "base:record:retrieve",
@@ -93,6 +94,8 @@ const permissionLabels: Record<string, string> = {
   "base:table:read": "获取数据表信息",
   "base:table:update": "更新数据表",
   "base:field:read": "读取数据表字段",
+  "base:field:create": "新增数据表字段",
+  "bitable:app": "管理多维表格应用与字段（可替代细分权限）",
   "bitable:app:readonly": "读取多维表格应用与字段",
   "base:view:write_only": "创建和更新班级筛选视图（可选）",
   "base:record:create": "新增记录",
@@ -325,8 +328,11 @@ export function IntegrationsPage() {
   const workspaceReady = Boolean(
     status.workspace?.status === "active" && status.workspace.tables?.length === resources.length,
   );
+  const hasFullBitableAppScope = status.granted_scopes.includes("bitable:app");
   const missingBitableSyncScopes = bitableSyncScopes.filter(
-    (scope) => scope === "bitable:app:readonly"
+    (scope) => hasFullBitableAppScope
+      ? false
+      : scope === "bitable:app:readonly"
       ? !status.granted_scopes.some((item) => item === "bitable:app" || item === "bitable:app:readonly")
       : !status.granted_scopes.includes(scope),
   );

@@ -12,6 +12,7 @@ from sqlalchemy import delete, func, select
 
 from app.api import settings
 from app.config import (
+    FEISHU_OPTIONAL_BITABLE_APP_SCOPES,
     FEISHU_OPTIONAL_CLEANUP_SCOPES,
     FEISHU_OPTIONAL_VIEW_SCOPES,
     FEISHU_REQUIRED_SCOPES,
@@ -93,6 +94,7 @@ def complete_authorization(
     assert "offline_access" in query["scope"][0]
     assert (
         set(FEISHU_REQUIRED_SCOPES)
+        | set(FEISHU_OPTIONAL_BITABLE_APP_SCOPES)
         | set(FEISHU_OPTIONAL_CLEANUP_SCOPES)
         | set(FEISHU_OPTIONAL_VIEW_SCOPES)
     ) == set(query["scope"][0].split())
@@ -301,7 +303,7 @@ def test_connection_status_requires_reauthorization_when_scope_grant_is_stale(
         connection.scopes = [
             scope
             for scope in connection.scopes
-            if scope not in {"base:field:read", "bitable:app:readonly"}
+            if scope not in {"base:field:read", "bitable:app", "bitable:app:readonly"}
         ]
         db.commit()
 
@@ -674,12 +676,13 @@ def test_sync_preflight_adopts_existing_table_and_adds_only_missing_fields(
             scopes=[
                 "base:record:create",
                 "base:record:retrieve",
-                    "base:record:update",
-                    "base:table:read",
-                    "base:table:update",
-                    "base:field:read",
-                    "bitable:app:readonly",
-                ],
+                "base:record:update",
+                "base:table:read",
+                "base:table:update",
+                "base:field:read",
+                "base:field:create",
+                "bitable:app:readonly",
+            ],
             status="active",
         )
         db.add(connection)

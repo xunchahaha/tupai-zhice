@@ -233,6 +233,7 @@ describe("飞书生产接入页", () => {
         "offline_access",
         "base:table:read",
         "base:field:read",
+        "base:field:create",
         "bitable:app:readonly",
         "base:record:create",
         "base:record:retrieve",
@@ -276,7 +277,7 @@ describe("飞书生产接入页", () => {
       ...baseConnection,
       status: "reauthorization_required",
       authorized: false,
-      missing_scopes: ["base:field:read", "bitable:app:readonly"],
+      missing_scopes: ["base:field:read", "base:field:create", "bitable:app:readonly"],
       message: "当前飞书用户令牌缺少同步所需权限，请重新授权管理员账号。",
     };
     const user = userEvent.setup();

@@ -35,6 +35,10 @@ FEISHU_REQUIRED_SCOPES = (
     # Bitable read variants); requesting both lets the UI detect stale grants
     # deterministically after an app version is published.
     "base:field:read",
+    # Adding a missing column during schema reconciliation uses the field
+    # creation endpoint. Feishu accepts either this granular grant or the
+    # full ``bitable:app`` grant for that endpoint.
+    "base:field:create",
     "bitable:app:readonly",
     "base:record:create",
     "base:record:retrieve",
@@ -49,6 +53,12 @@ FEISHU_REQUIRED_SCOPES = (
 # them as an OR group instead of requiring the exact scope requested in the
 # latest OAuth URL.
 FEISHU_BITABLE_APP_READ_SCOPES = frozenset({"bitable:app", "bitable:app:readonly"})
+
+# ``bitable:app`` is the full Bitable user-identity grant. Feishu may return
+# it instead of granular ``base:*`` grants, and the full grant satisfies both
+# metadata reads and writes. Request it explicitly so a fresh OAuth grant can
+# use the same fallback as the API.
+FEISHU_OPTIONAL_BITABLE_APP_SCOPES = ("bitable:app",)
 
 # Requested on a new OAuth grant but never treated as a prerequisite for the
 # normal create/retrieve/update sync path. This keeps old authorizations ready
