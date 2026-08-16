@@ -2322,11 +2322,11 @@ class FeishuService:
             legacy_by_session_version: dict[tuple[str, str], list[str]] = {}
             for record in remote_records:
                 record_id = str(record.get("record_id") or "")
-                fields = record.get("fields")
-                if not record_id or not isinstance(fields, dict):
+                legacy_fields = record.get("fields")
+                if not record_id or not isinstance(legacy_fields, dict):
                     continue
-                session_key = normalize_business_key(fields.get("场次标识"))
-                version_key = normalize_business_key(fields.get("版本标识"))
+                session_key = normalize_business_key(legacy_fields.get("场次标识"))
+                version_key = normalize_business_key(legacy_fields.get("版本标识"))
                 if session_key and version_key:
                     legacy_by_session_version.setdefault(
                         (session_key, version_key), []
