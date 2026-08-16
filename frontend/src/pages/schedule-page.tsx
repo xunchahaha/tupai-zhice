@@ -1,4 +1,5 @@
 import {
+  BookOpen,
   Calendar,
   CalendarCheck2,
   CalendarDays,
@@ -22,12 +23,13 @@ import { toast } from "sonner";
 import {
   useGetScheduleApiV1SchedulesScheduleIdGet,
   useListClassGroupsApiV1ClassGroupsGet,
+  useListCourseSessionsApiV1CourseSessionsGet,
   useListRoomsApiV1RoomsGet,
   useListSchedulesApiV1SchedulesGet,
   useListTeachersApiV1TeachersGet,
   useListTimeSlotsApiV1TimeSlotsGet,
 } from "@/api/generated/client";
-import type { AssignmentResponse, TimeSlotResponse } from "@/api/generated/models";
+import type { AssignmentResponse, CourseSessionResponse, TimeSlotResponse } from "@/api/generated/models";
 import { http } from "@/api/http";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -125,6 +127,7 @@ export function SchedulePage() {
   const classes = useListClassGroupsApiV1ClassGroupsGet();
   const teachers = useListTeachersApiV1TeachersGet();
   const rooms = useListRoomsApiV1RoomsGet();
+  const courseSessions = useListCourseSessionsApiV1CourseSessionsGet();
 
   useEffect(() => {
     const initial = preferredSchedule(schedules.data);
@@ -142,6 +145,15 @@ export function SchedulePage() {
   });
   const schedule = detail.data;
   const slotRows = useMemo(() => slots.data ?? [], [slots.data]);
+
+  // Fast lookup for course details (subject, lesson name, stage, session_no)
+  const courseMap = useMemo(() => {
+    const map = new Map<string, CourseSessionResponse>();
+    for (const cs of courseSessions.data ?? []) {
+      map.set(cs.business_id, cs);
+    }
+    return map;
+  }, [courseSessions.data]);
 
   const filtered = useMemo(
     () =>
@@ -215,9 +227,9 @@ export function SchedulePage() {
       const isLast = idx === mondays.length - 1;
 
       let tag = `第 ${idx + 1} 阶段`;
-      if (isFirst && isLast) tag = "单周集中课";
-      else if (isFirst) tag = "⚡ 开营首周";
-      else if (isLast) tag = "🏁 结课尾周";
+      if (isFirst && isLast) tag = "全课程周";
+      else if (isFirst) tag = "开营首周";
+      else if (isLast) tag = "结课尾周";
 
       return {
         index: idx,
@@ -225,7 +237,7 @@ export function SchedulePage() {
         tag,
         startDay,
         endDay,
-        label: `${tag} · ${startDay} ~ ${endDay} (共 ${items.length} 节课)`,
+        label: `${tag} · ${startDay} ~ ${endDay} (共 ${items.length} 节)`,
         days,
         items,
       };
@@ -252,7 +264,7 @@ export function SchedulePage() {
 
   const rows = clockRows(slotRows);
 
-  const all = [schedules, slots, classes, teachers, rooms];
+  const all = [schedules, slots, classes, teachers, rooms, courseSessions];
   if (all.some((item) => item.isPending)) return <LoadingState />;
   if (all.some((item) => item.isError)) {
     return <ErrorState retry={() => all.forEach((item) => void item.refetch())} />;
@@ -279,7 +291,6 @@ export function SchedulePage() {
     }
   };
 
-  // Matrix grid: 80px time column + 7 equal columns for Mon-Sun
   const matrixGridStyle = {
     gridTemplateColumns: `80px repeat(7, minmax(0, 1fr))`,
   };
@@ -341,7 +352,7 @@ export function SchedulePage() {
               <button
                 type="button"
                 className={cn(
-                  "flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-xs font-medium transition-all",
+                  "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-all",
                   layout === "timeline"
                     ? "bg-white text-blue-700 shadow-2xs font-semibold"
                     : "text-zinc-600 hover:text-zinc-900",
@@ -354,7 +365,7 @@ export function SchedulePage() {
               <button
                 type="button"
                 className={cn(
-                  "flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-xs font-medium transition-all",
+                  "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-all",
                   layout === "matrix"
                     ? "bg-white text-blue-700 shadow-2xs font-semibold"
                     : "text-zinc-600 hover:text-zinc-900",
@@ -402,7 +413,7 @@ export function SchedulePage() {
         </div>
       </section>
 
-      {/* VIEW 1: Timeline / Session Flow View (Shows ALL sessions with prominent Time Badges & zero empty gaps!) */}
+      {/* VIEW 1: Timeline / Session Flow View (Shows ALL sessions with explicit course/subject, teacher & time!) */}
       {layout === "timeline" && (
         <section className="space-y-4">
           {sortedAssignments.length === 0 ? (
@@ -437,12 +448,14 @@ export function SchedulePage() {
                     const isLast = globalIndex === sortedAssignments.length - 1;
                     const weekday = item.lesson_date ? formatWeekday(item.lesson_date) : "";
                     const timeRange = getSlotTimeRange(slotRows, item.slot_business_id);
+                    const cs = courseMap.get(item.course_business_id);
+                    const courseName = cs?.subject || cs?.lesson_name || "课程课次";
 
                     return (
                       <div
                         key={item.course_session_id}
                         className={cn(
-                          "flex flex-col sm:flex-row sm:items-center justify-between gap-3.5 rounded-xl border p-4 transition-all duration-150 hover:shadow-xs",
+                          "flex flex-col md:flex-row md:items-center justify-between gap-3.5 rounded-xl border p-4 transition-all duration-150 hover:shadow-xs",
                           isFirst
                             ? "border-emerald-300 bg-emerald-50/40"
                             : isLast
@@ -450,9 +463,9 @@ export function SchedulePage() {
                               : "border-zinc-200/80 bg-zinc-50/40 hover:bg-white hover:border-zinc-300",
                         )}
                       >
-                        {/* Left: Date + Weekday + Tag */}
-                        <div className="flex items-center gap-3 sm:min-w-[190px]">
-                          <div className="grid size-11 place-items-center rounded-xl bg-white border border-zinc-200 text-center shadow-2xs">
+                        {/* 1. Date & Calendar Tag */}
+                        <div className="flex items-center gap-3 md:min-w-[200px]">
+                          <div className="grid size-12 place-items-center rounded-xl bg-white border border-zinc-200 text-center shadow-2xs shrink-0">
                             <div className="text-[10px] font-medium text-blue-600 leading-none">
                               {weekday || "排课"}
                             </div>
@@ -478,14 +491,27 @@ export function SchedulePage() {
                                       : "bg-zinc-200/80 text-zinc-600",
                                 )}
                               >
-                                {isFirst ? "⚡ 开营首课" : isLast ? "🏁 结营尾课" : `第 ${globalIndex + 1} 节`}
+                                {isFirst ? "开营首课" : isLast ? "结课尾课" : `第 ${globalIndex + 1} 讲`}
                               </span>
                             </div>
                           </div>
                         </div>
 
-                        {/* Center: Prominent Time Badge */}
-                        <div className="flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50/80 px-3 py-2 text-blue-950 sm:min-w-[160px]">
+                        {/* 2. Course Name / Subject Badge */}
+                        <div className="flex items-center gap-2 md:min-w-[170px]">
+                          <div className="flex items-center gap-1.5 rounded-lg border border-indigo-100 bg-indigo-50/80 px-3 py-2 text-indigo-950 w-full">
+                            <BookOpen className="size-4 text-indigo-600 shrink-0" />
+                            <div>
+                              <div className="text-xs font-bold leading-tight break-words">{courseName}</div>
+                              {cs?.stage && (
+                                <div className="text-[10px] text-indigo-600 font-medium">{cs.stage}</div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* 3. Explicit Time Range Badge */}
+                        <div className="flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50/80 px-3 py-2 text-blue-950 md:min-w-[160px]">
                           <Clock className="size-4 text-blue-600 shrink-0" />
                           <div>
                             <div className="text-xs font-bold tracking-tight">{timeRange}</div>
@@ -493,7 +519,7 @@ export function SchedulePage() {
                           </div>
                         </div>
 
-                        {/* Right: Course Details */}
+                        {/* 4. Teacher, Class and Room Details */}
                         <div className="flex flex-1 flex-wrap items-center gap-4 text-xs">
                           {mode !== "class" && (
                             <div className="flex items-center gap-1.5 text-zinc-800">
@@ -526,53 +552,53 @@ export function SchedulePage() {
         </section>
       )}
 
-      {/* VIEW 2: Standard 7-Day Weekly Calendar with First/Last Active Week Jumper */}
+      {/* VIEW 2: Standard 7-Day Weekly Calendar with First/Last Active Week Jumper in ONE LINE */}
       {layout === "matrix" && (
         <section className="space-y-4">
-          {/* Active Weeks Selector Bar */}
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-200 bg-white p-4 shadow-2xs">
-            {/* Quick Jumper Buttons: First Week / Last Week */}
-            <div className="flex items-center gap-2">
+          {/* Active Weeks Selector Bar - Fully aligned in ONE Single Line */}
+          <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 rounded-xl border border-zinc-200 bg-white p-3 shadow-2xs">
+            {/* Left: Quick Jumper Buttons (First Week / Last Week) */}
+            <div className="flex items-center gap-2 shrink-0">
               <Button
                 size="sm"
                 variant={activeWeekIndex === 0 ? "primary" : "outline"}
-                className="h-8 text-xs font-semibold"
+                className="h-8 text-xs font-semibold whitespace-nowrap"
                 onClick={() => setActiveWeekIndex(0)}
                 disabled={activeWeeks.length === 0}
               >
-                <Zap className="size-3.5" />
-                ⚡ 开营首周 ({activeWeeks[0]?.startDay ?? "-"})
+                <Zap className="size-3.5 text-amber-500" />
+                开营首周 ({activeWeeks[0]?.startDay ?? "-"})
               </Button>
               <Button
                 size="sm"
                 variant={activeWeekIndex === activeWeeks.length - 1 ? "primary" : "outline"}
-                className="h-8 text-xs font-semibold"
+                className="h-8 text-xs font-semibold whitespace-nowrap"
                 onClick={() => setActiveWeekIndex(activeWeeks.length - 1)}
                 disabled={activeWeeks.length === 0}
               >
-                <Zap className="size-3.5" />
-                🏁 结课尾周 ({activeWeeks[activeWeeks.length - 1]?.startDay ?? "-"})
+                <CalendarCheck2 className="size-3.5 text-purple-500" />
+                结课尾周 ({activeWeeks[activeWeeks.length - 1]?.startDay ?? "-"})
               </Button>
             </div>
 
-            {/* Active Weeks Dropdown Selector */}
+            {/* Right: Active Week Selector & Stepper */}
             {activeWeeks.length > 1 && (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 shrink-0">
                 <Button
                   size="sm"
                   variant="outline"
-                  className="h-8"
+                  className="h-8 px-2 text-xs"
                   onClick={() => setActiveWeekIndex((curr) => Math.max(0, curr - 1))}
                   disabled={activeWeekIndex <= 0}
                 >
-                  <ChevronLeft className="size-3.5" />
-                  上一有课周
+                  <ChevronLeft className="size-3.5 mr-0.5" />
+                  上一周
                 </Button>
 
                 <Select
                   aria-label="选择有课周次"
                   selectSize="sm"
-                  containerClassName="w-80"
+                  containerClassName="w-64"
                   value={String(activeWeekIndex)}
                   onChange={(e) => setActiveWeekIndex(Number(e.target.value))}
                 >
@@ -586,12 +612,12 @@ export function SchedulePage() {
                 <Button
                   size="sm"
                   variant="outline"
-                  className="h-8"
+                  className="h-8 px-2 text-xs"
                   onClick={() => setActiveWeekIndex((curr) => Math.min(activeWeeks.length - 1, curr + 1))}
                   disabled={activeWeekIndex >= activeWeeks.length - 1}
                 >
-                  下一有课周
-                  <ChevronRight className="size-3.5" />
+                  下一周
+                  <ChevronRight className="size-3.5 ml-0.5" />
                 </Button>
               </div>
             )}
@@ -646,75 +672,88 @@ export function SchedulePage() {
                       <div
                         key={col.date}
                         className={cn(
-                          "min-h-24 space-y-1.5 border-l border-zinc-100 p-2 flex flex-col justify-start",
+                          "min-h-28 space-y-1.5 border-l border-zinc-100 p-2 flex flex-col justify-start",
                           items.length > 0 ? "bg-blue-50/15" : "",
                         )}
                       >
-                        {items.map((assignment) => (
-                          <div
-                            key={assignment.course_session_id}
-                            title={`课次编号: ${assignment.course_business_id}`}
-                            className={cn(
-                              "group rounded-lg border p-2.5 text-left transition-all duration-150 shadow-2xs hover:shadow-xs",
-                              items.length > 1
-                                ? "border-red-200 bg-red-50/90 text-red-900"
-                                : "border-blue-200/90 bg-blue-50/80 text-blue-950 hover:bg-blue-100/70 hover:border-blue-300",
-                            )}
-                          >
-                            {/* Prominent Time Display on card */}
-                            <div className="text-[10px] font-mono font-semibold text-blue-700 mb-1 flex items-center gap-1">
-                              <Timer className="size-2.5" />
-                              {row.start}~{row.end}
-                            </div>
+                        {items.map((assignment) => {
+                          const cs = courseMap.get(assignment.course_business_id);
+                          const courseName = cs?.subject || cs?.lesson_name || "";
 
-                            {mode === "class" ? (
-                              <>
-                                <div className="flex items-start gap-1 text-xs font-bold text-zinc-900 group-hover:text-blue-700 leading-tight">
-                                  <User className="size-3 text-blue-600 shrink-0 mt-0.5" />
-                                  <span className="break-words">
-                                    {assignment.teacher_business_id || "未定教师"}
+                          return (
+                            <div
+                              key={assignment.course_session_id}
+                              title={`课次编号: ${assignment.course_business_id}`}
+                              className={cn(
+                                "group rounded-lg border p-2.5 text-left transition-all duration-150 shadow-2xs hover:shadow-xs",
+                                items.length > 1
+                                  ? "border-red-200 bg-red-50/90 text-red-900"
+                                  : "border-blue-200/90 bg-blue-50/80 text-blue-950 hover:bg-blue-100/70 hover:border-blue-300",
+                              )}
+                            >
+                              {/* 1. Time Badge + Course Subject Badge */}
+                              <div className="flex items-center justify-between gap-1 mb-1.5">
+                                <span className="text-[10px] font-mono font-bold text-blue-700 flex items-center gap-0.5">
+                                  <Timer className="size-2.5" />
+                                  {row.start}~{row.end}
+                                </span>
+                                {courseName && (
+                                  <span className="text-[10px] font-semibold bg-indigo-100/90 text-indigo-800 px-1.5 py-0.2 rounded break-all truncate max-w-[85px]">
+                                    {courseName}
                                   </span>
-                                </div>
-                                <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-600">
-                                  <DoorOpen className="size-3 text-zinc-400 shrink-0" />
-                                  <span className="font-medium break-words">
-                                    {formatRoom(assignment.room_business_id)}教室
-                                  </span>
-                                </div>
-                              </>
-                            ) : mode === "teacher" ? (
-                              <>
-                                <div className="flex items-start gap-1 text-xs font-bold text-zinc-900 group-hover:text-blue-700 leading-tight">
-                                  <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
-                                  <span className="break-words">
-                                    {assignment.class_business_id || "未定班级"}
-                                  </span>
-                                </div>
-                                <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-600">
-                                  <DoorOpen className="size-3 text-zinc-400 shrink-0" />
-                                  <span className="font-medium break-words">
-                                    {formatRoom(assignment.room_business_id)}教室
-                                  </span>
-                                </div>
-                              </>
-                            ) : (
-                              <>
-                                <div className="flex items-start gap-1 text-xs font-bold text-zinc-900 group-hover:text-blue-700 leading-tight">
-                                  <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
-                                  <span className="break-words">
-                                    {assignment.class_business_id || "未定班级"}
-                                  </span>
-                                </div>
-                                <div className="mt-1 flex items-start gap-1 text-[11px] text-zinc-600 leading-tight">
-                                  <User className="size-3 text-zinc-400 shrink-0 mt-0.5" />
-                                  <span className="break-words">
-                                    {assignment.teacher_business_id || "未定教师"}
-                                  </span>
-                                </div>
-                              </>
-                            )}
-                          </div>
-                        ))}
+                                )}
+                              </div>
+
+                              {/* 2. Main Contextual Subject & Teacher */}
+                              {mode === "class" ? (
+                                <>
+                                  <div className="flex items-start gap-1 text-xs font-bold text-zinc-900 group-hover:text-blue-700 leading-tight">
+                                    <User className="size-3 text-blue-600 shrink-0 mt-0.5" />
+                                    <span className="break-words">
+                                      {assignment.teacher_business_id || "未定教师"}
+                                    </span>
+                                  </div>
+                                  <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-600">
+                                    <DoorOpen className="size-3 text-zinc-400 shrink-0" />
+                                    <span className="font-medium break-words">
+                                      {formatRoom(assignment.room_business_id)}教室
+                                    </span>
+                                  </div>
+                                </>
+                              ) : mode === "teacher" ? (
+                                <>
+                                  <div className="flex items-start gap-1 text-xs font-bold text-zinc-900 group-hover:text-blue-700 leading-tight">
+                                    <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
+                                    <span className="break-words">
+                                      {assignment.class_business_id || "未定班级"}
+                                    </span>
+                                  </div>
+                                  <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-600">
+                                    <DoorOpen className="size-3 text-zinc-400 shrink-0" />
+                                    <span className="font-medium break-words">
+                                      {formatRoom(assignment.room_business_id)}教室
+                                    </span>
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <div className="flex items-start gap-1 text-xs font-bold text-zinc-900 group-hover:text-blue-700 leading-tight">
+                                    <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
+                                    <span className="break-words">
+                                      {assignment.class_business_id || "未定班级"}
+                                    </span>
+                                  </div>
+                                  <div className="mt-1 flex items-start gap-1 text-[11px] text-zinc-600 leading-tight">
+                                    <User className="size-3 text-zinc-400 shrink-0 mt-0.5" />
+                                    <span className="break-words">
+                                      {assignment.teacher_business_id || "未定教师"}
+                                    </span>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          );
+                        })}
 
                         {items.length > 1 ? (
                           <div className="rounded bg-red-100 px-1.5 py-0.5 text-center text-[10px] font-semibold text-red-700">
@@ -754,7 +793,7 @@ export function SchedulePage() {
           <span className="inline-block size-2 rounded-full bg-blue-500"></span>
           <span>
             {layout === "timeline"
-              ? "全部日程流：完整时间轴 + 醒目时间段"
+              ? "全部日程流：完整科目课程 + 授课教师 + 醒目时段"
               : `标准周历：当前定位在 ${currentWeek?.tag ?? "首周"} (${currentWeek?.startDay ?? ""} ~ ${currentWeek?.endDay ?? ""})`}
           </span>
         </div>
