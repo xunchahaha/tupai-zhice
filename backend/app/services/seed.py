@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..config import DEFAULT_ADMIN_PASSWORD, LEGACY_ADMIN_PASSWORDS
 from ..models import (
     Campus,
     ClassGroup,
@@ -14,14 +15,37 @@ from ..models import (
     TimeSlot,
     User,
 )
-from ..security import hash_password
+from ..security import hash_password, verify_password
+from ..timezone import shanghai_now
 
 
 def bootstrap_admin(db: Session, username: str, password: str) -> User:
+    target_password = (
+        DEFAULT_ADMIN_PASSWORD if password in LEGACY_ADMIN_PASSWORDS else password
+    )
     user = db.scalar(select(User).where(User.username == username))
     if user:
+        uses_legacy_password = any(
+            verify_password(legacy_password, user.password_hash)
+            for legacy_password in LEGACY_ADMIN_PASSWORDS
+        )
+        if uses_legacy_password:
+            user.role = "admin"
+            user.is_active = True
+            user.password_hash = hash_password(target_password)
+            user.password_changed_at = shanghai_now()
+            user.token_version += 1
+            user.failed_login_count = 0
+            user.locked_until = None
+            db.commit()
+            db.refresh(user)
         return user
-    user = User(username=username, password_hash=hash_password(password), role="admin")
+    user = User(
+        username=username,
+        password_hash=hash_password(target_password),
+        role="admin",
+        is_active=True,
+    )
     db.add(user)
     db.commit()
     db.refresh(user)

@@ -6,7 +6,7 @@ test("管理员完成排课、调课、回滚和飞书生产接入引导流程",
   test.setTimeout(75_000);
   const anonymousApi = await request.newContext({ baseURL: apiBaseURL });
   const login = await anonymousApi.post("/api/v1/auth/token", {
-    form: { username: "admin", password: "tupai-demo" },
+    form: { username: "admin", password: "tupai-demo-admin-2026!" },
   });
   expect(login.ok()).toBeTruthy();
   const { access_token: accessToken } = await login.json();
@@ -40,7 +40,7 @@ test("管理员完成排课、调课、回滚和飞书生产接入引导流程",
 
   await page.goto("/login");
   await page.getByLabel("用户名").fill("admin");
-  await page.getByLabel("密码").fill("tupai-demo");
+  await page.getByLabel("密码").fill("tupai-demo-admin-2026!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.waitForURL("**/overview");
   await expect(page.getByRole("heading", { name: "总览" })).toBeVisible();

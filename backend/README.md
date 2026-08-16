@@ -9,6 +9,8 @@ uv run tupai-seed
 uv run tupai-api
 ```
 
+容器启动入口会先自动执行 `alembic upgrade head`，再启动 API。因此全新持久化卷会先完成建表，随后由应用启动流程创建默认管理员。已有数据库只执行幂等迁移，不会覆盖管理员自行修改过的密码。
+
 ## 课表数据导入
 
 导入按官方模板（`data/imports/sample.xlsx` 的「课表数据源」工作表，14 列）读取，

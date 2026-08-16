@@ -5,7 +5,7 @@ const apiBaseURL = process.env.E2E_API_BASE_URL ?? "http://127.0.0.1:8001";
 async function createAdminApi(): Promise<APIRequestContext> {
   const anonymousApi = await request.newContext({ baseURL: apiBaseURL });
   const login = await anonymousApi.post("/api/v1/auth/token", {
-    form: { username: "admin", password: "tupai-demo" },
+    form: { username: "admin", password: "tupai-demo-admin-2026!" },
   });
   expect(login.ok()).toBeTruthy();
   const { access_token: accessToken } = await login.json();
@@ -40,7 +40,7 @@ async function ensureSchedule(api: APIRequestContext) {
 async function login(page: Page) {
   await page.goto("/login");
   await page.getByLabel("用户名").fill("admin");
-  await page.getByLabel("密码").fill("tupai-demo");
+  await page.getByLabel("密码").fill("tupai-demo-admin-2026!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.waitForURL("**/overview");
 }

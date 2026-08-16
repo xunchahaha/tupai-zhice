@@ -48,7 +48,8 @@ def client() -> TestClient:
 @pytest.fixture(scope="session")
 def auth_headers(client: TestClient) -> dict[str, str]:
     response = client.post(
-        "/api/v1/auth/token", data={"username": "admin", "password": "tupai-demo"}
+        "/api/v1/auth/token",
+        data={"username": "admin", "password": "tupai-demo-admin-2026!"},
     )
     assert response.status_code == 200
     token = response.json()["access_token"]

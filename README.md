@@ -15,7 +15,7 @@ uv run tupai-api
 
 Swagger：`http://127.0.0.1:8000/docs`
 
-默认本地账号：`admin` / `tupai-demo`。部署前必须通过 `.env` 更换管理员密码和 JWT 密钥，并在“飞书集成”页面配置飞书应用与一句话排课 AI。
+新数据库启动时会自动创建默认管理员：`admin` / `tupai-demo-admin-2026!`。首次登录后建议在账号管理中修改密码；部署环境也可通过 `.env` 的 `BOOTSTRAP_ADMIN_USERNAME`、`BOOTSTRAP_ADMIN_PASSWORD` 覆盖。JWT 密钥仍应在部署时单独配置。
 
 前端：
 

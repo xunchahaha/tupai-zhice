@@ -81,7 +81,9 @@ FEISHU_OPTIONAL_VIEW_SCOPES = ("base:view:write_only",)
 AILY_OPTIONAL_SCOPES = ("aily:skill:write",)
 
 DEFAULT_JWT_SECRET = "dev-secret-change-before-deployment"
-DEFAULT_ADMIN_PASSWORD = "tupai-demo"
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "tupai-demo-admin-2026!"
+LEGACY_ADMIN_PASSWORDS = ("tupai-demo",)
 DEFAULT_AILY_KEY = "aily-demo-key"
 
 
@@ -95,8 +97,8 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-secret-change-before-deployment"
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 480
-    bootstrap_admin_username: str = "admin"
-    bootstrap_admin_password: str = "tupai-demo"
+    bootstrap_admin_username: str = DEFAULT_ADMIN_USERNAME
+    bootstrap_admin_password: str = DEFAULT_ADMIN_PASSWORD
     aily_skill_api_key: str = "aily-demo-key"
     aily_app_id: str = ""
     aily_skill_id: str = ""
@@ -131,6 +133,20 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
+    @field_validator("bootstrap_admin_username", mode="before")
+    @classmethod
+    def default_bootstrap_admin_username(cls, value: object) -> object:
+        if value is None or not str(value).strip():
+            return DEFAULT_ADMIN_USERNAME
+        return value
+
+    @field_validator("bootstrap_admin_password", mode="before")
+    @classmethod
+    def default_bootstrap_admin_password(cls, value: object) -> object:
+        if value is None or not str(value).strip() or str(value) in LEGACY_ADMIN_PASSWORDS:
+            return DEFAULT_ADMIN_PASSWORD
+        return value
+
     @property
     def is_production(self) -> bool:
         return self.app_env.strip().lower() in {"production", "prod"}
@@ -143,11 +159,13 @@ class Settings(BaseSettings):
             issues.append("JWT_SECRET 仍是示例值")
         if len(self.jwt_secret) < 32:
             issues.append("JWT_SECRET 长度不足 32 位")
-        if self.bootstrap_admin_password == DEFAULT_ADMIN_PASSWORD:
-            issues.append("BOOTSTRAP_ADMIN_PASSWORD 仍是示例值")
         if self.aily_skill_api_key == DEFAULT_AILY_KEY:
             issues.append("AILY_SKILL_API_KEY 仍是示例值")
         return issues
+
+    @property
+    def uses_default_admin_password(self) -> bool:
+        return self.bootstrap_admin_password == DEFAULT_ADMIN_PASSWORD
 
     @property
     def feishu_environment_configured(self) -> bool:

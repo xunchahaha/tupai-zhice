@@ -15,7 +15,7 @@ type FormValues = z.infer<typeof schema>;
 
 export function LoginPage() {
   const navigate = useNavigate();
-  const form = useForm<FormValues>({ resolver: zodResolver(schema), defaultValues: { username: "admin", password: "tupai-demo" } });
+  const form = useForm<FormValues>({ resolver: zodResolver(schema), defaultValues: { username: "admin", password: "tupai-demo-admin-2026!" } });
   const submit = async (values: FormValues) => {
     try {
       const response = await loginApiV1AuthTokenPost(values);

@@ -27,10 +27,10 @@ describe("LoginPage", () => {
     render(<MemoryRouter><LoginPage /></MemoryRouter>);
 
     expect(screen.getByLabelText("用户名")).toHaveValue("admin");
-    expect(screen.getByLabelText("密码")).toHaveValue("tupai-demo");
+    expect(screen.getByLabelText("密码")).toHaveValue("tupai-demo-admin-2026!");
     await user.click(screen.getByRole("button", { name: "登录" }));
 
-    await waitFor(() => expect(login).toHaveBeenCalledWith({ username: "admin", password: "tupai-demo" }));
+    await waitFor(() => expect(login).toHaveBeenCalledWith({ username: "admin", password: "tupai-demo-admin-2026!" }));
     expect(setToken).toHaveBeenCalledWith("test-token");
   });
 

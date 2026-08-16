@@ -27,6 +27,8 @@ async def lifespan(app: FastAPI):
             # 示例密钥公开在仓库里，生产环境带着它启动等于没有鉴权。
             raise RuntimeError(f"生产环境不允许使用示例密钥：{message}")
         logger.warning("当前使用示例密钥，部署前必须更换：%s", message)
+    if settings.uses_default_admin_password:
+        logger.warning("当前使用内置默认管理员密码；首次登录后请在账号管理中修改密码")
     require_current_database_schema()
     with SessionLocal() as db:
         admin = bootstrap_admin(
