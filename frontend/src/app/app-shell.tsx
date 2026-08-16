@@ -29,24 +29,56 @@ const navigation = [
 ];
 
 function Nav({ user, scheduleAccessRole, close, collapsed }: { user: UserResponse; scheduleAccessRole?: ScheduleAccessRole; close?: () => void; collapsed?: boolean }) {
-  let currentGroup = "";
   const visibleNavigation = navigation.filter((item) => {
     if (item.adminOnly && user.role !== "admin") return false;
     if (item.roles && !item.roles.includes(user.role)) return false;
     return !isReadOnlyMember(user, scheduleAccessRole) || item.memberVisible;
   });
-  return <nav className={cn("flex-1 overflow-y-auto pr-1", collapsed ? "mt-5" : "mt-8")}>
-    {visibleNavigation.map((item) => {
-      const showGroup = item.group !== currentGroup;
-      currentGroup = item.group;
-      return <div key={item.to}>
-        {showGroup ? <div className={cn("px-2.5 text-[11px] font-semibold text-zinc-400 uppercase tracking-wider", collapsed ? "mb-2 mt-7 h-1 px-0 text-center text-[0px]" : "mb-2 mt-7 first:mt-0")}>{collapsed ? "·" : item.group}</div> : null}
-        <NavLink title={collapsed ? item.label : undefined} to={item.to} onClick={close} className={({ isActive }) => cn("flex h-8 items-center rounded-md text-sm text-zinc-600 transition-all duration-150 hover:bg-zinc-100 hover:text-zinc-950 active:scale-[0.98]", collapsed ? "justify-center px-0 text-xs font-semibold" : "px-2.5", isActive && "bg-zinc-100/90 text-blue-700 font-medium shadow-2xs")}>
-          {collapsed ? item.label.slice(0, 1) : item.label}
-        </NavLink>
-      </div>;
-    })}
-  </nav>;
+
+  const groups: { name: string; items: typeof visibleNavigation }[] = [];
+  for (const item of visibleNavigation) {
+    const lastGroup = groups[groups.length - 1];
+    if (lastGroup && lastGroup.name === item.group) {
+      lastGroup.items.push(item);
+    } else {
+      groups.push({ name: item.group, items: [item] });
+    }
+  }
+
+  return (
+    <nav className={cn("flex-1 overflow-y-auto pr-1", collapsed ? "mt-4 space-y-3" : "mt-6 space-y-4")}>
+      {groups.map((group, groupIndex) => (
+        <div key={group.name} className={groupIndex === 0 ? "" : "pt-1"}>
+          {!collapsed ? (
+            <div className="px-2.5 pb-1 text-[11px] font-semibold text-zinc-400 tracking-wider">
+              {group.name}
+            </div>
+          ) : (
+            groupIndex > 0 && <div className="my-1.5 text-center text-xs text-zinc-300">·</div>
+          )}
+          <div className="space-y-0.5">
+            {group.items.map((item) => (
+              <NavLink
+                key={item.to}
+                title={collapsed ? item.label : undefined}
+                to={item.to}
+                onClick={close}
+                className={({ isActive }) =>
+                  cn(
+                    "flex h-8 items-center rounded-md text-sm text-zinc-600 transition-all duration-150 hover:bg-zinc-100 hover:text-zinc-950 active:scale-[0.98]",
+                    collapsed ? "justify-center px-0 text-xs font-semibold" : "px-2.5",
+                    isActive && "bg-zinc-100/90 text-blue-700 font-medium shadow-2xs",
+                  )
+                }
+              >
+                {collapsed ? item.label.slice(0, 1) : item.label}
+              </NavLink>
+            ))}
+          </div>
+        </div>
+      ))}
+    </nav>
+  );
 }
 
 export function AppShell() {
