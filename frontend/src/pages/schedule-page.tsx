@@ -691,18 +691,13 @@ export function SchedulePage() {
                                   : "border-blue-200/90 bg-blue-50/80 text-blue-950 hover:bg-blue-100/70 hover:border-blue-300",
                               )}
                             >
-                              {/* 1. Time Badge + Course Subject Badge */}
-                              <div className="flex items-center justify-between gap-1 mb-1.5">
-                                <span className="text-[10px] font-mono font-bold text-blue-700 flex items-center gap-0.5">
-                                  <Timer className="size-2.5" />
-                                  {row.start}~{row.end}
-                                </span>
-                                {courseName && (
-                                  <span className="text-[10px] font-semibold bg-indigo-100/90 text-indigo-800 px-1.5 py-0.2 rounded break-all truncate max-w-[85px]">
-                                    {courseName}
-                                  </span>
-                                )}
-                              </div>
+                              {/* 1. Full Course Name / Subject Badge without truncation */}
+                              {courseName ? (
+                                <div className="flex items-center gap-1 text-[11px] font-bold text-indigo-800 bg-indigo-100/80 px-1.5 py-0.5 rounded leading-tight break-words mb-1.5 w-fit max-w-full">
+                                  <BookOpen className="size-3 text-indigo-600 shrink-0" />
+                                  <span className="break-words">{courseName}</span>
+                                </div>
+                              ) : null}
 
                               {/* 2. Main Contextual Subject & Teacher */}
                               {mode === "class" ? (
