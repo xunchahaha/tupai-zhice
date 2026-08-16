@@ -237,6 +237,19 @@ export function OverviewPage() {
         </div>
       </section>
 
+      {analytics.isPending ? (
+        <section className="rounded-xl border border-zinc-200/90 bg-white p-5 shadow-2xs">
+          <LoadingState rows={4} />
+        </section>
+      ) : analytics.isError || !analyticsData ? (
+        <section>
+          <ErrorState
+            error={new Error("统计数据加载失败")}
+            retry={() => void analytics.refetch()}
+          />
+        </section>
+      ) : (
+        <>
       {/* SECTION 1: 7x3 Room Heatmap & Optimization Penalties */}
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(340px,1fr)]">
         {/* Left: 7x3 Room Slot Heatmap */}
@@ -544,6 +557,8 @@ export function OverviewPage() {
           </div>
         </div>
       </section>
+        </>
+      )}
     </div>
   );
 }
