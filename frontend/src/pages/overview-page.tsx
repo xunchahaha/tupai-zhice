@@ -89,6 +89,8 @@ export function OverviewPage() {
   const heatmap = analyticsData?.room_heatmap;
   const penalties = analyticsData?.optimization_penalties;
   const syncHealth = analyticsData?.sync_health;
+  const hasSyncSamples = (syncHealth?.total_syncs ?? 0) > 0;
+  const hasRetrySamples = (syncHealth?.retry_samples ?? 0) > 0;
 
   // Build 7x3 Period Heatmap Matrix
   const heatmapCells = heatmap?.period_cells ?? [];
@@ -340,7 +342,7 @@ export function OverviewPage() {
                 <h2 className="text-sm font-semibold text-zinc-900">求解质量与软约束满足率</h2>
               </div>
               <span className="text-xs font-mono text-zinc-400">
-                {penalties?.solver_status ? `状态: ${penalties.solver_status}` : "实时计算"}
+                {penalties?.solver_status ? `状态: ${penalties.solver_status}` : "暂无求解记录"}
               </span>
             </div>
 
@@ -359,7 +361,7 @@ export function OverviewPage() {
               <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-center">
                 <div className="text-xs text-blue-700 font-medium">软约束总扣分</div>
                 <div className="mt-1 text-2xl font-bold text-blue-900 tabular-nums">
-                  {penalties?.total_soft_penalty != null ? Number(penalties.total_soft_penalty).toFixed(1) : "0.0"}
+                  {penalties?.total_soft_penalty != null ? Number(penalties.total_soft_penalty).toFixed(1) : "-"}
                 </div>
                 <div className="text-[10px] text-blue-600 mt-0.5">
                   评估课次: {penalties?.evaluated_assignment_count ?? 0} 节
@@ -371,7 +373,9 @@ export function OverviewPage() {
             <div className="mt-3.5 space-y-2 max-h-48 overflow-y-auto pr-1">
               {(penalties?.soft_constraints ?? []).length === 0 ? (
                 <div className="py-6 text-center text-xs text-zinc-400">
-                  当前方案软约束全部 100% 完美满足，无任何扣分项
+                  {penalties?.solver_run_id
+                    ? "当前求解快照未配置可评估的软约束"
+                    : "当前课表暂无求解记录或软约束评估数据"}
                 </div>
               ) : (
                 penalties?.soft_constraints?.map((item) => {
@@ -405,7 +409,13 @@ export function OverviewPage() {
           </div>
 
           <div className="mt-3 flex items-center justify-between border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-400">
-            <span>对账差额: {penalties?.reconciliation_error ? "有异常" : "0 (对账平齐)"}</span>
+            <span>
+              对账差额: {penalties?.reconciliation_error == null
+                ? "暂无数据"
+                : penalties.reconciliation_error > 0
+                  ? "有异常"
+                  : "0 (对账平齐)"}
+            </span>
             <span>无样本软约束满足率已标定为 null</span>
           </div>
         </div>
@@ -503,8 +513,12 @@ export function OverviewPage() {
                 <Server className="size-4 text-emerald-600" />
                 <h2 className="text-sm font-semibold text-zinc-900">飞书 / 多维表格同步健康度</h2>
               </div>
-              <Badge tone={syncHealth?.failed_syncs === 0 ? "green" : "yellow"}>
-                {syncHealth?.failed_syncs === 0 ? "全部健康" : "存在重试/预警"}
+              <Badge tone={!hasSyncSamples ? "neutral" : syncHealth?.failed_syncs === 0 ? "green" : "yellow"}>
+                {!hasSyncSamples
+                  ? "暂无同步样本"
+                  : syncHealth?.failed_syncs === 0
+                    ? "全部健康"
+                    : "存在重试/预警"}
               </Badge>
             </div>
 
@@ -513,9 +527,9 @@ export function OverviewPage() {
               <div className="rounded-lg border border-zinc-100 bg-zinc-50/70 p-3">
                 <div className="text-xs text-zinc-500">同步成功率</div>
                 <div className="mt-1 text-2xl font-bold text-emerald-600 tabular-nums">
-                  {syncHealth?.total_syncs
+                  {hasSyncSamples && syncHealth
                     ? `${((syncHealth.completed_syncs / syncHealth.total_syncs) * 100).toFixed(0)}%`
-                    : "100%"}
+                    : "-"}
                 </div>
                 <div className="text-[10px] text-zinc-400 mt-0.5">
                   成功 {syncHealth?.completed_syncs ?? 0} / 总计 {syncHealth?.total_syncs ?? 0} 次
@@ -528,7 +542,7 @@ export function OverviewPage() {
                   {syncHealth?.average_duration_ms != null ? `${syncHealth.average_duration_ms}ms` : "-"}
                 </div>
                 <div className="text-[10px] text-zinc-400 mt-0.5">
-                  累计重试: {syncHealth?.retry_count ?? 0} 次
+                  累计重试: {hasRetrySamples ? `${syncHealth?.retry_count ?? 0} 次` : "暂无样本"}
                 </div>
               </div>
             </div>

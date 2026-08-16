@@ -9868,6 +9868,11 @@
             "minimum": 0.0,
             "title": "Duration Samples"
           },
+          "retry_samples": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Retry Samples"
+          },
           "resources": {
             "items": {
               "$ref": "#/components/schemas/SyncHealthResourceItem"
@@ -9895,7 +9900,8 @@
           "records_read",
           "records_written",
           "latest_sync_at",
-          "duration_samples"
+          "duration_samples",
+          "retry_samples"
         ],
         "title": "SyncHealthTelemetry"
       },

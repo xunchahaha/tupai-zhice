@@ -274,6 +274,7 @@ def test_overview_analytics_returns_scoped_dashboard_metrics(
     assert sync_health["total_syncs"] == 1
     assert sync_health["records_written"] == 3
     assert sync_health["retry_count"] == 1
+    assert sync_health["retry_samples"] == 1
     assert sync_health["average_duration_ms"] == 1200
 
 

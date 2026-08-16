@@ -813,6 +813,7 @@ class SyncHealthTelemetry(ShanghaiTimestampResponse):
     average_duration_ms: float | None = Field(default=None, ge=0)
     latest_sync_at: datetime | None
     duration_samples: int = Field(ge=0)
+    retry_samples: int = Field(ge=0)
     resources: list[SyncHealthResourceItem] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 

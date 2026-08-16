@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverviewPage } from "@/pages/overview-page";
 
 const mocks = vi.hoisted(() => ({
+  analytics: { current: {} as Record<string, unknown> },
   analyticsRefetch: vi.fn(),
   overviewRefetch: vi.fn(),
 }));
@@ -22,13 +23,7 @@ vi.mock("@/api/generated/client", () => ({
     isError: false,
     refetch: mocks.overviewRefetch,
   }),
-  useOverviewAnalyticsApiV1OverviewAnalyticsGet: () => ({
-    data: undefined,
-    error: new Error("Request failed with status code 404"),
-    isPending: false,
-    isError: true,
-    refetch: mocks.analyticsRefetch,
-  }),
+  useOverviewAnalyticsApiV1OverviewAnalyticsGet: () => mocks.analytics.current,
   useListRulesApiV1RulesGet: () => ({ data: [] }),
   useListSchedulesApiV1SchedulesGet: () => ({ data: [] }),
   useListSolverRunsApiV1SolverRunsGet: () => ({ data: [] }),
@@ -53,6 +48,13 @@ describe("OverviewPage analytics error handling", () => {
   beforeEach(() => {
     mocks.analyticsRefetch.mockReset();
     mocks.overviewRefetch.mockReset();
+    mocks.analytics.current = {
+      data: undefined,
+      error: new Error("Request failed with status code 404"),
+      isPending: false,
+      isError: true,
+      refetch: mocks.analyticsRefetch,
+    };
   });
 
   it("统计接口失败时展示错误与重试，不把缺失数据伪装成零值", async () => {
@@ -65,5 +67,52 @@ describe("OverviewPage analytics error handling", () => {
 
     await user.click(screen.getByRole("button", { name: "重试" }));
     expect(mocks.analyticsRefetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("没有求解或同步样本时展示暂无数据，不宣称 100% 健康", () => {
+    mocks.analytics.current = {
+      data: {
+        teacher_workload: {
+          total_teachers: 0,
+          assigned_teachers: 0,
+          total_hours: 0,
+          top_teachers: [],
+          buckets: [],
+        },
+        room_heatmap: { period_cells: [] },
+        optimization_penalties: {
+          solver_run_id: null,
+          solver_status: null,
+          objective_value: null,
+          best_bound: null,
+          total_soft_penalty: null,
+          reconciliation_error: null,
+          evaluated_assignment_count: 0,
+          soft_constraints: [],
+        },
+        sync_health: {
+          total_syncs: 0,
+          completed_syncs: 0,
+          failed_syncs: 0,
+          retry_count: 0,
+          retry_samples: 0,
+          records_read: 0,
+          records_written: 0,
+          average_duration_ms: null,
+          latest_sync_at: null,
+        },
+      },
+      isPending: false,
+      isError: false,
+      refetch: mocks.analyticsRefetch,
+    };
+
+    renderPage();
+
+    expect(screen.getByText("当前课表暂无求解记录或软约束评估数据")).toBeInTheDocument();
+    expect(screen.getByText("对账差额: 暂无数据")).toBeInTheDocument();
+    expect(screen.getByText("暂无同步样本")).toBeInTheDocument();
+    expect(screen.getByText("累计重试: 暂无样本")).toBeInTheDocument();
+    expect(screen.queryByText("100%", { exact: true })).not.toBeInTheDocument();
   });
 });

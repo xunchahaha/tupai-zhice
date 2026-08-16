@@ -756,6 +756,7 @@ def _sync_health(
         else None,
         "latest_sync_at": latest_sync_at,
         "duration_samples": len(durations),
+        "retry_samples": retry_samples,
         "resources": [by_resource[key] for key in sorted(by_resource)],
         "notes": notes,
     }

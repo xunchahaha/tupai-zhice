@@ -29,6 +29,8 @@ export interface SyncHealthTelemetry {
   latest_sync_at: SyncHealthTelemetryLatestSyncAt;
   /** @minimum 0 */
   duration_samples: number;
+  /** @minimum 0 */
+  retry_samples: number;
   resources?: SyncHealthResourceItem[];
   notes?: string[];
 }
