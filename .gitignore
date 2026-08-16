@@ -12,7 +12,12 @@ frontend/test-results/
 frontend/*runtime*.log
 frontend/vite-*.log
 .playwright-cli/
+.artifact-work/
 data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.db-journal
+data/backup/
 data/secrets/
 data/exports/*.xlsx
 # 上传的真实课表数据不进版本库，赛后需按保密要求删除
