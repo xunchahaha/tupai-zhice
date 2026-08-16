@@ -304,12 +304,24 @@ class AIService:
 
         try:
             payload = response.json()
+        except ValueError as exc:
+            content_type = response.headers.get("content-type", "").lower()
+            if "text/html" in content_type or response.text.lstrip().lower().startswith(
+                ("<!doctype html", "<html")
+            ):
+                raise AIServiceError(
+                    "AI 接口返回了网页而不是模型 JSON；请填写 API 基础地址"
+                    "（通常以 /v1 结尾），不要填写管理控制台地址"
+                ) from exc
+            raise AIServiceError("AI 模型响应不是合法 JSON") from exc
+
+        try:
             choices = payload["choices"]
             message = choices[0]["message"]
             content = message.get("content")
             if content in (None, ""):
                 content = message.get("reasoning_content")
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
+        except (KeyError, IndexError, TypeError) as exc:
             raise AIServiceError("AI 模型响应缺少 choices[0].message.content") from exc
         raw_usage = payload.get("usage") if isinstance(payload, dict) else None
         usage = {

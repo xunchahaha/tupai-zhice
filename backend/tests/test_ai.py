@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.api import settings
 from app.db import SessionLocal
 from app.models import AIProviderConfiguration, SolverRun
-from app.services.ai import AISecretCipher, AIService
+from app.services.ai import AISecretCipher, AIService, AIServiceError
 
 
 def test_admin_configures_ai_provider_and_secret_is_encrypted(
@@ -140,6 +140,28 @@ def test_ai_service_parses_fenced_json_and_typed_content(monkeypatch: Any) -> No
             context={"business_lines": ["考研"]},
         )
     assert parsed == {"business_lines": ["考研"]}
+
+
+def test_ai_service_explains_when_console_url_returns_html(monkeypatch: Any) -> None:
+    monkeypatch.setattr(settings, "ai_base_url", "https://model.example/console/v1")
+    monkeypatch.setattr(settings, "ai_api_key", "environment-ai-key")
+    monkeypatch.setattr(settings, "ai_model", "scheduling-model")
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text="<!doctype html><html><body>管理控制台</body></html>",
+            headers={"content-type": "text/html; charset=utf-8"},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.services.ai.httpx.post", fake_post)
+    with SessionLocal() as db:
+        with pytest.raises(AIServiceError, match="不要填写管理控制台地址"):
+            AIService(settings, db).interpret_instruction(
+                "解析考研课程",
+                context={"business_lines": ["考研"]},
+            )
 
 
 def test_assistant_interpret_uses_configured_ai_provider(
