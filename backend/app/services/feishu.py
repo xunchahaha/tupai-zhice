@@ -958,13 +958,23 @@ class FeishuService:
             return connection, self._remember_access_token(connection, access_token)
 
     def workspace_view(self, workspace: FeishuWorkspace) -> dict[str, Any]:
-        tables = list(
+        bindings = list(
             self.db.scalars(
                 select(FeishuTableBinding)
                 .where(FeishuTableBinding.workspace_id == workspace.id)
                 .order_by(FeishuTableBinding.created_at)
             )
         )
+        # Bindings from an older release can remain in the local ledger and in
+        # Feishu for audit/rollback.  They are not part of the current sync
+        # contract and must not make an otherwise complete workspace look like
+        # "11 / 10" to the frontend.
+        bindings_by_resource = {binding.resource: binding for binding in bindings}
+        tables = [
+            bindings_by_resource[resource]
+            for resource in FEISHU_RESOURCES
+            if resource in bindings_by_resource
+        ]
         return {
             "id": workspace.id,
             "name": workspace.name,

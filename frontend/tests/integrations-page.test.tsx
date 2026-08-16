@@ -225,6 +225,9 @@ describe("飞书生产接入页", () => {
       ["public_adjustment_notice", "公开调课通知"],
       ["public_class_links", "班级链接索引"],
     ].map(([resource, table_name], index) => ({ resource, table_name, table_id: `tbl-${index}` }));
+    // Older installations may still expose the retired projection binding.
+    // It must not make the current ten-table workspace fail readiness checks.
+    tables.push({ resource: "public_class_schedule", table_name: "班级公开课表", table_id: "tbl-legacy" });
     mocks.connection.current = {
       ...baseConnection,
       status: "connected",

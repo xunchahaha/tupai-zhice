@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -686,6 +687,70 @@ def test_auto_create_workspace_and_sync_idempotently(
     assert {item["resource"] for item in history.json()} >= set(FEISHU_RESOURCES)
     with SessionLocal() as db:
         assert db.scalar(select(func.count(FeishuRecordBinding.id))) >= 6
+
+
+def test_workspace_view_excludes_legacy_business_table_binding() -> None:
+    """Legacy public-class rows must not block the current ten-table contract."""
+    suffix = uuid4().hex
+    with SessionLocal() as db:
+        user = User(
+            username=f"workspace_view_legacy_{suffix}",
+            password_hash="not-used-in-this-test",
+            role="admin",
+        )
+        db.add(user)
+        db.flush()
+        connection = FeishuConnection(
+            user_id=user.id,
+            access_token_encrypted="workspace-view-access",
+            refresh_token_encrypted="workspace-view-refresh",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            scopes=[],
+            status="active",
+        )
+        db.add(connection)
+        db.flush()
+        workspace = FeishuWorkspace(
+            connection_id=connection.id,
+            schedule_set_id="default",
+            name="workspace view legacy fixture",
+            app_token=f"app-workspace-view-{suffix}",
+            default_table_id="tbl-default",
+            url="https://example.test/workspace-view",
+            status="active",
+        )
+        db.add(workspace)
+        db.flush()
+        for index, resource in enumerate(FEISHU_RESOURCES, start=1):
+            db.add(
+                FeishuTableBinding(
+                    workspace_id=workspace.id,
+                    resource=resource,
+                    table_name=TABLE_SCHEMAS[resource][0],
+                    table_id=f"tbl-current-{index}-{suffix}",
+                )
+            )
+        db.add(
+            FeishuTableBinding(
+                workspace_id=workspace.id,
+                resource="public_class_schedule",
+                table_name="班级公开课表",
+                table_id=f"tbl-legacy-{suffix}",
+            )
+        )
+        db.commit()
+
+        view = FeishuService(settings, db).workspace_view(workspace)
+        assert len(view["tables"]) == len(FEISHU_RESOURCES)
+        assert {item.resource for item in view["tables"]} == set(FEISHU_RESOURCES)
+
+        db.execute(
+            delete(FeishuTableBinding).where(FeishuTableBinding.workspace_id == workspace.id)
+        )
+        db.delete(workspace)
+        db.delete(connection)
+        db.delete(user)
+        db.commit()
 
 
 def test_sync_preflight_adopts_existing_table_and_adds_only_missing_fields(

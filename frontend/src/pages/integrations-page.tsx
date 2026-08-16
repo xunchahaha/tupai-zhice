@@ -59,6 +59,21 @@ const resources = [
   "public_class_links",
 ] as const;
 
+type FeishuWorkspace = FeishuConnectionResponse["workspace"];
+
+function workspaceResourceCount(workspace?: FeishuWorkspace): number {
+  const boundResources = new Set(
+    Array.isArray(workspace?.tables)
+      ? workspace.tables.map((table) => table.resource)
+      : [],
+  );
+  return resources.filter((resource) => boundResources.has(resource)).length;
+}
+
+function workspaceHasAllResources(workspace?: FeishuWorkspace): boolean {
+  return workspace?.status === "active" && workspaceResourceCount(workspace) === resources.length;
+}
+
 const publicDisplayResources = [
   "public_summary",
   "public_adjustment_notice",
@@ -328,11 +343,8 @@ export function IntegrationsPage() {
   const status = connection.data;
   const grantedScopes = Array.isArray(status?.granted_scopes) ? status.granted_scopes : [];
   const missingScopes = Array.isArray(status?.missing_scopes) ? status.missing_scopes : [];
-  const workspaceReady = Boolean(
-    status?.workspace?.status === "active" &&
-      Array.isArray(status.workspace.tables) &&
-      status.workspace.tables.length === resources.length,
-  );
+  const workspaceReady = workspaceHasAllResources(status.workspace);
+  const boundWorkspaceResourceCount = workspaceResourceCount(status.workspace);
   const hasFullBitableAppScope = grantedScopes.includes("bitable:app");
   const missingBitableSyncScopes = bitableSyncScopes.filter(
     (scope) => hasFullBitableAppScope
@@ -355,7 +367,7 @@ export function IntegrationsPage() {
     !workspaceReady
       ? status?.workspace?.status === "error"
         ? `排课多维表格创建失败：${status.workspace.last_error ?? "请重试第 4 步"}`
-        : `排课多维表格尚未完成（当前 ${status?.workspace?.tables?.length ?? 0} / ${resources.length} 张业务表）`
+        : `排课多维表格尚未完成（当前 ${boundWorkspaceResourceCount} / ${resources.length} 张业务表）`
       : null,
   ].filter((item): item is string => Boolean(item));
   const currentStep = !status?.app_configured
@@ -572,7 +584,7 @@ export function IntegrationsPage() {
                       ? "补齐缺失业务表"
                       : "自动创建排课表格"}
                 </Button>
-                <p className="text-xs leading-5 text-zinc-500 sm:col-span-2">{status.workspace ? `当前空间已有 ${status.workspace.tables?.length ?? 0} / ${resources.length} 张业务表；用同名空间补齐新增展示表，不会新建另一套课表。` : "创建时会自动加上当前课表方案名称，因此第 1、2、3……N 套课表会绑定到不同的飞书多维表格。"}</p>
+                <p className="text-xs leading-5 text-zinc-500 sm:col-span-2">{status.workspace ? `当前空间已有 ${workspaceResourceCount(status.workspace)} / ${resources.length} 张业务表；用同名空间补齐新增展示表，不会新建另一套课表。` : "创建时会自动加上当前课表方案名称，因此第 1、2、3……N 套课表会绑定到不同的飞书多维表格。"}</p>
               </div>
             )}
           </FlowStep>
@@ -797,7 +809,7 @@ function ConnectionSummary({
         />
         <SummaryItem
           label="业务数据表"
-          value={`${status.workspace?.tables?.length ?? 0} / ${resources.length} 张`}
+          value={`${workspaceResourceCount(status.workspace)} / ${resources.length} 张`}
         />
       </div>
     </section>
@@ -1039,7 +1051,9 @@ function PermissionWarning({ scopes }: { scopes?: unknown }) {
 
 function WorkspaceDetails({ workspace }: { workspace?: FeishuConnectionResponse["workspace"] }) {
   if (!workspace) return null;
-  const tables = Array.isArray(workspace.tables) ? workspace.tables : [];
+  const tables = Array.isArray(workspace.tables)
+    ? workspace.tables.filter((table) => resources.includes(table.resource as (typeof resources)[number]))
+    : [];
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
@@ -1327,7 +1341,7 @@ function GuideWorkspace({
   createWorkspace: () => void;
   creatingWorkspace: boolean;
 }) {
-  if (status.workspace?.status === "active") return <WorkspaceDetails workspace={status.workspace} />;
+  if (workspaceHasAllResources(status.workspace)) return <WorkspaceDetails workspace={status.workspace} />;
   return (
     <div className="space-y-4">
       {Array.isArray(status.missing_scopes) && status.missing_scopes.length > 0 ? <PermissionWarning scopes={status.missing_scopes} /> : null}
@@ -1344,7 +1358,7 @@ function GuideWorkspace({
 }
 
 function GuideFinish({ status }: { status: FeishuConnectionResponse }) {
-  const ready = status.workspace?.status === "active" && (status.workspace.tables?.length ?? 0) === resources.length;
+  const ready = workspaceHasAllResources(status.workspace);
   return (
     <div className="space-y-4">
       <GuideCompleted
