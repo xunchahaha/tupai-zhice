@@ -16,6 +16,7 @@ from app.config import (
     FEISHU_OPTIONAL_CLEANUP_SCOPES,
     FEISHU_OPTIONAL_VIEW_SCOPES,
     FEISHU_REQUIRED_SCOPES,
+    FEISHU_RESOURCES,
 )
 from app.db import SessionLocal
 from app.models import (
@@ -372,6 +373,7 @@ def test_class_view_projection_is_optional_without_write_scope() -> None:
         "created": 0,
         "updated": 0,
         "deleted": 0,
+        "links": {},
     }
 
 
@@ -466,6 +468,7 @@ def test_auto_create_workspace_and_sync_idempotently(
     complete_authorization(client, auth_headers, monkeypatch)
     created_tables: list[dict[str, Any]] = []
     remote_records: dict[str, list[dict[str, Any]]] = {}
+    remote_views: dict[str, list[dict[str, Any]]] = {}
     app_create_count = 0
 
     def feishu_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
@@ -513,6 +516,7 @@ def test_auto_create_workspace_and_sync_idempotently(
             created_tables.append(body["table"])
             table_id = f"tbl-{len(created_tables)}"
             remote_records[table_id] = []
+            remote_views[table_id] = []
             return response(
                 method,
                 url,
@@ -530,14 +534,41 @@ def test_auto_create_workspace_and_sync_idempotently(
                 {
                     "code": 0,
                     "data": {
-                        "items": [
-                            {"field_name": field["field_name"], "type": field["type"]}
-                            for field in created_tables[table_index]["fields"]
-                        ],
+                            "items": [
+                                {
+                                    "field_id": f"fld-{field_index}",
+                                    "field_name": field["field_name"],
+                                    "type": field["type"],
+                                }
+                                for field_index, field in enumerate(
+                                    created_tables[table_index]["fields"], start=1
+                                )
+                            ],
                         "has_more": False,
                     },
                 },
             )
+        if method == "GET" and url.endswith("/views"):
+            return response(
+                method,
+                url,
+                {
+                    "code": 0,
+                    "data": {"items": remote_views[table_id], "has_more": False},
+                },
+            )
+        if method == "POST" and url.endswith("/views"):
+            view_id = f"vew-{len(remote_views[table_id]) + 1}"
+            remote_views[table_id].append(
+                {"view_id": view_id, "view_name": body["view_name"]}
+            )
+            return response(
+                method,
+                url,
+                {"code": 0, "data": {"view": {"view_id": view_id}}},
+            )
+        if method == "PATCH" and "/views/" in url:
+            return response(method, url, {"code": 0, "data": {}})
         if method == "POST" and url.endswith("/records/search"):
             assert body["field_names"][0] == "业务标识"
             return response(
@@ -579,7 +610,7 @@ def test_auto_create_workspace_and_sync_idempotently(
     )
     assert workspace.status_code == 201, workspace.text
     assert workspace.json()["status"] == "active"
-    assert len(workspace.json()["tables"]) == len(TABLE_SCHEMAS)
+    assert len(workspace.json()["tables"]) == len(FEISHU_RESOURCES)
     assert [table["name"] for table in created_tables] == [
         "教师",
         "班级",
@@ -589,8 +620,8 @@ def test_auto_create_workspace_and_sync_idempotently(
         "规则",
         "课表",
         "公开展示汇总",
-        "班级公开课表",
         "公开调课通知",
+        "班级链接索引",
     ]
     assert all(table["fields"][0]["field_name"] == "业务标识" for table in created_tables)
 
@@ -641,16 +672,18 @@ def test_auto_create_workspace_and_sync_idempotently(
     assert batch.status_code == 200, batch.text
     payload = batch.json()
     assert payload["schedule_set_id"] == "default"
+    failed_results = [item for item in payload["results"] if item["status"] != "completed"]
+    assert not failed_results, failed_results
     assert payload["status"] == "completed"
-    assert payload["completed_count"] == len(TABLE_SCHEMAS)
+    assert payload["completed_count"] == len(FEISHU_RESOURCES)
     assert payload["failed_count"] == 0
-    assert [item["resource"] for item in payload["results"]] == list(TABLE_SCHEMAS)
+    assert [item["resource"] for item in payload["results"]] == list(FEISHU_RESOURCES)
     assert all(item["detail"]["trigger"] == "manual_batch" for item in payload["results"])
     assert all(item["detail"]["schedule_set_id"] == "default" for item in payload["results"])
 
     history = client.get("/api/v1/integrations/feishu/syncs", headers=auth_headers)
     assert history.status_code == 200
-    assert {item["resource"] for item in history.json()} >= set(TABLE_SCHEMAS)
+    assert {item["resource"] for item in history.json()} >= set(FEISHU_RESOURCES)
     with SessionLocal() as db:
         assert db.scalar(select(func.count(FeishuRecordBinding.id))) >= 6
 
@@ -770,6 +803,7 @@ def test_sync_request_retries_a_transient_transport_failure(monkeypatch: Any) ->
     )
     assert data == {"items": []}
     assert calls == 2
+    assert service._request_retry_count == 1
 
 
 def test_batch_create_uses_large_batches_for_timetable_exports(monkeypatch: Any) -> None:
@@ -1373,11 +1407,153 @@ def test_sync_keeps_binding_when_remote_search_temporarily_omits_record(
         db.commit()
 
 
+def test_class_link_sync_prefers_remote_public_share_over_generated_view(
+    monkeypatch: Any,
+) -> None:
+    with SessionLocal() as db:
+        user = User(
+            username="class_link_public_url_fixture",
+            password_hash="not-used-in-this-test",
+            role="admin",
+        )
+        db.add(user)
+        db.flush()
+        connection = FeishuConnection(
+            user_id=user.id,
+            access_token_encrypted="class-link-access",
+            refresh_token_encrypted="class-link-refresh",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            scopes=[
+                "base:record:create",
+                "base:record:retrieve",
+                "base:record:update",
+                "base:record:delete",
+            ],
+            status="active",
+        )
+        db.add(connection)
+        db.flush()
+        workspace = FeishuWorkspace(
+            connection_id=connection.id,
+            schedule_set_id="default",
+            name="班级链接人工公开地址",
+            app_token="app-class-link-public-url",
+            default_table_id="tbl-default",
+            url="https://example.test/base",
+            status="active",
+        )
+        db.add(workspace)
+        db.flush()
+        table = FeishuTableBinding(
+            workspace_id=workspace.id,
+            resource="public_class_links",
+            table_name="班级链接索引",
+            table_id="tbl-class-links",
+        )
+        db.add(table)
+        db.flush()
+        business_key = "class-link-key"
+        binding = FeishuRecordBinding(
+            table_binding_id=table.id,
+            business_key=business_key,
+            record_id="rec-class-link",
+        )
+        db.add(binding)
+        db.commit()
+
+        remote_public_url = "https://example.test/public/share-token"
+        generated_view_url = "https://example.test/base?table=tbl-schedule&view=vew-class"
+        remote_records = [
+            {
+                "record_id": "rec-class-link",
+                "fields": {
+                    "业务标识": business_key,
+                    "课表版本": "V1",
+                    "班级标识": "campus-a:class-a",
+                    "班级名称": "OMO Smart199班",
+                    "学生/家长妙搭链接": "https://miaoda.example.test/class-a",
+                    "公开视图链接": remote_public_url,
+                    "公开入口类型": "妙搭 + 多维表格视图",
+                    "访问模式": "互联网公开",
+                    "状态": "已配置",
+                    "失效时间": "2026-12-31T23:59:59+08:00",
+                    "备注": "管理员确认过的正式入口",
+                },
+            }
+        ]
+        service = FeishuService(settings, db)
+        service._class_view_links[(workspace.id, "default")] = {
+            "campus-a:class-a": generated_view_url
+        }
+        monkeypatch.setattr(service, "_app_configuration", lambda: None)
+        monkeypatch.setattr(service, "access_token", lambda _user_id: (connection, "token"))
+        monkeypatch.setattr(service, "prepare_sync_resources", lambda *_args, **_kwargs: {})
+        monkeypatch.setattr(service, "_list_records", lambda *_args: (remote_records, []))
+        monkeypatch.setattr(
+            service,
+            "_batch_create",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("must update existing link row")),
+        )
+        updates: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            service,
+            "_batch_update",
+            lambda _token, _workspace, _table_id, rows: updates.extend(rows) or [],
+        )
+        monkeypatch.setattr(
+            service,
+            "_batch_delete",
+            lambda *_args: (set(), set(), [], None),
+        )
+
+        result = service.sync_rows(
+            user.id,
+            "public_class_links",
+            [
+                {
+                    "业务标识": business_key,
+                    "课表版本": "V2",
+                    "班级标识": "campus-a:class-a",
+                    "班级名称": "OMO Smart199班",
+                    "学生/家长妙搭链接": "",
+                    "公开视图链接": "",
+                    "公开入口类型": "",
+                    "访问模式": "",
+                    "状态": "",
+                    "更新时间": "2026-08-16T12:00:00+08:00",
+                    "失效时间": "",
+                    "备注": "",
+                }
+            ],
+            workspace.id,
+        )
+
+        assert result["records_created"] == 0
+        assert result["records_updated"] == 1
+        assert updates[0][0] == "rec-class-link"
+        updated_fields = updates[0][1]
+        assert updated_fields["课表版本"] == "V2"
+        assert updated_fields["公开视图链接"] == remote_public_url
+        assert updated_fields["公开视图链接"] != generated_view_url
+        assert updated_fields["学生/家长妙搭链接"] == "https://miaoda.example.test/class-a"
+        assert updated_fields["访问模式"] == "互联网公开"
+        assert updated_fields["失效时间"] == "2026-12-31T23:59:59+08:00"
+        assert updated_fields["备注"] == "管理员确认过的正式入口"
+
+        db.delete(binding)
+        db.delete(table)
+        db.delete(workspace)
+        db.delete(connection)
+        db.delete(user)
+        db.commit()
+
+
 def test_calendar_table_schemas_include_binding_and_fixed_time_fields() -> None:
     teacher_fields = {name for name, _ in TABLE_SCHEMAS["teachers"][1]}
     session_fields = {name for name, _ in TABLE_SCHEMAS["course_sessions"][1]}
     schedule_fields = {name for name, _ in TABLE_SCHEMAS["schedule"][1]}
     public_class_fields = {name for name, _ in TABLE_SCHEMAS["public_class_schedule"][1]}
+    class_link_fields = {name for name, _ in TABLE_SCHEMAS["public_class_links"][1]}
     notice_fields = {name for name, _ in TABLE_SCHEMAS["public_adjustment_notice"][1]}
 
     assert "飞书用户标识" in teacher_fields
@@ -1389,7 +1565,14 @@ def test_calendar_table_schemas_include_binding_and_fixed_time_fields() -> None:
         "原始教室标识",
         "具体日程账号",
     } <= session_fields
-    assert {"上课日期", "固定开始时间", "固定结束时间"} <= schedule_fields
+    assert {
+        "上课日期",
+        "排序键",
+        "班级名称",
+        "课程名称",
+        "固定开始时间",
+        "固定结束时间",
+    } <= schedule_fields
     assert {
         "是否展示",
         "班级标识",
@@ -1399,6 +1582,16 @@ def test_calendar_table_schemas_include_binding_and_fixed_time_fields() -> None:
         "上课地点",
         "课表版本",
     } <= public_class_fields
+    assert {
+        "班级标识",
+        "班级名称",
+        "学生/家长妙搭链接",
+        "公开视图链接",
+        "公开入口类型",
+        "访问模式",
+        "状态",
+        "备注",
+    } <= class_link_fields
     assert {
         "是否展示",
         "通用提示",

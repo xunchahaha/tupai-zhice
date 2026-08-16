@@ -206,8 +206,8 @@ def test_publish_keeps_local_version_when_published_data_sync_partially_fails(
     assert calls == [
         ("schedule", "default"),
         ("public_summary", "default"),
-        ("public_class_schedule", "default"),
         ("public_adjustment_notice", "default"),
+        ("public_class_links", "default"),
     ]
 
     syncs = client.get("/api/v1/integrations/feishu/syncs", headers=auth_headers)
@@ -220,8 +220,8 @@ def test_publish_keeps_local_version_when_published_data_sync_partially_fails(
     assert {item["resource"] for item in automatic} == {
         "schedule",
         "public_summary",
-        "public_class_schedule",
         "public_adjustment_notice",
+        "public_class_links",
     }
     assert {item["status"] for item in automatic} == {"completed", "failed"}
     assert all(item["detail"]["schedule_set_id"] == "default" for item in automatic)
@@ -753,6 +753,7 @@ def test_public_bitable_projections_use_only_current_schedule_and_safe_fields(
         db.commit()
 
         class_rows = export_resource_rows(db, "public_class_schedule")
+        class_link_rows = export_resource_rows(db, "public_class_links")
         notices = export_resource_rows(db, "public_adjustment_notice")
         summary = export_resource_rows(db, "public_summary")
         schedule_rows = export_resource_rows(db, "schedule")
@@ -781,6 +782,12 @@ def test_public_bitable_projections_use_only_current_schedule_and_safe_fields(
 
     active_class_rows = [item for item in class_rows if item["是否展示"] == "是"]
     assert active_class_rows
+    assert len(class_link_rows) == len(active_class_rows)
+    assert {item["班级标识"] for item in class_link_rows} == {
+        item["班级标识"] for item in active_class_rows
+    }
+    assert all("学生/家长妙搭链接" in item for item in class_link_rows)
+    assert all("公开视图链接" in item for item in class_link_rows)
     assert {item["课表版本"] for item in active_class_rows} == {f"V{next_version_no}"}
     assert len(schedule_rows) == len(current.assignments)
     assert {item["版本号"] for item in schedule_rows} == {next_version_no}

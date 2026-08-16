@@ -689,6 +689,145 @@ class OverviewResponse(BaseModel):
     latest_sync_status: str | None
 
 
+class TeacherWorkloadItem(BaseModel):
+    """课表版本内一名教师的课时负荷。"""
+
+    campus_id: str
+    campus_name: str
+    teacher_business_id: str
+    teacher_name: str
+    subject: str = ""
+    total_sessions: int = Field(ge=0)
+    total_hours: float = Field(ge=0)
+    load_share: float = Field(ge=0, le=1)
+    rank: int | None = Field(default=None, ge=1)
+
+
+class TeacherWorkloadBucket(BaseModel):
+    label: str
+    min_sessions: int = Field(ge=0)
+    max_sessions: int | None = Field(default=None, ge=0)
+    teacher_count: int = Field(ge=0)
+
+
+class TeacherWorkloadDistribution(BaseModel):
+    schedule_set_id: str
+    schedule_version_id: str | None
+    schedule_version_no: int | None
+    date_from: date | None
+    date_to: date | None
+    total_teachers: int = Field(ge=0)
+    assigned_teachers: int = Field(ge=0)
+    total_sessions: int = Field(ge=0)
+    total_hours: float = Field(ge=0)
+    top_teachers: list[TeacherWorkloadItem] = Field(default_factory=list)
+    teachers: list[TeacherWorkloadItem] = Field(default_factory=list)
+    buckets: list[TeacherWorkloadBucket] = Field(default_factory=list)
+
+
+class RoomSlotHeatmapCell(BaseModel):
+    weekday: str
+    slot_business_id: str
+    slot_label: str
+    period: str
+    sequence: int
+    occupied_room_slots: int = Field(ge=0)
+    available_room_slots: int = Field(ge=0)
+    occupancy_rate: float = Field(ge=0, le=1)
+    observed_days: int = Field(ge=0)
+
+
+class RoomPeriodHeatmapCell(BaseModel):
+    """7×3 汇总格：周一至周日 × 上午/下午/晚自习。"""
+
+    weekday: str
+    period: str
+    occupied_room_slots: int = Field(ge=0)
+    available_room_slots: int = Field(ge=0)
+    occupancy_rate: float = Field(ge=0, le=1)
+    observed_days: int = Field(ge=0)
+    slot_count: int = Field(ge=0)
+
+
+class RoomSlotHeatmap(BaseModel):
+    schedule_set_id: str
+    schedule_version_id: str | None
+    schedule_version_no: int | None
+    date_from: date | None
+    date_to: date | None
+    effective_date_from: date | None
+    effective_date_to: date | None
+    total_rooms: int = Field(ge=0)
+    cells: list[RoomSlotHeatmapCell] = Field(default_factory=list)
+    period_cells: list[RoomPeriodHeatmapCell] = Field(default_factory=list)
+
+
+class OptimizationPenaltyItem(BaseModel):
+    rule_id: str
+    constraint_type: str
+    label: str
+    hardness: str = "soft"
+    weight: float = Field(ge=0)
+    violations: int | None = Field(default=None, ge=0)
+    evaluated_count: int = Field(ge=0)
+    penalty: float | None = Field(default=None, ge=0)
+    satisfaction_rate: float | None = Field(default=None, ge=0, le=1)
+    source: str = "declared"
+
+
+class OptimizationPenaltyBreakdown(BaseModel):
+    schedule_set_id: str
+    solver_run_id: str | None
+    solver_status: str | None
+    objective_value: float | None
+    best_bound: float | None
+    total_soft_penalty: float | None
+    unattributed_objective_value: float | None
+    reconciliation_error: float | None = Field(default=None, ge=0)
+    breakdown_source: str
+    scope_source: str
+    evaluated_assignment_count: int = Field(ge=0)
+    soft_constraints: list[OptimizationPenaltyItem] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class SyncHealthResourceItem(BaseModel):
+    resource: str
+    total_syncs: int = Field(ge=0)
+    completed_syncs: int = Field(ge=0)
+    failed_syncs: int = Field(ge=0)
+    records_read: int = Field(ge=0)
+    records_written: int = Field(ge=0)
+
+
+class SyncHealthTelemetry(ShanghaiTimestampResponse):
+    schedule_set_id: str
+    window_start: datetime
+    window_end: datetime
+    total_syncs: int = Field(ge=0)
+    completed_syncs: int = Field(ge=0)
+    failed_syncs: int = Field(ge=0)
+    retry_count: int = Field(ge=0)
+    records_read: int = Field(ge=0)
+    records_written: int = Field(ge=0)
+    average_duration_ms: float | None = Field(default=None, ge=0)
+    latest_sync_at: datetime | None
+    duration_samples: int = Field(ge=0)
+    resources: list[SyncHealthResourceItem] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class OverviewAnalyticsResponse(ShanghaiTimestampResponse):
+    """总览页可选的分析维度；不改变原有 ``/overview`` 响应契约。"""
+
+    schedule_set_id: str
+    generated_at: datetime
+    teacher_workload: TeacherWorkloadDistribution
+    room_heatmap: RoomSlotHeatmap
+    optimization_penalties: OptimizationPenaltyBreakdown
+    sync_health: SyncHealthTelemetry
+
+
 class AIProviderConfigurationInput(BaseModel):
     provider: Literal["openai_compatible"] = "openai_compatible"
     base_url: str = Field(min_length=8, max_length=500)
@@ -775,8 +914,8 @@ FeishuSyncResource = Literal[
     "rules",
     "schedule",
     "public_summary",
-    "public_class_schedule",
     "public_adjustment_notice",
+    "public_class_links",
 ]
 
 
@@ -790,8 +929,8 @@ def default_feishu_sync_resources() -> list[FeishuSyncResource]:
         "rules",
         "schedule",
         "public_summary",
-        "public_class_schedule",
         "public_adjustment_notice",
+        "public_class_links",
     ]
 
 

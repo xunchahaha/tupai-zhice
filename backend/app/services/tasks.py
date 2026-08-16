@@ -245,6 +245,13 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
         run = db.get(SolverRun, run_id)
         if run is None:
             return
+        result["solved_course_business_ids"] = sorted(
+            {
+                str(item.get("course_business_id") or "")
+                for item in result.get("assignments", [])
+                if str(item.get("course_business_id") or "").strip()
+            }
+        )
         run.model_status = result["model_status"]
         run.objective_value = result["objective_value"]
         run.best_bound = result["best_bound"]

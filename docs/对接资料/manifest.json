@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-11T15:06:47.471658+00:00",
+  "generated_at": "2026-08-16T03:10:06.306843+00:00",
   "root": "docs/对接资料",
   "files": [
     {
@@ -24,8 +24,8 @@
     },
     {
       "path": "01_赛事与需求/团队补充材料总册.md",
-      "size": 22823,
-      "sha256": "309ea4202e1c28972237ba194f92017997c2f5353ada86fa3581a9faf67ff5fa"
+      "size": 26430,
+      "sha256": "3ae45ee163ef3b26ac77ddfc0715d1fea7d8c4808ab737a69a9425006a1e0c8d"
     },
     {
       "path": "01_赛事与需求/比赛规则.md",
@@ -39,8 +39,8 @@
     },
     {
       "path": "01_赛事与需求/答辩演示与评审证据链.md",
-      "size": 6648,
-      "sha256": "14a09029e7aefcdddfe6e042274b4492702c1bc746a4dd604ce5e4447f4adc03"
+      "size": 6662,
+      "sha256": "f6cdc60f7e1fa32b2670297b7ae1f5f2c110787211bc358f1ce5ca80e23ffacc"
     },
     {
       "path": "01_赛事与需求/访谈提纲与试点验证计划.md",
@@ -54,8 +54,8 @@
     },
     {
       "path": "02_飞书官方/01_Aily产品能力.md",
-      "size": 754,
-      "sha256": "acecbf8a14615e258530605891cfed1ea364440cc1a338d677ed03ae692dd07c"
+      "size": 1057,
+      "sha256": "e212552064c0e103d50cfb5f9445dba14fad6cc57f3d83c8d4c2568fdcc162a6"
     },
     {
       "path": "02_飞书官方/02_多维表格与工作流.md",
@@ -64,23 +64,28 @@
     },
     {
       "path": "02_飞书官方/03_开放平台服务端API.md",
-      "size": 4817,
-      "sha256": "6a5a12732c820ecae6e9a42d05465cecdd8b19fc6bd1a0276ecebf612e3bc391"
+      "size": 7288,
+      "sha256": "73745fd8824b13a75d164545bbb0daf3d4d11745afdbc5d8fcacee55ba9825c5"
     },
     {
       "path": "02_飞书官方/04_生产接入操作手册.md",
-      "size": 6228,
-      "sha256": "6f58685a2bc953bf9f1ec58f7f07f22af8ed29b8f5a6462673055c0bf2253cae"
+      "size": 11555,
+      "sha256": "d1f17b899ff4c4f89070da0eb8cfe30ab1608fdd0a94a1f7823cdae2fa09663a"
     },
     {
       "path": "02_飞书官方/05_官方契约核对记录_2026-08-10.md",
-      "size": 4447,
-      "sha256": "1d60c19cc03225320bb5a7f4be48f14037d7ebcceda67dd36f1a01c831032165"
+      "size": 9123,
+      "sha256": "1404bfe5e6c16b39e0536bab8194b854a2e4491724a1c9a5f37b4f521bf05648"
     },
     {
       "path": "02_飞书官方/06_生产接入实现与运维.md",
-      "size": 5572,
-      "sha256": "88756faf596e4156b10e879974138992edb690b78cb232e28162c7c6186b4381"
+      "size": 11887,
+      "sha256": "1c58deb21d5290b9aafc8a2c7796bf5a4540f7e6f3d893b663813dcd2ab195db"
+    },
+    {
+      "path": "02_飞书官方/07_妙搭与多维表格同步落地.md",
+      "size": 5768,
+      "sha256": "6018a6984e66e6e4c1b43080c7b3ad27943fb0bda347b24cc906221716e9c1af"
     },
     {
       "path": "03_算法与标准/CP-SAT与治理资料.md",
@@ -89,8 +94,8 @@
     },
     {
       "path": "04_接口与数据字典/Aily技能对接.md",
-      "size": 1117,
-      "sha256": "579c1b8ed347e5d446e0abd86536a85897bcbf6185e56e1deba91a77f36a09f3"
+      "size": 2585,
+      "sha256": "2640dbbe326012d249949f9a1778b5c2be92ea524b9f5ce99ae416a69e13c347"
     },
     {
       "path": "04_接口与数据字典/前端选型调研.md",
@@ -98,14 +103,19 @@
       "sha256": "e8db0a94736f1b6c8c28d2e1d0804087eda854108f4d72a9c337b4b357336a2b"
     },
     {
+      "path": "04_接口与数据字典/后端接口与运行约定.md",
+      "size": 7866,
+      "sha256": "323604a3bab88fdf5a8ef398adcca48851e37f4e306c66e196e82adb629d237e"
+    },
+    {
       "path": "04_接口与数据字典/数据字典与飞书映射.md",
-      "size": 2151,
-      "sha256": "4de554190d317d1012201881532243503b7d0991482c104d4e8dbee24b1d74cc"
+      "size": 8031,
+      "sha256": "f4c955b2213b25a1f460955a06609a2001201f53dce4cf700a411ee1161d367a"
     },
     {
       "path": "README.md",
-      "size": 1261,
-      "sha256": "af6d5f40a39daf17d29774378c8d9cc6ce1ea21e7caeab2b5d842b591524282e"
+      "size": 1590,
+      "sha256": "cf9e3d738035c9030f33365275fe9e27be8cadf837ad3472cb81bb79fb9d77e3"
     }
   ]
 }

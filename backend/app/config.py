@@ -18,9 +18,16 @@ FEISHU_RESOURCES = (
     "rules",
     "schedule",
     "public_summary",
-    "public_class_schedule",
     "public_adjustment_notice",
+    # One row per class with the student-facing MiaoDa and Bitable links.
+    "public_class_links",
 )
+
+# The legacy ``public_class_schedule`` table remains in TABLE_SCHEMAS so an
+# existing installation can be reconciled/cleaned explicitly, but it is no
+# longer part of the default workspace or publish sync.  The class-link index
+# replaces it as the lightweight public entry point.
+FEISHU_PUBLIC_LINK_RESOURCES = ("public_class_links",)
 
 FEISHU_REQUIRED_SCOPES = (
     "offline_access",

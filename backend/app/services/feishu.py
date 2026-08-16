@@ -47,9 +47,18 @@ BUSINESS_KEY_FIELD = "业务标识"
 # or a previous key format must be removed instead of accumulating beside the
 # current release.
 SYSTEM_OWNED_PUBLIC_RESOURCES = frozenset(
-    {"schedule", "public_summary", "public_class_schedule", "public_adjustment_notice"}
+    {
+        "schedule",
+        "public_summary",
+        "public_class_schedule",
+        "public_adjustment_notice",
+        "public_class_links",
+    }
 )
 CLASS_VIEW_PREFIX = "班级｜"
+# The first field is the only URL that the timetable service expects an
+# operator to paste.  Keep the public-view URL generated/confirmed separately.
+CLASS_LINK_FIELDS = ("学生/家长妙搭链接",)
 # Keep metadata reads below the endpoint's 500-row page limit.  This matters
 # on repeat syncs: a 9,000-row table is read in 18 pages instead of 45.
 SYNC_RECORD_PAGE_SIZE = 500
@@ -166,10 +175,13 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
             ("业务线", 1),
             ("产品班型", 1),
             ("班级标识", 1),
+            ("班级名称", 1),
             ("教师标识", 1),
             ("具体日程账号", 1),
             ("学科", 1),
+            ("课程名称", 1),
             ("上课日期", 1),
+            ("排序键", 1),
             ("时段标识", 1),
             ("星期", 1),
             ("开始时间", 1),
@@ -214,6 +226,9 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
             ("学科", 1),
             ("上课地点", 1),
             ("课表版本", 1),
+            ("课次总数", 2),
+            ("首课日期", 1),
+            ("末课日期", 1),
             ("更新时间", 1),
         ],
     ),
@@ -233,6 +248,23 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
             ("新上课地点", 1),
             ("生效版本", 1),
             ("更新时间", 1),
+        ],
+    ),
+    "public_class_links": (
+        "班级链接索引",
+        [
+            (BUSINESS_KEY_FIELD, 1),
+            ("课表版本", 1),
+            ("班级标识", 1),
+            ("班级名称", 1),
+            ("学生/家长妙搭链接", 1),
+            ("公开视图链接", 1),
+            ("公开入口类型", 1),
+            ("访问模式", 1),
+            ("状态", 1),
+            ("更新时间", 1),
+            ("失效时间", 1),
+            ("备注", 1),
         ],
     ),
 }
@@ -353,11 +385,45 @@ class FeishuService:
             tuple[str, str, str | None], tuple[FeishuWorkspace, FeishuConnection, str]
         ] = {}
         self._ready_table_ids: dict[tuple[str, str], str] = {}
+        # Class-view IDs are returned by the optional view reconciliation.  The
+        # link-index projection consumes this mapping in the same batch so the
+        # generated public-view URLs stay stable without another metadata scan.
+        self._class_view_links: dict[tuple[str, str], dict[str, str]] = {}
         # ``_request`` is intentionally shared by OAuth, Bitable and calendar
         # calls.  Keep the user connection for each request-local token so a
         # remote 99991679 can immediately turn the visible connection state
         # into "needs reauthorization" without special cases at every caller.
         self._token_connections: dict[str, FeishuConnection] = {}
+        # Count actual bounded retries performed by this request-local service
+        # instance.  ``sync_rows`` snapshots the counter so every resource log
+        # can expose a real retry count to overview telemetry instead of an
+        # inferred success/failure guess.
+        self._request_retry_count = 0
+
+    @property
+    def request_retry_count(self) -> int:
+        """Return retries actually issued by this request-local service.
+
+        API orchestration takes checkpoints around shared batch preflight and
+        each resource.  Exposing the monotonic counter read-only keeps those
+        logs accurate on both success and exception paths without reaching
+        into a private implementation detail.
+        """
+
+        return self._request_retry_count
+
+    @staticmethod
+    def _class_view_url(workspace: FeishuWorkspace, table_id: str, view_id: str) -> str:
+        """Build a shareable Bitable view URL from the workspace base URL."""
+
+        base_url = str(getattr(workspace, "url", "") or "").strip()
+        if not base_url or not view_id:
+            return ""
+        separator = "&" if "?" in base_url else "?"
+        return (
+            f"{base_url}{separator}table={quote(table_id, safe='')}"
+            f"&view={quote(view_id, safe='')}"
+        )
 
     def _cipher(self) -> TokenCipher:
         key = self.settings.feishu_token_encryption_key.strip()
@@ -658,10 +724,10 @@ class FeishuService:
         # refactors honest with an explicit terminal error.
         raise FeishuServiceError("飞书接口重试结束但没有返回结果")
 
-    @staticmethod
-    def _retry_request(method: str, url: str, attempt: int, total: int, reason: str) -> None:
+    def _retry_request(self, method: str, url: str, attempt: int, total: int, reason: str) -> None:
         # A bounded sub-second backoff repairs transient Feishu disconnects
         # without converting one failed click into a long opaque wait.
+        self._request_retry_count += 1
         delay = 0.25 * attempt
         logger.info(
             "飞书请求短暂失败，准备重试：method=%s url=%s attempt=%s/%s reason=%s",
@@ -1450,6 +1516,7 @@ class FeishuService:
         class_field_id: str,
         class_name: str,
         hidden_field_ids: list[str] | None = None,
+        sort_field_id: str | None = None,
     ) -> str | None:
         property_payload: dict[str, Any] = {
             "filter_info": {
@@ -1465,6 +1532,10 @@ class FeishuService:
         }
         if hidden_field_ids:
             property_payload["hidden_fields"] = hidden_field_ids
+        if sort_field_id:
+            property_payload["sort_info"] = {
+                "sorters": [{"field_id": sort_field_id, "desc": False}]
+            }
         _, log_id = self._request(
             "PATCH",
             f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
@@ -1537,6 +1608,7 @@ class FeishuService:
                 "created": 0,
                 "updated": 0,
                 "deleted": 0,
+                "links": {},
             }
         fields, field_logs = self._list_fields(token, workspace, table_id)
         class_identity_field_id = next(
@@ -1564,7 +1636,7 @@ class FeishuService:
             "",
         )
         if not class_identity_field_id and not class_name_field_id:
-            raise FeishuServiceError("班级公开课表缺少“班级标识”字段，无法创建班级视图")
+            raise FeishuServiceError("课表缺少“班级标识”字段，无法创建班级视图")
         views, view_logs = self._list_views(token, workspace, table_id)
         owned_views = {
             str(item.get("view_name") or ""): item
@@ -1589,8 +1661,30 @@ class FeishuService:
             ): (class_identity, class_name)
             for class_identity, class_name in sorted(class_entries.items())
         }
+        # Views are used as student/parent entry points.  Hide every internal
+        # scheduling field and retain only the class/date/course/location
+        # columns that are safe for a public timetable.
+        public_field_names = {
+            "班级名称",
+            "上课日期",
+            "星期",
+            "开始时间",
+            "结束时间",
+            "排序键",
+            "课程名称",
+            "学科",
+            "教室名称",
+            "课表版本",
+        }
+        hidden_public_field_ids = [
+            str(item.get("field_id") or "")
+            for item in fields
+            if str(item.get("field_id") or "")
+            and str(item.get("field_name") or "").strip() not in public_field_names
+        ]
         created = updated = deleted = 0
         log_ids = [*field_logs, *view_logs]
+        class_view_links: dict[str, str] = {}
         for view_name, (class_identity, class_name) in expected_names.items():
             existing = owned_views.get(view_name)
             if existing is None:
@@ -1605,11 +1699,15 @@ class FeishuService:
                     view_name,
                     class_identity_field_id or class_name_field_id,
                     class_identity if class_identity_field_id else class_name,
-                    [field_id for field_id in (class_identity_field_id, sort_field_id) if field_id],
+                    hidden_public_field_ids,
+                    sort_field_id,
                 )
                 if log_id:
                     log_ids.append(log_id)
                 created += 1
+                class_view_links[class_identity] = self._class_view_url(
+                    workspace, table_id, view_id
+                )
             else:
                 # Namespaced views created by this service are immutable in
                 # meaning; avoid PATCHing all 36 views on every sync because
@@ -1617,6 +1715,9 @@ class FeishuService:
                 view_id = str(existing["view_id"])
                 if not view_id:
                     continue
+                class_view_links[class_identity] = self._class_view_url(
+                    workspace, table_id, view_id
+                )
                 updated += 0
         for view_name, view in owned_views.items():
             if view_name in expected_names:
@@ -1633,6 +1734,7 @@ class FeishuService:
             "created": created,
             "updated": updated,
             "deleted": deleted,
+            "links": class_view_links,
             "request_log_ids": list(dict.fromkeys(log_ids)),
         }
 
@@ -2251,6 +2353,7 @@ class FeishuService:
         workspace_id: str | None = None,
         schedule_set_id: str = "default",
     ) -> dict[str, Any]:
+        retry_count_before = self._request_retry_count
         workspace, connection, token = self._resolve_sync_context(
             user_id,
             workspace_id,
@@ -2348,6 +2451,90 @@ class FeishuService:
             if record_id:
                 canonical_by_key[key] = record_id
 
+        if resource == "public_class_links":
+            # The class-view projection runs immediately before this table in
+            # publish/batch sync.  Copy its stable URLs into the index, while
+            # retaining any MiaoDa URL manually entered by an operator in the
+            # remote Bitable row.
+            generated_view_links = self._class_view_links.get(
+                (workspace.id, schedule_set_id), {}
+            )
+            for row in normalized:
+                class_identity = normalize_business_key(row.get("班级标识"))
+                generated_view = generated_view_links.get(class_identity, "")
+                key = str(row[BUSINESS_KEY_FIELD])
+                record_id = canonical_by_key.get(key)
+                remote_fields = remote_fields_by_record_id.get(record_id or "", {})
+                remote_candidates = [remote_fields]
+                remote_candidates.extend(
+                    remote_fields_by_record_id.get(candidate_id, {})
+                    for candidate_id in remote_by_key.get(key, [])
+                    if candidate_id != record_id
+                )
+                if isinstance(remote_fields, dict):
+                    # A Bitable view URL built from table/view IDs is only an
+                    # internal view entry.  Once an operator has enabled an
+                    # independent/public share and pasted its final URL, that
+                    # hand-authored URL is the authoritative student-facing
+                    # link and must win over the generated entry forever.
+                    preserved_public_view = next(
+                        (
+                            normalize_business_key(candidate.get("公开视图链接"))
+                            for candidate in remote_candidates
+                            if isinstance(candidate, dict)
+                            and normalize_business_key(candidate.get("公开视图链接"))
+                        ),
+                        "",
+                    )
+                    if preserved_public_view:
+                        row["公开视图链接"] = preserved_public_view
+                    elif generated_view:
+                        row["公开视图链接"] = generated_view
+                    # These values are operator-maintained in the link index;
+                    # a later publish must not erase a pasted MiaoDa URL,
+                    # sharing mode, expiry date, or note.
+                    for field_name in (
+                        *CLASS_LINK_FIELDS,
+                        "公开入口类型",
+                        "访问模式",
+                        "状态",
+                        "失效时间",
+                        "备注",
+                    ):
+                        if normalize_business_key(row.get(field_name)):
+                            continue
+                        preserved = next(
+                            (
+                                normalize_business_key(candidate.get(field_name))
+                                for candidate in remote_candidates
+                                if isinstance(candidate, dict)
+                                and normalize_business_key(candidate.get(field_name))
+                            ),
+                            "",
+                        )
+                        if preserved:
+                            row[field_name] = preserved
+                elif generated_view:
+                    row["公开视图链接"] = generated_view
+                has_miaoda_link = any(
+                    normalize_business_key(row.get(field_name)) for field_name in CLASS_LINK_FIELDS
+                )
+                has_view_link = bool(normalize_business_key(row.get("公开视图链接")))
+                if normalize_business_key(row.get("状态")) != "停用":
+                    row["状态"] = "已配置" if has_miaoda_link else (
+                        "公开视图待确认" if has_view_link else "待配置"
+                    )
+                if not normalize_business_key(row.get("公开入口类型")):
+                    row["公开入口类型"] = (
+                        "妙搭 + 多维表格视图"
+                        if has_miaoda_link and has_view_link
+                        else "妙搭"
+                        if has_miaoda_link
+                        else "多维表格视图"
+                        if has_view_link
+                        else "待配置"
+                    )
+
         # Before this release the schedule key included ``version.id``.  The
         # current projection key is intentionally version-independent, so a
         # one-time reconciliation should reuse the existing current-version
@@ -2405,10 +2592,17 @@ class FeishuService:
         # any potentially slow batch request so unrelated account edits are not
         # blocked by this sync.
         self.db.commit()
-        created_records, create_logs = self._batch_create(
-            token, workspace, table.table_id, to_create
-        )
-        log_ids.extend(create_logs)
+        # Do not issue an empty mutation request when every local key already
+        # has a canonical remote record.  Besides avoiding needless Feishu
+        # traffic, this keeps the upsert contract precise: an existing class
+        # link row is updated in place rather than entering the create path at
+        # all (even with an empty payload).
+        created_records: list[dict[str, Any]] = []
+        if to_create:
+            created_records, create_logs = self._batch_create(
+                token, workspace, table.table_id, to_create
+            )
+            log_ids.extend(create_logs)
         if to_create:
             if len(created_records) == len(to_create):
                 for row, record in zip(to_create, created_records, strict=True):
@@ -2594,7 +2788,10 @@ class FeishuService:
             duplicate_cleanup["status"] = "unmanaged_duplicates"
         self.db.commit()
         view_sync: dict[str, Any] | None = None
-        if resource == "public_class_schedule":
+        # Class views belong on the full operational ``课表`` table.  The
+        # former ``班级公开课表`` projection is now a legacy/summary table and
+        # is no longer a suitable student-facing source.
+        if resource == "schedule":
             try:
                 view_sync = self._reconcile_class_views(
                     connection,
@@ -2603,10 +2800,24 @@ class FeishuService:
                     table.table_id,
                     normalized,
                 )
+                links = view_sync.get("links") if isinstance(view_sync, dict) else None
+                if isinstance(links, dict):
+                    self._class_view_links[(workspace.id, schedule_set_id)] = {
+                        str(identity): str(url)
+                        for identity, url in links.items()
+                        if str(identity).strip() and str(url).strip()
+                    }
             except (FeishuServiceError, httpx.HTTPError) as exc:
                 # View projection is supplementary; a view API failure must
                 # not roll back the successfully synchronized class records.
-                view_sync = {"status": "failed", "error": str(exc)}
+                view_sync = {
+                    "status": "failed",
+                    "error": str(exc),
+                    "reauthorization_required": (
+                        isinstance(exc, FeishuServiceError)
+                        and exc.reauthorization_required
+                    ),
+                }
         return {
             "workspace_id": workspace.id,
             "workspace_url": workspace.url,
@@ -2619,6 +2830,7 @@ class FeishuService:
             "records_written": len(to_create) + len(to_update),
             "duplicate_cleanup": duplicate_cleanup,
             "view_sync": view_sync,
+            "retry_count": self._request_retry_count - retry_count_before,
             "request_log_ids": list(dict.fromkeys(log_ids)),
         }
 

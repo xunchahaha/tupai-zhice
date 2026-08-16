@@ -40,6 +40,17 @@ uv run pytest
 uv run python scripts/export_openapi.py
 ```
 
+## 排课参数与时间口径
+
+- `date_from`、`date_to` 是本次求解要处理的**原始课次日期范围**，两端均包含；同时会把候选日期窗口裁剪到该范围。只填写一端时表示开区间边界。
+- `date_window_days` 是每节未锁定课次围绕原始日期可前后移动的天数，默认 `7`，允许 `0–31`。锁定课次仍只能使用原日期；规则中的 `before_days`、`after_days` 和固定日期还会继续收窄窗口。
+- `room_no_overlap`（教室不重叠）与 `teacher_no_overlap`（教师不重叠）是系统级硬约束。即使调用方从 `solver_rules` 中省略，后端也会自动补齐；前端不应把它们当作可关闭的普通选项。
+- 求解超时由 `time_limit_seconds` 控制，允许 `1–900` 秒；超时会返回当前求解状态和已知目标界，不等于自动发布。`wait=false` 只入队，`wait=true` 在请求内执行。
+
+应用业务时间统一按 `Asia/Shanghai`（UTC+8）展示和落库，接口响应中的 `created_at`、`updated_at`、
+`published_at`、授权过期时间等会带 UTC+8 偏移。OAuth/JWT 等协议内部仍按 UTC 计算过期瞬间，
+只在协议边界转换，禁止在业务层把 UTC 字符串直接当作本地时间。
+
 ## 配置
 
 将 `.env.example` 复制为 `.env` 后填写数据库、JWT、管理员账号和跨域配置。默认 SQLite
@@ -47,12 +58,34 @@ uv run python scripts/export_openapi.py
 
 飞书普通接入不修改 `.env`：管理员在前端“飞书集成”中一次填写 `App ID` 和
 `App Secret`，后端自动生成本地加密主密钥并加密保存凭据。完成 OAuth 授权后，系统会
-自动创建多维表格、7 张中文业务表并保存全部标识，不需要手工填写 `app_token` 或
-`table_id`。
+自动创建多维表格、10 张中文业务表并保存全部标识，不需要手工填写 `app_token` 或
+`table_id`。默认表为：教师、班级、教室、时段、课程场次、规则、课表、公开展示汇总、
+公开调课通知、班级链接索引。班级链接索引每个班级一行，用于登记学生/家长妙搭链接、
+多维表格视图链接、访问模式和链接状态。旧版“班级公开课表”保留为兼容资源，不再进入默认同步。
 
 集中式容器部署可以使用 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、
 `FEISHU_TOKEN_ENCRYPTION_KEY`、`FEISHU_OAUTH_REDIRECT_URI` 和 `FRONTEND_URL`
 覆盖前端配置。该模式面向部署平台或 KMS，不属于管理员首次接入步骤。
+
+### 飞书授权与重新授权
+
+新授权至少需要 `base:field:read`、`base:field:create`、`bitable:app:readonly`（或完整
+`bitable:app`）以及记录读写权限；重复记录清理还需要 `base:record:delete`，按班级创建/维护
+多维表格视图需要 `base:view:write_only`（完整 `bitable:app` 也可满足）。飞书控制台勾选权限后
+必须发布应用版本，再在“飞书集成”中点击“解除连接”→“重新授权管理员账号”；刷新页面或刷新旧
+令牌不会增加权限。后端检测到授权过期或错误码 `99991679` 时会将连接标记为
+`reauthorization_required`，同步结果的 `detail.reauthorization_required=true`，前端应直接展示
+重新授权入口。
+
+### 同步语义与性能
+
+`POST /api/v1/integrations/feishu/sync-batch` 默认同步教师、班级、教室、时段、课程场次、规则、
+课表、公开展示汇总、公开调课通知和班级链接索引 10 个资源；旧版“班级公开课表”只保留为兼容
+资源，不在默认列表中。同步按业务标识幂等：先分页读取（每页 500），再批量新增/更新（每批 1000），
+删除系统拥有的过期或重复投影（每批 500），网络短暂失败最多重试 2 次。当前“课表”是当前发布版本
+的运行投影，业务标识与版本号无关，因此 V2 会更新 V1 的同一行，不会每次追加数千条历史明细。
+`public_class_links` 每个班级一行，手工维护的妙搭链接、公开视图链接、访问模式、状态、失效时间和
+备注必须在后续同步中保留。
 
 一句话排课 AI 在前端单独配置 `Base URL`、`API Key` 和模型名称，后端使用
 OpenAI-compatible `/chat/completions` 接口解析指令，并对 API Key 加密保存。集中部署也可使用
@@ -67,4 +100,48 @@ OpenAI-compatible `/chat/completions` 接口解析指令，并对 API Key 加密
 - AI 配置：`GET/POST /api/v1/integrations/ai/configuration`
 - 一句话解析：`POST /api/v1/assistant/interpret`
 - 求解进度：`GET /api/v1/solver-runs/{id}/events`
+- 版本差异：`GET /api/v1/schedules/{base_id}/diff/{target_id}`，逐课次返回 `added`、`removed`、`moved`、`unchanged` 及调整前后日期/时段/教室
+- 发布/回滚：`POST /api/v1/schedules/{id}/publish`、`POST /api/v1/schedules/{id}/rollback`（审批人权限）
+- Feishu 单资源同步：`POST /api/v1/integrations/feishu/sync`
+- Feishu 批量同步：`POST /api/v1/integrations/feishu/sync-batch`
+- Feishu 同步记录：`GET /api/v1/integrations/feishu/syncs`（当前课表方案最近 50 条）
+- 总览基础数据：`GET /api/v1/overview`
+- 总览分析数据：`GET /api/v1/overview/analytics`（教师负荷、教室时段热力、软约束指标、飞书同步健康）
+- 课表方案：`GET/POST /api/v1/schedule-sets`、`PATCH /api/v1/schedule-sets/{id}`
+- 课表方案成员：`GET /api/v1/schedule-sets/{id}/members`，`PUT/DELETE /api/v1/schedule-sets/{id}/members/{user_id}`
+- 飞书连接诊断：`GET /api/v1/integrations/feishu/connection`
 - OpenAPI：`openapi.json`
+
+所有业务查询和写入都在当前课表方案作用域内执行。排课员和成员只能看到管理员在“账号列表 →
+课表访问权限”中授予的方案；管理员默认可管理全部方案。`schedule_set_id` 不应由前端自行拼接
+到另一个方案，后端会在依赖注入层校验可见范围。
+
+## 总览分析接口的数据口径
+
+`GET /api/v1/overview/analytics` 只读取当前已发布课表、当前方案的求解结果和同步日志，不改变
+排课或同步状态。返回四组可直接供前端图表使用的数据：
+
+- `teacher_workload`：按“校区 + 教师业务标识”汇总排课节数和小时数，含
+  `top_teachers`（前 5 名）与 `buckets`（`0-10 节`、`10-20 节`、`20+ 节`），
+  避免不同校区复用同一教师编号时被误合并。
+  周/学期切换由 `date_from`、`date_to` 查询参数控制；未传时统计选定课表版本的全部安排。
+- `room_heatmap`：`cells` 按原始星期×课节统计已用教室数、可用教室数和占用率；
+  `period_cells` 额外给出固定 7×3（周一至周日 × 上午/下午/晚自习）汇总。日期参数
+  缺一侧或全部省略时，响应中的 `effective_date_from/to` 会用当前版本最早/最晚课次补齐，
+  完全空闲的日期仍计入容量分母。
+- `optimization_penalties`：返回最近一次求解的目标值、界、软规则数量和可解释的
+  扣分/满足率明细。分项严格限制在该次求解的课次范围；新运行保存真实求解课次 ID，
+  历史运行按请求筛选条件重建范围，并通过 `breakdown_source`、`scope_source` 和
+  `reconciliation_error` 明示估算口径与异常差额。没有可评估样本时满足率返回 `null`。
+  没有可分解的历史求解数据时，接口会明确返回空明细，而不会把目标值伪装成规则分项。
+- `sync_health`：默认统计最近 24 小时飞书同步次数、成功/失败数、读写记录数、平均耗时、
+  重试次数和最近一次同步时间；可用 `sync_window_hours` 调整窗口。
+
+指标基于已发布版本，草稿或未执行的求解不会进入公开总览。后端使用课程实际 `duration_minutes`
+计算教师课时，不用“每节课固定 3 小时”的假设。
+
+## 发布、回滚与同步边界
+
+发布/回滚是本地版本状态操作，完成并提交本地事务后同步触发一次最佳努力的飞书投影同步；“一键同步当前方案”
+只读取当前数据并写入飞书，不会重新调用求解器，也不会自动生成新的课表版本。同步失败不会撤销
+本地发布/回滚，失败资源可在同步历史中单独重试。

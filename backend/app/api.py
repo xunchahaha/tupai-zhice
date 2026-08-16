@@ -105,6 +105,7 @@ from .schemas import (
     ImportResult,
     IntegrationSyncResponse,
     MasterDataBatchDelete,
+    OverviewAnalyticsResponse,
     OverviewResponse,
     PasswordChange,
     PublicScheduleShareItem,
@@ -165,6 +166,7 @@ from .services.explain import (
     deterministic_summary,
 )
 from .services.feishu import FeishuService, FeishuServiceError, json_text
+from .services.overview_analytics import build_overview_analytics
 from .services.snapshot import create_snapshot
 from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
 from .services.xlsx_io import export_schedule_xlsx
@@ -1011,6 +1013,58 @@ def overview(db: Db, user: CurrentUser, scope: ViewerScope) -> OverviewResponse:
             or 0
         ),
         latest_sync_status=latest_sync.status if latest_sync else None,
+    )
+
+
+@router.get(
+    "/overview/analytics",
+    response_model=OverviewAnalyticsResponse,
+    tags=["overview"],
+)
+def overview_analytics(
+    db: Db,
+    user: CurrentUser,
+    scope: ViewerScope,
+    schedule_id: Annotated[
+        str | None,
+        Query(description="指定课表版本；为空时优先当前发布版本，再取最新版本"),
+    ] = None,
+    date_from: Annotated[date | None, Query(description="统计起始日期（含）")] = None,
+    date_to: Annotated[date | None, Query(description="统计结束日期（含）")] = None,
+    sync_window_hours: Annotated[
+        int,
+        Query(ge=1, le=24 * 30, description="飞书同步遥测回看小时数"),
+    ] = 24,
+) -> OverviewAnalyticsResponse:
+    """Return dashboard analytics without expanding the legacy overview DTO."""
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=422, detail="date_from 必须早于或等于 date_to")
+    if schedule_id:
+        schedule = get_scoped_or_404(db, ScheduleVersion, schedule_id, scope)
+    else:
+        schedule = db.scalar(
+            select(ScheduleVersion)
+            .where(
+                ScheduleVersion.schedule_set_id == scope.id,
+                ScheduleVersion.status == "published",
+            )
+            .order_by(ScheduleVersion.published_at.desc(), ScheduleVersion.version_no.desc())
+        )
+        if schedule is None:
+            schedule = db.scalar(
+                select(ScheduleVersion)
+                .where(ScheduleVersion.schedule_set_id == scope.id)
+                .order_by(ScheduleVersion.version_no.desc())
+            )
+    return OverviewAnalyticsResponse.model_validate(
+        build_overview_analytics(
+            db,
+            scope.id,
+            schedule,
+            date_from=date_from,
+            date_to=date_to,
+            sync_window_hours=sync_window_hours,
+        )
     )
 
 
@@ -3769,7 +3823,12 @@ def _public_class_schedule_rows(
     }
     courses, classes, rooms, slots = _public_schedule_maps(db, schedule_set_id)
     updated_at = _public_projection_updated_at(schedule)
-    rows: list[dict[str, Any]] = []
+    # This is a class index, not the student-facing timetable itself.  The
+    # detailed assignment rows already live in the operational ``课表`` table;
+    # duplicating thousands of rows here made the public source unnecessarily
+    # large.  Aggregate one deterministic row per class for MiaoDa and view
+    # navigation.
+    grouped: dict[str, dict[str, Any]] = {}
     for course in courses:
         assignment = assignments.get(course.id)
         if assignment is None:
@@ -3779,30 +3838,99 @@ def _public_class_schedule_rows(
             continue
         snapshot = _public_assignment_snapshot(assignment, course, rooms, slots)
         class_group = classes.get((course.campus_id, course.class_business_id))
+        class_identity = _public_class_identity(course)
+        entry = grouped.setdefault(
+            class_identity,
+            {
+                "班级标识": class_identity,
+                "班级名称": class_group.name if class_group else "未分班",
+                "items": [],
+                "subjects": set(),
+                "locations": set(),
+            },
+        )
+        entry["items"].append(snapshot)
+        if course.subject:
+            entry["subjects"].add(course.subject)
+        if snapshot["location"]:
+            entry["locations"].add(snapshot["location"])
+
+    rows: list[dict[str, Any]] = []
+    for class_identity, entry in grouped.items():
+        items = sorted(
+            entry["items"],
+            key=lambda item: (
+                item["date"],
+                item["start"],
+                item["end"],
+            ),
+        )
+        first = items[0] if items else {"date": "", "weekday": "", "start": "", "end": ""}
+        dates = [item["date"] for item in items if item["date"]]
         rows.append(
             {
                 "业务标识": _public_projection_key(
-                    schedule_set_id, "public_class_schedule", course.id
+                    schedule_set_id, "public_class_schedule", class_identity
                 ),
                 "是否展示": "是",
-                "班级标识": _public_class_identity(course),
-                "班级名称": class_group.name if class_group else "未分班",
-                "上课日期": snapshot["date"],
-                "星期": snapshot["weekday"],
-                "开始时间": snapshot["start"],
-                "结束时间": snapshot["end"],
+                "班级标识": entry["班级标识"],
+                "班级名称": entry["班级名称"],
+                # Keep the first assignment in the legacy display columns so
+                # old views remain readable, while the aggregate columns make
+                # the row's purpose explicit.
+                "上课日期": first["date"],
+                "星期": first["weekday"],
+                "开始时间": first["start"],
+                "结束时间": first["end"],
                 "排序键": " ".join(
-                    item for item in (snapshot["date"], snapshot["start"], snapshot["end"])
-                    if item
+                    item for item in (first["date"], first["start"], first["end"]) if item
                 ),
-                "课程名称": course.lesson_name or "课程安排",
-                "学科": course.subject or "",
-                "上课地点": snapshot["location"],
+                "课程名称": f"共{len(items)}节课",
+                "学科": " / ".join(sorted(entry["subjects"])),
+                "上课地点": " / ".join(sorted(entry["locations"])),
                 "课表版本": f"V{schedule.version_no}" if schedule else "",
+                "课次总数": len(items),
+                "首课日期": dates[0] if dates else "",
+                "末课日期": dates[-1] if dates else "",
                 "更新时间": updated_at,
             }
         )
     return sorted(rows, key=_public_schedule_sort_key)
+
+
+def _public_class_links_rows(
+    db: Session, schedule_set_id: str
+) -> list[dict[str, Any]]:
+    """Export one stable MiaoDa/public-view link row per published class.
+
+    MiaoDa links are intentionally blank on first export: an operator creates
+    the MiaoDa app/page and pastes its public URL into this index table.  The
+    sync layer preserves that hand-authored value on subsequent exports.
+    """
+
+    schedule = _current_published_schedule(db, schedule_set_id)
+    class_rows = _public_class_schedule_rows(db, schedule_set_id)
+    updated_at = _public_projection_updated_at(schedule)
+    version = f"V{schedule.version_no}" if schedule else ""
+    return [
+        {
+            "业务标识": _public_projection_key(
+                schedule_set_id, "public_class_links", str(row["班级标识"])
+            ),
+            "课表版本": version,
+            "班级标识": row["班级标识"],
+            "班级名称": row["班级名称"],
+            "学生/家长妙搭链接": "",
+            "公开视图链接": "",
+            "公开入口类型": "",
+            "访问模式": "",
+            "状态": "",
+            "更新时间": updated_at,
+            "失效时间": "",
+            "备注": "",
+        }
+        for row in class_rows
+    ]
 
 
 def _public_adjustment_notice_rows(
@@ -4063,6 +4191,12 @@ def export_resource_rows(
                 select(Room).where(Room.schedule_set_id == schedule_set_id)
             )
         }
+        class_map = {
+            (item.campus_id, item.business_id): item
+            for item in db.scalars(
+                select(ClassGroup).where(ClassGroup.schedule_set_id == schedule_set_id)
+            )
+        }
         status_labels = {
             "published": "当前发布",
             "archived": "历史发布",
@@ -4098,7 +4232,14 @@ def export_resource_rows(
                         "场次标识": session.business_id,
                         "业务线": session.business_line,
                         "产品班型": " / ".join(_course_product_values(session)),
-                        "班级标识": session.class_business_id,
+                        # Keep the public class identity unique when two
+                        # campuses reuse the same business class code.
+                        "班级标识": _public_class_identity(session),
+                        "班级名称": (
+                            class_map[(session.campus_id, session.class_business_id)].name
+                            if (session.campus_id, session.class_business_id) in class_map
+                            else "未分班"
+                        ),
                         "教师标识": session.teacher_business_id,
                         "具体日程账号": session.calendar_user_id
                         or (
@@ -4108,9 +4249,21 @@ def export_resource_rows(
                         )
                         or "",
                         "学科": session.subject,
+                        "课程名称": " / ".join(session.lesson_names or [session.lesson_name]),
                         "上课日期": assignment.lesson_date.isoformat()
                         if assignment.lesson_date
                         else "",
+                        "排序键": " ".join(
+                            item
+                            for item in (
+                                assignment.lesson_date.isoformat()
+                                if assignment.lesson_date
+                                else "",
+                                slot.start_time if slot else session.fixed_start_time,
+                                slot.end_time if slot else session.fixed_end_time,
+                            )
+                            if item
+                        ),
                         "时段标识": assignment.slot_business_id,
                         "星期": slot.weekday if slot else "",
                         "开始时间": slot.start_time if slot else session.fixed_start_time,
@@ -4238,6 +4391,8 @@ def export_resource_rows(
         return public_rows
     if resource == "public_class_schedule":
         return _public_class_schedule_rows(db, schedule_set_id)
+    if resource == "public_class_links":
+        return _public_class_links_rows(db, schedule_set_id)
     if resource == "public_adjustment_notice":
         return _public_adjustment_notice_rows(db, schedule_set_id)
     return []
@@ -4248,6 +4403,8 @@ def _sync_detail(
     *,
     trigger: str,
     schedule_set_id: str,
+    duration_ms: float | None = None,
+    retry_count: int | None = None,
     error: str | None = None,
     reauthorization_required: bool = False,
 ) -> dict[str, Any]:
@@ -4257,11 +4414,43 @@ def _sync_detail(
         "schedule_set_id": schedule_set_id,
         **(result or {}),
     }
+    if duration_ms is not None:
+        detail["duration_ms"] = round(max(0.0, duration_ms), 2)
+    if retry_count is not None:
+        # The service-level checkpoint includes shared preflight and also
+        # exists when sync_rows raises before it can return a result.
+        detail["retry_count"] = max(0, retry_count)
     if error:
         detail["error"] = error
     if reauthorization_required:
         detail["reauthorization_required"] = True
     return detail
+
+
+def _sync_result_failure(result: dict[str, Any]) -> tuple[str | None, bool]:
+    """Promote explicit sub-step failures to the resource-level status.
+
+    Missing optional scopes remain visible as skipped/warning statuses.  Only
+    an attempted sub-step that reports ``failed`` makes the resource fail;
+    otherwise a failed class-view or duplicate-cleanup call would be rendered
+    as a healthy completed sync even though its own result says otherwise.
+    """
+
+    failures: list[str] = []
+    reauthorization_required = False
+    for key, label in (
+        ("duplicate_cleanup", "重复记录清理"),
+        ("view_sync", "班级视图同步"),
+    ):
+        step = result.get(key)
+        if not isinstance(step, dict) or step.get("status") != "failed":
+            continue
+        message = str(step.get("error") or f"{label}未完成")
+        failures.append(f"{label}失败：{message}")
+        reauthorization_required = reauthorization_required or bool(
+            step.get("reauthorization_required")
+        )
+    return ("；".join(failures) or None, reauthorization_required)
 
 
 def sync_feishu_resources(
@@ -4284,6 +4473,11 @@ def sync_feishu_resources(
     syncs: list[IntegrationSync] = []
     preflight_error: str | None = None
     preflight_reauthorization_required = False
+    # Attribute the shared preflight to the first resource only.  This keeps
+    # the sum/average telemetry truthful instead of multiplying one network
+    # operation by the number of resources in the batch.
+    first_resource_started = time_module.perf_counter()
+    first_retry_checkpoint = service.request_retry_count
     try:
         # Inspect the existing Base once for this batch.  It adopts matching
         # tables, adds only missing tables/fields, and caches the result for
@@ -4301,7 +4495,15 @@ def sync_feishu_resources(
         preflight_reauthorization_required = (
             isinstance(exc, FeishuServiceError) and exc.reauthorization_required
         )
-    for resource in resources:
+    except Exception as exc:
+        # Preserve the endpoint's per-resource isolation even for an
+        # unexpected readiness-check failure.  Every requested resource gets
+        # a durable failed result instead of leaving the whole batch invisible.
+        logger.exception(
+            "飞书批量同步预检异常：schedule_set_id=%s", schedule_set_id
+        )
+        preflight_error = str(exc)
+    for index, resource in enumerate(resources):
         sync = IntegrationSync(
             schedule_set_id=schedule_set_id,
             direction="export",
@@ -4313,6 +4515,12 @@ def sync_feishu_resources(
         # Never hold SQLite's write lock while a Feishu request is waiting.
         # The running record is durable before any network operation begins.
         db.commit()
+        sync_started = (
+            first_resource_started if index == 0 else time_module.perf_counter()
+        )
+        retry_checkpoint = (
+            first_retry_checkpoint if index == 0 else service.request_retry_count
+        )
         try:
             if preflight_error is not None:
                 raise FeishuServiceError(
@@ -4333,12 +4541,17 @@ def sync_feishu_resources(
             )
             sync.records_read = int(result["records_read"])
             sync.records_written = int(result["records_written"])
+            result_error, result_reauthorization_required = _sync_result_failure(result)
             sync.detail = _sync_detail(
                 result,
                 trigger=trigger,
                 schedule_set_id=schedule_set_id,
+                duration_ms=(time_module.perf_counter() - sync_started) * 1000,
+                retry_count=service.request_retry_count - retry_checkpoint,
+                error=result_error,
+                reauthorization_required=result_reauthorization_required,
             )
-            sync.status = "completed"
+            sync.status = "failed" if result_error else "completed"
         except (FeishuServiceError, httpx.HTTPError) as exc:
             logger.warning(
                 "飞书批量同步失败：schedule_set_id=%s resource=%s",
@@ -4351,6 +4564,8 @@ def sync_feishu_resources(
                 None,
                 trigger=trigger,
                 schedule_set_id=schedule_set_id,
+                duration_ms=(time_module.perf_counter() - sync_started) * 1000,
+                retry_count=service.request_retry_count - retry_checkpoint,
                 error=str(exc),
                 reauthorization_required=(
                     isinstance(exc, FeishuServiceError) and exc.reauthorization_required
@@ -4365,6 +4580,8 @@ def sync_feishu_resources(
                 None,
                 trigger=trigger,
                 schedule_set_id=schedule_set_id,
+                duration_ms=(time_module.perf_counter() - sync_started) * 1000,
+                retry_count=service.request_retry_count - retry_checkpoint,
                 error=str(exc),
             )
         audit(db, user, "sync", "feishu", sync.id, sync.detail)
@@ -4409,8 +4626,8 @@ def trigger_published_data_sync(
             (
                 "schedule",
                 "public_summary",
-                "public_class_schedule",
                 "public_adjustment_notice",
+                "public_class_links",
             ),
             trigger=f"version_{event}",
         )
@@ -4521,6 +4738,7 @@ def feishu_sync(
     user: AdminOrScheduler,
     scope: SchedulerScope,
 ) -> IntegrationSync:
+    service = FeishuService(settings, db)
     sync = IntegrationSync(
         schedule_set_id=scope.id,
         direction=request.direction,
@@ -4532,10 +4750,11 @@ def feishu_sync(
     # Persist the running state first; the following remote calls must not
     # monopolize SQLite's write lock.
     db.commit()
+    sync_started = time_module.perf_counter()
+    retry_checkpoint = service.request_retry_count
     try:
         rows = export_resource_rows(db, request.resource, scope.id)
         db.commit()
-        service = FeishuService(settings, db)
         service.prepare_sync_resources(
             user.id,
             [request.resource],
@@ -4551,18 +4770,25 @@ def feishu_sync(
         )
         sync.records_read = int(result["records_read"])
         sync.records_written = int(result["records_written"])
+        result_error, result_reauthorization_required = _sync_result_failure(result)
         sync.detail = _sync_detail(
             result,
             trigger="single_resource",
             schedule_set_id=scope.id,
+            duration_ms=(time_module.perf_counter() - sync_started) * 1000,
+            retry_count=service.request_retry_count - retry_checkpoint,
+            error=result_error,
+            reauthorization_required=result_reauthorization_required,
         )
-        sync.status = "completed"
+        sync.status = "failed" if result_error else "completed"
     except (FeishuServiceError, httpx.HTTPError) as exc:
         sync.status = "failed"
         sync.detail = _sync_detail(
             None,
             trigger="single_resource",
             schedule_set_id=scope.id,
+            duration_ms=(time_module.perf_counter() - sync_started) * 1000,
+            retry_count=service.request_retry_count - retry_checkpoint,
             error=str(exc),
             reauthorization_required=(
                 isinstance(exc, FeishuServiceError) and exc.reauthorization_required
@@ -4576,6 +4802,27 @@ def feishu_sync(
             else status.HTTP_502_BAD_GATEWAY
         )
         raise HTTPException(status_code=code, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception(
+            "飞书单资源同步异常：schedule_set_id=%s resource=%s",
+            scope.id,
+            request.resource,
+        )
+        sync.status = "failed"
+        sync.detail = _sync_detail(
+            None,
+            trigger="single_resource",
+            schedule_set_id=scope.id,
+            duration_ms=(time_module.perf_counter() - sync_started) * 1000,
+            retry_count=service.request_retry_count - retry_checkpoint,
+            error=str(exc),
+        )
+        audit(db, user, "sync", "feishu", sync.id, sync.detail)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
     audit(db, user, "sync", "feishu", sync.id, sync.detail)
     db.commit()
     db.refresh(sync)

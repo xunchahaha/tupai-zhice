@@ -750,6 +750,131 @@
         }
       }
     },
+    "/api/v1/overview/analytics": {
+      "get": {
+        "tags": [
+          "overview"
+        ],
+        "summary": "Overview Analytics",
+        "description": "Return dashboard analytics without expanding the legacy overview DTO.",
+        "operationId": "overview_analytics_api_v1_overview_analytics_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "指定课表版本；为空时优先当前发布版本，再取最新版本",
+              "title": "Schedule Id"
+            },
+            "description": "指定课表版本；为空时优先当前发布版本，再取最新版本"
+          },
+          {
+            "name": "date_from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "统计起始日期（含）",
+              "title": "Date From"
+            },
+            "description": "统计起始日期（含）"
+          },
+          {
+            "name": "date_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "统计结束日期（含）",
+              "title": "Date To"
+            },
+            "description": "统计结束日期（含）"
+          },
+          {
+            "name": "sync_window_hours",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 720,
+              "minimum": 1,
+              "description": "飞书同步遥测回看小时数",
+              "default": 24,
+              "title": "Sync Window Hours"
+            },
+            "description": "飞书同步遥测回看小时数"
+          },
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OverviewAnalyticsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/imports/sample.xlsx": {
       "get": {
         "tags": [
@@ -6888,8 +7013,8 @@
                 "rules",
                 "schedule",
                 "public_summary",
-                "public_class_schedule",
-                "public_adjustment_notice"
+                "public_adjustment_notice",
+                "public_class_links"
               ]
             },
             "type": "array",
@@ -7097,8 +7222,8 @@
               "rules",
               "schedule",
               "public_summary",
-              "public_class_schedule",
-              "public_adjustment_notice"
+              "public_adjustment_notice",
+              "public_class_links"
             ],
             "title": "Resource"
           },
@@ -7460,6 +7585,251 @@
         ],
         "title": "MasterDataBatchDelete"
       },
+      "OptimizationPenaltyBreakdown": {
+        "properties": {
+          "schedule_set_id": {
+            "type": "string",
+            "title": "Schedule Set Id"
+          },
+          "solver_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Solver Run Id"
+          },
+          "solver_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Solver Status"
+          },
+          "objective_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objective Value"
+          },
+          "best_bound": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Best Bound"
+          },
+          "total_soft_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Soft Penalty"
+          },
+          "unattributed_objective_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unattributed Objective Value"
+          },
+          "reconciliation_error": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconciliation Error"
+          },
+          "breakdown_source": {
+            "type": "string",
+            "title": "Breakdown Source"
+          },
+          "scope_source": {
+            "type": "string",
+            "title": "Scope Source"
+          },
+          "evaluated_assignment_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Evaluated Assignment Count"
+          },
+          "soft_constraints": {
+            "items": {
+              "$ref": "#/components/schemas/OptimizationPenaltyItem"
+            },
+            "type": "array",
+            "title": "Soft Constraints"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Notes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "schedule_set_id",
+          "solver_run_id",
+          "solver_status",
+          "objective_value",
+          "best_bound",
+          "total_soft_penalty",
+          "unattributed_objective_value",
+          "breakdown_source",
+          "scope_source",
+          "evaluated_assignment_count"
+        ],
+        "title": "OptimizationPenaltyBreakdown"
+      },
+      "OptimizationPenaltyItem": {
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "title": "Rule Id"
+          },
+          "constraint_type": {
+            "type": "string",
+            "title": "Constraint Type"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "hardness": {
+            "type": "string",
+            "title": "Hardness",
+            "default": "soft"
+          },
+          "weight": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Weight"
+          },
+          "violations": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Violations"
+          },
+          "evaluated_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Evaluated Count"
+          },
+          "penalty": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Penalty"
+          },
+          "satisfaction_rate": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Satisfaction Rate"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "declared"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rule_id",
+          "constraint_type",
+          "label",
+          "weight",
+          "evaluated_count"
+        ],
+        "title": "OptimizationPenaltyItem"
+      },
+      "OverviewAnalyticsResponse": {
+        "properties": {
+          "schedule_set_id": {
+            "type": "string",
+            "title": "Schedule Set Id"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Generated At"
+          },
+          "teacher_workload": {
+            "$ref": "#/components/schemas/TeacherWorkloadDistribution"
+          },
+          "room_heatmap": {
+            "$ref": "#/components/schemas/RoomSlotHeatmap"
+          },
+          "optimization_penalties": {
+            "$ref": "#/components/schemas/OptimizationPenaltyBreakdown"
+          },
+          "sync_health": {
+            "$ref": "#/components/schemas/SyncHealthTelemetry"
+          }
+        },
+        "type": "object",
+        "required": [
+          "schedule_set_id",
+          "generated_at",
+          "teacher_workload",
+          "room_heatmap",
+          "optimization_penalties",
+          "sync_health"
+        ],
+        "title": "OverviewAnalyticsResponse",
+        "description": "总览页可选的分析维度；不改变原有 ``/overview`` 响应契约。"
+      },
       "OverviewResponse": {
         "properties": {
           "counts": {
@@ -7770,6 +8140,56 @@
         ],
         "title": "RoomPayload"
       },
+      "RoomPeriodHeatmapCell": {
+        "properties": {
+          "weekday": {
+            "type": "string",
+            "title": "Weekday"
+          },
+          "period": {
+            "type": "string",
+            "title": "Period"
+          },
+          "occupied_room_slots": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Occupied Room Slots"
+          },
+          "available_room_slots": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Available Room Slots"
+          },
+          "occupancy_rate": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Occupancy Rate"
+          },
+          "observed_days": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Observed Days"
+          },
+          "slot_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Slot Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "weekday",
+          "period",
+          "occupied_room_slots",
+          "available_room_slots",
+          "occupancy_rate",
+          "observed_days",
+          "slot_count"
+        ],
+        "title": "RoomPeriodHeatmapCell",
+        "description": "7×3 汇总格：周一至周日 × 上午/下午/晚自习。"
+      },
       "RoomResponse": {
         "properties": {
           "campus_id": {
@@ -7802,6 +8222,173 @@
           "id"
         ],
         "title": "RoomResponse"
+      },
+      "RoomSlotHeatmap": {
+        "properties": {
+          "schedule_set_id": {
+            "type": "string",
+            "title": "Schedule Set Id"
+          },
+          "schedule_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Version Id"
+          },
+          "schedule_version_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Version No"
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
+          },
+          "effective_date_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Date From"
+          },
+          "effective_date_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Date To"
+          },
+          "total_rooms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Rooms"
+          },
+          "cells": {
+            "items": {
+              "$ref": "#/components/schemas/RoomSlotHeatmapCell"
+            },
+            "type": "array",
+            "title": "Cells"
+          },
+          "period_cells": {
+            "items": {
+              "$ref": "#/components/schemas/RoomPeriodHeatmapCell"
+            },
+            "type": "array",
+            "title": "Period Cells"
+          }
+        },
+        "type": "object",
+        "required": [
+          "schedule_set_id",
+          "schedule_version_id",
+          "schedule_version_no",
+          "date_from",
+          "date_to",
+          "effective_date_from",
+          "effective_date_to",
+          "total_rooms"
+        ],
+        "title": "RoomSlotHeatmap"
+      },
+      "RoomSlotHeatmapCell": {
+        "properties": {
+          "weekday": {
+            "type": "string",
+            "title": "Weekday"
+          },
+          "slot_business_id": {
+            "type": "string",
+            "title": "Slot Business Id"
+          },
+          "slot_label": {
+            "type": "string",
+            "title": "Slot Label"
+          },
+          "period": {
+            "type": "string",
+            "title": "Period"
+          },
+          "sequence": {
+            "type": "integer",
+            "title": "Sequence"
+          },
+          "occupied_room_slots": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Occupied Room Slots"
+          },
+          "available_room_slots": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Available Room Slots"
+          },
+          "occupancy_rate": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Occupancy Rate"
+          },
+          "observed_days": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Observed Days"
+          }
+        },
+        "type": "object",
+        "required": [
+          "weekday",
+          "slot_business_id",
+          "slot_label",
+          "period",
+          "sequence",
+          "occupied_room_slots",
+          "available_room_slots",
+          "occupancy_rate",
+          "observed_days"
+        ],
+        "title": "RoomSlotHeatmapCell"
       },
       "RuleCreate": {
         "properties": {
@@ -9163,6 +9750,155 @@
         ],
         "title": "SolverRunResponse"
       },
+      "SyncHealthResourceItem": {
+        "properties": {
+          "resource": {
+            "type": "string",
+            "title": "Resource"
+          },
+          "total_syncs": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Syncs"
+          },
+          "completed_syncs": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Completed Syncs"
+          },
+          "failed_syncs": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Failed Syncs"
+          },
+          "records_read": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Records Read"
+          },
+          "records_written": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Records Written"
+          }
+        },
+        "type": "object",
+        "required": [
+          "resource",
+          "total_syncs",
+          "completed_syncs",
+          "failed_syncs",
+          "records_read",
+          "records_written"
+        ],
+        "title": "SyncHealthResourceItem"
+      },
+      "SyncHealthTelemetry": {
+        "properties": {
+          "schedule_set_id": {
+            "type": "string",
+            "title": "Schedule Set Id"
+          },
+          "window_start": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window Start"
+          },
+          "window_end": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window End"
+          },
+          "total_syncs": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Syncs"
+          },
+          "completed_syncs": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Completed Syncs"
+          },
+          "failed_syncs": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Failed Syncs"
+          },
+          "retry_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Retry Count"
+          },
+          "records_read": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Records Read"
+          },
+          "records_written": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Records Written"
+          },
+          "average_duration_ms": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Average Duration Ms"
+          },
+          "latest_sync_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Sync At"
+          },
+          "duration_samples": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Duration Samples"
+          },
+          "resources": {
+            "items": {
+              "$ref": "#/components/schemas/SyncHealthResourceItem"
+            },
+            "type": "array",
+            "title": "Resources"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Notes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "schedule_set_id",
+          "window_start",
+          "window_end",
+          "total_syncs",
+          "completed_syncs",
+          "failed_syncs",
+          "retry_count",
+          "records_read",
+          "records_written",
+          "latest_sync_at",
+          "duration_samples"
+        ],
+        "title": "SyncHealthTelemetry"
+      },
       "TeacherBatchUpdate": {
         "properties": {
           "object_ids": {
@@ -9280,6 +10016,216 @@
           "id"
         ],
         "title": "TeacherResponse"
+      },
+      "TeacherWorkloadBucket": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "min_sessions": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Min Sessions"
+          },
+          "max_sessions": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Sessions"
+          },
+          "teacher_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Teacher Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "label",
+          "min_sessions",
+          "teacher_count"
+        ],
+        "title": "TeacherWorkloadBucket"
+      },
+      "TeacherWorkloadDistribution": {
+        "properties": {
+          "schedule_set_id": {
+            "type": "string",
+            "title": "Schedule Set Id"
+          },
+          "schedule_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Version Id"
+          },
+          "schedule_version_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Version No"
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
+          },
+          "total_teachers": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Teachers"
+          },
+          "assigned_teachers": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Assigned Teachers"
+          },
+          "total_sessions": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Sessions"
+          },
+          "total_hours": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Total Hours"
+          },
+          "top_teachers": {
+            "items": {
+              "$ref": "#/components/schemas/TeacherWorkloadItem"
+            },
+            "type": "array",
+            "title": "Top Teachers"
+          },
+          "teachers": {
+            "items": {
+              "$ref": "#/components/schemas/TeacherWorkloadItem"
+            },
+            "type": "array",
+            "title": "Teachers"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/TeacherWorkloadBucket"
+            },
+            "type": "array",
+            "title": "Buckets"
+          }
+        },
+        "type": "object",
+        "required": [
+          "schedule_set_id",
+          "schedule_version_id",
+          "schedule_version_no",
+          "date_from",
+          "date_to",
+          "total_teachers",
+          "assigned_teachers",
+          "total_sessions",
+          "total_hours"
+        ],
+        "title": "TeacherWorkloadDistribution"
+      },
+      "TeacherWorkloadItem": {
+        "properties": {
+          "campus_id": {
+            "type": "string",
+            "title": "Campus Id"
+          },
+          "campus_name": {
+            "type": "string",
+            "title": "Campus Name"
+          },
+          "teacher_business_id": {
+            "type": "string",
+            "title": "Teacher Business Id"
+          },
+          "teacher_name": {
+            "type": "string",
+            "title": "Teacher Name"
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject",
+            "default": ""
+          },
+          "total_sessions": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Sessions"
+          },
+          "total_hours": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Total Hours"
+          },
+          "load_share": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Load Share"
+          },
+          "rank": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rank"
+          }
+        },
+        "type": "object",
+        "required": [
+          "campus_id",
+          "campus_name",
+          "teacher_business_id",
+          "teacher_name",
+          "total_sessions",
+          "total_hours",
+          "load_share"
+        ],
+        "title": "TeacherWorkloadItem",
+        "description": "课表版本内一名教师的课时负荷。"
       },
       "TimeSlotBatchUpdate": {
         "properties": {
