@@ -497,15 +497,22 @@ export function SchedulePage() {
                           </div>
                         </div>
 
-                        {/* 2. Course Name / Subject Badge */}
-                        <div className="flex items-center gap-2 md:min-w-[170px]">
-                          <div className="flex items-center gap-1.5 rounded-lg border border-indigo-100 bg-indigo-50/80 px-3 py-2 text-indigo-950 w-full">
-                            <BookOpen className="size-4 text-indigo-600 shrink-0" />
+                        {/* 2. Course Name / Subject Badge + Stage */}
+                        <div className="flex items-center gap-2 md:min-w-[190px]">
+                          <div className="flex items-start gap-2 rounded-lg border border-indigo-100 bg-indigo-50/80 px-3 py-2 text-indigo-950 w-full">
+                            <BookOpen className="size-4 text-indigo-600 shrink-0 mt-0.5" />
                             <div>
                               <div className="text-xs font-bold leading-tight break-words">{courseName}</div>
-                              {cs?.stage && (
-                                <div className="text-[10px] text-indigo-600 font-medium">{cs.stage}</div>
-                              )}
+                              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
+                                {cs?.stage && (
+                                  <span className="font-bold text-amber-900 bg-amber-100/90 px-1.5 py-0.2 rounded">
+                                    {cs.stage}
+                                  </span>
+                                )}
+                                {cs?.session_no != null && (
+                                  <span className="text-zinc-500 font-medium">第 {cs.session_no} 讲</span>
+                                )}
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -691,11 +698,25 @@ export function SchedulePage() {
                                   : "border-blue-200/90 bg-blue-50/80 text-blue-950 hover:bg-blue-100/70 hover:border-blue-300",
                               )}
                             >
-                              {/* 1. Full Course Name / Subject Badge without truncation */}
-                              {courseName ? (
-                                <div className="flex items-center gap-1 text-[11px] font-bold text-indigo-800 bg-indigo-100/80 px-1.5 py-0.5 rounded leading-tight break-words mb-1.5 w-fit max-w-full">
-                                  <BookOpen className="size-3 text-indigo-600 shrink-0" />
-                                  <span className="break-words">{courseName}</span>
+                              {/* 1. Full Course Name / Subject + Stage & Session Badge */}
+                              {(courseName || cs?.stage || cs?.session_no != null) ? (
+                                <div className="flex flex-wrap items-center gap-1 mb-1.5 leading-tight">
+                                  {courseName && (
+                                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-900 bg-indigo-100/90 px-1.5 py-0.5 rounded break-words">
+                                      <BookOpen className="size-3 text-indigo-600 shrink-0" />
+                                      {courseName}
+                                    </span>
+                                  )}
+                                  {cs?.stage && (
+                                    <span className="text-[10px] font-bold text-amber-900 bg-amber-100 px-1.5 py-0.5 rounded break-words">
+                                      {cs.stage}
+                                    </span>
+                                  )}
+                                  {cs?.session_no != null && (
+                                    <span className="text-[10px] font-medium text-zinc-600 bg-zinc-100 px-1 py-0.5 rounded">
+                                      第{cs.session_no}讲
+                                    </span>
+                                  )}
                                 </div>
                               ) : null}
 
