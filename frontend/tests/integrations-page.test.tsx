@@ -222,8 +222,8 @@ describe("飞书生产接入页", () => {
       ["rules", "规则"],
       ["schedule", "课表"],
       ["public_summary", "公开展示汇总"],
-      ["public_class_schedule", "班级公开课表"],
       ["public_adjustment_notice", "公开调课通知"],
+      ["public_class_links", "班级链接索引"],
     ].map(([resource, table_name], index) => ({ resource, table_name, table_id: `tbl-${index}` }));
     mocks.connection.current = {
       ...baseConnection,
@@ -261,10 +261,10 @@ describe("飞书生产接入页", () => {
     );
     await user.click(screen.getByRole("button", { name: "一键同步当前方案" }));
     expect(mocks.batchSync).toHaveBeenCalledWith({ data: {} });
-    await user.click(screen.getByRole("button", { name: "同步三张展示表" }));
+    await user.click(screen.getByRole("button", { name: "同步展示数据与班级链接目录" }));
     expect(mocks.batchSync).toHaveBeenLastCalledWith({
       data: {
-        resources: ["public_summary", "public_class_schedule", "public_adjustment_notice"],
+        resources: ["public_summary", "public_adjustment_notice", "public_class_links"],
       },
     });
     await user.selectOptions(screen.getByLabelText("同步资源"), "teachers");

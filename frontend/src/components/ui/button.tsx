@@ -13,14 +13,14 @@ export const Button = forwardRef<
     ref={ref}
     type={type}
     className={cn(
-      "inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md font-medium transition-colors disabled:pointer-events-none disabled:opacity-50",
+      "inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md font-medium transition-all duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50 disabled:active:scale-100",
       "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600",
       {
-        primary: "bg-zinc-900 text-white hover:bg-zinc-700",
-        secondary: "bg-zinc-100 text-zinc-800 hover:bg-zinc-200",
+        primary: "bg-zinc-900 text-white shadow-2xs hover:bg-zinc-800 hover:shadow-xs",
+        secondary: "bg-zinc-100 text-zinc-800 hover:bg-zinc-200/80",
         ghost: "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-950",
-        danger: "bg-red-600 text-white hover:bg-red-700",
-        outline: "border border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50",
+        danger: "bg-red-600 text-white shadow-2xs hover:bg-red-700 hover:shadow-xs",
+        outline: "border border-zinc-300 bg-white text-zinc-700 shadow-2xs hover:border-zinc-400 hover:bg-zinc-50/80",
       }[variant],
       { sm: "h-8 px-2.5 text-xs", md: "h-9 px-3 text-sm", icon: "size-8 p-0" }[size],
       className,

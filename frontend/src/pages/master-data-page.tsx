@@ -49,6 +49,7 @@ import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { ColumnHeader, CopyableId, TableText, TagList } from "@/components/table-cell";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { Select } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/format";
@@ -143,8 +144,8 @@ interface SlotDraft {
   isOpen: boolean;
 }
 
-const inputClass = "mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm outline-none focus:border-blue-500";
-const compactInputClass = "h-8 rounded-md border border-zinc-300 bg-white px-2 text-xs outline-none focus:border-blue-500";
+const inputClass = "mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2.5 text-sm shadow-2xs outline-none transition-all duration-150 focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20";
+const compactInputClass = "h-8 rounded-md border border-zinc-300 bg-white px-2.5 text-xs shadow-2xs outline-none transition-all duration-150 focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20";
 
 /** 可关闭的课程列。课程 ID 是内部标识，默认不占版面，需要时再打开。 */
 const COURSE_OPTIONAL_COLUMNS: Array<{ key: CourseColumnKey; label: string }> = [
@@ -756,7 +757,7 @@ export function MasterDataPage() {
           <DialogTitle className="text-base font-semibold">{entityDialog?.mode === "edit" ? "编辑" : "新增"}{entityLabel}</DialogTitle>
           <DialogDescription className="mt-1 text-sm text-zinc-500">{entityDialog?.kind === "slot" ? "时段用于描述可排课时间窗口；课程自身的固定开始、结束时间仍以课程数据为准。" : entityDialog?.kind === "class" ? "班级只登记身份。班型、业务线、教师由这个班的课程场次实时汇总，新建的班在排课次之前这几项都是空的。" : "名称与业务标签一致时，名称可以留空，系统会自动复用标签。"}</DialogDescription>
           <form className="mt-5 space-y-4" onSubmit={submitEntity}>
-            <label className="block text-sm text-zinc-700">所属校区<select className={inputClass} value={campusId} onChange={(event) => setCampusId(event.target.value)} required>{campusQuery.data?.map((campus) => <option key={campus.id} value={campus.id}>{campus.name}</option>)}</select></label>
+            <label className="block text-sm text-zinc-700">所属校区<Select selectSize="md" containerClassName="mt-1.5" value={campusId} onChange={(event) => setCampusId(event.target.value)} required>{campusQuery.data?.map((campus) => <option key={campus.id} value={campus.id}>{campus.name}</option>)}</Select></label>
             {entityDialog?.kind === "teacher" ? <><label className="block text-sm text-zinc-700">教师标签<input className={inputClass} value={teacherDraft.businessId} onChange={(event) => setTeacherDraft({ ...teacherDraft, businessId: event.target.value })} required /></label><label className="block text-sm text-zinc-700">显示名称（选填）<input className={inputClass} value={teacherDraft.name} onChange={(event) => setTeacherDraft({ ...teacherDraft, name: event.target.value })} placeholder="留空则与标签一致" /></label><label className="block text-sm text-zinc-700">学科<input className={inputClass} value={teacherDraft.subject} onChange={(event) => setTeacherDraft({ ...teacherDraft, subject: event.target.value })} /></label><label className="block text-sm text-zinc-700">飞书日程账号（选填）<input className={inputClass} value={teacherDraft.calendarUserId} onChange={(event) => setTeacherDraft({ ...teacherDraft, calendarUserId: event.target.value })} /></label></> : entityDialog?.kind === "class" ? <><label className="block text-sm text-zinc-700">班级标签<input className={inputClass} value={classDraft.businessId} onChange={(event) => setClassDraft({ ...classDraft, businessId: event.target.value })} required /></label><label className="block text-sm text-zinc-700">显示名称（选填）<input className={inputClass} value={classDraft.name} onChange={(event) => setClassDraft({ ...classDraft, name: event.target.value })} placeholder="留空则与标签一致" /></label></> : entityDialog?.kind === "room" ? <><label className="block text-sm text-zinc-700">教室标签<input className={inputClass} value={roomDraft.businessId} onChange={(event) => setRoomDraft({ ...roomDraft, businessId: event.target.value })} required /></label><label className="block text-sm text-zinc-700">显示名称（选填）<input className={inputClass} value={roomDraft.name} onChange={(event) => setRoomDraft({ ...roomDraft, name: event.target.value })} placeholder="留空则与标签一致" /></label><label className="flex items-center gap-2 text-sm text-zinc-700"><input type="checkbox" checked={roomDraft.isActive} onChange={(event) => setRoomDraft({ ...roomDraft, isActive: event.target.checked })} />启用教室</label></> : <><label className="block text-sm text-zinc-700">时段标签<input className={inputClass} value={slotDraft.businessId} onChange={(event) => setSlotDraft({ ...slotDraft, businessId: event.target.value })} required /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block text-sm text-zinc-700">星期<input className={inputClass} value={slotDraft.weekday} onChange={(event) => setSlotDraft({ ...slotDraft, weekday: event.target.value })} placeholder="例如：周一" required /></label><label className="block text-sm text-zinc-700">类型<input className={inputClass} value={slotDraft.kind} onChange={(event) => setSlotDraft({ ...slotDraft, kind: event.target.value })} placeholder="例如：上午" /></label><label className="block text-sm text-zinc-700">开始时间<input className={inputClass} type="time" value={slotDraft.startTime} onChange={(event) => setSlotDraft({ ...slotDraft, startTime: event.target.value })} required /></label><label className="block text-sm text-zinc-700">结束时间<input className={inputClass} type="time" value={slotDraft.endTime} onChange={(event) => setSlotDraft({ ...slotDraft, endTime: event.target.value })} required /></label><label className="block text-sm text-zinc-700">排序序号<input className={inputClass} type="number" min="0" value={slotDraft.sequence} onChange={(event) => setSlotDraft({ ...slotDraft, sequence: event.target.value })} /></label></div><label className="flex items-center gap-2 text-sm text-zinc-700"><input type="checkbox" checked={slotDraft.isOpen} onChange={(event) => setSlotDraft({ ...slotDraft, isOpen: event.target.checked })} />开放时段</label></>}
             <div className="flex justify-end gap-2 border-t border-zinc-100 pt-4"><Button type="button" variant="outline" onClick={closeEntityDialog}>取消</Button><Button type="submit" disabled={isCreating || !campusId}>{isCreating ? "保存中" : "保存"}</Button></div>
           </form>
@@ -845,7 +846,20 @@ function BatchLimitNotice({ selected }: { selected: number }) {
 
 function FilterSelect({ label, value, setValue, options }: { label: string; value: string; setValue: (value: string) => void; options: string[] }) {
   // min-w-0：select 的固有宽度由最长选项决定（班级标签很长），不压住会把整行网格撑出容器。
-  return <select aria-label={label} className={`${compactInputClass} w-full min-w-0`} value={value} onChange={(event) => setValue(event.target.value)}><option value="">{label}</option>{options.map((option) => <option key={option} value={option}>{option}</option>)}</select>;
+  return (
+    <Select
+      aria-label={label}
+      selectSize="sm"
+      containerClassName="w-full min-w-0"
+      value={value}
+      onChange={(event) => setValue(event.target.value)}
+    >
+      <option value="">{label}</option>
+      {options.map((option) => (
+        <option key={option} value={option}>{option}</option>
+      ))}
+    </Select>
+  );
 }
 
 function CourseEditorDialog({ open, mode, draft, setDraft, campuses, teachers, classes, rooms, saving, close, submit }: { open: boolean; mode: CourseDialogMode; draft: CourseDraft; setDraft: (draft: CourseDraft) => void; campuses: Array<{ id: string; name: string }>; teachers: TeacherResponse[]; classes: ClassGroupResponse[]; rooms: RoomResponse[]; saving: boolean; close: () => void; submit: (event: FormEvent<HTMLFormElement>) => void }) {
@@ -910,7 +924,23 @@ function FormInput({ label, value, setValue, type = "text", required = false, mi
 }
 
 function FormSelect({ label, value, setValue, options, required = false }: { label: string; value: string; setValue: (value: string) => void; options: Array<{ value: string; label: string }>; required?: boolean }) {
-  return <label className="block text-sm text-zinc-700">{label}<select className={inputClass} value={value} onChange={(event) => setValue(event.target.value)} required={required}><option value="">请选择</option>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>;
+  return (
+    <label className="block text-sm text-zinc-700">
+      {label}
+      <Select
+        selectSize="md"
+        containerClassName="mt-1.5"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        required={required}
+      >
+        <option value="">请选择</option>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </Select>
+    </label>
+  );
 }
 
 function ReadOnlyField({ label, value }: { label: string; value: string }) {

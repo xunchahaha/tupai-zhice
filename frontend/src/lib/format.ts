@@ -20,3 +20,24 @@ export function errorMessage(error: unknown): string {
   }
   return error instanceof Error ? error.message : "请求未完成";
 }
+
+export function formatSlot(value: string | undefined | null): string {
+  if (!value) return "-";
+  let s = value.replace(/^SLOT-/, "");
+  const match = s.match(/^([\u4e00-\u9fa5]+|\w+)-(\d{2})(\d{2})-(\d{2})(\d{2})$/);
+  if (match) {
+    const [, day, h1, m1, h2, m2] = match;
+    return `${day} ${h1}:${m1}-${h2}:${m2}`;
+  }
+  const timeOnly = s.match(/^(\d{2})(\d{2})-(\d{2})(\d{2})$/);
+  if (timeOnly) {
+    const [, h1, m1, h2, m2] = timeOnly;
+    return `${h1}:${m1}-${h2}:${m2}`;
+  }
+  return s;
+}
+
+export function formatRoom(value: string | undefined | null): string {
+  if (!value) return "-";
+  return value.replace(/^教室-/, "");
+}

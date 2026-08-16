@@ -14,6 +14,7 @@ import type { AssignmentResponse, TimeSlotResponse } from "@/api/generated/model
 import { http } from "@/api/http";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { errorMessage } from "@/lib/format";
 import { statusLabel } from "@/lib/labels";
@@ -135,23 +136,19 @@ export function SchedulePage() {
   const gridTemplate = { gridTemplateColumns: `110px repeat(${Math.max(visible.length, 1)}, minmax(150px, 1fr))` };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 animate-fade-in">
       <PageHeader
         title="课表视图"
         actions={
           <>
-            <select
-              aria-label="课表版本"
-              className="h-8 max-w-48 rounded-md border border-zinc-300 bg-white px-2 text-xs"
-              value={scheduleId}
-              onChange={(event) => setScheduleId(event.target.value)}
+            <Select aria-label="课表版本" selectSize="sm" containerClassName="w-48" value={scheduleId} onChange={(event) => setScheduleId(event.target.value)}
             >
               {schedules.data?.map((item) => (
                 <option key={item.id} value={item.id}>
                   v{item.version_no} / {statusLabel(item.status)}
                 </option>
               ))}
-            </select>
+            </Select>
             <Button size="sm" variant="outline" onClick={download} disabled={!schedule}>
               <Download className="size-3.5" />
               导出 XLSX
@@ -172,18 +169,14 @@ export function SchedulePage() {
             </button>
           ))}
         </div>
-        <select
-          aria-label="排课对象"
-          className="h-8 min-w-44 rounded-md border border-zinc-300 bg-white px-2 text-xs"
-          value={subject}
-          onChange={(event) => setSubject(event.target.value)}
+        <Select aria-label="排课对象" selectSize="sm" containerClassName="w-48" value={subject} onChange={(event) => setSubject(event.target.value)}
         >
           {options.map((item) => (
             <option key={item.id} value={item.business_id}>
               {item.business_id} / {item.name}
             </option>
           ))}
-        </select>
+        </Select>
       </section>
 
       {columns.length > COLUMNS_PER_PAGE ? (

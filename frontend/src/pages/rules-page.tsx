@@ -24,6 +24,7 @@ import { canScheduleCurrentSet, useAppUser, useScheduleAccessRole } from "@/app/
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { actorTypeLabel, constraintLabel, hardnessLabel, statusLabel } from "@/lib/labels";
 import { errorMessage } from "@/lib/format";
@@ -138,7 +139,7 @@ export function RulesPage() {
   );
   if (rules.isPending) return <LoadingState />;
   if (rules.isError) return <ErrorState retry={() => void rules.refetch()} />;
-  return <div className="space-y-5">
+  return <div className="space-y-5 animate-fade-in">
     <PageHeader
       title="规则工作台"
       actions={<div className="inline-flex h-8 items-center rounded-md border border-zinc-200 bg-white p-0.5">
@@ -330,24 +331,18 @@ function ConstraintFields({ entries, draft, hardness, onChange }: {
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="text-sm text-zinc-700">
           约束类型
-          <select
-            className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2"
-            value={draft.constraint_type}
-            onChange={(event) => onChange({ ...draft, constraint_type: event.target.value, scope: {} })}
+          <Select selectSize="md" containerClassName="mt-1.5" value={draft.constraint_type} onChange={(event) => onChange({ ...draft, constraint_type: event.target.value, scope: {} })}
           >
             {selectable.map((item) => <option key={item.type} value={item.type}>{item.label}</option>)}
             {entry?.alias_of ? <option value={entry.type}>{entry.label}</option> : null}
-          </select>
+          </Select>
         </label>
         <label className="text-sm text-zinc-700">
           作用对象
-          <select
-            className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2"
-            value={draft.actor_type}
-            onChange={(event) => onChange({ ...draft, actor_type: event.target.value, actor_ids: [] })}
+          <Select selectSize="md" containerClassName="mt-1.5" value={draft.actor_type} onChange={(event) => onChange({ ...draft, actor_type: event.target.value, actor_ids: [] })}
           >
             {ACTOR_TYPES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-          </select>
+          </Select>
         </label>
       </div>
       {entry?.description ? <p className="text-xs text-zinc-500">{entry.description}</p> : null}
@@ -430,10 +425,10 @@ function RuleIntakeForm({ create, entries }: { create: ReturnType<typeof useCrea
           </label>
           <label className="text-sm text-zinc-700">
             约束级别
-            <select className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2" {...form.register("hardness")}>
+            <Select selectSize="md" containerClassName="mt-1.5" {...form.register("hardness")}>
               {allowedHardness.includes("soft") ? <option value="soft">软约束</option> : null}
               {allowedHardness.includes("hard") ? <option value="hard">硬约束</option> : null}
-            </select>
+            </Select>
           </label>
           <label className="text-sm text-zinc-700">
             软约束权重
@@ -505,5 +500,5 @@ function RuleEditor({ rule, entries, close, afterSave }: { rule: RuleResponse | 
     }
     setScopeError(null);
     update.mutate({ ruleId: rule.id, data: { source_text: value.source_text, actor_type: draft.actor_type, actor_ids: draft.actor_ids, constraint_type: draft.constraint_type, scope: cleanScope(draft.scope), hardness: value.hardness, weight: value.hardness === "soft" ? value.weight : null, structured_expression: rule.structured_expression ?? {}, source_doc: rule.source_doc, confidence: rule.confidence } });
-  })}><label className="block text-sm text-zinc-700">规则原文<textarea className="mt-1.5 min-h-24 w-full rounded-md border border-zinc-300 p-2.5 outline-none focus:border-blue-500" aria-invalid={Boolean(form.formState.errors.source_text)} {...form.register("source_text")} /><FieldError message={form.formState.errors.source_text?.message} /></label><div className="grid grid-cols-2 gap-3"><label className="text-sm text-zinc-700">约束级别<select className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-2" {...form.register("hardness")}>{allowedHardness.includes("hard") ? <option value="hard">硬约束</option> : null}{allowedHardness.includes("soft") ? <option value="soft">软约束</option> : null}</select></label><label className="text-sm text-zinc-700">权重<input className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-2" type="number" min="1" disabled={hardness === "hard"} aria-invalid={Boolean(form.formState.errors.weight)} {...form.register("weight", { valueAsNumber: true })} /><FieldError message={hardness === "soft" ? form.formState.errors.weight?.message : undefined} /></label></div><ConstraintFields entries={entries} draft={draft} hardness={hardness} onChange={(next) => { setDraft(next); setScopeError(null); }} /><FieldError message={scopeError ?? undefined} /><div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={close}>取消</Button><Button type="submit" disabled={update.isPending}>保存</Button></div></form></DialogContent></Dialog>;
+  })}><label className="block text-sm text-zinc-700">规则原文<textarea className="mt-1.5 min-h-24 w-full rounded-md border border-zinc-300 p-2.5 outline-none focus:border-blue-500" aria-invalid={Boolean(form.formState.errors.source_text)} {...form.register("source_text")} /><FieldError message={form.formState.errors.source_text?.message} /></label><div className="grid grid-cols-2 gap-3"><label className="text-sm text-zinc-700">约束级别<Select selectSize="md" containerClassName="mt-1.5" {...form.register("hardness")}>{allowedHardness.includes("hard") ? <option value="hard">硬约束</option> : null}{allowedHardness.includes("soft") ? <option value="soft">软约束</option> : null}</Select></label><label className="text-sm text-zinc-700">权重<input className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-2" type="number" min="1" disabled={hardness === "hard"} aria-invalid={Boolean(form.formState.errors.weight)} {...form.register("weight", { valueAsNumber: true })} /><FieldError message={hardness === "soft" ? form.formState.errors.weight?.message : undefined} /></label></div><ConstraintFields entries={entries} draft={draft} hardness={hardness} onChange={(next) => { setDraft(next); setScopeError(null); }} /><FieldError message={scopeError ?? undefined} /><div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={close}>取消</Button><Button type="submit" disabled={update.isPending}>保存</Button></div></form></DialogContent></Dialog>;
 }

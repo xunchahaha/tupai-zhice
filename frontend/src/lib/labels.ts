@@ -55,6 +55,7 @@ const labels: Record<string, string> = {
   schedule: "课表版本",
   public_summary: "公开展示汇总",
   public_class_schedule: "班级公开课表",
+  public_class_links: "班级链接索引",
   public_adjustment_notice: "公开调课通知",
   schedule_version: "课表版本",
   solver_run: "求解任务",
@@ -124,4 +125,32 @@ export function roleLabel(value?: string | null): string {
 
 export function auditActionLabel(value?: string | null): string {
   return statusLabel(value);
+}
+
+export const systemConstraintLabels: Record<string, string> = {
+  "SYSTEM-FIXED-TIME": "固定时段锁定",
+  "SYSTEM-CLASS-NO-OVERLAP": "班级时间不重叠",
+  "SYSTEM-ROOM-NO-OVERLAP": "教室容量与不重叠",
+  "SYSTEM-TEACHER-NO-OVERLAP": "教师时间不重叠",
+  "SYSTEM-CALENDAR-NO-OVERLAP": "飞书日程时间不冲突",
+  "SYSTEM-MAX-DAILY-HOURS": "教师单日课时上限",
+  "SYSTEM-CONSECUTIVE-SESSIONS": "连续课次连堂限制",
+  "SYSTEM-CAMPUS-ISOLATION": "校区场地隔离",
+  "SYSTEM-DEFAULT-MAX-CONSECUTIVE-HOURS": "最大连续授课时长",
+  "SYSTEM-DEFAULT-MAX-DAILY-HOURS": "单日最大授课课时",
+  "SYSTEM-ROOM-CAPACITY": "教室座位容量限制",
+};
+
+export function systemConstraintLabel(key?: string | null): string {
+  if (!key) return "";
+  return systemConstraintLabels[key] ?? key;
+}
+
+export function translateSystemConstraints(text: string): string {
+  if (!text) return "";
+  let result = text;
+  for (const [key, label] of Object.entries(systemConstraintLabels)) {
+    result = result.replaceAll(key, label);
+  }
+  return result;
 }

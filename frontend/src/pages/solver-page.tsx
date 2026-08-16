@@ -10,7 +10,8 @@ import { http } from "@/api/http";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { errorMessage } from "@/lib/format";
+import { Select } from "@/components/ui/select";
+import { errorMessage, formatRoom, formatSlot } from "@/lib/format";
 import { diffKindLabel, modelStatusLabel, statusLabel } from "@/lib/labels";
 import { latestDraftSchedule, preferredSchedule } from "@/lib/schedule";
 import { modelStatusTone, statusTone } from "@/lib/status";
@@ -168,7 +169,7 @@ export function SolverPage() {
     toast.success("建议指令已填入「一句话排课」，确认无误后可直接解析并重跑");
   };
   const publishCalendar = async (dryRun: boolean) => { if (!schedule) return; setPublishing(dryRun ? "dry-run" : "publish"); try { const { data } = await http.post<CalendarResult>(`/api/v1/schedules/${schedule.id}/calendar-publish`, { calendar_id: "primary", need_notification: true, dry_run: dryRun }); setCalendarResult(data); toast.success(dryRun ? `预检完成：预计下发 ${data.would_publish} 个日程，发现 ${data.conflict_count} 个冲突` : `已下发 ${data.published} 个日程，发现 ${data.conflict_count} 个冲突`); } catch (error) { toast.error(errorMessage(error)); } finally { setPublishing(null); } };
-  return <div className="space-y-5">
+  return <div className="space-y-5 animate-fade-in">
     <PageHeader title="排课求解" actions={<Badge tone="blue">AI + CP-SAT</Badge>} />
     <section className="border border-blue-200 bg-blue-50/40 p-5"><div className="flex flex-wrap items-center gap-2"><Bot className="size-4 text-blue-600" /><h2 className="font-semibold">一句话排课</h2><Badge tone={assistantReady === true ? "green" : "yellow"}>{assistantReady === true ? `${assistantEngine} 已接入` : assistantReady === false ? "AI 模型待配置" : assistantProbeError ? "AI 配置读取失败" : "正在读取 AI 配置"}</Badge>{assistantProbeError ? <Button size="sm" variant="outline" onClick={probeAssistant}>重试</Button> : null}</div><p className="mt-2 text-xs text-zinc-500">自然语言 → AI 解析业务范围与规则 → 教务确认 → CP-SAT 确定性求解 → 飞书多维表格与日历下发</p><textarea aria-label="一句话排课指令" className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500" value={instruction} onChange={(event) => { setInstruction(event.target.value); setInterpretation(null); }} /><div className="mt-3 flex flex-wrap gap-2"><Button onClick={interpret} disabled={assistantReady !== true || interpreting || instruction.trim().length < 2}><Sparkles className="size-4" />{interpreting ? "AI 正在理解指令" : "让 AI 解析排课指令"}</Button>{interpretation ? <Button variant="outline" onClick={solveFromInterpretation}><Play className="size-4" />确认并开始求解</Button> : null}</div>{assistantReady === false ? <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><div>普通飞书应用继续负责多维表格和日历；一句话理解改由独立 AI 模型接口完成，不再要求 Aily 应用标识和技能标识。</div><Button className="mt-3" size="sm" variant="outline" onClick={() => navigate("/integrations?section=ai")}><Settings2 className="size-4" />配置一句话排课 AI</Button></div> : null}{interpretation ? <><p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-xs text-zinc-600">{interpretation.summary}；解析来源：{interpretation.source === "feishu_aily" ? "飞书 Aily" : assistantEngine}。</p><div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3"><Scope label="业务线" values={interpretation.business_lines} /><Scope label="产品班型" values={interpretation.product_types} /><Scope label="班级范围" values={interpretation.class_business_ids} /><Scope label="日期范围" values={[interpretation.date_from, interpretation.date_to].filter(Boolean) as string[]} /><Scope label="日期调整窗口" values={[`${interpretation.date_window_days} 天`]} /><Scope label="识别规则" values={interpretation.recognized_rules} /></div></> : null}</section>
     <div className="grid gap-2 xl:grid-cols-[360px_minmax(0,1fr)]">
@@ -221,9 +222,9 @@ function NumberField({ label, hint, value, min, max, step, onChange }: { label: 
   const id = `solver-${label}`;
   return (
     <div className="block text-sm text-zinc-700">
-      <span className="flex items-baseline justify-between">
-        <label htmlFor={id}>{label}</label>
-        <span className="inline-flex items-center gap-1.5 font-mono text-xs tabular-nums text-zinc-500">{value}<InfoTooltip label={label}>{hint}</InfoTooltip></span>
+      <span className="flex items-center justify-between">
+        <label htmlFor={id} className="cursor-pointer font-medium text-zinc-800">{label}</label>
+        <InfoTooltip label={label}>{hint}</InfoTooltip>
       </span>
       <input
         id={id}
@@ -258,10 +259,7 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
         <div className="text-xs font-medium text-zinc-500">求解范围</div>
         <label className="block text-sm text-zinc-700">
           业务线
-          <select
-            className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm"
-            value={params.business_lines[0] ?? ""}
-            onChange={(event) =>
+          <Select selectSize="md" containerClassName="mt-1.5" value={params.business_lines[0] ?? ""} onChange={(event) =>
               setParams((current) => ({
                 ...current,
                 business_lines: event.target.value ? [event.target.value] : [],
@@ -272,14 +270,11 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
             {scope.businessLines.map((item) => (
               <option key={item} value={item}>{item}</option>
             ))}
-          </select>
+          </Select>
         </label>
         <label className="block text-sm text-zinc-700">
           班级
-          <select
-            className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm"
-            value={params.class_business_ids[0] ?? ""}
-            onChange={(event) =>
+          <Select selectSize="md" containerClassName="mt-1.5" value={params.class_business_ids[0] ?? ""} onChange={(event) =>
               setParams((current) => ({
                 ...current,
                 class_business_ids: event.target.value ? [event.target.value] : [],
@@ -290,7 +285,7 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
             {scope.classes.map((item) => (
               <option key={item} value={item}>{item}</option>
             ))}
-          </select>
+          </Select>
         </label>
         <div className="grid grid-cols-2 gap-3">
           {(["date_from", "date_to"] as const).map((key) => {
@@ -405,12 +400,41 @@ function ScheduleChangePanel({
         <Value label="教室变化" value={String(roomChanges)} />
       </div>
       {changed.length ? (
-        <div className="mt-4 max-h-72 overflow-auto rounded border border-blue-100 bg-white">
+        <div className="mt-4 max-h-72 overflow-auto rounded-lg border border-blue-100 bg-white">
           <table className="w-full min-w-[720px] text-left text-xs">
-            <thead className="sticky top-0 bg-zinc-50 text-zinc-500"><tr><th className="h-8 px-3">课次</th><th>调整前</th><th>调整后</th><th>类型</th></tr></thead>
-            <tbody>{changed.slice(0, 30).map((item) => <tr key={item.course_business_id} className="border-t border-zinc-100"><td className="px-3 py-2 font-mono">{item.course_business_id}</td><td>{item.before_lesson_date ?? "-"} / {item.before_slot_id ?? "-"} / {item.before_room_id ?? "-"}</td><td>{item.after_lesson_date ?? "-"} / {item.after_slot_id ?? "-"} / {item.after_room_id ?? "-"}</td><td><Badge tone="blue">{diffKindLabel(item.change_kind)}</Badge></td></tr>)}</tbody>
+            <thead className="sticky top-0 bg-zinc-50 text-zinc-500">
+              <tr>
+                <th className="h-8 px-3">班级 / 教师</th>
+                <th>调整前</th>
+                <th>调整后</th>
+                <th>调整类型</th>
+              </tr>
+            </thead>
+            <tbody>
+              {changed.slice(0, 30).map((item) => (
+                <tr key={item.course_business_id} className="border-t border-zinc-100 transition-colors hover:bg-blue-50/20">
+                  <td className="px-3 py-2">
+                    <div className="font-medium text-zinc-900 truncate max-w-[180px]" title={item.course_business_id}>
+                      {item.class_business_id || "未指定班级"}
+                    </div>
+                    <div className="text-xs text-zinc-500">{item.teacher_business_id || "未指定教师"}</div>
+                  </td>
+                  <td className="px-3 py-2 text-zinc-600">
+                    <div>{item.before_lesson_date ?? "-"}</div>
+                    <div className="text-xs text-zinc-400">{formatSlot(item.before_slot_id)} · {formatRoom(item.before_room_id)}</div>
+                  </td>
+                  <td className="px-3 py-2 text-blue-700">
+                    <div className="font-medium">{item.after_lesson_date ?? "-"}</div>
+                    <div className="text-xs text-blue-600/80">{formatSlot(item.after_slot_id)} · {formatRoom(item.after_room_id)}</div>
+                  </td>
+                  <td className="px-3 py-2">
+                    <Badge tone="blue">{diffKindLabel(item.change_kind)}</Badge>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
           </table>
-          {changed.length > 30 ? <p className="border-t border-zinc-100 px-3 py-2 text-zinc-500">仅展示前 30 条，完整列表请打开版本对比。</p> : null}
+          {changed.length > 30 ? <p className="border-t border-zinc-100 px-3 py-2 text-xs text-zinc-500">仅展示前 30 条，完整列表请打开版本对比。</p> : null}
         </div>
       ) : <p className="mt-4 text-sm text-zinc-500">本次没有相对基准版本发生变化。</p>}
     </section>

@@ -35,6 +35,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -54,14 +55,14 @@ const resources = [
   "rules",
   "schedule",
   "public_summary",
-  "public_class_schedule",
   "public_adjustment_notice",
+  "public_class_links",
 ] as const;
 
 const publicDisplayResources = [
   "public_summary",
-  "public_class_schedule",
   "public_adjustment_notice",
+  "public_class_links",
 ] as const;
 
 // 第 5 步只写飞书多维表格；日历和 Aily 权限缺失不应把同步按钮置灰。
@@ -375,7 +376,7 @@ export function IntegrationsPage() {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 animate-fade-in">
       <PageHeader
         title="飞书集成"
         actions={
@@ -539,7 +540,7 @@ export function IntegrationsPage() {
           <FlowStep
             number={4}
             title="创建排课多维表格"
-            description="系统会为当前课表方案创建独立的内部业务表，以及领导、班级和调课通知三张展示投影表，并保存全部表格标识。"
+            description="系统会为当前课表方案创建独立的内部业务表，以及领导、班级入口目录和调课通知展示数据，并保存全部表格标识。"
             state={workspaceReady ? "completed" : status.authorized ? "current" : "pending"}
             icon={Database}
           >
@@ -575,7 +576,7 @@ export function IntegrationsPage() {
           <FlowStep
             number={5}
             title="同步业务数据"
-            description="一键同步当前发布版本的 10 类数据；发布或回滚后会自动同步课表和三张展示投影表。所有生成表按稳定业务标识覆盖更新并清理旧版本行；此按钮只同步，不会启动求解。"
+            description="一键同步当前发布版本的业务数据、展示汇总和班级链接目录；发布或回滚后会自动更新当前版本。所有生成表按稳定业务标识覆盖更新并清理旧版本行；此按钮只同步，不会启动求解。"
             state={ready ? "current" : "pending"}
             icon={CloudUpload}
           >
@@ -587,10 +588,7 @@ export function IntegrationsPage() {
                 <CloudUpload className="size-4" />
                 {batchSync.isPending ? `正在同步 ${resources.length} 类数据` : "一键同步当前方案"}
               </Button>
-              <select
-                aria-label="同步资源"
-                value={resource}
-                onChange={(event) => setResource(event.target.value as typeof resource)}
+              <Select aria-label="同步资源" selectSize="sm" containerClassName="w-44" value={resource} onChange={(event) => setResource(event.target.value as typeof resource)}
                 className="h-9 min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-3 text-sm"
                 disabled={!ready || batchSync.isPending}
               >
@@ -599,7 +597,7 @@ export function IntegrationsPage() {
                     {resourceLabel(item)}
                   </option>
                 ))}
-              </select>
+              </Select>
               <Button
                 onClick={() => sync.mutate({ data: { resource } })}
                 disabled={!ready || sync.isPending || batchSync.isPending}
@@ -633,15 +631,16 @@ export function IntegrationsPage() {
           <FlowStep
             number={6}
             title="在飞书内创建妙搭应用"
-            description="三张展示投影表会随一键同步及版本发布/回滚更新；在飞书内分别绑定到妙搭的领导、班级和通知页面。"
+            description="三张展示投影表和班级链接目录会随一键同步及版本发布/回滚更新；在飞书内分别绑定到妙搭的领导、班级和通知页面。"
             state={workspaceReady ? "current" : "pending"}
             icon={ExternalLink}
           >
             <div className="space-y-3 text-sm text-zinc-700">
-              <p>每套课表方案都有独立的飞书多维表格。妙搭应从当前方案的三张展示表取数：领导页使用“公开展示汇总”，班级服务页使用“班级公开课表”，变更页使用“公开调课通知”。</p>
-              <div className="grid gap-2 text-xs text-zinc-600 md:grid-cols-3">
+              <p>每套课表方案都有独立的飞书多维表格。妙搭应从当前方案的展示数据和“班级链接索引”取数：领导页使用“公开展示汇总”，班级服务页使用“课表”并按班级筛选，入口目录使用“班级链接索引”，变更页使用“公开调课通知”。</p>
+              <div className="grid gap-2 text-xs text-zinc-600 md:grid-cols-4">
                 <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">领导驾驶舱</div><p className="mt-1 leading-5">当前版本、发布时间、排课覆盖日期、覆盖班级、调整课次、总课次、教室利用率和月度趋势。</p></div>
-                <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">学生 / 家长课表</div><p className="mt-1 leading-5">班级、日期、时段、课程、学科、地点和当前版本；妙搭必须按班级身份或受控链接筛选，不展示全校班级。</p></div>
+                <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">学生 / 家长课表</div><p className="mt-1 leading-5">从“课表”读取明细，按班级标识筛选；不把全校课表直接暴露给学生。</p></div>
+                <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">班级入口目录</div><p className="mt-1 leading-5">每个班级一行，登记学生/家长妙搭链接、公开视图链接、访问模式和链接状态。</p></div>
                 <div className="border border-zinc-200 bg-zinc-50 p-3"><div className="font-medium text-zinc-800">调课通知</div><p className="mt-1 leading-5">只展示已生效的时间、地点、课程变更；不包含教师账号、联系方式和内部调课原因。</p></div>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -650,7 +649,7 @@ export function IntegrationsPage() {
                   onClick={() => batchSync.mutate({ data: { resources: [...publicDisplayResources] } })}
                   disabled={!ready || sync.isPending || batchSync.isPending}
                 >
-                  同步三张展示表
+                  同步展示数据与班级链接目录
                 </Button>
                 {status.workspace?.url ? <a href={status.workspace.url} target="_blank" rel="noreferrer"><Button variant="outline"><ExternalLink className="size-4" />打开飞书多维表格</Button></a> : null}
               </div>
@@ -1407,7 +1406,7 @@ function duplicateCleanupMessage(detail: Record<string, unknown>): string | null
 }
 
 function classViewSyncMessage(resource: string, detail: Record<string, unknown>): string | null {
-  if (resource !== "public_class_schedule") return null;
+  if (resource !== "schedule") return null;
   const raw = detail.view_sync;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const sync = raw as Record<string, unknown>;
@@ -1417,7 +1416,7 @@ function classViewSyncMessage(resource: string, detail: Record<string, unknown>)
   const classes = typeof sync.classes === "number" ? sync.classes : 0;
   if (status === "completed") return `班级视图 ${classes} 个（新增 ${created}，清理 ${deleted}）`;
   if (status === "skipped_missing_scope") return "班级视图未创建：重新授权后会自动补齐";
-  if (status === "failed") return "班级视图同步未完成，可重试班级公开课表";
+  if (status === "failed") return "班级视图同步未完成，可重试班级链接目录";
   return null;
 }
 

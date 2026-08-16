@@ -22,6 +22,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { useAppUser } from "@/app/user-context";
 import { datetime, errorMessage } from "@/lib/format";
@@ -210,7 +211,7 @@ export function AccountsPage() {
   const rows = accounts.data ?? [];
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 animate-fade-in">
       <PageHeader
         title="账号管理"
         actions={
@@ -289,12 +290,7 @@ export function AccountsPage() {
                       {self ? (
                         <Badge tone="blue">{roleLabel(account.role)}</Badge>
                       ) : (
-                        <select
-                          aria-label={`${account.username} 的角色`}
-                          className="h-8 rounded-md border border-zinc-300 bg-white px-2 text-xs"
-                          value={account.role}
-                          disabled={updateRole.isPending}
-                          onChange={(event) =>
+                        <Select aria-label={`${account.username} 的角色`} selectSize="sm" containerClassName="w-32" value={account.role} disabled={updateRole.isPending} onChange={(event) =>
                             updateRole.mutate({
                               userId: account.id,
                               data: { role: event.target.value as UserResponseRole },
@@ -306,7 +302,7 @@ export function AccountsPage() {
                               {roleLabel(role.value)}
                             </option>
                           ))}
-                        </select>
+                        </Select>
                       )}
                     </td>
                     <td className="px-4 py-3">
@@ -433,12 +429,7 @@ export function AccountsPage() {
                       <div className="truncate text-sm font-medium text-zinc-800">{scheduleSet.name}</div>
                       <div className="mt-0.5 font-mono text-[11px] text-zinc-400">{scheduleSet.code}</div>
                     </div>
-                    <select
-                      aria-label={`${accessTarget?.username ?? "成员"} 在 ${scheduleSet.name} 的课表权限`}
-                      className="h-8 w-full rounded-md border border-zinc-300 bg-white px-2 text-xs disabled:opacity-60 sm:w-32"
-                      value={value}
-                      disabled={saving || !accessTarget?.is_active}
-                      onChange={(event) => {
+                    <Select aria-label={`${accessTarget?.username ?? "成员"} 在 ${scheduleSet.name} 的课表权限`} selectSize="sm" containerClassName="w-full sm:w-32" value={value} disabled={saving || !accessTarget?.is_active} onChange={(event) => {
                         if (!accessTarget) return;
                         const next = event.target.value as "none" | ScheduleAccessRole;
                         if (accessAllowed(accessTarget.role, next)) {
@@ -453,7 +444,7 @@ export function AccountsPage() {
                           {option.label}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                   </div>
                 );
               })}
@@ -514,10 +505,7 @@ export function AccountsPage() {
             </label>
             <label className="block text-sm text-zinc-700">
               角色
-              <select
-                className={inputClass}
-                value={draft.role}
-                onChange={(event) =>
+              <Select selectSize="md" containerClassName="mt-1.5" value={draft.role} onChange={(event) =>
                   setDraft((current) => ({ ...current, role: event.target.value as UserResponseRole }))
                 }
               >
@@ -526,7 +514,7 @@ export function AccountsPage() {
                     {roleLabel(role.value)} · {role.hint}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
             <div className="flex justify-end gap-2">
               <Button type="button" variant="outline" onClick={() => setCreateOpen(false)} disabled={create.isPending}>
