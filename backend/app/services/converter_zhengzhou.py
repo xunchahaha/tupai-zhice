@@ -428,6 +428,15 @@ def _collect_lesson_rows(
     }
 
 
+def _teacher_is_group(name: str) -> bool:
+    """根据源表教师名称识别资源类型。
+
+    通用导入不能把“授课教师”列里的所有值都当成教研组。当前业务约定明确：
+    名称包含“教研组”时代表群体教师，否则按单体教师处理。
+    """
+    return "教研组" in name.strip()
+
+
 def _upsert(db: Session, model: type[Any], match: dict[str, Any], values: dict[str, Any]) -> Any:
     statement = select(model)
     for key, value in match.items():
@@ -665,8 +674,7 @@ def import_schedule_workbook(
             {
                 "name": name,
                 "subject": subjects.most_common(1)[0][0] if subjects else "",
-                # 源表「授课教师」列填的是教研组，不是自然人。
-                "is_group": True,
+                "is_group": _teacher_is_group(name),
             },
         )
 
@@ -958,7 +966,8 @@ def import_schedule_workbook(
         "orphans": orphan_report,
         "warnings": {
             "dropped_placeholder_room": placeholder_report,
-            "teachers_are_groups": teachers,
+            "teachers_are_groups": [name for name in teachers if _teacher_is_group(name)],
+            "teachers_are_individuals": [name for name in teachers if not _teacher_is_group(name)],
             "planned_hours_mismatch": hour_warnings,
             "product_subject_mismatch": _product_subject_mismatches(session_rows),
         },

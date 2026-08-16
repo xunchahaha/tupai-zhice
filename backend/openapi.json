@@ -9931,6 +9931,11 @@
               }
             ],
             "title": "Calendar User Id"
+          },
+          "is_group": {
+            "type": "boolean",
+            "title": "Is Group",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -9969,6 +9974,11 @@
               }
             ],
             "title": "Calendar User Id"
+          },
+          "is_group": {
+            "type": "boolean",
+            "title": "Is Group",
+            "default": false
           }
         },
         "type": "object",
@@ -10008,6 +10018,11 @@
               }
             ],
             "title": "Calendar User Id"
+          },
+          "is_group": {
+            "type": "boolean",
+            "title": "Is Group",
+            "default": false
           },
           "id": {
             "type": "string",

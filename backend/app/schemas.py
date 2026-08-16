@@ -167,6 +167,7 @@ class TeacherPayload(BaseModel):
     name: str
     subject: str = ""
     calendar_user_id: str | None = None
+    is_group: bool = False
 
 
 class TeacherResponse(TeacherPayload, ORMModel):
@@ -179,12 +180,13 @@ class TeacherBatchUpdate(BaseModel):
     object_ids: list[str] = Field(min_length=1, max_length=1000)
     subject: str = ""
     calendar_user_id: str | None = None
+    is_group: bool = False
 
     @model_validator(mode="after")
     def validate_requested_changes(self) -> TeacherBatchUpdate:
         if len(set(self.object_ids)) != len(self.object_ids):
             raise ValueError("教师记录不能重复选择")
-        editable_fields = {"subject", "calendar_user_id"}
+        editable_fields = {"subject", "calendar_user_id", "is_group"}
         if not (self.model_fields_set & editable_fields):
             raise ValueError("请至少指定一个要批量修改的字段")
         return self

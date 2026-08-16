@@ -42,6 +42,7 @@ def test_master_data_batch_update_delete_and_reference_guards(
                 "business_id": f"BATCH-T{i}",
                 "name": f"批量教师{i}",
                 "subject": "原学科",
+                "is_group": i == 1,
             },
         )
         for i in (1, 2)
@@ -55,6 +56,7 @@ def test_master_data_batch_update_delete_and_reference_guards(
             "business_id": "BATCH-T-NEW",
             "name": "批量替换教师",
             "subject": "新学科",
+            "is_group": False,
         },
     )
     classes = [
@@ -114,10 +116,25 @@ def test_master_data_batch_update_delete_and_reference_guards(
             "object_ids": [item["id"] for item in teachers],
             "subject": "批量新学科",
             "calendar_user_id": "ou_batch_teacher",
+            "is_group": True,
         },
     )
     assert teacher_update.status_code == 200
     assert teacher_update.json()["affected_count"] == 2
+
+    legacy_teacher_update = client.put(
+        f"/api/v1/teachers/{teachers[0]['id']}",
+        headers=auth_headers,
+        json={
+            "campus_id": campus_id,
+            "business_id": teachers[0]["business_id"],
+            "name": teachers[0]["name"],
+            "subject": "兼容旧客户端",
+            "calendar_user_id": "ou_batch_teacher",
+        },
+    )
+    assert legacy_teacher_update.status_code == 200
+    assert legacy_teacher_update.json()["is_group"] is True
 
     # 班型/业务线/教师都是课次的属性，班级上没有可批量修改的字段，端点已经取消。
     class_update = client.post(
@@ -146,10 +163,12 @@ def test_master_data_batch_update_delete_and_reference_guards(
     teacher_rows = {
         item["id"]: item for item in client.get("/api/v1/teachers", headers=auth_headers).json()
     }
-    assert all(teacher_rows[item["id"]]["subject"] == "批量新学科" for item in teachers)
+    assert teacher_rows[teachers[0]["id"]]["subject"] == "兼容旧客户端"
+    assert teacher_rows[teachers[1]["id"]]["subject"] == "批量新学科"
     assert all(
         teacher_rows[item["id"]]["calendar_user_id"] == "ou_batch_teacher" for item in teachers
     )
+    assert all(teacher_rows[item["id"]]["is_group"] is True for item in teachers)
 
     courses = [
         create_master_record(

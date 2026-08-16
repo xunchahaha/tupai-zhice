@@ -13,4 +13,5 @@ export interface TeacherPayload {
   name: string;
   subject?: string;
   calendar_user_id?: TeacherPayloadCalendarUserId;
+  is_group?: boolean;
 }

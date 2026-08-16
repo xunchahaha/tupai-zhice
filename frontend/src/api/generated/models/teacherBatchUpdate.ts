@@ -15,4 +15,5 @@ export interface TeacherBatchUpdate {
   object_ids: string[];
   subject?: string;
   calendar_user_id?: TeacherBatchUpdateCalendarUserId;
+  is_group?: boolean;
 }

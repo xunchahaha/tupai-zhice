@@ -25,6 +25,7 @@ const teachers = ["数学", "英语", "政治", "专业课"].map((subject, index
   name: `郑州考研${subject}教研组`,
   subject,
   calendar_user_id: null,
+  is_group: true,
 }));
 const rooms = [{ id: "room-1", campus_id: "campus-1", business_id: "教室-211", name: "教室-211", is_active: true }];
 const slots = [{ id: "slot-1", campus_id: "campus-1", business_id: "S01", weekday: "周一", start_time: "09:00", end_time: "12:00", kind: "上午", sequence: 1, is_open: true }];
@@ -157,7 +158,29 @@ describe("主数据页", () => {
     renderPage();
     await waitFor(() => expect(screen.getByRole("tab", { name: "教师" })).toBeInTheDocument());
     expect(screen.queryByText("教师（教研组）")).not.toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: /^教师/ })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "教师" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "教师类型" })).toBeInTheDocument();
+  });
+
+  it("管理员可以把教师在单体教师和教研组之间切换", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("columnheader", { name: "教师类型" })).toBeInTheDocument());
+
+    const row = (await screen.findByText("郑州考研数学教研组")).closest("tr") as HTMLTableRowElement;
+    expect(within(row).getByText("教研组")).toBeInTheDocument();
+    await userEvent.click(within(row).getByRole("button", { name: "编辑教师" }));
+
+    const dialog = await screen.findByRole("dialog");
+    const type = within(dialog).getByLabelText("教师类型");
+    expect(type).toHaveValue("group");
+    await userEvent.selectOptions(type, "person");
+    await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(mocks.request).toHaveBeenCalledWith(expect.objectContaining({
+      url: "/api/v1/teachers/teacher-0",
+      method: "PUT",
+      data: expect.objectContaining({ is_group: false }),
+    })));
   });
 
   it("课程场次可以全选超过 1000 条，并按筛选条件整批删除", async () => {

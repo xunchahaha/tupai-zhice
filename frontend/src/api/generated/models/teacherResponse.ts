@@ -13,5 +13,6 @@ export interface TeacherResponse {
   name: string;
   subject?: string;
   calendar_user_id?: TeacherResponseCalendarUserId;
+  is_group?: boolean;
   id: string;
 }

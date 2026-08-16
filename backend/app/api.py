@@ -1346,7 +1346,12 @@ def update_teacher(
     object_id: str, payload: TeacherPayload, db: Db, user: Admin, scope: ViewerScope
 ) -> Teacher:
     instance = get_scoped_or_404(db, Teacher, object_id, scope)
-    for key, value in payload.model_dump().items():
+    values = payload.model_dump()
+    # is_group 是后加到教师契约里的字段。旧客户端没有这个字段时应保留原类型，
+    # 避免仅修改名称或学科就把既有教研组静默重置为单体教师。
+    if "is_group" not in payload.model_fields_set:
+        values.pop("is_group")
+    for key, value in values.items():
         setattr(instance, key, value)
     audit(db, user, "update", "teacher", object_id)
     db.commit()

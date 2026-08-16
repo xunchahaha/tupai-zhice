@@ -121,6 +121,27 @@ def test_placeholder_rows_are_dropped_at_import_not_kept_as_a_disabled_room(
     assert db.scalar(select(func.count(ScheduleAssignment.id))) == 2
 
 
+def test_import_identifies_groups_by_teacher_name_instead_of_defaulting_all_to_groups(
+    db: Session, tmp_path: Path
+) -> None:
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    person = _edit_cell(base, 13, "王老师")
+    person = _edit_cell(person, 2, "单体教师测试班")
+    person = _edit_cell(person, 8, 99)
+    person = _edit_cell(person, 9, "英语·单体教师测试课")
+    path = tmp_path / "teacher-types.xlsx"
+    _write_workbook(path, [base, person])
+
+    result = import_schedule_workbook(db, path)
+    db.commit()
+
+    teachers = {item.business_id: item for item in db.scalars(select(Teacher))}
+    assert teachers[str(base[13])].is_group is True
+    assert teachers["王老师"].is_group is False
+    assert result["warnings"]["teachers_are_groups"] == [base[13]]
+    assert result["warnings"]["teachers_are_individuals"] == ["王老师"]
+
+
 def test_placeholder_report_names_the_dimensions_that_disappear_entirely(
     db: Session,
 ) -> None:
