@@ -2,7 +2,6 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeftRight,
   ArrowRight,
-  ChevronDown,
   FileSpreadsheet,
   Filter,
   History,
@@ -43,8 +42,8 @@ const VERSION_WRITE_ROLES: readonly UserResponseRole[] = [UserResponseRole.admin
 const OFFICIAL_VERSION_SUFFIX = "官方原始课表";
 const localActionLabels: Record<string, string> = { delete: "删除" };
 
-const INITIAL_CHUNK_SIZE = 50;
-const INCREMENT_CHUNK_SIZE = 40;
+const INITIAL_CHUNK_SIZE = 200;
+const INCREMENT_CHUNK_SIZE = 150;
 
 export function VersionsPage() {
   const user = useAppUser();
@@ -329,16 +328,16 @@ export function VersionsPage() {
               <div
                 ref={scrollContainerRef}
                 onScroll={handleScroll}
-                className="max-h-[440px] overflow-y-auto overflow-x-auto scrollbar-thin"
+                className="max-h-[480px] overflow-y-auto overflow-x-auto scrollbar-thin"
               >
-                <table className="w-full text-left text-sm">
+                <table className="w-full text-left text-sm table-auto">
                   <thead className="sticky top-0 z-10 bg-zinc-50 text-xs font-medium text-zinc-500 shadow-2xs">
                     <tr>
-                      <th className="h-9 px-4">班级 / 教师</th>
-                      <th className="px-3">变更前安排</th>
-                      <th className="px-2 text-center w-8"></th>
-                      <th className="px-3">变更后安排</th>
-                      <th className="px-4 text-right">变更类型</th>
+                      <th className="h-9 px-4 whitespace-nowrap min-w-[150px]">班级 / 教师</th>
+                      <th className="px-3 whitespace-nowrap min-w-[170px]">变更前安排</th>
+                      <th className="px-1 text-center w-6 shrink-0"></th>
+                      <th className="px-3 whitespace-nowrap min-w-[180px]">变更后安排</th>
+                      <th className="px-4 text-right whitespace-nowrap min-w-[90px] w-24">变更类型</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-100">
@@ -361,59 +360,64 @@ export function VersionsPage() {
                             key={item.course_business_id}
                             className="transition-colors hover:bg-blue-50/20"
                           >
-                            <td className="px-4 py-3">
+                            <td className="px-4 py-2.5">
                               <div
-                                className="font-medium text-zinc-900 truncate max-w-[190px]"
+                                className="font-medium text-zinc-900 truncate max-w-[180px]"
                                 title={item.course_business_id}
                               >
                                 {item.class_business_id || "未指定班级"}
                               </div>
-                              <div className="text-xs text-zinc-500 truncate max-w-[190px]">
+                              <div className="text-xs text-zinc-500 truncate max-w-[180px]">
                                 {item.teacher_business_id || "未指定教师"}
                               </div>
                             </td>
-                            <td className="px-3 py-3 text-xs text-zinc-600">
-                              <div className="font-medium">{item.before_lesson_date ?? "-"}</div>
-                              <div className="text-zinc-400 mt-0.5">
-                                {formatSlot(item.before_slot_id)} · {formatRoom(item.before_room_id)}
+                            <td className="px-3 py-2.5 text-xs text-zinc-600 whitespace-nowrap">
+                              <div className="font-medium text-zinc-700">{item.before_lesson_date ?? "-"}</div>
+                              <div className="text-zinc-400 mt-0.5 whitespace-nowrap">
+                                {formatSlot(item.before_slot_id)} · {formatRoom(item.before_room_id)}教室
                               </div>
                             </td>
-                            <td className="px-2 py-3 text-center">
+                            <td className="px-1 py-2.5 text-center shrink-0">
                               <ArrowRight className="inline-block size-3.5 text-zinc-400" />
                             </td>
-                            <td className="px-3 py-3 text-xs">
+                            <td className="px-3 py-2.5 text-xs whitespace-nowrap">
                               <div
                                 className={cn(
-                                  "font-medium",
+                                  "font-medium whitespace-nowrap",
                                   dateDiff ? "text-amber-700 font-semibold" : "text-blue-700",
                                 )}
                               >
                                 {item.after_lesson_date ?? "-"}
+                                {dateDiff && <span className="ml-1 text-[11px] text-amber-600 font-normal">(已挪期)</span>}
                               </div>
-                              <div className="mt-0.5">
+                              <div className="mt-0.5 whitespace-nowrap flex items-center gap-1.5 text-zinc-600">
                                 <span
                                   className={cn(
+                                    "whitespace-nowrap inline-block",
                                     slotDiff
-                                      ? "font-medium text-blue-700 bg-blue-50 px-1 rounded"
+                                      ? "font-semibold text-blue-700 bg-blue-50 px-1 py-0.2 rounded"
                                       : "text-zinc-500",
                                   )}
                                 >
                                   {formatSlot(item.after_slot_id)}
                                 </span>
-                                <span className="text-zinc-300 mx-1">·</span>
+                                <span className="text-zinc-300">·</span>
                                 <span
                                   className={cn(
+                                    "whitespace-nowrap inline-block",
                                     roomDiff
-                                      ? "font-medium text-purple-700 bg-purple-50 px-1 rounded"
+                                      ? "font-semibold text-purple-700 bg-purple-50 px-1 py-0.2 rounded"
                                       : "text-zinc-500",
                                   )}
                                 >
-                                  {formatRoom(item.after_room_id)}
+                                  {formatRoom(item.after_room_id)}教室
                                 </span>
                               </div>
                             </td>
-                            <td className="px-4 py-3 text-right">
-                              <Badge tone="blue">{diffKindLabel(item.change_kind)}</Badge>
+                            <td className="px-4 py-2.5 text-right whitespace-nowrap w-24">
+                              <Badge tone="blue" className="whitespace-nowrap shrink-0">
+                                {diffKindLabel(item.change_kind)}
+                              </Badge>
                             </td>
                           </tr>
                         );
@@ -422,36 +426,6 @@ export function VersionsPage() {
                   </tbody>
                 </table>
               </div>
-
-              {/* Dynamic Scroll Footer Status Indicator */}
-              {filteredDiffItems.length > 0 && (
-                <div className="flex items-center justify-between border-t border-zinc-200 bg-zinc-50/70 px-4 py-2.5 text-xs text-zinc-500">
-                  <div className="tabular-nums">
-                    已加载 <strong className="font-semibold text-zinc-800">{visibleItems.length}</strong> / 共{" "}
-                    {filteredDiffItems.length} 条差异
-                  </div>
-                  {visibleLimit < filteredDiffItems.length ? (
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] text-zinc-400">向下滚动自动加载更多</span>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50"
-                        onClick={() =>
-                          setVisibleLimit((current) =>
-                            Math.min(current + INCREMENT_CHUNK_SIZE * 2, filteredDiffItems.length),
-                          )
-                        }
-                      >
-                        <ChevronDown className="size-3.5" />
-                        快速加载更多
-                      </Button>
-                    </div>
-                  ) : (
-                    <span className="text-[11px] text-zinc-400">已加载全部差异内容</span>
-                  )}
-                </div>
-              )}
             </div>
           ) : (
             <div className="grid min-h-60 place-items-center text-sm text-zinc-400">
