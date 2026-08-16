@@ -29,13 +29,13 @@ import {
   useListTeachersApiV1TeachersGet,
   useListTimeSlotsApiV1TimeSlotsGet,
 } from "@/api/generated/client";
-import type { AssignmentResponse, CourseSessionResponse, TimeSlotResponse } from "@/api/generated/models";
+import type { AssignmentResponse, ClassGroupResponse, CourseSessionResponse, RoomResponse, TeacherResponse, TimeSlotResponse } from "@/api/generated/models";
 import { http } from "@/api/http";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
-import { errorMessage, formatRoom, formatSlot } from "@/lib/format";
+import { asArray, errorMessage, formatRoom, formatSlot } from "@/lib/format";
 import { statusLabel } from "@/lib/labels";
 import { preferredSchedule } from "@/lib/schedule";
 import { cn } from "@/lib/cn";
@@ -144,12 +144,12 @@ export function SchedulePage() {
     query: { enabled: Boolean(scheduleId) },
   });
   const schedule = detail.data;
-  const slotRows = useMemo(() => slots.data ?? [], [slots.data]);
+  const slotRows = useMemo(() => asArray<TimeSlotResponse>(slots.data), [slots.data]);
 
   // Fast lookup for course details (subject, lesson name, stage, session_no)
   const courseMap = useMemo(() => {
     const map = new Map<string, CourseSessionResponse>();
-    for (const cs of courseSessions.data ?? []) {
+    for (const cs of asArray<CourseSessionResponse>(courseSessions.data)) {
       map.set(cs.business_id, cs);
     }
     return map;
@@ -157,7 +157,7 @@ export function SchedulePage() {
 
   const filtered = useMemo(
     () =>
-      (schedule?.assignments ?? []).filter((item) =>
+      asArray<AssignmentResponse>(schedule?.assignments).filter((item) =>
         mode === "class"
           ? item.class_business_id === subject
           : mode === "teacher"
@@ -271,7 +271,7 @@ export function SchedulePage() {
   }
 
   const options =
-    mode === "class" ? classes.data ?? [] : mode === "teacher" ? teachers.data ?? [] : rooms.data ?? [];
+    mode === "class" ? asArray<ClassGroupResponse>(classes.data) : mode === "teacher" ? asArray<TeacherResponse>(teachers.data) : asArray<RoomResponse>(rooms.data);
   const currentSubjectObj = options.find((item) => item.business_id === subject);
 
   const download = async () => {

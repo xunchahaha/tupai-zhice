@@ -2,21 +2,24 @@ import { AlertTriangle, CircleAlert, FileQuestion, HelpCircle, ShieldAlert, Spar
 import { useEffect, useMemo, useState } from "react";
 
 import { useListRulesApiV1RulesGet, useListSolverRunsApiV1SolverRunsGet } from "@/api/generated/client";
-import { type RuleResponse } from "@/api/generated/models";
+import { type RuleResponse, type SolverRunResponse } from "@/api/generated/models";
 import { Badge } from "@/components/ui/badge";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { actorTypeLabel, constraintLabel, modelStatusLabel, statusLabel, translateSystemConstraints } from "@/lib/labels";
 import { statusTone } from "@/lib/status";
-import { datetime } from "@/lib/format";
+import { asArray, datetime } from "@/lib/format";
 
 export function DiagnosticsPage() {
   const runs = useListSolverRunsApiV1SolverRunsGet();
   const rules = useListRulesApiV1RulesGet();
   const [id, setId] = useState("");
 
+  const runList = asArray<SolverRunResponse>(runs.data);
+  const ruleList = asArray<RuleResponse>(rules.data);
+
   const infeasible = useMemo(
-    () => (runs.data ?? []).filter((run) => run.model_status === "INFEASIBLE"),
-    [runs.data],
+    () => runList.filter((run) => run.model_status === "INFEASIBLE"),
+    [runList],
   );
 
   useEffect(() => {
@@ -27,7 +30,7 @@ export function DiagnosticsPage() {
   if (runs.isError || rules.isError) return <ErrorState retry={() => { void runs.refetch(); void rules.refetch(); }} />;
 
   const run = infeasible.find((item) => item.id === id);
-  const related = (rules.data ?? []).filter((rule) => run?.conflict_rule_ids.includes(rule.business_id));
+  const related = ruleList.filter((rule) => run?.conflict_rule_ids.includes(rule.business_id));
   const priorityRules = (run?.priority_rule_ids ?? [])
     .map((businessId) => related.find((rule) => rule.business_id === businessId))
     .filter((rule): rule is RuleResponse => Boolean(rule));

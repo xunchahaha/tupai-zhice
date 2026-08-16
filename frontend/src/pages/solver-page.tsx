@@ -5,13 +5,13 @@ import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
 import { getListSchedulesApiV1SchedulesGetQueryKey, getListSolverRunsApiV1SolverRunsGetQueryKey, getOverviewApiV1OverviewGetQueryKey, useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet, useGetSolverRunApiV1SolverRunsRunIdGet, useListCourseSessionsApiV1CourseSessionsGet, useListRulesApiV1RulesGet, useListSchedulesApiV1SchedulesGet, useListSolverRunsApiV1SolverRunsGet, useSubmitSolverRunApiV1SolverRunsPost } from "@/api/generated/client";
-import { type ScheduleDiffResponse, type SolveRequest, type SolverRunExplanation, type SolverRunResponse } from "@/api/generated/models";
+import { type CourseSessionResponse, type ScheduleDiffResponse, type ScheduleSummaryResponse, type SolveRequest, type SolverRunExplanation, type SolverRunResponse } from "@/api/generated/models";
 import { http } from "@/api/http";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
-import { errorMessage, formatRoom, formatSlot } from "@/lib/format";
+import { asArray, errorMessage, formatRoom, formatSlot } from "@/lib/format";
 import { diffKindLabel, modelStatusLabel, statusLabel } from "@/lib/labels";
 import { latestDraftSchedule, preferredSchedule } from "@/lib/schedule";
 import { modelStatusTone, statusTone } from "@/lib/status";
@@ -116,7 +116,7 @@ export function SolverPage() {
   const progress = useGetSolverRunApiV1SolverRunsRunIdGet(runId, { query: { enabled: Boolean(runId), refetchInterval: (query) => query.state.data?.status === "completed" || query.state.data?.status === "failed" ? false : 700 } });
   const submit = useSubmitSolverRunApiV1SolverRunsPost({ mutation: { onSuccess: (result) => { setRunId(result.id); setCurrent(result); toast.success("求解任务已创建"); }, onError: (error) => toast.error(errorMessage(error)) } });
   useEffect(() => { if (progress.data) { setCurrent(progress.data); if (progress.data.status === "completed" || progress.data.status === "failed") { void Promise.all([client.invalidateQueries({ queryKey: getListSchedulesApiV1SchedulesGetQueryKey() }), client.invalidateQueries({ queryKey: getListSolverRunsApiV1SolverRunsGetQueryKey() }), client.invalidateQueries({ queryKey: getOverviewApiV1OverviewGetQueryKey() })]); } } }, [client, progress.data]);
-  const courseRows = courses.data ?? [];
+  const courseRows = asArray<CourseSessionResponse>(courses.data);
   const scopeOptions = {
     businessLines: [...new Set(courseRows.map((item) => item.business_line ?? "").filter(Boolean))].sort(),
     classes: [...new Set(courseRows.map((item) => item.class_business_id))].sort(),
@@ -128,12 +128,14 @@ export function SolverPage() {
     if (params.date_to && (item.lesson_date ?? "") > params.date_to) return false;
     return true;
   }).length;
-  const activeRun = current ?? runs.data?.[0] ?? null;
-  const draftSchedule = activeRun?.status === "completed" ? latestDraftSchedule(schedules.data) : undefined;
+  const runList = asArray<SolverRunResponse>(runs.data);
+  const scheduleList = asArray<ScheduleSummaryResponse>(schedules.data);
+  const activeRun = current ?? runList[0] ?? null;
+  const draftSchedule = activeRun?.status === "completed" ? latestDraftSchedule(scheduleList) : undefined;
   const baseSchedule = draftSchedule
     ? (draftSchedule.parent_id
-      ? schedules.data?.find((item) => item.id === draftSchedule.parent_id)
-      : schedules.data?.find((item) => item.status === "published" && item.id !== draftSchedule.id))
+      ? scheduleList.find((item) => item.id === draftSchedule.parent_id)
+      : scheduleList.find((item) => item.status === "published" && item.id !== draftSchedule.id))
     : undefined;
   const scheduleDiff = useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet(
     baseSchedule?.id ?? "",
@@ -141,8 +143,8 @@ export function SolverPage() {
     { query: { enabled: Boolean(baseSchedule?.id && draftSchedule?.id && baseSchedule.id !== draftSchedule.id) } },
   );
   const schedule = activeRun?.status === "completed"
-    ? (latestDraftSchedule(schedules.data) ?? preferredSchedule(schedules.data))
-    : preferredSchedule(schedules.data);
+    ? (latestDraftSchedule(scheduleList) ?? preferredSchedule(scheduleList))
+    : preferredSchedule(scheduleList);
   if (rules.isPending || runs.isPending || schedules.isPending) return <LoadingState />;
   if (rules.isError || runs.isError || schedules.isError) return <ErrorState retry={() => { void rules.refetch(); void runs.refetch(); void schedules.refetch(); }} />;
   const interpret = async () => {

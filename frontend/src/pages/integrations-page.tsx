@@ -662,7 +662,7 @@ export function IntegrationsPage() {
         </div>
       </section>
 
-      <SyncHistory syncs={syncs.data ?? []} />
+      <SyncHistory syncs={Array.isArray(syncs.data) ? syncs.data : []} />
 
       <OnboardingDialog
         open={guideOpen}

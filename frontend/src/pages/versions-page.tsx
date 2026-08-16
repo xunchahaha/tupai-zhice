@@ -33,7 +33,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { useAppUser, useScheduleAccessRole } from "@/app/user-context";
 import { auditActionLabel, diffKindLabel, resourceLabel, statusLabel } from "@/lib/labels";
-import { datetime, errorMessage, formatRoom, formatSlot } from "@/lib/format";
+import { asArray, datetime, errorMessage, formatRoom, formatSlot } from "@/lib/format";
 import { preferredSchedule } from "@/lib/schedule";
 import { statusTone } from "@/lib/status";
 import { cn } from "@/lib/cn";
@@ -67,7 +67,7 @@ export function VersionsPage() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const versions = useMemo(
-    () => (schedules.data ?? []).filter((item) => !removedIds.includes(item.id)),
+    () => asArray<ScheduleSummaryResponse>(schedules.data).filter((item) => !removedIds.includes(item.id)),
     [schedules.data, removedIds],
   );
 

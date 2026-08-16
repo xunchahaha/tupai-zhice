@@ -1030,7 +1030,8 @@ function selectedIds(selection: RowSelectionState) {
   return Object.entries(selection).filter(([, selected]) => selected).map(([id]) => id);
 }
 
-function filterBySearch<T>(items: T[], search: string, fields: (item: T) => string[]) {
+function filterBySearch<T>(rawItems: T[], search: string, fields: (item: T) => string[]) {
+  const items = Array.isArray(rawItems) ? rawItems : [];
   const query = search.trim().toLocaleLowerCase();
   if (!query) return items;
   return items.filter((item) => fields(item).join(" ").toLocaleLowerCase().includes(query));

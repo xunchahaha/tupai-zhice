@@ -41,3 +41,8 @@ export function formatRoom(value: string | undefined | null): string {
   if (!value) return "-";
   return value.replace(/^教室-/, "");
 }
+
+export function asArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+

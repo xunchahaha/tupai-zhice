@@ -1,6 +1,9 @@
-type ScheduleCandidate = {
+export type ScheduleCandidate = {
   id: string;
   status: string;
+  parent_id?: string | null;
+  name?: string;
+  version_no?: number;
 };
 
 export function preferredSchedule<T extends ScheduleCandidate>(

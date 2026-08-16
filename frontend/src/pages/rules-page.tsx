@@ -27,7 +27,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { actorTypeLabel, constraintLabel, hardnessLabel, statusLabel } from "@/lib/labels";
-import { errorMessage } from "@/lib/format";
+import { asArray, errorMessage } from "@/lib/format";
 import { statusTone } from "@/lib/status";
 
 type Hardness = "hard" | "soft";
@@ -119,7 +119,7 @@ export function RulesPage() {
   const [editing, setEditing] = useState<RuleResponse | null>(null);
   const rules = useListRulesApiV1RulesGet();
   const catalog = useListConstraintCatalogApiV1RulesConstraintCatalogGet();
-  const entries = useMemo(() => catalog.data ?? [], [catalog.data]);
+  const entries = useMemo(() => asArray<ConstraintCatalogEntry>(catalog.data), [catalog.data]);
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: getListRulesApiV1RulesGetQueryKey() });
   const transition = useTransitionRuleApiV1RulesRuleIdTransitionPost({
     mutation: {
@@ -133,9 +133,10 @@ export function RulesPage() {
       onError: (error) => toast.error(errorMessage(error)),
     },
   });
+  const ruleList = asArray<RuleResponse>(rules.data);
   const visible = useMemo(
-    () => (rules.data ?? []).filter((rule) => filter === "all" || rule.status === filter),
-    [rules.data, filter],
+    () => ruleList.filter((rule) => filter === "all" || rule.status === filter),
+    [ruleList, filter],
   );
   if (rules.isPending) return <LoadingState />;
   if (rules.isError) return <ErrorState retry={() => void rules.refetch()} />;
