@@ -19,7 +19,6 @@ export const FeishuSyncRequestResource = {
   rules: 'rules',
   schedule: 'schedule',
   public_summary: 'public_summary',
-  public_class_schedule: 'public_class_schedule',
   public_adjustment_notice: 'public_adjustment_notice',
   public_class_links: 'public_class_links',
 } as const;

@@ -70,6 +70,8 @@ import type {
   ListAuditLogsApiV1AuditLogsGetParams,
   ListRulesApiV1RulesGetParams,
   MasterDataBatchDelete,
+  OverviewAnalyticsApiV1OverviewAnalyticsGetParams,
+  OverviewAnalyticsResponse,
   OverviewResponse,
   PasswordChange,
   RescheduleCreate,
@@ -1413,6 +1415,101 @@ export function useOverviewApiV1OverviewGet<TData = Awaited<ReturnType<typeof ov
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getOverviewApiV1OverviewGetQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * Return dashboard analytics without expanding the legacy overview DTO.
+ * @summary Overview Analytics
+ */
+export const overviewAnalyticsApiV1OverviewAnalyticsGet = (
+    params?: OverviewAnalyticsApiV1OverviewAnalyticsGetParams,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<OverviewAnalyticsResponse>(
+      {url: `/api/v1/overview/analytics`, method: 'GET',
+        params, signal
+    },
+      );
+    }
+  
+
+
+
+export const getOverviewAnalyticsApiV1OverviewAnalyticsGetQueryKey = (params?: OverviewAnalyticsApiV1OverviewAnalyticsGetParams,) => {
+    return [
+    `/api/v1/overview/analytics`, ...(params ? [params]: [])
+    ] as const;
+    }
+
+    
+export const getOverviewAnalyticsApiV1OverviewAnalyticsGetQueryOptions = <TData = Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>, TError = HTTPValidationError>(params?: OverviewAnalyticsApiV1OverviewAnalyticsGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getOverviewAnalyticsApiV1OverviewAnalyticsGetQueryKey(params);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>> = ({ signal }) => overviewAnalyticsApiV1OverviewAnalyticsGet(params, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type OverviewAnalyticsApiV1OverviewAnalyticsGetQueryResult = NonNullable<Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>>
+export type OverviewAnalyticsApiV1OverviewAnalyticsGetQueryError = HTTPValidationError
+
+
+export function useOverviewAnalyticsApiV1OverviewAnalyticsGet<TData = Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>, TError = HTTPValidationError>(
+ params: undefined |  OverviewAnalyticsApiV1OverviewAnalyticsGetParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>,
+          TError,
+          Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useOverviewAnalyticsApiV1OverviewAnalyticsGet<TData = Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>, TError = HTTPValidationError>(
+ params?: OverviewAnalyticsApiV1OverviewAnalyticsGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>,
+          TError,
+          Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useOverviewAnalyticsApiV1OverviewAnalyticsGet<TData = Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>, TError = HTTPValidationError>(
+ params?: OverviewAnalyticsApiV1OverviewAnalyticsGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Overview Analytics
+ */
+
+export function useOverviewAnalyticsApiV1OverviewAnalyticsGet<TData = Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>, TError = HTTPValidationError>(
+ params?: OverviewAnalyticsApiV1OverviewAnalyticsGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof overviewAnalyticsApiV1OverviewAnalyticsGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getOverviewAnalyticsApiV1OverviewAnalyticsGetQueryOptions(params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 
