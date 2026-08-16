@@ -120,7 +120,12 @@ export function resourceLabel(value?: string | null): string {
 }
 
 export function roleLabel(value?: string | null): string {
-  return statusLabel(value);
+  if (!value) return "管理员";
+  if (value === "admin") return "管理员";
+  if (value === "scheduler") return "排课员";
+  if (value === "approver") return "审批人";
+  if (value === "viewer") return "成员";
+  return labels[value] ?? value;
 }
 
 export function auditActionLabel(value?: string | null): string {

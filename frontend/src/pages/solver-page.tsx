@@ -190,8 +190,8 @@ export function SolverPage() {
       loading={scheduleDiff.isPending}
       onOpenVersions={() => navigate("/versions")}
     />
-    <section className="border border-zinc-200 bg-white p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><div className="flex items-center gap-2"><CalendarPlus className="size-4 text-blue-600" /><h2 className="font-semibold">教师日历下发</h2></div><p className="mt-1 text-xs text-zinc-500">{schedule ? `当前课表：${schedule.name}` : "当前没有可下发课表"}。教师忙闲冲突会告警，但正式下发仍继续创建日程。</p></div><div className="flex gap-2"><Button variant="outline" onClick={() => publishCalendar(true)} disabled={!schedule || publishing !== null}>{publishing === "dry-run" ? "预检中" : "忙闲预检"}</Button><Button onClick={() => publishCalendar(false)} disabled={!schedule || publishing !== null}>{publishing === "publish" ? "正在下发" : "确认下发"}</Button></div></div>{calendarResult ? <><div className="mt-4 grid gap-2 sm:grid-cols-3 xl:grid-cols-6"><Value label="预计下发" value={String(calendarResult.would_publish)} /><Value label="本次发布" value={String(calendarResult.published)} /><Value label="已存在" value={String(calendarResult.existing)} /><Value label="待补账号" value={String(calendarResult.skipped_unmapped)} /><Value label="冲突告警" value={String(calendarResult.conflict_count)} /><Value label="执行模式" value={calendarResult.dry_run ? "仅预检" : "正式下发"} /></div>{calendarResult.skipped_unmapped ? <div className="mt-3 border-l-2 border-amber-500 bg-amber-50 px-4 py-2 text-xs text-amber-900">未映射具体飞书账号的课程已跳过，请先补充课程账号或教师账号。</div> : null}</> : null}{calendarResult?.conflicts.length ? <div className="mt-4 max-h-48 overflow-auto border-l-2 border-red-500 bg-red-50 px-4 py-2 text-xs text-red-900"><div className="mb-1 font-medium">冲突明细（正式下发仍会创建并标记冲突）</div>{calendarResult.conflicts.slice(0, 20).map((item, index) => <div key={`${item.course_session_id}-${item.lesson_date}-${item.source}-${index}`}>{item.lesson_date} {item.start_time}-{item.end_time} / {item.calendar_user_id} / 课程 {item.course_session_id.slice(0, 8)} / {item.source === "feishu_freebusy" ? "飞书已有忙碌" : "待下发课表内部重叠"}</div>)}</div> : null}</section>
-    <section className="border border-zinc-200 bg-white"><div className="border-b border-zinc-200 px-4 py-3 text-sm font-semibold">求解记录</div><div className="overflow-x-auto"><table className="w-full min-w-[720px] text-left text-sm"><thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="h-9 px-4">任务</th><th>状态</th><th>模型结果</th><th>目标值</th><th>最佳界</th><th>耗时</th></tr></thead><tbody>{runs.data?.map((run) => <tr key={run.id} className="border-t border-zinc-100"><td className="h-10 px-4 font-mono text-xs">{run.id.slice(0, 8)}</td><td><Badge tone={run.status === "completed" ? modelStatusTone(run.model_status) : statusTone(run.status)}>{statusLabel(run.status)}</Badge></td><td>{modelStatusLabel(run.model_status, run.presolve_infeasible)}</td><td>{run.objective_value?.toFixed(1) ?? "-"}</td><td>{run.best_bound?.toFixed(1) ?? "-"}</td><td>{run.wall_time_seconds?.toFixed(2) ?? "-"} 秒</td></tr>)}</tbody></table></div></section>
+    <section className="border border-zinc-200 bg-white p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><div className="flex items-center gap-2"><CalendarPlus className="size-4 text-blue-600" /><h2 className="font-semibold">教师日历下发</h2></div><p className="mt-1 text-xs text-zinc-500">{schedule ? `当前课表：${schedule.name}` : "当前没有可下发课表"}。教师忙闲冲突会告警，但正式下发仍继续创建日程。</p></div><div className="flex gap-2"><Button variant="outline" onClick={() => publishCalendar(true)} disabled={!schedule || publishing !== null}>{publishing === "dry-run" ? "预检中" : "忙闲预检"}</Button><Button onClick={() => publishCalendar(false)} disabled={!schedule || publishing !== null}>{publishing === "publish" ? "正在下发" : "确认下发"}</Button></div></div>{calendarResult ? <><div className="mt-4 grid gap-2 sm:grid-cols-3 xl:grid-cols-6"><Value label="预计下发" value={String(calendarResult.would_publish)} /><Value label="本次发布" value={String(calendarResult.published)} /><Value label="已存在" value={String(calendarResult.existing)} /><Value label="待补账号" value={String(calendarResult.skipped_unmapped)} /><Value label="冲突告警" value={String(calendarResult.conflict_count)} /><Value label="执行模式" value={calendarResult.dry_run ? "仅预检" : "正式下发"} /></div>{calendarResult.skipped_unmapped ? <div className="mt-3 border-l-2 border-amber-500 bg-amber-50 px-4 py-2 text-xs text-amber-900">未映射具体飞书账号的课程已跳过，请先补充课程账号或教师账号。</div> : null}</> : null}{(Array.isArray(calendarResult?.conflicts) ? calendarResult.conflicts : []).length ? <div className="mt-4 max-h-48 overflow-auto border-l-2 border-red-500 bg-red-50 px-4 py-2 text-xs text-red-900"><div className="mb-1 font-medium">冲突明细（正式下发仍会创建并标记冲突）</div>{(Array.isArray(calendarResult?.conflicts) ? calendarResult.conflicts : []).slice(0, 20).map((item, index) => <div key={`${item.course_session_id}-${item.lesson_date}-${item.source}-${index}`}>{item.lesson_date} {item.start_time}-{item.end_time} / {item.calendar_user_id} / 课程 {item.course_session_id.slice(0, 8)} / {item.source === "feishu_freebusy" ? "飞书已有忙碌" : "待下发课表内部重叠"}</div>)}</div> : null}</section>
+    <section className="border border-zinc-200 bg-white"><div className="border-b border-zinc-200 px-4 py-3 text-sm font-semibold">求解记录</div><div className="overflow-x-auto"><table className="w-full min-w-[720px] text-left text-sm"><thead className="bg-zinc-50 text-xs text-zinc-500"><tr><th className="h-9 px-4">任务</th><th>状态</th><th>模型结果</th><th>目标值</th><th>最佳界</th><th>耗时</th></tr></thead><tbody>{(Array.isArray(runs.data) ? runs.data : []).map((run) => <tr key={run.id} className="border-t border-zinc-100"><td className="h-10 px-4 font-mono text-xs">{run.id.slice(0, 8)}</td><td><Badge tone={run.status === "completed" ? modelStatusTone(run.model_status) : statusTone(run.status)}>{statusLabel(run.status)}</Badge></td><td>{modelStatusLabel(run.model_status, run.presolve_infeasible)}</td><td>{run.objective_value?.toFixed(1) ?? "-"}</td><td>{run.best_bound?.toFixed(1) ?? "-"}</td><td>{run.wall_time_seconds?.toFixed(2) ?? "-"} 秒</td></tr>)}</tbody></table></div></section>
   </div>;
 }
 
@@ -267,7 +267,7 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
             }
           >
             <option value="">全部业务线</option>
-            {scope.businessLines.map((item) => (
+            {(Array.isArray(scope.businessLines) ? scope.businessLines : []).map((item) => (
               <option key={item} value={item}>{item}</option>
             ))}
           </Select>
@@ -282,7 +282,7 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
             }
           >
             <option value="">全部班级</option>
-            {scope.classes.map((item) => (
+            {(Array.isArray(scope.classes) ? scope.classes : []).map((item) => (
               <option key={item} value={item}>{item}</option>
             ))}
           </Select>
@@ -471,10 +471,10 @@ function RunPanel({ run, onUseInstruction }: { run: SolverRunResponse | null; on
           冲突规则：{run.conflict_rule_ids.join("、") || "模型未返回可追溯规则"}
         </div>
       ) : null}
-      {run?.priority_explanations?.length ? (
+      {(Array.isArray(run?.priority_explanations) ? run.priority_explanations : []).length ? (
         <div className="mt-4 space-y-2 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           <div className="font-medium">冲突诊断</div>
-          {run.priority_explanations.map((explanation, index) => (
+          {(Array.isArray(run?.priority_explanations) ? run.priority_explanations : []).map((explanation, index) => (
             <div key={`${index}-${explanation}`}>{explanation}</div>
           ))}
         </div>
@@ -550,6 +550,10 @@ function ExplanationPanel({ run, onUseInstruction }: { run: SolverRunResponse | 
   const intent = explanation?.intent_review;
   const verdict = intent ? INTENT_VERDICTS[intent.verdict] ?? INTENT_VERDICTS.unclear : null;
   const suggested = explanation?.suggested_instruction ?? "";
+  const explanationItems = Array.isArray(explanation?.explanation) ? explanation.explanation : [];
+  const nextActions = Array.isArray(explanation?.next_actions) ? explanation.next_actions : [];
+  const concerns = Array.isArray(intent?.concerns) ? intent.concerns : [];
+
   return (
     <section className="mt-6 border-t border-zinc-100 pt-5">
       <div className="flex flex-wrap items-center gap-2">
@@ -581,16 +585,16 @@ function ExplanationPanel({ run, onUseInstruction }: { run: SolverRunResponse | 
       {explanation ? (
         <div className="mt-3 space-y-3 text-sm">
           <p className="font-medium text-zinc-900">{explanation.headline}</p>
-          {explanation.explanation?.length ? (
+          {explanationItems.length ? (
             <ul className="list-disc space-y-1 pl-5 text-zinc-700">
-              {explanation.explanation.map((item, index) => <li key={`${index}-${item.slice(0, 12)}`}>{item}</li>)}
+              {explanationItems.map((item, index) => <li key={`${index}-${item.slice(0, 12)}`}>{item}</li>)}
             </ul>
           ) : null}
-          {explanation.next_actions?.length ? (
+          {nextActions.length ? (
             <div className="border-l-2 border-blue-400 bg-blue-50/60 px-4 py-3 text-zinc-800">
               <div className="text-xs font-medium text-blue-800">下一步可以做什么</div>
               <ul className="mt-1 list-disc space-y-1 pl-5">
-                {explanation.next_actions.map((item, index) => <li key={`${index}-${item.slice(0, 12)}`}>{item}</li>)}
+                {nextActions.map((item, index) => <li key={`${index}-${item.slice(0, 12)}`}>{item}</li>)}
               </ul>
             </div>
           ) : null}
@@ -623,9 +627,9 @@ function ExplanationPanel({ run, onUseInstruction }: { run: SolverRunResponse | 
                 意图核对
                 <Badge tone={verdict.tone}>{verdict.label}</Badge>
               </div>
-              {intent.concerns?.length ? (
+              {concerns.length ? (
                 <ul className="mt-1.5 list-disc space-y-1 pl-5 text-zinc-700">
-                  {intent.concerns.map((item, index) => <li key={`${index}-${item.slice(0, 12)}`}>{item}</li>)}
+                  {concerns.map((item, index) => <li key={`${index}-${item.slice(0, 12)}`}>{item}</li>)}
                 </ul>
               ) : null}
               <p className="mt-2 text-xs text-zinc-500">

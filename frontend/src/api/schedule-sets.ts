@@ -29,7 +29,7 @@ export interface ScheduleSetMember {
 export const scheduleSetApi = {
   async list(): Promise<ScheduleSet[]> {
     const response = await http.get<ScheduleSet[]>("/api/v1/schedule-sets");
-    return response.data;
+    return Array.isArray(response.data) ? response.data : [];
   },
   async create(name: string): Promise<ScheduleSet> {
     const response = await http.post<ScheduleSet>("/api/v1/schedule-sets", { name });
@@ -41,7 +41,7 @@ export const scheduleSetApi = {
   },
   async listMembers(scheduleSetId: string): Promise<ScheduleSetMember[]> {
     const response = await http.get<ScheduleSetMember[]>(`/api/v1/schedule-sets/${scheduleSetId}/members`);
-    return response.data;
+    return Array.isArray(response.data) ? response.data : [];
   },
   async setMember(
     scheduleSetId: string,

@@ -547,7 +547,7 @@ export function VersionsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100">
-                {logs.data?.map((log) => (
+                {(Array.isArray(logs.data) ? logs.data : []).map((log) => (
                   <tr key={log.id} className="hover:bg-zinc-50/60 transition-colors">
                     <td className="py-2.5 px-4 text-zinc-400 whitespace-nowrap">{datetime(log.created_at)}</td>
                     <td className="py-2.5 px-3 font-medium text-zinc-700 whitespace-nowrap">{actionLabel(log.action)}</td>

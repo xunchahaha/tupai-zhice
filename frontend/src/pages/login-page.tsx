@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { z } from "zod";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { loginApiV1AuthTokenPost } from "@/api/generated/client";
 import { authStore } from "@/api/http";
 import { Button } from "@/components/ui/button";
@@ -15,11 +16,13 @@ type FormValues = z.infer<typeof schema>;
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const form = useForm<FormValues>({ resolver: zodResolver(schema), defaultValues: { username: "admin", password: "tupai-demo-admin-2026!" } });
   const submit = async (values: FormValues) => {
     try {
       const response = await loginApiV1AuthTokenPost(values);
       authStore.set(response.access_token);
+      await queryClient.invalidateQueries();
       navigate("/overview", { replace: true });
     } catch (error) { toast.error(errorMessage(error)); }
   };

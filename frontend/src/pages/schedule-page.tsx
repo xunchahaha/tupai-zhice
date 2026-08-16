@@ -308,7 +308,7 @@ export function SchedulePage() {
               value={scheduleId}
               onChange={(event) => setScheduleId(event.target.value)}
             >
-              {schedules.data?.map((item) => (
+              {(Array.isArray(schedules.data) ? schedules.data : []).map((item) => (
                 <option key={item.id} value={item.id}>
                   v{item.version_no} / {statusLabel(item.status)}
                 </option>

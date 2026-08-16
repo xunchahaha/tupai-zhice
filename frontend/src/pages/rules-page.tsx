@@ -271,19 +271,19 @@ function ConstraintFields({ entries, draft, hardness, onChange }: {
   const slots = useListTimeSlotsApiV1TimeSlotsGet({ query: { enabled: needsSlots } });
 
   const roomOptions: PickerOption[] = useMemo(
-    () => (rooms.data ?? []).map((item) => ({ value: item.business_id, label: item.name, hint: item.is_active === false ? "已停用" : undefined })),
+    () => (Array.isArray(rooms.data) ? rooms.data : []).map((item) => ({ value: item.business_id, label: item.name, hint: item.is_active === false ? "已停用" : undefined })),
     [rooms.data],
   );
   const slotOptions: PickerOption[] = useMemo(
-    () => (slots.data ?? []).map((item) => ({ value: item.business_id, label: `${item.weekday} ${item.start_time}-${item.end_time}`, hint: item.is_open === false ? "未开放" : item.kind })),
+    () => (Array.isArray(slots.data) ? slots.data : []).map((item) => ({ value: item.business_id, label: `${item.weekday} ${item.start_time}-${item.end_time}`, hint: item.is_open === false ? "未开放" : item.kind })),
     [slots.data],
   );
   const actorOptions: PickerOption[] = useMemo(() => {
-    if (draft.actor_type === "teacher") return (teachers.data ?? []).map((item) => ({ value: item.business_id, label: item.name, hint: item.subject }));
+    if (draft.actor_type === "teacher") return (Array.isArray(teachers.data) ? teachers.data : []).map((item) => ({ value: item.business_id, label: item.name, hint: item.subject }));
     // 班型是多值（走班制下一个班同时有含数学/无数学），提示行里拼串显示。
-    if (draft.actor_type === "class") return (classes.data ?? []).map((item) => ({ value: item.business_id, label: item.name, hint: item.product_types.join(" / ") }));
+    if (draft.actor_type === "class") return (Array.isArray(classes.data) ? classes.data : []).map((item) => ({ value: item.business_id, label: item.name, hint: (Array.isArray(item.product_types) ? item.product_types : []).join(" / ") }));
     if (draft.actor_type === "room") return roomOptions;
-    if (draft.actor_type === "course") return (courses.data ?? []).map((item) => ({ value: item.business_id, label: item.lesson_name || item.business_id, hint: [item.class_business_id, item.lesson_date].filter(Boolean).join(" · ") }));
+    if (draft.actor_type === "course") return (Array.isArray(courses.data) ? courses.data : []).map((item) => ({ value: item.business_id, label: item.lesson_name || item.business_id, hint: [item.class_business_id, item.lesson_date].filter(Boolean).join(" · ") }));
     return [];
   }, [draft.actor_type, teachers.data, classes.data, courses.data, roomOptions]);
   const actorLoading = (draft.actor_type === "teacher" && teachers.isPending) || (draft.actor_type === "class" && classes.isPending) || (draft.actor_type === "course" && courses.isPending) || (draft.actor_type === "room" && rooms.isPending);

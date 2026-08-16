@@ -78,11 +78,19 @@ export function OverviewPage() {
   if (overview.isError || !overview.data) return <ErrorState retry={() => void overview.refetch()} />;
 
   const data = overview.data;
-  const metrics = data.latest_schedule?.metrics ?? {};
-  const rulesList = rules.data ?? [];
-  const activeRulesCount = rulesList.filter((r) => r.status === "active").length;
-  const versionsList = schedules.data ?? [];
-  const publishedVersion = versionsList.find((s) => s.status === "published");
+  const counts = data?.counts ?? {
+    teachers: 0,
+    class_groups: 0,
+    rooms: 0,
+    time_slots: 0,
+    course_sessions: 0,
+    schedule_versions: 0,
+  };
+  const metrics = data?.latest_schedule?.metrics ?? {};
+  const rulesList = Array.isArray(rules.data) ? rules.data : [];
+  const activeRulesCount = rulesList.filter((r) => r && r.status === "active").length;
+  const versionsList = Array.isArray(schedules.data) ? schedules.data : [];
+  const publishedVersion = versionsList.find((s) => s && s.status === "published");
 
   const analyticsData = analytics.data;
   const workload = analyticsData?.teacher_workload;
@@ -91,20 +99,20 @@ export function OverviewPage() {
   const syncHealth = analyticsData?.sync_health;
   const hasSyncSamples = (syncHealth?.total_syncs ?? 0) > 0;
   const hasRetrySamples = (syncHealth?.retry_samples ?? 0) > 0;
-  const hasSolverRecord = Boolean(penalties?.solver_run_id || penalties?.solver_status || data.latest_run);
-  const evaluatedCount = penalties?.evaluated_assignment_count || data.counts.course_sessions || 0;
+  const hasSolverRecord = Boolean(penalties?.solver_run_id || penalties?.solver_status || data?.latest_run);
+  const evaluatedCount = penalties?.evaluated_assignment_count || counts.course_sessions || 0;
   const totalPenalty = Number(penalties?.total_soft_penalty ?? 0);
-  const softConstraintsList = penalties?.soft_constraints ?? [];
+  const softConstraintsList = Array.isArray(penalties?.soft_constraints) ? penalties.soft_constraints : [];
   const totalViolations = softConstraintsList.reduce(
-    (sum, item) => sum + (Number(item.violations) || 0),
+    (sum, item) => sum + (Number(item?.violations) || 0),
     0,
   );
 
   const isFeasible =
     penalties?.solver_status === "FEASIBLE" ||
     penalties?.solver_status === "OPTIMAL" ||
-    data.latest_run?.model_status === "FEASIBLE" ||
-    data.latest_run?.model_status === "OPTIMAL";
+    data?.latest_run?.model_status === "FEASIBLE" ||
+    data?.latest_run?.model_status === "OPTIMAL";
 
   let optimalityDegree = "100%";
   if (penalties?.objective_value && penalties?.best_bound && Number(penalties.objective_value) > 0) {
@@ -116,18 +124,19 @@ export function OverviewPage() {
   }
 
   // Build 7x3 Period Heatmap Matrix
-  const heatmapCells = heatmap?.period_cells ?? [];
+  const heatmapCells = Array.isArray(heatmap?.period_cells) ? heatmap.period_cells : [];
   const heatmapMap = new Map<string, { rate: number; occupied: number; available: number }>();
   for (const cell of heatmapCells) {
+    if (!cell) continue;
     heatmapMap.set(`${cell.weekday}-${cell.period}`, {
-      rate: cell.occupancy_rate,
-      occupied: cell.occupied_room_slots,
-      available: cell.available_room_slots,
+      rate: cell.occupancy_rate ?? 0,
+      occupied: cell.occupied_room_slots ?? 0,
+      available: cell.available_room_slots ?? 0,
     });
   }
 
   // Workload buckets for chart
-  const workloadBuckets = workload?.buckets ?? [];
+  const workloadBuckets = Array.isArray(workload?.buckets) ? workload.buckets : [];
   const totalTeachersCount = workload?.total_teachers || 1;
   const bucketChartData = workloadBuckets.map((b) => ({
     name: b.label,
@@ -178,7 +187,7 @@ export function OverviewPage() {
             </div>
             <div className="mt-3 flex items-baseline justify-between">
               <div className="text-3xl font-bold tracking-tight text-zinc-900 tabular-nums">
-                {data.counts[key] ?? 0}
+                {counts[key] ?? 0}
               </div>
               <span className="text-xs text-zinc-400">已登记主数据</span>
             </div>
@@ -396,7 +405,7 @@ export function OverviewPage() {
               <div className="rounded-lg border border-blue-100 bg-blue-50/50 p-3.5 text-center">
                 <div className="text-xs font-semibold text-blue-900">已排入课次</div>
                 <div className="mt-1 text-2xl font-bold text-blue-950 tabular-nums">
-                  {evaluatedCount > 0 ? evaluatedCount : data.counts.course_sessions ?? 0}
+                  {evaluatedCount > 0 ? evaluatedCount : counts.course_sessions ?? 0}
                   <span className="text-xs font-normal text-blue-700 ml-1">节</span>
                 </div>
                 <div className="text-[11px] text-blue-700 mt-0.5">
@@ -491,7 +500,7 @@ export function OverviewPage() {
 
             {/* Top 5 Teachers List */}
             <div className="mt-4 space-y-2.5">
-              {(workload?.top_teachers ?? []).map((t, idx) => {
+              {(Array.isArray(workload?.top_teachers) ? workload.top_teachers : []).map((t, idx) => {
                 const medals = ["🥇", "🥈", "🥉", "4", "5"];
                 const loadPct = (t.load_share * 100).toFixed(1);
 
@@ -537,7 +546,7 @@ export function OverviewPage() {
                 );
               })}
 
-              {(workload?.top_teachers ?? []).length === 0 && (
+              {(!Array.isArray(workload?.top_teachers) || workload.top_teachers.length === 0) && (
                 <div className="py-8 text-center text-xs text-zinc-400">
                   当前方案暂无教师课时分配数据
                 </div>

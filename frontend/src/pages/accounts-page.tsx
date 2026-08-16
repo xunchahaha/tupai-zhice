@@ -122,7 +122,8 @@ export function AccountsPage() {
     setScheduleSetsLoading(true);
     setScheduleSetsError(null);
     try {
-      const sets = await scheduleSetApi.list();
+      const rawSets = await scheduleSetApi.list();
+      const sets = Array.isArray(rawSets) ? rawSets : [];
       const memberEntries = await Promise.all(
         sets.map(async (item) => [item.id, await scheduleSetApi.listMembers(item.id)] as const),
       );
@@ -208,7 +209,7 @@ export function AccountsPage() {
   if (accounts.isError) {
     return <ErrorState error={accounts.error} retry={() => void accounts.refetch()} />;
   }
-  const rows = accounts.data ?? [];
+  const rows = Array.isArray(accounts.data) ? accounts.data : [];
 
   return (
     <div className="space-y-5 animate-fade-in">

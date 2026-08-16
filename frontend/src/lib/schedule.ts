@@ -6,10 +6,10 @@ type ScheduleCandidate = {
 export function preferredSchedule<T extends ScheduleCandidate>(
   schedules: readonly T[] | undefined,
 ): T | undefined {
-  if (!schedules?.length) return undefined;
+  if (!Array.isArray(schedules) || !schedules.length) return undefined;
   return (
-    schedules.find((schedule) => schedule.status === "published") ??
-    schedules.find((schedule) => schedule.status === "draft") ??
+    schedules.find((schedule) => schedule?.status === "published") ??
+    schedules.find((schedule) => schedule?.status === "draft") ??
     schedules[0]
   );
 }
@@ -18,5 +18,6 @@ export function preferredSchedule<T extends ScheduleCandidate>(
 export function latestDraftSchedule<T extends ScheduleCandidate>(
   schedules: readonly T[] | undefined,
 ): T | undefined {
-  return schedules?.find((schedule) => schedule.status === "draft");
+  if (!Array.isArray(schedules)) return undefined;
+  return schedules.find((schedule) => schedule?.status === "draft");
 }

@@ -24,6 +24,15 @@ export function AuthBoundary() {
 
   if (!token) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   if (user.isPending) return <LoadingState />;
-  if (user.isError) return <ErrorState retry={() => void user.refetch()} />;
-  return <Outlet context={{ user: user.data }} />;
+  if (user.isError || !user.data) return <ErrorState retry={() => void user.refetch()} />;
+
+  const userData = {
+    id: user.data.id ?? "admin",
+    username: user.data.username ?? "admin",
+    role: user.data.role ?? "admin",
+    is_active: user.data.is_active ?? true,
+    created_at: user.data.created_at ?? new Date().toISOString(),
+  };
+
+  return <Outlet context={{ user: userData }} />;
 }
