@@ -464,9 +464,9 @@ export function SchedulePage() {
                         )}
                       >
                         {/* 1. Date & Calendar Tag */}
-                        <div className="flex items-center gap-3 md:min-w-[200px]">
+                        <div className="flex items-center gap-3 md:min-w-[190px]">
                           <div className="grid size-12 place-items-center rounded-xl bg-white border border-zinc-200 text-center shadow-2xs shrink-0">
-                            <div className="text-[10px] font-medium text-blue-600 leading-none">
+                            <div className="text-[10px] font-semibold text-blue-600 leading-none">
                               {weekday || "排课"}
                             </div>
                             <div className="text-xs font-bold text-zinc-900 leading-none mt-1">
@@ -480,39 +480,22 @@ export function SchedulePage() {
                               </span>
                               <span className="text-xs font-semibold text-blue-600">({weekday})</span>
                             </div>
-                            <div className="mt-1">
-                              <span
-                                className={cn(
-                                  "text-[10px] font-semibold px-2 py-0.5 rounded-full",
-                                  isFirst
-                                    ? "bg-emerald-100 text-emerald-800"
-                                    : isLast
-                                      ? "bg-purple-100 text-purple-800"
-                                      : "bg-zinc-200/80 text-zinc-600",
-                                )}
-                              >
-                                {isFirst ? "开营首课" : isLast ? "结课尾课" : `第 ${globalIndex + 1} 讲`}
-                              </span>
-                            </div>
                           </div>
                         </div>
 
                         {/* 2. Course Name / Subject Badge + Stage */}
-                        <div className="flex items-center gap-2 md:min-w-[190px]">
+                        <div className="flex items-center gap-2 md:min-w-[180px]">
                           <div className="flex items-start gap-2 rounded-lg border border-indigo-100 bg-indigo-50/80 px-3 py-2 text-indigo-950 w-full">
                             <BookOpen className="size-4 text-indigo-600 shrink-0 mt-0.5" />
                             <div>
                               <div className="text-xs font-bold leading-tight break-words">{courseName}</div>
-                              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
-                                {cs?.stage && (
-                                  <span className="font-bold text-amber-900 bg-amber-100/90 px-1.5 py-0.2 rounded">
+                              {cs?.stage && (
+                                <div className="mt-1">
+                                  <span className="font-bold text-[10px] text-amber-900 bg-amber-100/90 px-1.5 py-0.2 rounded">
                                     {cs.stage}
                                   </span>
-                                )}
-                                {cs?.session_no != null && (
-                                  <span className="text-zinc-500 font-medium">第 {cs.session_no} 讲</span>
-                                )}
-                              </div>
+                                </div>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -698,8 +681,8 @@ export function SchedulePage() {
                                   : "border-blue-200/90 bg-blue-50/80 text-blue-950 hover:bg-blue-100/70 hover:border-blue-300",
                               )}
                             >
-                              {/* 1. Full Course Name / Subject + Stage & Session Badge */}
-                              {(courseName || cs?.stage || cs?.session_no != null) ? (
+                              {/* 1. Full Course Name / Subject + Stage Badge */}
+                              {(courseName || cs?.stage) ? (
                                 <div className="flex flex-wrap items-center gap-1 mb-1.5 leading-tight">
                                   {courseName && (
                                     <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-900 bg-indigo-100/90 px-1.5 py-0.5 rounded break-words">
@@ -710,11 +693,6 @@ export function SchedulePage() {
                                   {cs?.stage && (
                                     <span className="text-[10px] font-bold text-amber-900 bg-amber-100 px-1.5 py-0.5 rounded break-words">
                                       {cs.stage}
-                                    </span>
-                                  )}
-                                  {cs?.session_no != null && (
-                                    <span className="text-[10px] font-medium text-zinc-600 bg-zinc-100 px-1 py-0.5 rounded">
-                                      第{cs.session_no}讲
                                     </span>
                                   )}
                                 </div>
