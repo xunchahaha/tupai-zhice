@@ -98,7 +98,7 @@ const permissionLabels: Record<string, string> = {
   "base:record:create": "新增记录",
   "base:record:retrieve": "根据条件搜索记录",
   "base:record:update": "更新记录",
-  "base:record:delete": "清理系统识别出的重复公开展示记录",
+  "base:record:delete": "清理系统识别出的重复生成记录",
 };
 
 export function IntegrationsPage() {
@@ -569,7 +569,7 @@ export function IntegrationsPage() {
           <FlowStep
             number={5}
             title="同步业务数据"
-            description="一键同步当前课表方案的 10 类数据；发布或回滚后会自动同步课表和三张展示投影表。所有表按业务标识新增或更新；公开表会识别并清理历史重复项。"
+            description="一键同步当前发布版本的 10 类数据；发布或回滚后会自动同步课表和三张展示投影表。所有生成表按稳定业务标识覆盖更新并清理旧版本行；此按钮只同步，不会启动求解。"
             state={ready ? "current" : "pending"}
             icon={CloudUpload}
           >
@@ -608,7 +608,7 @@ export function IntegrationsPage() {
                 <div className="font-medium">同步暂不可用，原因是：</div>
                 <ul className="mt-1 list-disc pl-4">{syncBlockers.map((item) => <li key={item}>{item}</li>)}</ul>
               </div>
-            ) : <p className="mt-2 text-xs text-emerald-700">连接已就绪：一键同步只写入顶栏当前所选方案绑定的独立多维表格。</p>}
+            ) : <p className="mt-2 text-xs text-emerald-700">连接已就绪：一键同步只写入顶栏当前所选方案绑定的独立多维表格；求解必须在“排课求解”页单独点击“开始求解”。</p>}
             {(syncReauthorizationPrompt || status.status === "reauthorization_required") ? (
               <FeishuReauthorizationAction
                 authorize={() => authorize.mutate()}
@@ -1119,6 +1119,7 @@ function BatchSyncResult({
             <div className="mt-1 text-zinc-500">写入 {item.records_written} 条{detailNumberValue(item.detail, "records_skipped") ? `，跳过 ${detailNumberValue(item.detail, "records_skipped")} 条` : ""}</div>
             {detailError(item.detail) ? <div className="mt-1 text-red-600">{detailError(item.detail)}</div> : null}
             {duplicateCleanupMessage(item.detail) ? <div className="mt-1 text-amber-700">{duplicateCleanupMessage(item.detail)}</div> : null}
+            {classViewSyncMessage(item.resource, item.detail) ? <div className="mt-1 text-blue-700">{classViewSyncMessage(item.resource, item.detail)}</div> : null}
           </div>
         ))}
       </div>
@@ -1383,9 +1384,24 @@ function duplicateCleanupMessage(detail: Record<string, unknown>): string | null
   const status = typeof cleanup.status === "string" ? cleanup.status : "";
   const deleted = typeof cleanup.deleted === "number" ? cleanup.deleted : 0;
   const candidates = typeof cleanup.managed_candidates === "number" ? cleanup.managed_candidates : 0;
-  if (status === "completed" && deleted) return `已清理 ${deleted} 条历史重复公开记录`;
+  if (status === "completed" && deleted) return `已清理 ${deleted} 条历史重复记录`;
   if (status === "skipped_missing_delete_scope" && candidates) return `发现 ${candidates} 条历史重复记录；补充清理权限后可自动删除`;
   if (status === "failed" && candidates) return `重复记录清理未完成（${candidates} 条待处理）`;
+  return null;
+}
+
+function classViewSyncMessage(resource: string, detail: Record<string, unknown>): string | null {
+  if (resource !== "public_class_schedule") return null;
+  const raw = detail.view_sync;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const sync = raw as Record<string, unknown>;
+  const status = typeof sync.status === "string" ? sync.status : "";
+  const created = typeof sync.created === "number" ? sync.created : 0;
+  const deleted = typeof sync.deleted === "number" ? sync.deleted : 0;
+  const classes = typeof sync.classes === "number" ? sync.classes : 0;
+  if (status === "completed") return `班级视图 ${classes} 个（新增 ${created}，清理 ${deleted}）`;
+  if (status === "skipped_missing_scope") return "班级视图未创建：重新授权后会自动补齐";
+  if (status === "failed") return "班级视图同步未完成，可重试班级公开课表";
   return null;
 }
 

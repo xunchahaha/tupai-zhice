@@ -22,6 +22,7 @@ from ..config import (
     AILY_OPTIONAL_SCOPES,
     FEISHU_BITABLE_APP_READ_SCOPES,
     FEISHU_OPTIONAL_CLEANUP_SCOPES,
+    FEISHU_OPTIONAL_VIEW_SCOPES,
     FEISHU_REQUIRED_SCOPES,
     FEISHU_RESOURCES,
     Settings,
@@ -40,9 +41,14 @@ AUTHORIZATION_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
 TOKEN_URL = "https://accounts.feishu.cn/oauth/v3/token"
 OPEN_API_URL = "https://open.feishu.cn/open-apis"
 BUSINESS_KEY_FIELD = "业务标识"
+# These projections are generated entirely from the local schedule state.  A
+# sync therefore owns the complete remote row-set: rows from an older release
+# or a previous key format must be removed instead of accumulating beside the
+# current release.
 SYSTEM_OWNED_PUBLIC_RESOURCES = frozenset(
-    {"public_summary", "public_class_schedule", "public_adjustment_notice"}
+    {"schedule", "public_summary", "public_class_schedule", "public_adjustment_notice"}
 )
+CLASS_VIEW_PREFIX = "班级｜"
 # Keep metadata reads below the endpoint's 500-row page limit.  This matters
 # on repeat syncs: a 9,000-row table is read in 18 pages instead of 45.
 SYNC_RECORD_PAGE_SIZE = 500
@@ -191,11 +197,18 @@ TABLE_SCHEMAS: dict[str, tuple[str, list[tuple[str, int]]]] = {
         [
             (BUSINESS_KEY_FIELD, 1),
             ("是否展示", 1),
+            # Stable campus + class identity keeps same-named classes in
+            # different campuses from being merged by a public view filter.
+            ("班级标识", 1),
             ("班级名称", 1),
             ("上课日期", 1),
             ("星期", 1),
             ("开始时间", 1),
             ("结束时间", 1),
+            # ISO text sorts lexicographically in the same order as the
+            # timetable; MiaoDa and a manually opened Bitable view can use it
+            # as the single ascending sort key.
+            ("排序键", 1),
             ("课程名称", 1),
             ("学科", 1),
             ("上课地点", 1),
@@ -681,7 +694,11 @@ class FeishuService:
 
     def create_oauth_start(self, user_id: str) -> dict[str, Any]:
         app = self._app_configuration()
-        scopes = sorted(self._required_user_scopes() | set(FEISHU_OPTIONAL_CLEANUP_SCOPES))
+        scopes = sorted(
+            self._required_user_scopes()
+            | set(FEISHU_OPTIONAL_CLEANUP_SCOPES)
+            | set(FEISHU_OPTIONAL_VIEW_SCOPES)
+        )
         state = secrets.token_urlsafe(32)
         expires_at = _utcnow() + timedelta(minutes=10)
         self.db.add(
@@ -1346,6 +1363,253 @@ class FeishuService:
             page_token = str(data.get("page_token") or "")
             if not page_token:
                 raise FeishuServiceError("飞书字段分页响应缺少下一页标识")
+
+    def _list_views(
+        self, token: str, workspace: FeishuWorkspace, table_id: str
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        views: list[dict[str, Any]] = []
+        log_ids: list[str] = []
+        page_token: str | None = None
+        while True:
+            params: dict[str, Any] = {"page_size": 100}
+            if page_token:
+                params["page_token"] = page_token
+            data, log_id = self._request(
+                "GET",
+                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                f"{table_id}/views",
+                token=token,
+                params=params,
+                timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
+                retry_attempts=SYNC_RETRY_ATTEMPTS,
+            )
+            if log_id:
+                log_ids.append(log_id)
+            items = data.get("items", [])
+            if not isinstance(items, list):
+                raise FeishuServiceError("飞书视图列表格式不正确")
+            views.extend(item for item in items if isinstance(item, dict))
+            if not data.get("has_more"):
+                return views, log_ids
+            page_token = str(data.get("page_token") or "")
+            if not page_token:
+                raise FeishuServiceError("飞书视图分页响应缺少下一页标识")
+
+    def _create_view(
+        self,
+        token: str,
+        workspace: FeishuWorkspace,
+        table_id: str,
+        view_name: str,
+    ) -> tuple[str, str | None]:
+        data, log_id = self._request(
+            "POST",
+            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+            f"{table_id}/views",
+            token=token,
+            json_body={"view_name": view_name, "view_type": "grid"},
+            timeout=SYNC_MUTATION_TIMEOUT_SECONDS,
+        )
+        view = data.get("view", data)
+        if not isinstance(view, dict) or not view.get("view_id"):
+            raise FeishuServiceError(f"创建视图“{view_name}”后未返回视图标识")
+        return str(view["view_id"]), log_id
+
+    def _patch_class_view(
+        self,
+        token: str,
+        workspace: FeishuWorkspace,
+        table_id: str,
+        view_id: str,
+        view_name: str,
+        class_field_id: str,
+        class_name: str,
+        hidden_field_ids: list[str] | None = None,
+    ) -> str | None:
+        property_payload: dict[str, Any] = {
+            "filter_info": {
+                "conjunction": "and",
+                "conditions": [
+                    {
+                        "field_id": class_field_id,
+                        "operator": "is",
+                        "value": json.dumps([class_name], ensure_ascii=False),
+                    }
+                ],
+            }
+        }
+        if hidden_field_ids:
+            property_payload["hidden_fields"] = hidden_field_ids
+        _, log_id = self._request(
+            "PATCH",
+            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+            f"{table_id}/views/{view_id}",
+            token=token,
+            json_body={
+                "view_name": view_name,
+                "property": property_payload,
+            },
+            timeout=SYNC_MUTATION_TIMEOUT_SECONDS,
+        )
+        return log_id
+
+    def _delete_view(
+        self,
+        token: str,
+        workspace: FeishuWorkspace,
+        table_id: str,
+        view_id: str,
+    ) -> str | None:
+        _, log_id = self._request(
+            "DELETE",
+            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+            f"{table_id}/views/{view_id}",
+            token=token,
+            timeout=SYNC_MUTATION_TIMEOUT_SECONDS,
+        )
+        return log_id
+
+    @staticmethod
+    def _class_view_name(class_name: str) -> str:
+        normalized = " ".join(str(class_name).replace("[", "").replace("]", "").split())
+        return (CLASS_VIEW_PREFIX + normalized)[:100]
+
+    @classmethod
+    def _class_view_display_name(
+        cls,
+        class_name: str,
+        class_identity: str,
+        duplicate_name: bool,
+    ) -> str:
+        # Keep the friendly name for the common case.  If two campuses expose
+        # the same class label, include the stable identity so the views stay
+        # distinct and operators can tell them apart.
+        suffix = f"（{class_identity}）" if duplicate_name and class_identity else ""
+        return cls._class_view_name(f"{class_name}{suffix}")
+
+    def _reconcile_class_views(
+        self,
+        connection: FeishuConnection,
+        token: str,
+        workspace: FeishuWorkspace,
+        table_id: str,
+        rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Create/update/delete one filtered grid view per public class.
+
+        View management is an optional projection.  A legacy read-only grant
+        must not make the actual class schedule sync fail; the next OAuth grant
+        can include ``base:view:write_only`` and enable this reconciliation.
+        """
+
+        can_write_views = (
+            "base:view:write_only" in connection.scopes or "bitable:app" in connection.scopes
+        )
+        if not can_write_views:
+            return {
+                "status": "skipped_missing_scope",
+                "missing_scope": "base:view:write_only 或 bitable:app",
+                "created": 0,
+                "updated": 0,
+                "deleted": 0,
+            }
+        fields, field_logs = self._list_fields(token, workspace, table_id)
+        class_identity_field_id = next(
+            (
+                str(item.get("field_id") or "")
+                for item in fields
+                if str(item.get("field_name") or "").strip() == "班级标识"
+            ),
+            "",
+        )
+        class_name_field_id = next(
+            (
+                str(item.get("field_id") or "")
+                for item in fields
+                if str(item.get("field_name") or "").strip() == "班级名称"
+            ),
+            "",
+        )
+        sort_field_id = next(
+            (
+                str(item.get("field_id") or "")
+                for item in fields
+                if str(item.get("field_name") or "").strip() == "排序键"
+            ),
+            "",
+        )
+        if not class_identity_field_id and not class_name_field_id:
+            raise FeishuServiceError("班级公开课表缺少“班级标识”字段，无法创建班级视图")
+        views, view_logs = self._list_views(token, workspace, table_id)
+        owned_views = {
+            str(item.get("view_name") or ""): item
+            for item in views
+            if str(item.get("view_name") or "").startswith(CLASS_VIEW_PREFIX)
+            and item.get("view_id")
+        }
+        class_entries: dict[str, str] = {}
+        for row in rows:
+            class_name = str(row.get("班级名称") or "").strip()
+            class_identity = str(row.get("班级标识") or class_name).strip()
+            if class_name and class_identity:
+                class_entries.setdefault(class_identity, class_name)
+        name_counts: dict[str, int] = {}
+        for class_name in class_entries.values():
+            name_counts[class_name] = name_counts.get(class_name, 0) + 1
+        expected_names = {
+            self._class_view_display_name(
+                class_name,
+                class_identity,
+                name_counts[class_name] > 1,
+            ): (class_identity, class_name)
+            for class_identity, class_name in sorted(class_entries.items())
+        }
+        created = updated = deleted = 0
+        log_ids = [*field_logs, *view_logs]
+        for view_name, (class_identity, class_name) in expected_names.items():
+            existing = owned_views.get(view_name)
+            if existing is None:
+                view_id, log_id = self._create_view(token, workspace, table_id, view_name)
+                if log_id:
+                    log_ids.append(log_id)
+                log_id = self._patch_class_view(
+                    token,
+                    workspace,
+                    table_id,
+                    view_id,
+                    view_name,
+                    class_identity_field_id or class_name_field_id,
+                    class_identity if class_identity_field_id else class_name,
+                    [field_id for field_id in (class_identity_field_id, sort_field_id) if field_id],
+                )
+                if log_id:
+                    log_ids.append(log_id)
+                created += 1
+            else:
+                # Namespaced views created by this service are immutable in
+                # meaning; avoid PATCHing all 36 views on every sync because
+                # Bitable serializes table/view writes.
+                view_id = str(existing["view_id"])
+                if not view_id:
+                    continue
+                updated += 0
+        for view_name, view in owned_views.items():
+            if view_name in expected_names:
+                continue
+            view_id = str(view.get("view_id") or "")
+            if view_id:
+                log_id = self._delete_view(token, workspace, table_id, view_id)
+                if log_id:
+                    log_ids.append(log_id)
+                deleted += 1
+        return {
+            "status": "completed",
+            "classes": len(class_entries),
+            "created": created,
+            "updated": updated,
+            "deleted": deleted,
+            "request_log_ids": list(dict.fromkeys(log_ids)),
+        }
 
     def _create_table(
         self,
@@ -2048,6 +2312,43 @@ class FeishuService:
             if record_id:
                 canonical_by_key[key] = record_id
 
+        # Before this release the schedule key included ``version.id``.  The
+        # current projection key is intentionally version-independent, so a
+        # one-time reconciliation should reuse the existing current-version
+        # record in place instead of creating another 4,544 rows and deleting
+        # them immediately afterwards.  The old historical-version records
+        # still fall through to the system-owned cleanup below.
+        if resource == "schedule":
+            legacy_by_session_version: dict[tuple[str, str], list[str]] = {}
+            for record in remote_records:
+                record_id = str(record.get("record_id") or "")
+                fields = record.get("fields")
+                if not record_id or not isinstance(fields, dict):
+                    continue
+                session_key = normalize_business_key(fields.get("场次标识"))
+                version_key = normalize_business_key(fields.get("版本标识"))
+                if session_key and version_key:
+                    legacy_by_session_version.setdefault(
+                        (session_key, version_key), []
+                    ).append(record_id)
+            for row in normalized:
+                key = str(row[BUSINESS_KEY_FIELD])
+                if key in canonical_by_key:
+                    continue
+                legacy_key = (
+                    normalize_business_key(row.get("场次标识")),
+                    normalize_business_key(row.get("版本标识")),
+                )
+                for record_id in legacy_by_session_version.get(legacy_key, []):
+                    owner = bindings_by_record_id.get(record_id)
+                    if record_id in canonical_record_ids:
+                        continue
+                    if owner is not None and owner.business_key in local_keys:
+                        continue
+                    canonical_by_key[key] = record_id
+                    canonical_record_ids.add(record_id)
+                    break
+
         to_create = [
             row for row in normalized if str(row[BUSINESS_KEY_FIELD]) not in canonical_by_key
         ]
@@ -2178,6 +2479,24 @@ class FeishuService:
             key = str(row[BUSINESS_KEY_FIELD])
             bound_record_id = canonical_by_key[key]
             record_binding = bindings_by_key.get(key)
+            legacy_binding = bindings_by_record_id.get(bound_record_id)
+            if (
+                resource == "schedule"
+                and legacy_binding is not None
+                and legacy_binding.business_key != key
+            ):
+                # Rekey the existing ledger row in place.  Deleting the old
+                # row and inserting a new one in the same flush can violate
+                # the table_binding_id + record_id unique constraint because
+                # SQLite is free to order INSERT before DELETE.
+                bindings_by_key.pop(legacy_binding.business_key, None)
+                if record_binding is None:
+                    legacy_binding.business_key = key
+                    record_binding = legacy_binding
+                    bindings_by_key[key] = record_binding
+                else:
+                    self.db.delete(legacy_binding)
+                    bindings_by_record_id.pop(bound_record_id, None)
             if record_binding is None:
                 record_binding = FeishuRecordBinding(
                     table_binding_id=table.id,
@@ -2238,6 +2557,20 @@ class FeishuService:
         elif unmanaged_duplicates or unmanaged_stale_records:
             duplicate_cleanup["status"] = "unmanaged_duplicates"
         self.db.commit()
+        view_sync: dict[str, Any] | None = None
+        if resource == "public_class_schedule":
+            try:
+                view_sync = self._reconcile_class_views(
+                    connection,
+                    token,
+                    workspace,
+                    table.table_id,
+                    normalized,
+                )
+            except (FeishuServiceError, httpx.HTTPError) as exc:
+                # View projection is supplementary; a view API failure must
+                # not roll back the successfully synchronized class records.
+                view_sync = {"status": "failed", "error": str(exc)}
         return {
             "workspace_id": workspace.id,
             "workspace_url": workspace.url,
@@ -2249,6 +2582,7 @@ class FeishuService:
             "records_deleted": int(duplicate_cleanup["deleted"]),
             "records_written": len(to_create) + len(to_update),
             "duplicate_cleanup": duplicate_cleanup,
+            "view_sync": view_sync,
             "request_log_ids": list(dict.fromkeys(log_ids)),
         }
 

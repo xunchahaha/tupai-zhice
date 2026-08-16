@@ -1023,6 +1023,143 @@ def test_public_sync_normalizes_rich_text_and_repairs_historical_duplicate(
         db.delete(user)
         db.commit()
 
+def test_schedule_sync_reuses_current_legacy_version_row(monkeypatch: Any) -> None:
+    """V2 replaces the old V2 row instead of creating a second current row."""
+
+    with SessionLocal() as db:
+        user = User(
+            username="schedule_legacy_key_fixture",
+            password_hash="not-used-in-this-test",
+            role="admin",
+        )
+        db.add(user)
+        db.flush()
+        connection = FeishuConnection(
+            user_id=user.id,
+            access_token_encrypted="schedule-legacy-access",
+            refresh_token_encrypted="schedule-legacy-refresh",
+            access_expires_at=datetime.now(UTC) + timedelta(hours=1),
+            scopes=[
+                "base:record:create",
+                "base:record:retrieve",
+                "base:record:update",
+                "base:record:delete",
+            ],
+            status="active",
+        )
+        db.add(connection)
+        db.flush()
+        workspace = FeishuWorkspace(
+            connection_id=connection.id,
+            schedule_set_id="default",
+            name="课表历史键迁移",
+            app_token="app-schedule-legacy",
+            default_table_id="tbl-default",
+            url="https://example.test/schedule-legacy",
+            status="active",
+        )
+        db.add(workspace)
+        db.flush()
+        table = FeishuTableBinding(
+            workspace_id=workspace.id,
+            resource="schedule",
+            table_name="课表",
+            table_id="tbl-schedule-legacy",
+        )
+        db.add(table)
+        db.flush()
+        old_v2 = FeishuRecordBinding(
+            table_binding_id=table.id,
+            business_key="old-v2-key",
+            record_id="rec-v2",
+        )
+        old_v1 = FeishuRecordBinding(
+            table_binding_id=table.id,
+            business_key="old-v1-key",
+            record_id="rec-v1",
+        )
+        db.add_all([old_v2, old_v1])
+        db.commit()
+
+        remote_records = [
+            {
+                "record_id": "rec-v2",
+                "fields": {
+                    "业务标识": "old-v2-key",
+                    "场次标识": "CS-1",
+                    "版本标识": "version-v2",
+                },
+            },
+            {
+                "record_id": "rec-v1",
+                "fields": {
+                    "业务标识": "old-v1-key",
+                    "场次标识": "CS-1",
+                    "版本标识": "version-v1",
+                },
+            },
+        ]
+        service = FeishuService(settings, db)
+        monkeypatch.setattr(service, "_app_configuration", lambda: None)
+        monkeypatch.setattr(service, "access_token", lambda _user_id: (connection, "token"))
+        monkeypatch.setattr(service, "prepare_sync_resources", lambda *_args, **_kwargs: {})
+        monkeypatch.setattr(
+            service,
+            "_list_records",
+            lambda _token, _workspace, _table_id, _field_names: (remote_records, []),
+        )
+        monkeypatch.setattr(service, "_batch_create", lambda *_args: ([], []))
+        updates: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            service,
+            "_batch_update",
+            lambda _token, _workspace, _table_id, rows: updates.extend(rows) or [],
+        )
+        deleted: list[str] = []
+        monkeypatch.setattr(
+            service,
+            "_batch_delete",
+            lambda _token, _workspace, _table_id, record_ids: (
+                deleted.extend(record_ids) or set(record_ids),
+                set(),
+                [],
+                None,
+            ),
+        )
+
+        result = service.sync_rows(
+            user.id,
+            "schedule",
+            [
+                {
+                    "业务标识": "stable-schedule-key",
+                    "版本标识": "version-v2",
+                    "场次标识": "CS-1",
+                    "版本号": 2,
+                    "版本名称": "V2",
+                }
+            ],
+        )
+        assert result["records_created"] == 0
+        assert result["records_updated"] == 1
+        assert result["records_deleted"] == 1
+        assert updates[0][0] == "rec-v2"
+        assert deleted == ["rec-v1"]
+        bindings = list(
+            db.scalars(
+                select(FeishuRecordBinding).where(
+                    FeishuRecordBinding.table_binding_id == table.id
+                )
+            )
+        )
+        assert [(item.business_key, item.record_id) for item in bindings] == [
+            ("stable-schedule-key", "rec-v2")
+        ]
+        db.delete(table)
+        db.delete(workspace)
+        db.delete(connection)
+        db.delete(user)
+        db.commit()
 
 def test_duplicate_cleanup_without_optional_delete_scope_keeps_primary_upsert(
     monkeypatch: Any,
@@ -1222,8 +1359,10 @@ def test_calendar_table_schemas_include_binding_and_fixed_time_fields() -> None:
     assert {"上课日期", "固定开始时间", "固定结束时间"} <= schedule_fields
     assert {
         "是否展示",
+        "班级标识",
         "班级名称",
         "上课日期",
+        "排序键",
         "上课地点",
         "课表版本",
     } <= public_class_fields

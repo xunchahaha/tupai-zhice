@@ -55,6 +55,12 @@ FEISHU_BITABLE_APP_READ_SCOPES = frozenset({"bitable:app", "bitable:app:readonly
 # while making duplicate cleanup available after a one-time reauthorization.
 FEISHU_OPTIONAL_CLEANUP_SCOPES = ("base:record:delete",)
 
+# Creating and updating per-class Bitable views is an optional projection
+# feature.  Core record synchronization remains usable for older grants; a
+# fresh OAuth grant includes this scope so the view projection can be enabled
+# without changing the record permissions above.
+FEISHU_OPTIONAL_VIEW_SCOPES = ("base:view:write_only",)
+
 AILY_OPTIONAL_SCOPES = ("aily:skill:write",)
 
 DEFAULT_JWT_SECRET = "dev-secret-change-before-deployment"

@@ -3739,6 +3739,24 @@ def _public_projection_updated_at(schedule: ScheduleVersion | None) -> str:
     return published_at.isoformat() if published_at else ""
 
 
+def _public_class_identity(course: CourseSession) -> str:
+    """Return a stable class key that remains unique across campuses."""
+
+    return f"{course.campus_id}:{course.class_business_id}"
+
+
+def _public_schedule_sort_key(row: dict[str, Any]) -> tuple[str, ...]:
+    """Sort public timetable rows in display order, with deterministic ties."""
+
+    return (
+        str(row.get("上课日期") or ""),
+        str(row.get("开始时间") or ""),
+        str(row.get("结束时间") or ""),
+        str(row.get("班级标识") or ""),
+        str(row.get("业务标识") or ""),
+    )
+
+
 def _public_class_schedule_rows(
     db: Session, schedule_set_id: str
 ) -> list[dict[str, Any]]:
@@ -3765,11 +3783,16 @@ def _public_class_schedule_rows(
                     schedule_set_id, "public_class_schedule", course.id
                 ),
                 "是否展示": "是",
+                "班级标识": _public_class_identity(course),
                 "班级名称": class_group.name if class_group else "未分班",
                 "上课日期": snapshot["date"],
                 "星期": snapshot["weekday"],
                 "开始时间": snapshot["start"],
                 "结束时间": snapshot["end"],
+                "排序键": " ".join(
+                    item for item in (snapshot["date"], snapshot["start"], snapshot["end"])
+                    if item
+                ),
                 "课程名称": course.lesson_name or "课程安排",
                 "学科": course.subject or "",
                 "上课地点": snapshot["location"],
@@ -3777,7 +3800,7 @@ def _public_class_schedule_rows(
                 "更新时间": updated_at,
             }
         )
-    return rows
+    return sorted(rows, key=_public_schedule_sort_key)
 
 
 def _public_adjustment_notice_rows(
@@ -4009,16 +4032,11 @@ def export_resource_rows(
             )
         ]
     if resource == "schedule":
-        versions = list(
-            db.scalars(
-                select(ScheduleVersion)
-                .where(
-                    ScheduleVersion.schedule_set_id == schedule_set_id,
-                    ScheduleVersion.published_at.is_not(None),
-                )
-                .order_by(ScheduleVersion.version_no)
-            )
-        )
+        # The Feishu "课表" table is the current operational projection.  The
+        # local database remains the source of truth for version history; it
+        # must not be appended to the same public sync table on every publish.
+        current_version = _current_published_schedule(db, schedule_set_id)
+        versions = [current_version] if current_version is not None else []
         sessions = {
             item.id: item
             for item in db.scalars(
@@ -4063,7 +4081,13 @@ def export_resource_rows(
                 room = rooms.get(assignment.room_business_id)
                 rows.append(
                     {
-                        "业务标识": f"{version.id}:{session.business_id}",
+                        # The Feishu row represents the current operational
+                        # assignment, not a history entry.  Keep this key
+                        # stable across V1 -> V2 so the next sync updates the
+                        # existing row instead of creating another 4,000 rows.
+                        "业务标识": _public_projection_key(
+                            schedule_set_id, "schedule", session.business_id
+                        ),
                         "版本标识": version.id,
                         "版本号": version.version_no,
                         "版本名称": version.name,
@@ -4099,7 +4123,7 @@ def export_resource_rows(
                         ),
                     }
                 )
-        return rows
+        return sorted(rows, key=_public_schedule_sort_key)
     if resource == "public_summary":
         summary = _public_summary(db, schedule_set_id)
         published = _current_published_schedule(db, schedule_set_id)

@@ -755,6 +755,7 @@ def test_public_bitable_projections_use_only_current_schedule_and_safe_fields(
         class_rows = export_resource_rows(db, "public_class_schedule")
         notices = export_resource_rows(db, "public_adjustment_notice")
         summary = export_resource_rows(db, "public_summary")
+        schedule_rows = export_resource_rows(db, "schedule")
         changed_notice_key = _public_projection_key(
             previous.schedule_set_id, "public_adjustment_notice", course.id
         )
@@ -781,6 +782,23 @@ def test_public_bitable_projections_use_only_current_schedule_and_safe_fields(
     active_class_rows = [item for item in class_rows if item["是否展示"] == "是"]
     assert active_class_rows
     assert {item["课表版本"] for item in active_class_rows} == {f"V{next_version_no}"}
+    assert len(schedule_rows) == len(current.assignments)
+    assert {item["版本号"] for item in schedule_rows} == {next_version_no}
+    assert len({item["业务标识"] for item in schedule_rows}) == len(schedule_rows)
+    assert all(previous_id not in item["业务标识"] for item in schedule_rows)
+    assert class_rows == sorted(
+        class_rows,
+        key=lambda item: (
+            item["上课日期"],
+            item["开始时间"],
+            item["结束时间"],
+            item["班级标识"],
+            item["业务标识"],
+        ),
+    )
+    assert all(item["排序键"] == " ".join(
+        part for part in (item["上课日期"], item["开始时间"], item["结束时间"]) if part
+    ) for item in class_rows)
     changed_notice = next(item for item in notices if item["业务标识"] == changed_notice_key)
     assert changed_notice["是否展示"] == "是"
     assert changed_notice["调整类型"] == "时间及地点调整"
