@@ -23,7 +23,7 @@ export function errorMessage(error: unknown): string {
 
 export function formatSlot(value: string | undefined | null): string {
   if (!value) return "-";
-  let s = value.replace(/^SLOT-/, "");
+  const s = value.replace(/^SLOT-/, "");
   const match = s.match(/^([\u4e00-\u9fa5]+|\w+)-(\d{2})(\d{2})-(\d{2})(\d{2})$/);
   if (match) {
     const [, day, h1, m1, h2, m2] = match;

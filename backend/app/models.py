@@ -324,6 +324,8 @@ class CourseSession(TimestampMixin, Base):
     original_room_business_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     candidate_room_business_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     source_variant_count: Mapped[int] = mapped_column(Integer, default=1)
+    # 重导移除的课次保留历史引用，但不再进入当前待排集合。
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
 
 

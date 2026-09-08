@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { AssignmentResponseLessonDate } from './assignmentResponseLessonDate';
+import type { AssignmentResponseCourse } from './assignmentResponseCourse';
 
 export interface AssignmentResponse {
   course_session_id: string;
@@ -16,4 +17,5 @@ export interface AssignmentResponse {
   slot_business_id: string;
   room_business_id: string;
   change_kind: string;
+  course?: AssignmentResponseCourse;
 }

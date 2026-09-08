@@ -27,5 +27,7 @@ export interface AssistantInterpretResponse {
   date_window_days?: number;
   recognized_rules?: string[];
   solver_rules?: AssistantInterpretResponseSolverRulesItem[];
+  unsupported_requirements?: string[];
+  coverage_warnings?: string[];
   summary: string;
 }

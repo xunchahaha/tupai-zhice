@@ -441,9 +441,18 @@ def _selected_sessions(payload: dict[str, Any]) -> list[dict[str, Any]]:
     course_ids = {str(item) for item in payload.get("course_business_ids") or []}
     date_from = _parse_date(payload.get("date_from"))
     date_to = _parse_date(payload.get("date_to"))
+    previous = {
+        str(item.get("course_business_id")): item
+        for item in payload.get("previous_assignments", [])
+    }
     selected: list[dict[str, Any]] = []
     for session in payload.get("course_sessions", []):
-        lesson_date = _parse_date(session.get("lesson_date"))
+        if not session.get("is_active", True):
+            continue
+        lesson_date = _parse_date(
+            previous.get(str(session.get("business_id")), {}).get("lesson_date")
+            or session.get("lesson_date")
+        )
         if course_ids and str(session.get("business_id")) not in course_ids:
             continue
         if business_lines and session.get("business_line") not in business_lines:
@@ -669,6 +678,9 @@ def _can_use_discrete_date_grid(payload: dict[str, Any]) -> bool:
     a per-date/window capacity constraint is mathematically equivalent. Cases
     with overlapping clocks or room-specific rules stay on the interval model.
     """
+    # 父版本的教室也是最小变更目标的一部分，须与日期/时段共同决策。
+    if payload.get("previous_assignments"):
+        return False
     sessions = _selected_sessions(payload)
     if not sessions or any(session.get("is_locked") for session in sessions):
         return False
@@ -1027,6 +1039,9 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         return result
 
     previous_assignments = list(payload.get("previous_assignments", []))
+    previous_by_course = {
+        str(item.get("course_business_id")): item for item in previous_assignments
+    }
     selected_business_ids = {str(item["business_id"]) for item in sessions}
     has_fixed_parent_rooms = any(
         str(item.get("course_business_id") or "") not in selected_business_ids
@@ -1039,7 +1054,8 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         "unavailable_room",
     }
     explicit_room_choices = bool(
-        has_fixed_parent_rooms
+        previous_assignments
+        or has_fixed_parent_rooms
         or event.get("event_type") == "room_outage"
         or any(session.get("is_locked") for session in sessions)
         or any(rule.get("constraint_type") in room_constraint_types for rule in rules)
@@ -1055,6 +1071,8 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
     calendar_intervals: dict[str, list[cp_model.IntervalVar]] = {}
     person_intervals: dict[str, list[cp_model.IntervalVar]] = {}
     objective_terms: list[Any] = []
+    changed_terms: list[Any] = []
+    secondary_upper_bound = 0
 
     all_sessions = {str(item["business_id"]): item for item in payload.get("course_sessions", [])}
     for index, previous in enumerate(previous_assignments):
@@ -1102,8 +1120,11 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         if original_date is None:
             model.add_bool_or([])
             continue
-        lower = original_date - timedelta(days=date_window)
-        upper = original_date + timedelta(days=date_window)
+        previous = previous_by_course.get(course_id)
+        baseline_date = _parse_date(previous.get("lesson_date")) if previous else original_date
+        baseline_date = baseline_date or original_date
+        lower = baseline_date - timedelta(days=date_window)
+        upper = baseline_date + timedelta(days=date_window)
         if request_date_from:
             lower = max(lower, request_date_from)
         if request_date_to:
@@ -1139,13 +1160,14 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
             else []
         )
         if session.get("is_locked"):
-            allowed_dates = [item for item in allowed_dates if item == original_date]
+            allowed_dates = [item for item in allowed_dates if item == baseline_date]
 
         windows = _candidate_clock_windows(session)
         if session.get("is_locked") and windows:
+            parent_slot = slot_details.get(str((previous or {}).get("slot_business_id"))) or {}
             fixed_window = (
-                str(session.get("fixed_start_time") or ""),
-                str(session.get("fixed_end_time") or ""),
+                str(parent_slot.get("start_time") or session.get("fixed_start_time") or ""),
+                str(parent_slot.get("end_time") or session.get("fixed_end_time") or ""),
             )
             windows = [fixed_window] if fixed_window in windows else [windows[0]]
 
@@ -1213,12 +1235,14 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
         time_choices[course_id] = choice_var
         time_options[course_id] = options
 
-        date_deltas = [abs((item["lesson_date"] - original_date).days) for item in options]
+        date_deltas = [abs((item["lesson_date"] - baseline_date).days) for item in options]
         date_delta = model.new_int_var(
             min(date_deltas), max(date_deltas), f"date_delta_{course_id}"
         )
         model.add_element(choice_var, date_deltas, date_delta)
-        objective_terms.append(change_weight * date_delta)
+        distance_weight = 1 if previous and change_weight else change_weight
+        objective_terms.append(distance_weight * date_delta)
+        secondary_upper_bound += distance_weight * max(date_deltas)
 
         for rule in matching_rules:
             if rule.get("hardness") != "soft":
@@ -1273,7 +1297,9 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
                 0, 1, f"time_rule_penalty_{course_id}_{rule['business_id']}"
             )
             model.add_element(choice_var, penalties, penalty)
-            objective_terms.append(max(1, int(rule.get("weight") or 1)) * penalty)
+            weight = max(1, int(rule.get("weight") or 1))
+            objective_terms.append(weight * penalty)
+            secondary_upper_bound += weight
 
         if explicit_room_choices:
             valid_room_choices: list[cp_model.IntVar] = []
@@ -1298,8 +1324,9 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
                     )
                 elif constraint_type in {"forbidden_room", "unavailable_room"}:
                     forbidden_room_ids.update(rule_room_ids)
-            if session.get("is_locked") and original_room:
-                locked_room = {original_room}
+            locked_room_id = str((previous or {}).get("room_business_id") or original_room)
+            if session.get("is_locked") and locked_room_id:
+                locked_room = {locked_room_id}
                 fixed_room_ids = (
                     locked_room
                     if fixed_room_ids is None
@@ -1338,6 +1365,7 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
                 valid_room_choices.append(selected)
                 if source_rooms and room_id not in source_rooms:
                     objective_terms.append(selected)
+                    secondary_upper_bound += 1
                 if room_event:
                     outage_slots = set(event.get("slot_business_ids") or [])
                     for option_index, option in enumerate(options):
@@ -1362,11 +1390,26 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
                         and room_id in rule_room_ids
                     )
                     if penalized:
-                        objective_terms.append(max(1, int(rule.get("weight") or 1)) * selected)
+                        weight = max(1, int(rule.get("weight") or 1))
+                        objective_terms.append(weight * selected)
+                        secondary_upper_bound += weight
             if valid_room_choices:
                 model.add_exactly_one(valid_room_choices)
             else:
                 model.add_bool_or([])
+
+        if previous and change_weight:
+            time_differences = [
+                int(item["lesson_date"] != baseline_date
+                    or item["slot_business_id"] != previous.get("slot_business_id"))
+                for item in options
+            ]
+            time_changed = model.new_bool_var(f"time_changed_{course_id}")
+            model.add_element(choice_var, time_differences, time_changed)
+            same_room = room_choices.get((course_id, str(previous.get("room_business_id"))), 0)
+            changed = model.new_bool_var(f"changed_{course_id}")
+            model.add_max_equality(changed, [time_changed, 1 - same_room])
+            changed_terms.append(changed)
 
     if "room_no_overlap" in solver_rules:
         if explicit_room_choices:
@@ -1409,7 +1452,8 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
                 model.add_no_overlap(grouped)
 
     result["presolve_infeasible"] = False
-    model.minimize(sum(objective_terms))
+    # 上界来自实际候选域和规则权重，使少改一节严格优先于所有次级偏好。
+    model.minimize((secondary_upper_bound + 1) * sum(changed_terms) + sum(objective_terms))
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(payload.get("time_limit_seconds", 30))
     solver.parameters.random_seed = int(payload.get("random_seed", 2026))

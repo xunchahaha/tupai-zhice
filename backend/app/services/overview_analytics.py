@@ -28,6 +28,7 @@ from ..models import (
     TimeSlot,
 )
 from ..timezone import as_shanghai, shanghai_now
+from .snapshot import version_course_map
 
 WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 PERIOD_LABELS = ("上午", "下午", "晚自习")
@@ -74,7 +75,9 @@ def _load_assignment_context(
         statement = statement.where(ScheduleAssignment.lesson_date >= date_from)
     if date_to is not None:
         statement = statement.where(ScheduleAssignment.lesson_date <= date_to)
-    return list(db.execute(statement).tuples().all())
+    courses = version_course_map(db, schedule)
+    return [(assignment, courses[course.id])
+            for assignment, course in db.execute(statement).tuples().all()]
 
 
 def _teacher_workload(

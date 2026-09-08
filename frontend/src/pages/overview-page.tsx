@@ -8,43 +8,29 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
-import { datetime, percent } from "@/lib/format";
-import { modelStatusLabel, statusLabel } from "@/lib/labels";
-import { modelStatusTone, statusTone } from "@/lib/status";
+import { datetime } from "@/lib/format";
+import { modelStatusLabel } from "@/lib/labels";
+import { modelStatusTone } from "@/lib/status";
 import {
-  Activity,
   ArrowRight,
-  BookOpenCheck,
-  CalendarCheck,
   CalendarClock,
   CalendarDays,
   CheckCircle2,
-  CircleAlert,
-  Clock,
   Compass,
   DoorOpen,
   Flame,
-  GraduationCap,
   History,
-  Layers,
   Play,
   RefreshCw,
-  RotateCcw,
-  Scale,
   Server,
-  ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
-  Target,
   Trophy,
   Users,
   UsersRound,
-  Zap,
 } from "lucide-react";
-import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 const primaryStats = [
   { key: "teachers", label: "教师总数", icon: UsersRound, color: "text-blue-600", bg: "bg-blue-50" },
@@ -72,7 +58,7 @@ export function OverviewPage() {
   });
   const rules = useListRulesApiV1RulesGet();
   const schedules = useListSchedulesApiV1SchedulesGet();
-  const solverRuns = useListSolverRunsApiV1SolverRunsGet();
+  useListSolverRunsApiV1SolverRunsGet();
 
   if (overview.isPending) return <LoadingState />;
   if (overview.isError || !overview.data) return <ErrorState retry={() => void overview.refetch()} />;
@@ -86,11 +72,9 @@ export function OverviewPage() {
     course_sessions: 0,
     schedule_versions: 0,
   };
-  const metrics = data?.latest_schedule?.metrics ?? {};
   const rulesList = Array.isArray(rules.data) ? rules.data : [];
   const activeRulesCount = rulesList.filter((r) => r && r.status === "active").length;
   const versionsList = Array.isArray(schedules.data) ? schedules.data : [];
-  const publishedVersion = versionsList.find((s) => s && s.status === "published");
 
   const analyticsData = analytics.data;
   const workload = analyticsData?.teacher_workload;
@@ -135,14 +119,7 @@ export function OverviewPage() {
     });
   }
 
-  // Workload buckets for chart
   const workloadBuckets = Array.isArray(workload?.buckets) ? workload.buckets : [];
-  const totalTeachersCount = workload?.total_teachers || 1;
-  const bucketChartData = workloadBuckets.map((b) => ({
-    name: b.label,
-    count: b.teacher_count,
-    share: `${((b.teacher_count / totalTeachersCount) * 100).toFixed(0)}%`,
-  }));
 
   return (
     <div className="space-y-6 animate-fade-in">

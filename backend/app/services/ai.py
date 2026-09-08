@@ -396,6 +396,8 @@ class AIService:
             "业务线、产品班型、班级标识只能使用候选值；未指定的范围输出空数组。"
             "日期使用 YYYY-MM-DD；未指定时输出 null。date_window_days 是 0 到 31 的整数。"
             "recognized_rules 只能从 fixed_rule_labels 中选择。"
+            "逐项核对原指令，把结构化字段和固定标签未覆盖的要求原文列入 unsupported_requirements；"
+            "尤其是具体教师禁排、指定教室、连续几节等要求，禁止用通用标签冒充已实现。"
             "业务事实：不同产品线并行运营；课程教师（教研组）与固定开始/结束时间保持原数据；"
             "日期与教室允许重新编排；同一教室和同一具体日程账号的真实时间区间不可重叠；"
             "每个班级的课次号独立编号且允许跳号。\n"
@@ -405,7 +407,7 @@ class AIService:
             "输出结构："
             '{"business_lines":[],"product_types":[],"class_business_ids":[],'
             '"date_from":null,"date_to":null,"date_window_days":7,'
-            '"recognized_rules":[]}'
+            '"recognized_rules":[],"unsupported_requirements":[]}'
         )
         parsed, _usage = self._chat_json(system_prompt, instruction)
         return parsed

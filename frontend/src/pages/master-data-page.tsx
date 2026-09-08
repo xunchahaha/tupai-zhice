@@ -389,7 +389,8 @@ export function MasterDataPage() {
     setSlotSelection({});
     setCourseSelection({});
     setImportReport(result);
-    toast.success(`主数据已导入：新建 ${result.course_sessions} 个课次`);
+    void client.invalidateQueries({ queryKey: ["/api/v1/schedules"] });
+    toast.success(`主数据已导入：新建 ${result.course_sessions} 个课次；导入版本为草稿，待审核发布`);
   };
   const upload = useImportXlsxApiV1ImportsXlsxPost({ mutation: { onSuccess: afterImport, onError: createError } });
 
@@ -1085,6 +1086,8 @@ function ImportReportPanel({ report, onDismiss }: { report: ImportResult; onDism
     { label: "多课节名称需求", value: String(report.multi_lesson_name_demands ?? 0) },
     { label: "多候选时段需求", value: String(report.multi_slot_demands ?? 0) },
     { label: "本次新建课次", value: String(report.course_sessions) },
+    { label: "导入草稿版本", value: report.schedule_version_no ? `V${report.schedule_version_no}` : "待审核发布" },
+    { label: "历史引用保留课次", value: String(report.orphans_retained ?? 0) },
   ];
   return (
     <section className="border border-zinc-200 bg-white">
@@ -1103,7 +1106,7 @@ function ImportReportPanel({ report, onDismiss }: { report: ImportResult; onDism
         ))}
       </dl>
       <p className="border-t border-zinc-200 px-4 py-3 text-xs leading-5 text-zinc-600">
-        导入先按完整 14 列去重，再按“业务线 × 班级标签 × 课次序号 × 上课日期 × 学科”合并为教学需求；
+        每次导入生成独立草稿，当前发布版本保持原状；请到版本管理审核发布。导入先按完整 14 列去重，再按“业务线 × 班级标签 × 课次序号 × 上课日期 × 学科”合并为教学需求；
         产品班型、编排阶段、课节名称、候选时段和候选教室分别保留，不再互相冒充。
       </p>
       {dropped ? (

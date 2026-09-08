@@ -5273,6 +5273,16 @@
           "change_kind": {
             "type": "string",
             "title": "Change Kind"
+          },
+          "course": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CourseSessionResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -5396,6 +5406,20 @@
             },
             "type": "array",
             "title": "Solver Rules"
+          },
+          "unsupported_requirements": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unsupported Requirements"
+          },
+          "coverage_warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Coverage Warnings"
           },
           "summary": {
             "type": "string",
@@ -7465,6 +7489,33 @@
             "type": "integer",
             "title": "Orphans Deleted",
             "default": 0
+          },
+          "orphans_retained": {
+            "type": "integer",
+            "title": "Orphans Retained",
+            "default": 0
+          },
+          "schedule_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Version Id"
+          },
+          "schedule_version_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Version No"
           }
         },
         "type": "object",

@@ -1081,3 +1081,54 @@ def test_soft_date_rule_loses_to_default_change_weight() -> None:
 
     assert result["model_status"] == "OPTIMAL"
     assert result["assignments"][0]["lesson_date"] == "2026-09-07"
+
+
+def test_repeated_reschedule_preserves_parent_date_slot_and_room():
+    sessions = [_course("C1", class_id="B1", teacher_id="T1")]
+    parent = [{
+        "course_business_id": "C1", "lesson_date": "2026-09-09",
+        "slot_business_id": "S-周三-0830", "room_business_id": "R2",
+    }]
+    payload = _date_payload(sessions, previous_assignments=parent, date_window_days=2)
+    first = solve_problem(payload)
+    assert first["model_status"] == "OPTIMAL"
+    assignment = first["assignments"][0]
+    assert {key: assignment[key] for key in parent[0]} == parent[0]
+    # 再调一次，父版本窗口为 0 也应保留，而不是跳回导入日期。
+    payload.update(previous_assignments=first["assignments"], date_window_days=0)
+    second = solve_problem(payload)
+    assert second["model_status"] == "OPTIMAL"
+    assert second["assignments"] == first["assignments"]
+
+
+def test_minimum_changed_sessions_takes_priority_over_large_soft_room_preference():
+    payload = _date_payload(
+        [_course("C1", class_id="B1")], date_window_days=0,
+        previous_assignments=[{
+            "course_business_id": "C1", "lesson_date": "2026-09-07",
+            "slot_business_id": "S-周一-0830", "room_business_id": "R2",
+        }],
+        rules=[_rule("preferred_room", {"room_id": "R1"}, hardness="soft", weight=1000000)],
+    )
+    result = solve_problem(payload)
+    assert result["model_status"] == "OPTIMAL"
+    assert result["assignments"][0]["room_business_id"] == "R2"
+
+
+def test_second_teacher_leave_does_not_undo_first_adjustment():
+    sessions = [_course("C1", class_id="B1", teacher_id="T1"),
+                _course("C2", class_id="B2", teacher_id="T2")]
+    parent = [{"course_business_id": "C1", "lesson_date": "2026-09-09",
+               "slot_business_id": "S-周三-0830", "room_business_id": "R2"},
+              {"course_business_id": "C2", "lesson_date": "2026-09-07",
+               "slot_business_id": "S-周一-0830", "room_business_id": "R1"}]
+    result = solve_problem(_date_payload(
+        sessions, previous_assignments=parent, date_window_days=2,
+        event={"event_type": "teacher_leave", "teacher_business_id": "T2",
+               "date_from": "2026-09-07", "date_to": "2026-09-07"},
+    ))
+    assert result["model_status"] == "OPTIMAL"
+    assignments = {item["course_business_id"]: item for item in result["assignments"]}
+    assert assignments["C1"]["lesson_date"] == "2026-09-09"
+    assert assignments["C1"]["room_business_id"] == "R2"
+    assert assignments["C2"]["lesson_date"] != "2026-09-07"

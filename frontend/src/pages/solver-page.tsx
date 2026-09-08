@@ -4,7 +4,7 @@ import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
-import { getListSchedulesApiV1SchedulesGetQueryKey, getListSolverRunsApiV1SolverRunsGetQueryKey, getOverviewApiV1OverviewGetQueryKey, useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet, useGetSolverRunApiV1SolverRunsRunIdGet, useListCourseSessionsApiV1CourseSessionsGet, useListRulesApiV1RulesGet, useListSchedulesApiV1SchedulesGet, useListSolverRunsApiV1SolverRunsGet, useSubmitSolverRunApiV1SolverRunsPost } from "@/api/generated/client";
+import { getListSchedulesApiV1SchedulesGetQueryKey, getListSolverRunsApiV1SolverRunsGetQueryKey, getOverviewApiV1OverviewGetQueryKey, useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet, useGetSolverRunApiV1SolverRunsRunIdGet, useGetScheduleApiV1SchedulesScheduleIdGet, useListCourseSessionsApiV1CourseSessionsGet, useListRulesApiV1RulesGet, useListSchedulesApiV1SchedulesGet, useListSolverRunsApiV1SolverRunsGet, useSubmitSolverRunApiV1SolverRunsPost } from "@/api/generated/client";
 import { type CourseSessionResponse, type ScheduleDiffResponse, type ScheduleSummaryResponse, type SolveRequest, type SolverRunExplanation, type SolverRunResponse } from "@/api/generated/models";
 import { http } from "@/api/http";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { asArray, errorMessage, formatRoom, formatSlot } from "@/lib/format";
 import { diffKindLabel, modelStatusLabel, statusLabel } from "@/lib/labels";
-import { latestDraftSchedule, preferredSchedule } from "@/lib/schedule";
+import { preferredSchedule, scheduleForRun } from "@/lib/schedule";
 import { modelStatusTone, statusTone } from "@/lib/status";
 
 interface Interpretation {
@@ -28,6 +28,8 @@ interface Interpretation {
   date_to: string | null;
   date_window_days: number;
   recognized_rules: string[];
+  unsupported_requirements?: string[];
+  coverage_warnings?: string[];
   solver_rules: string[];
   summary: string;
 }
@@ -48,7 +50,7 @@ interface SolverParamValues {
 /** 教室、教师冲突是系统级硬约束，界面展示但不允许关闭。 */
 const SYSTEM_SOLVER_RULES: Array<{ key: SolverRule; label: string; hint: string }> = [
   { key: "room_no_overlap", label: "教室不重叠", hint: "同一教室的真实时间区间不可重叠，始终生效" },
-  { key: "teacher_no_overlap", label: "教师不重叠", hint: "同一教师不可同时上两节课，始终生效" },
+  { key: "teacher_no_overlap", label: "教师不重叠", hint: "具体个人教师不可同时上两节课；教研组名称不代表已落实到个人" },
 ];
 const OPTIONAL_SOLVER_RULES: Array<{ key: SolverRule; label: string; hint: string }> = [
   { key: "fixed_time", label: "固定上课时段", hint: "只调整日期和教室，不动上课时刻" },
@@ -121,17 +123,21 @@ export function SolverPage() {
     businessLines: [...new Set(courseRows.map((item) => item.business_line ?? "").filter(Boolean))].sort(),
     classes: [...new Set(courseRows.map((item) => item.class_business_id))].sort(),
   };
+  const publishedVersion = asArray<ScheduleSummaryResponse>(schedules.data).find((item) => item.status === "published");
+  const publishedDetail = useGetScheduleApiV1SchedulesScheduleIdGet(publishedVersion?.id ?? "", { query: { enabled: Boolean(publishedVersion) } });
+  const parentDates = new Map(publishedDetail.data?.assignments?.map((item) => [item.course_session_id, item.lesson_date]));
   const selectedCount = courseRows.filter((item) => {
     if (params.business_lines.length && !params.business_lines.includes(item.business_line ?? "")) return false;
     if (params.class_business_ids.length && !params.class_business_ids.includes(item.class_business_id)) return false;
-    if (params.date_from && (item.lesson_date ?? "") < params.date_from) return false;
-    if (params.date_to && (item.lesson_date ?? "") > params.date_to) return false;
+    const lessonDate = parentDates.get(item.id) ?? item.lesson_date ?? "";
+    if (params.date_from && lessonDate < params.date_from) return false;
+    if (params.date_to && lessonDate > params.date_to) return false;
     return true;
   }).length;
   const runList = asArray<SolverRunResponse>(runs.data);
   const scheduleList = asArray<ScheduleSummaryResponse>(schedules.data);
   const activeRun = current ?? runList[0] ?? null;
-  const draftSchedule = activeRun?.status === "completed" ? latestDraftSchedule(scheduleList) : undefined;
+  const draftSchedule = scheduleForRun(scheduleList, activeRun);
   const baseSchedule = draftSchedule
     ? (draftSchedule.parent_id
       ? scheduleList.find((item) => item.id === draftSchedule.parent_id)
@@ -142,9 +148,7 @@ export function SolverPage() {
     draftSchedule?.id ?? "",
     { query: { enabled: Boolean(baseSchedule?.id && draftSchedule?.id && baseSchedule.id !== draftSchedule.id) } },
   );
-  const schedule = activeRun?.status === "completed"
-    ? (latestDraftSchedule(scheduleList) ?? preferredSchedule(scheduleList))
-    : preferredSchedule(scheduleList);
+  const schedule = activeRun ? draftSchedule : preferredSchedule(scheduleList);
   if (rules.isPending || runs.isPending || schedules.isPending) return <LoadingState />;
   if (rules.isError || runs.isError || schedules.isError) return <ErrorState retry={() => { void rules.refetch(); void runs.refetch(); void schedules.refetch(); }} />;
   const interpret = async () => {
@@ -162,7 +166,7 @@ export function SolverPage() {
       setInterpreting(false);
     }
   };
-  const solveFromInterpretation = async () => { if (!interpretation) return; try { const { data } = await http.post<SolverRunResponse>("/api/v1/assistant/solve", { instruction: interpretation.instruction, business_lines: interpretation.business_lines, product_types: interpretation.product_types, class_business_ids: interpretation.class_business_ids, date_from: interpretation.date_from, date_to: interpretation.date_to, date_window_days: interpretation.date_window_days, solver_rules: interpretation.solver_rules, time_limit_seconds: 30, wait: false }); setRunId(data.id); setCurrent(data); toast.success("确认完成，CP-SAT 求解已启动"); } catch (error) { toast.error(errorMessage(error)); } };
+  const solveFromInterpretation = async () => { if (!interpretation || interpretation.unsupported_requirements?.length) return; try { const { data } = await http.post<SolverRunResponse>("/api/v1/assistant/solve", { instruction: interpretation.instruction, business_lines: interpretation.business_lines, product_types: interpretation.product_types, class_business_ids: interpretation.class_business_ids, date_from: interpretation.date_from, date_to: interpretation.date_to, date_window_days: interpretation.date_window_days, solver_rules: interpretation.solver_rules, time_limit_seconds: 30, wait: false }); setRunId(data.id); setCurrent(data); toast.success("确认完成，CP-SAT 求解已启动"); } catch (error) { toast.error(errorMessage(error)); } };
   /** 把 AI 给出的建议指令填回输入框，省掉「复制—滚动—粘贴」三步。 */
   const applySuggestedInstruction = (value: string) => {
     setInstruction(value);
@@ -173,7 +177,7 @@ export function SolverPage() {
   const publishCalendar = async (dryRun: boolean) => { if (!schedule) return; setPublishing(dryRun ? "dry-run" : "publish"); try { const { data } = await http.post<CalendarResult>(`/api/v1/schedules/${schedule.id}/calendar-publish`, { calendar_id: "primary", need_notification: true, dry_run: dryRun }); setCalendarResult(data); toast.success(dryRun ? `预检完成：预计下发 ${data.would_publish} 个日程，发现 ${data.conflict_count} 个冲突` : `已下发 ${data.published} 个日程，发现 ${data.conflict_count} 个冲突`); } catch (error) { toast.error(errorMessage(error)); } finally { setPublishing(null); } };
   return <div className="space-y-5 animate-fade-in">
     <PageHeader title="排课求解" actions={<Badge tone="blue">AI + CP-SAT</Badge>} />
-    <section className="border border-blue-200 bg-blue-50/40 p-5"><div className="flex flex-wrap items-center gap-2"><Bot className="size-4 text-blue-600" /><h2 className="font-semibold">一句话排课</h2><Badge tone={assistantReady === true ? "green" : "yellow"}>{assistantReady === true ? `${assistantEngine} 已接入` : assistantReady === false ? "AI 模型待配置" : assistantProbeError ? "AI 配置读取失败" : "正在读取 AI 配置"}</Badge>{assistantProbeError ? <Button size="sm" variant="outline" onClick={probeAssistant}>重试</Button> : null}</div><p className="mt-2 text-xs text-zinc-500">自然语言 → AI 解析业务范围与规则 → 教务确认 → CP-SAT 确定性求解 → 飞书多维表格与日历下发</p><textarea aria-label="一句话排课指令" className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500" value={instruction} onChange={(event) => { setInstruction(event.target.value); setInterpretation(null); }} /><div className="mt-3 flex flex-wrap gap-2"><Button onClick={interpret} disabled={assistantReady !== true || interpreting || instruction.trim().length < 2}><Sparkles className="size-4" />{interpreting ? "AI 正在理解指令" : "让 AI 解析排课指令"}</Button>{interpretation ? <Button variant="outline" onClick={solveFromInterpretation}><Play className="size-4" />确认并开始求解</Button> : null}</div>{assistantReady === false ? <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><div>普通飞书应用继续负责多维表格和日历；一句话理解改由独立 AI 模型接口完成，不再要求 Aily 应用标识和技能标识。</div><Button className="mt-3" size="sm" variant="outline" onClick={() => navigate("/integrations?section=ai")}><Settings2 className="size-4" />配置一句话排课 AI</Button></div> : null}{interpretation ? <><p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-xs text-zinc-600">{interpretation.summary}；解析来源：{interpretation.source === "feishu_aily" ? "飞书 Aily" : assistantEngine}。</p><div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3"><Scope label="业务线" values={interpretation.business_lines} /><Scope label="产品班型" values={interpretation.product_types} /><Scope label="班级范围" values={interpretation.class_business_ids} /><Scope label="日期范围" values={[interpretation.date_from, interpretation.date_to].filter(Boolean) as string[]} /><Scope label="日期调整窗口" values={[`${interpretation.date_window_days} 天`]} /><Scope label="识别规则" values={interpretation.recognized_rules} /></div></> : null}</section>
+    <section className="border border-blue-200 bg-blue-50/40 p-5"><div className="flex flex-wrap items-center gap-2"><Bot className="size-4 text-blue-600" /><h2 className="font-semibold">一句话排课</h2><Badge tone={assistantReady === true ? "green" : "yellow"}>{assistantReady === true ? `${assistantEngine} 已接入` : assistantReady === false ? "AI 模型待配置" : assistantProbeError ? "AI 配置读取失败" : "正在读取 AI 配置"}</Badge>{assistantProbeError ? <Button size="sm" variant="outline" onClick={probeAssistant}>重试</Button> : null}</div><p className="mt-2 text-xs text-zinc-500">自然语言 → AI 解析业务范围与规则 → 教务确认 → CP-SAT 确定性求解 → 飞书多维表格与日历下发</p><textarea aria-label="一句话排课指令" className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500" value={instruction} onChange={(event) => { setInstruction(event.target.value); setInterpretation(null); }} /><div className="mt-3 flex flex-wrap gap-2"><Button onClick={interpret} disabled={assistantReady !== true || interpreting || instruction.trim().length < 2}><Sparkles className="size-4" />{interpreting ? "AI 正在理解指令" : "让 AI 解析排课指令"}</Button>{interpretation ? <Button variant="outline" onClick={solveFromInterpretation} disabled={Boolean(interpretation.unsupported_requirements?.length)}><Play className="size-4" />确认并开始求解</Button> : null}</div>{assistantReady === false ? <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><div>普通飞书应用继续负责多维表格和日历；一句话理解改由独立 AI 模型接口完成，不再要求 Aily 应用标识和技能标识。</div><Button className="mt-3" size="sm" variant="outline" onClick={() => navigate("/integrations?section=ai")}><Settings2 className="size-4" />配置一句话排课 AI</Button></div> : null}{interpretation ? <><p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-xs text-zinc-600">{interpretation.summary}；解析来源：{interpretation.source === "feishu_aily" ? "飞书 Aily" : assistantEngine}。</p><div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3"><Scope label="业务线" values={interpretation.business_lines} /><Scope label="产品班型" values={interpretation.product_types} /><Scope label="班级范围" values={interpretation.class_business_ids} /><Scope label="日期范围" values={[interpretation.date_from, interpretation.date_to].filter(Boolean) as string[]} /><Scope label="日期调整窗口" values={[`${interpretation.date_window_days} 天`]} /><Scope label="识别规则" values={interpretation.recognized_rules} /></div><div className="mt-3 space-y-2 text-xs text-amber-900">{interpretation.coverage_warnings?.map((warning) => <p key={warning}>{warning}</p>)}{interpretation.unsupported_requirements?.length ? <div role="alert" className="border-l-2 border-amber-500 bg-amber-50 p-3"><strong>以下要求尚未进入求解：</strong><ul>{interpretation.unsupported_requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul><p>请先在规则管理中补充已支持的结构化规则，并修订指令后重新解析。</p></div> : null}</div></> : null}</section>
     <div className="grid gap-2 xl:grid-cols-[360px_minmax(0,1fr)]">
       <SolverParams
         params={params}
@@ -322,7 +326,7 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
         </p>
       </fieldset>
       <div className="mt-4 grid gap-4">
-        <NumberField label="求解时限（秒）" hint="CP-SAT 最多运行多久。达到时限会返回 UNKNOWN；课次范围越大，通常需要越长时间。" value={params.time_limit_seconds} min={1} max={900} step={5} onChange={(value) => setParams((current) => ({ ...current, time_limit_seconds: value }))} />
+        <NumberField label="求解时限（秒）" hint="CP-SAT 最多运行多久。超时可能返回已有可行解，或 UNKNOWN（尚未找到解，不代表无解）；课次范围越大，通常需要越长时间。" value={params.time_limit_seconds} min={1} max={900} step={5} onChange={(value) => setParams((current) => ({ ...current, time_limit_seconds: value }))} />
         <NumberField label="日期调整窗口（天）" hint="每节课相对原日期最多可前后挪动几天。实际新日期还必须落在起始日期与结束日期设定的边界内；设为 0 表示不调日期。" value={params.date_window_days} min={0} max={31} step={1} onChange={(value) => setParams((current) => ({ ...current, date_window_days: value }))} />
         <NumberField label="变更权重" hint="每挪动一天的代价。数值越大，求解器越倾向保持原课表。" value={params.change_weight} min={0} max={1000000} step={1000} onChange={(value) => setParams((current) => ({ ...current, change_weight: value }))} />
       </div>
@@ -391,7 +395,7 @@ function ScheduleChangePanel({
         <div>
           <h2 className="font-semibold">本次排课调整</h2>
           <p className="mt-1 text-xs text-zinc-600">v{base.version_no}「{base.name}」→ v{target.version_no}「{target.name}」。下面列出实际发生变化的课次。</p>
-          <p className="mt-1 text-xs text-zinc-500">调整依据：教室与教师不重叠始终生效；其余日期、时段和教室变化按本次求解的日期窗口与变更权重择优。</p>
+          <p className="mt-1 text-xs text-zinc-500">调整依据：教室与教师不重叠始终生效；启用最小变更时，以父课表的日期、时段和教室为基准，优先少改课次，再比较次级偏好。</p>
         </div>
         <Button size="sm" variant="outline" onClick={onOpenVersions}>查看完整版本对比</Button>
       </div>
@@ -468,6 +472,7 @@ function RunPanel({ run, onUseInstruction }: { run: SolverRunResponse | null; on
           本次结论来自求解前的数据预检，CP-SAT 未运行，因此不能表述为「已证明无解」。请先按下方诊断修正输入数据。
         </div>
       ) : null}
+      {run?.model_status === "UNKNOWN" ? <p role="status" className="mt-3 text-sm text-amber-800">本次尚未找到可用解，尚未证明无解；请增加时限或缩小范围。本次没有候选课表。</p> : null}
       {run?.model_status === "INFEASIBLE" && !presolved ? (
         <div className="mt-6 border-l-2 border-red-600 bg-red-50 px-4 py-3 text-sm text-red-800">
           冲突规则：{run.conflict_rule_ids.join("、") || "模型未返回可追溯规则"}

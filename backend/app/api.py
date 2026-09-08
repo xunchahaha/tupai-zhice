@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import secrets
 import tempfile
 import time as time_module
@@ -167,7 +168,8 @@ from .services.explain import (
 )
 from .services.feishu import FeishuService, FeishuServiceError, json_text
 from .services.overview_analytics import build_overview_analytics
-from .services.snapshot import create_snapshot
+from .services.snapshot import build_snapshot_payload, create_snapshot, version_course_map
+from .services.solver import _has_date_information, _selected_sessions, _session_matches_rule
 from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
 from .services.xlsx_io import export_schedule_xlsx
 from .timezone import SHANGHAI_TZ, as_shanghai, as_utc, shanghai_now
@@ -460,15 +462,9 @@ def schedule_response(db: Session, schedule: ScheduleVersion) -> ScheduleRespons
             select(ScheduleAssignment).where(ScheduleAssignment.schedule_version_id == schedule.id)
         )
     )
-    courses = {
-        item.id: item
-        for item in db.scalars(
-            select(CourseSession).where(
-                CourseSession.schedule_set_id == schedule.schedule_set_id,
-                CourseSession.id.in_([row.course_session_id for row in rows]),
-            )
-        )
-    }
+    courses = version_course_map(db, schedule)
+    if any(row.course_session_id not in courses for row in rows):
+        raise HTTPException(status_code=409, detail="课表数据完整性错误：存在缺失或跨方案课次")
     return ScheduleResponse(
         id=schedule.id,
         version_no=schedule.version_no,
@@ -489,6 +485,7 @@ def schedule_response(db: Session, schedule: ScheduleVersion) -> ScheduleRespons
                 slot_business_id=row.slot_business_id,
                 room_business_id=row.room_business_id,
                 change_kind=row.change_kind,
+                course=CourseSessionResponse.model_validate(courses[row.course_session_id]),
             )
             for row in rows
         ],
@@ -976,7 +973,7 @@ def overview(db: Db, user: CurrentUser, scope: ViewerScope) -> OverviewResponse:
         "course_sessions": int(
             db.scalar(
                 select(func.count(CourseSession.id)).where(
-                    CourseSession.schedule_set_id == scope.id
+                    CourseSession.schedule_set_id == scope.id, CourseSession.is_active.is_(True)
                 )
             )
             or 0
@@ -1149,6 +1146,9 @@ def import_xlsx(
         duplicate_lessons=result["duplicate_lessons"]["conflicting_lessons"],
         class_slot_conflicts=result["class_slot_conflicts"]["conflicting_groups"],
         orphans_deleted=result["orphans"]["deleted"],
+        orphans_retained=result["orphans"]["retained_by_schedule"],
+        schedule_version_id=result["schedule_versions"][0]["id"],
+        schedule_version_no=result["schedule_versions"][0]["version_no"],
     )
 
 
@@ -1413,7 +1413,7 @@ def class_group_track_index(
     grouped: Counter[tuple[str, str, str, str, str, str]] = Counter()
     for course in db.scalars(
         select(CourseSession)
-        .where(CourseSession.schedule_set_id == schedule_set_id)
+        .where(CourseSession.schedule_set_id == schedule_set_id, CourseSession.is_active.is_(True))
         .order_by(CourseSession.business_id)
     ):
         product_types = list(course.product_types or [])
@@ -1694,7 +1694,7 @@ def list_course_sessions(db: Db, user: CurrentUser, scope: ViewerScope) -> list[
     return list(
         db.scalars(
             select(CourseSession)
-            .where(CourseSession.schedule_set_id == scope.id)
+            .where(CourseSession.schedule_set_id == scope.id, CourseSession.is_active.is_(True))
             .order_by(CourseSession.business_id)
         )
     )
@@ -1838,7 +1838,9 @@ def _all_course_product_types(db: Session, schedule_set_id: str) -> set[str]:
     return {
         product_type
         for course in db.scalars(
-            select(CourseSession).where(CourseSession.schedule_set_id == schedule_set_id)
+            select(CourseSession).where(
+                CourseSession.schedule_set_id == schedule_set_id, CourseSession.is_active.is_(True)
+            )
         )
         for product_type in _course_product_values(course)
     }
@@ -1852,7 +1854,9 @@ def course_session_criteria(
     条件形态（而不是 id 列表）是刻意的：按条件删两万条时，引用检查和删除都能写成
     子查询，不用把两万个绑定变量塞进 IN——SQLite 的变量上限只有三万出头。
     """
-    criteria: list[ColumnElement[bool]] = [CourseSession.schedule_set_id == schedule_set_id]
+    criteria: list[ColumnElement[bool]] = [
+        CourseSession.schedule_set_id == schedule_set_id, CourseSession.is_active.is_(True)
+    ]
     if object_ids is not None:
         return [*criteria, CourseSession.id.in_(object_ids)]
     if spec is None:
@@ -2122,7 +2126,8 @@ _DATE_RANGE_HINT = "填绝对区间（最早/最晚日期）或相对浮动天�
 # 日期路径里每移动一天要扣 change_weight（求解请求默认 100000），
 # 软的日期规则权重低于它时不会真的改日期，录入界面必须先讲清楚这个取舍。
 _DATE_SOFT_WEIGHT_HINT = (
-    "日期类软约束要和「减少改动」竞争：每移动一天扣一份 change_weight"
+    "有父课表时优先最小化变更课次数，软偏好仅用于同等变更数之间选择。"
+    "首次排课时每移动一天扣 change_weight"
     "（求解请求默认 100000）。权重低于它时日期不会变，只有调高权重或调低求解页的"
     "改动权重才会生效。"
 )
@@ -2142,7 +2147,7 @@ RULE_CONSTRAINTS: dict[str, dict[str, Any]] = {
         "scope": ["slot_id"],
         "scope_fields": [_SLOT_ONE],
         "hardness": ["hard", "soft"],
-        "solver_paths": {"hard": [DATE_PATH, SLOT_PATH], "soft": [SLOT_PATH]},
+        "solver_paths": {"hard": [DATE_PATH, SLOT_PATH], "soft": [DATE_PATH, SLOT_PATH]},
     },
     "forbidden_slot": {
         "label": "禁排时段",
@@ -2150,7 +2155,7 @@ RULE_CONSTRAINTS: dict[str, dict[str, Any]] = {
         "scope": ["slot_ids"],
         "scope_fields": [_SLOT_MANY],
         "hardness": ["hard", "soft"],
-        "solver_paths": {"hard": [DATE_PATH, SLOT_PATH], "soft": [SLOT_PATH]},
+        "solver_paths": {"hard": [DATE_PATH, SLOT_PATH], "soft": [DATE_PATH, SLOT_PATH]},
     },
     "unavailable_slot": {
         "label": "不可用时段",
@@ -2158,7 +2163,7 @@ RULE_CONSTRAINTS: dict[str, dict[str, Any]] = {
         "scope": ["slot_ids"],
         "scope_fields": [_SLOT_MANY],
         "hardness": ["hard", "soft"],
-        "solver_paths": {"hard": [DATE_PATH, SLOT_PATH], "soft": [SLOT_PATH]},
+        "solver_paths": {"hard": [DATE_PATH, SLOT_PATH], "soft": [DATE_PATH, SLOT_PATH]},
     },
     "preferred_slot": {
         "label": "偏好时段",
@@ -2166,7 +2171,7 @@ RULE_CONSTRAINTS: dict[str, dict[str, Any]] = {
         "scope": ["slot_ids"],
         "scope_fields": [_SLOT_MANY],
         "hardness": ["soft"],
-        "solver_paths": {"soft": [SLOT_PATH]},
+        "solver_paths": {"soft": [DATE_PATH, SLOT_PATH]},
     },
     "consecutive_sessions": {
         "label": "连续课次",
@@ -2476,6 +2481,14 @@ def transition_rule(
     }
     if payload.status not in allowed.get(rule.status, set()):
         raise HTTPException(status_code=409, detail=f"不允许从 {rule.status} 转为 {payload.status}")
+    if payload.status == "active":
+        coverage = build_snapshot_payload(db, scope.id)
+        coverage["rules"] = [{
+            "business_id": rule.business_id, "constraint_type": rule.constraint_type,
+            "hardness": rule.hardness, "scope": rule.scope,
+            "actor_type": rule.actor_type, "actor_ids": rule.actor_ids,
+        }]
+        _validate_rule_coverage(coverage)
     rule.status = payload.status
     rule.version += 1
     if payload.status == "active":
@@ -2484,6 +2497,30 @@ def transition_rule(
     db.commit()
     db.refresh(rule)
     return rule
+
+
+def _validate_rule_coverage(payload: dict[str, Any]) -> None:
+    selected = _selected_sessions(payload)
+    unsupported = []
+    for rule in payload.get("rules", []):
+        catalog = RULE_CONSTRAINTS.get(rule["constraint_type"], {})
+        paths = catalog.get("solver_paths", {}).get(rule.get("hardness", "hard"), [])
+        matches = [course for course in selected if any(
+            _session_matches_rule(course, str(room.get("business_id", "")), rule)
+            for room in payload.get("rooms", []) or [{}]
+        )]
+        required_paths = {"date" if _has_date_information(course) else "slot" for course in matches}
+        excessive_consecutive = (
+            rule["constraint_type"] == "consecutive_sessions"
+            and int((rule.get("scope") or {}).get("minimum_consecutive", 2)) != 2
+        )
+        if not paths or excessive_consecutive or required_paths - set(paths):
+            unsupported.append(str(rule["business_id"]))
+    if unsupported:
+        raise HTTPException(status_code=422, detail=(
+            "以下规则尚未接入当前求解模型，请先调整规则类型、范围或停用后再求解："
+            + "、".join(unsupported)
+        ))
 
 
 def create_solver_run(
@@ -2495,7 +2532,7 @@ def create_solver_run(
     extra: dict[str, Any] | None = None,
 ) -> SolverRun:
     snapshot = create_snapshot(db, user_id, schedule_set_id)
-    payload = {
+    payload: dict[str, Any] = {
         "time_limit_seconds": request.time_limit_seconds,
         "change_weight": getattr(request, "change_weight", 100000),
         "random_seed": settings.solver_random_seed,
@@ -2512,14 +2549,7 @@ def create_solver_run(
     if isinstance(request, AilySolveRequest):
         payload["instruction"] = request.instruction
     run_extra = dict(extra or {})
-    is_partial_scope = bool(
-        request.business_lines
-        or request.product_types
-        or request.class_business_ids
-        or request.date_from
-        or request.date_to
-    )
-    if is_partial_scope and "parent_schedule_id" not in run_extra:
+    if "parent_schedule_id" not in run_extra:
         parent = db.scalar(
             select(ScheduleVersion)
             .where(
@@ -2535,6 +2565,15 @@ def create_solver_run(
                 item.model_dump(mode="json") for item in parent_response.assignments
             ]
     payload.update(run_extra)
+    inactive_ids = {item["id"] for item in snapshot.payload.get("course_sessions", [])
+                    if not item.get("is_active", True)}
+    payload["excluded_course_session_ids"] = sorted(inactive_ids)
+    if "previous_assignments" in payload:
+        payload["previous_assignments"] = [item for item in payload["previous_assignments"]
+                                           if item["course_session_id"] not in inactive_ids]
+    if payload.get("assistant_entry") and not _selected_sessions({**snapshot.payload, **payload}):
+        raise HTTPException(status_code=422, detail="确认的排课范围没有匹配到课次")
+    _validate_rule_coverage({**snapshot.payload, **payload})
     run = SolverRun(
         schedule_set_id=schedule_set_id,
         snapshot_id=snapshot.id,
@@ -2822,7 +2861,8 @@ def publish_schedule(
     # 发布门禁：独立于求解器重算一遍硬冲突，求解器建模有误时在这里兜住。
     response = schedule_response(db, schedule)
     conflicts = count_hard_conflicts(
-        db, [item.model_dump(mode="json") for item in response.assignments]
+        db, [item.model_dump(mode="json") for item in response.assignments], scope.id,
+        course_overrides=version_course_map(db, schedule),
     )
     if conflicts["total"]:
         detail = "、".join(
@@ -2832,6 +2872,7 @@ def publish_schedule(
                 ("class", "班级"),
                 ("teacher", "教师"),
                 ("calendar", "日程账号"),
+                ("integrity", "数据完整性"),
             )
             if conflicts[key]
         )
@@ -3425,6 +3466,7 @@ def create_reschedule_event(
         raise HTTPException(status_code=422, detail="事件的开始日期不能晚于结束日期")
     parent_response = schedule_response(db, parent)
     event_payload = request.model_dump(
+        mode="json",
         exclude={"parent_schedule_id", "description", "time_limit_seconds"}
     )
     event = RescheduleEvent(
@@ -3448,7 +3490,9 @@ def create_reschedule_event(
         extra={
             "parent_schedule_id": parent.id,
             "event": event_payload,
-            "previous_assignments": [item.model_dump() for item in parent_response.assignments],
+            "previous_assignments": [
+                item.model_dump(mode="json") for item in parent_response.assignments
+            ],
             "change_weight": 100000,
             "course_business_ids": sorted(neighborhood),
         },
@@ -3733,13 +3777,8 @@ def _public_schedule_maps(
     dict[tuple[str, str], Room],
     dict[tuple[str, str], TimeSlot],
 ]:
-    courses = list(
-        db.scalars(
-            select(CourseSession)
-            .where(CourseSession.schedule_set_id == schedule_set_id)
-            .order_by(CourseSession.business_id)
-        )
-    )
+    schedule = _current_published_schedule(db, schedule_set_id)
+    courses = list(version_course_map(db, schedule).values()) if schedule else []
     classes = list(
         db.scalars(
             select(ClassGroup).where(ClassGroup.schedule_set_id == schedule_set_id)
@@ -4180,12 +4219,7 @@ def export_resource_rows(
         # must not be appended to the same public sync table on every publish.
         current_version = _current_published_schedule(db, schedule_set_id)
         versions = [current_version] if current_version is not None else []
-        sessions = {
-            item.id: item
-            for item in db.scalars(
-                select(CourseSession).where(CourseSession.schedule_set_id == schedule_set_id)
-            )
-        }
+        sessions = version_course_map(db, current_version) if current_version else {}
         teachers = {
             item.business_id: item
             for item in db.scalars(
@@ -4297,12 +4331,7 @@ def export_resource_rows(
         published = _current_published_schedule(db, schedule_set_id)
         updated_at = _public_projection_updated_at(published)
         assignments = _assignment_rows(db, published.id if published else None)
-        courses = {
-            item.id: item
-            for item in db.scalars(
-                select(CourseSession).where(CourseSession.schedule_set_id == schedule_set_id)
-            )
-        }
+        courses = version_course_map(db, published) if published else {}
         assignment_dates = sorted(
             item.lesson_date for item in assignments if item.lesson_date is not None
         )
@@ -4975,7 +5004,10 @@ def aily_context(db: Db, schedule_scope: AilyScheduleScope) -> AilyContextRespon
                 course_context(item)
                 for item in db.scalars(
                     select(CourseSession)
-                    .where(CourseSession.schedule_set_id == schedule_scope.id)
+                    .where(
+                        CourseSession.schedule_set_id == schedule_scope.id,
+                        CourseSession.is_active.is_(True)
+                    )
                     .order_by(CourseSession.business_id)
                 )
             ],
@@ -5083,7 +5115,8 @@ def _validated_assistant_scope(
             item
             for item in db.scalars(
                 select(CourseSession.business_line).where(
-                    CourseSession.schedule_set_id == schedule_set_id
+                    CourseSession.schedule_set_id == schedule_set_id,
+                    CourseSession.is_active.is_(True)
                 )
             ).all()
             if item
@@ -5092,7 +5125,8 @@ def _validated_assistant_scope(
         "class_business_ids": set(
             db.scalars(
                 select(CourseSession.class_business_id).where(
-                    CourseSession.schedule_set_id == schedule_set_id
+                    CourseSession.schedule_set_id == schedule_set_id,
+                    CourseSession.is_active.is_(True)
                 )
             ).all()
         ),
@@ -5138,7 +5172,8 @@ def assistant_interpret(
                     item
                     for item in db.scalars(
                         select(CourseSession.business_line).where(
-                            CourseSession.schedule_set_id == schedule_scope.id
+                            CourseSession.schedule_set_id == schedule_scope.id,
+                            CourseSession.is_active.is_(True)
                         )
                     ).all()
                     if item
@@ -5149,7 +5184,8 @@ def assistant_interpret(
                 set(
                     db.scalars(
                         select(CourseSession.class_business_id).where(
-                            CourseSession.schedule_set_id == schedule_scope.id
+                            CourseSession.schedule_set_id == schedule_scope.id,
+                            CourseSession.is_active.is_(True)
                         )
                     ).all()
                 )
@@ -5215,6 +5251,26 @@ def assistant_interpret(
         "date_window_days": output["date_window_days"],
         "recognized_rules": _string_list(output["recognized_rules"]),
     }
+    unsupported = _string_list(output.get("unsupported_requirements"))
+    for pattern, label in (
+        (r"(?:老师|教师).*(?:请假|不.{0,4}(?:排|上|课)|只能|只上)", "具体教师的禁排或请假要求"),
+        (r"(?:只能用|指定|固定|只用).{0,12}(?:教室|房间)", "指定教室要求"),
+        (r"连续|连排", "精确连续课次要求"),
+    ):
+        if re.search(pattern, request.instruction):
+            unsupported.append(label)
+    known_labels = set(SOLVER_RULE_LABELS.values())
+    unsupported.extend(label for label in parsed["recognized_rules"] if label not in known_labels)
+    parsed["recognized_rules"] = [
+        label for label in parsed["recognized_rules"] if label in known_labels
+    ]
+    parsed["unsupported_requirements"] = list(dict.fromkeys(unsupported))
+    parsed["coverage_warnings"] = [
+        "仅下列结构化范围和规则开关进入求解；本接口不会自动创建教师、教室或连续课次规则。",
+        "教研组未落实到个人教师时，零冲突仅代表已建模对象的检查结果。",
+    ]
+    if "unsupported_requirements" not in output:
+        parsed["coverage_warnings"].append("模型未返回逐项需求覆盖检查，请逐项核对原指令。")
     parsed["solver_rules"] = _solver_rules_from_labels(parsed["recognized_rules"])
     try:
         parsed = _validated_assistant_scope(db, parsed, schedule_scope.id)
@@ -5263,31 +5319,7 @@ def assistant_solve(
     filters/rules. The instruction is persisted for traceability, while the
     same CP-SAT path as the regular solver is used for deterministic execution.
     """
-    scope = _validated_assistant_scope(db, request.model_dump(), schedule_scope.id)
-    selected_count = db.scalar(
-        select(func.count(CourseSession.id)).where(
-            CourseSession.schedule_set_id == schedule_scope.id,
-            *(
-                [CourseSession.business_line.in_(scope["business_lines"])]
-                if scope["business_lines"]
-                else []
-            ),
-            *(
-                [_course_products_criterion(scope["product_types"])]
-                if scope["product_types"]
-                else []
-            ),
-            *(
-                [CourseSession.class_business_id.in_(scope["class_business_ids"])]
-                if scope["class_business_ids"]
-                else []
-            ),
-            *([CourseSession.lesson_date >= request.date_from] if request.date_from else []),
-            *([CourseSession.lesson_date <= request.date_to] if request.date_to else []),
-        )
-    )
-    if not selected_count:
-        raise HTTPException(status_code=422, detail="确认的排课范围没有匹配到课次")
+    _validated_assistant_scope(db, request.model_dump(), schedule_scope.id)
     run = create_solver_run(
         db,
         user.id,
@@ -5327,15 +5359,7 @@ def _public_summary(
         if schedule
         else []
     )
-    courses = {
-        item.id: item
-        for item in db.scalars(
-            select(CourseSession).where(
-                CourseSession.schedule_set_id == schedule_set_id,
-                CourseSession.id.in_([item.course_session_id for item in assignments])
-            )
-        )
-    }
+    courses = version_course_map(db, schedule) if schedule else {}
     rooms = {
         item.business_id: item
         for item in db.scalars(select(Room).where(Room.schedule_set_id == schedule_set_id))

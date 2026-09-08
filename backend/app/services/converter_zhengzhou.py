@@ -26,7 +26,7 @@ from ..models import (
     Teacher,
     TimeSlot,
 )
-from ..timezone import shanghai_now
+from .snapshot import _json_default, build_snapshot_payload
 
 WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 PLACEHOLDER_ROOM = "教室-待校区确认"
@@ -570,12 +570,11 @@ def _remove_orphan_sessions(
     db: Session,
     campus_id: str,
     keep_business_ids: set[str],
-    official_version_name: str,
     schedule_set_id: str = "default",
 ) -> dict[str, Any]:
     """删除源表里已经不存在的课次，让导入收敛到工作簿的当前状态。
 
-    唯一的例外是被求解产出的课表版本引用过的课次：直接删会破坏历史版本与回滚链，
+    所有课表版本（包括导入草稿）引用过的课次都保留：直接删会破坏历史版本与回滚链，
     因此保留并报出来，由教务决定怎么处理。
     """
     orphans = [
@@ -591,25 +590,18 @@ def _remove_orphan_sessions(
     if not orphans:
         return {"deleted": 0, "retained_by_schedule": 0, "retained_examples": []}
 
-    official_version_id = db.scalar(
-        select(ScheduleVersion.id).where(
-            ScheduleVersion.schedule_set_id == schedule_set_id,
-            ScheduleVersion.name == official_version_name,
-        )
-    )
     orphan_ids = {item.id for item in orphans}
     referenced_elsewhere = set(
         db.scalars(
             select(ScheduleAssignment.course_session_id).where(
                 ScheduleAssignment.course_session_id.in_(orphan_ids),
-                ScheduleAssignment.schedule_version_id != official_version_id
-                if official_version_id
-                else ScheduleAssignment.course_session_id.is_not(None),
             )
         )
     )
     removable = [item for item in orphans if item.id not in referenced_elsewhere]
     retained = [item for item in orphans if item.id in referenced_elsewhere]
+    for item in retained:
+        item.is_active = False
     if removable:
         removable_ids = [item.id for item in removable]
         db.execute(
@@ -647,6 +639,21 @@ def import_schedule_workbook(
             f"{workbook_path.name} 的全部 {len(source_rows)} 行教室标签均为"
             f"「{PLACEHOLDER_ROOM}」，没有可排课的课次"
         )
+
+    # 旧导入只保存了统计，首次重导前补齐历史快照；已有求解快照保持原样。
+    legacy_snapshots = list(db.scalars(
+        select(DataSnapshot).join(SolverRun, SolverRun.snapshot_id == DataSnapshot.id)
+        .join(ScheduleVersion, ScheduleVersion.solver_run_id == SolverRun.id)
+        .where(ScheduleVersion.schedule_set_id == schedule_set_id)
+    ))
+    frozen_payload = None
+    for old_snapshot in legacy_snapshots:
+        if "course_sessions" not in old_snapshot.payload:
+            if frozen_payload is None:
+                frozen_payload = json.loads(json.dumps(
+                    build_snapshot_payload(db, schedule_set_id), default=_json_default
+                ))
+            old_snapshot.payload = {**old_snapshot.payload, **frozen_payload}
 
     campus = _upsert(
         db,
@@ -768,6 +775,7 @@ def import_schedule_workbook(
             for item in candidate_clock_windows
         ]
         values = {
+            "is_active": True,
             "source_row_id": row["来源组标识"],
             "business_line": row["业务线"],
             "product_type": row["产品班型"],
@@ -821,7 +829,6 @@ def import_schedule_workbook(
         db,
         campus.id,
         set(session_rows),
-        official_version_name(campus_name),
         schedule_set_id,
     )
 
@@ -861,56 +868,40 @@ def import_schedule_workbook(
     db.add(snapshot)
     db.flush()
 
-    version_stats: list[dict[str, Any]] = []
-    now = shanghai_now()
+    # 每次导入都是独立草稿。正式切换只经过发布接口，历史安排从不覆盖。
+    db.flush()
+    snapshot.payload = {
+        **snapshot.payload,
+        **json.loads(json.dumps(
+            build_snapshot_payload(db, schedule_set_id), default=_json_default
+        )),
+    }
     version_name = official_version_name(campus_name)
-    version = db.scalar(
-        select(ScheduleVersion).where(
-            ScheduleVersion.schedule_set_id == schedule_set_id,
-            ScheduleVersion.name == version_name,
-        )
+    run = SolverRun(
+        schedule_set_id=schedule_set_id,
+        snapshot_id=snapshot.id,
+        run_type="import",
+        status="completed",
+        model_status="IMPORTED",
+        request_payload={"source": workbook_path.name, "deduplication": "exact_row"},
     )
-    if version is None:
-        run = SolverRun(
-            schedule_set_id=schedule_set_id,
-            snapshot_id=snapshot.id,
-            run_type="import",
-            status="completed",
-            model_status="IMPORTED",
-            request_payload={
-                "source": workbook_path.name,
-                "deduplication": "exact_row",
-                "preprocessing": "class_session_subject",
-            },
+    db.add(run)
+    db.flush()
+    version_no = (db.scalar(
+        select(func.max(ScheduleVersion.version_no)).where(
+            ScheduleVersion.schedule_set_id == schedule_set_id
         )
-        db.add(run)
-        db.flush()
-        version_no = (
-            db.scalar(
-                select(func.max(ScheduleVersion.version_no)).where(
-                    ScheduleVersion.schedule_set_id == schedule_set_id
-                )
-            )
-            or 0
-        ) + 1
-        version = ScheduleVersion(
-            schedule_set_id=schedule_set_id,
-            version_no=version_no,
-            name=version_name,
-            status="published",
-            solver_run_id=run.id,
-            published_at=now,
-            metrics={"assignment_count": len(session_rows), "source_rows": len(rows)},
-        )
-        db.add(version)
-        db.flush()
-    else:
-        db.execute(
-            delete(ScheduleAssignment).where(ScheduleAssignment.schedule_version_id == version.id)
-        )
-        version.status = "published"
-        version.published_at = now
-        version.metrics = {"assignment_count": len(session_rows), "source_rows": len(rows)}
+    ) or 0) + 1
+    version = ScheduleVersion(
+        schedule_set_id=schedule_set_id,
+        version_no=version_no,
+        name=version_name,
+        status="draft",
+        solver_run_id=run.id,
+        metrics={"assignment_count": len(session_rows), "source_rows": len(rows)},
+    )
+    db.add(version)
+    db.flush()
     for business_id, row in session_rows.items():
         db.add(
             ScheduleAssignment(
@@ -922,7 +913,10 @@ def import_schedule_workbook(
             )
         )
     db.flush()
-    version_stats.append({"name": version_name, "rows": len(session_rows)})
+    version_stats = [{
+        "id": version.id, "version_no": version_no, "status": "draft",
+        "name": version_name, "rows": len(session_rows),
+    }]
 
     # 计划课时是否自洽，按该班型自己的实际课节时长核对，不假定每课次固定 3 小时。
     hour_warnings: list[dict[str, Any]] = []

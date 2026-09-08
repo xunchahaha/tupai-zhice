@@ -19,9 +19,15 @@ if database_url.startswith(prefix):
     for artifact in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
         artifact.unlink(missing_ok=True)
 
-from app.db import SessionLocal, create_all  # noqa: E402
+from alembic.config import Config  # noqa: E402
+
+from alembic import command  # noqa: E402
+from app.db import SessionLocal  # noqa: E402
 from app.services.seed import seed_demo_data  # noqa: E402
 
-create_all()
+root = Path(__file__).resolve().parents[1]
+config = Config(str(root / "alembic.ini"))
+config.set_main_option("script_location", str(root / "alembic"))
+command.upgrade(config, "head")
 with SessionLocal() as db:
     seed_demo_data(db)

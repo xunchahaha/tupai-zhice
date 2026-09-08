@@ -15,6 +15,8 @@ from ..models import (
     DataSnapshot,
     Room,
     Rule,
+    ScheduleVersion,
+    SolverRun,
     Teacher,
     TimeSlot,
 )
@@ -22,6 +24,29 @@ from ..models import (
 
 def _model_dict(instance: object, fields: list[str]) -> dict[str, object]:
     return {field: getattr(instance, field) for field in fields}
+
+
+def version_course_map(db: Session, schedule: ScheduleVersion) -> dict[str, CourseSession]:
+    """只读版本视图：叠加历史快照，使用脱离会话的新对象，绝不修改主数据。"""
+    current = list(db.scalars(select(CourseSession).where(
+        CourseSession.schedule_set_id == schedule.schedule_set_id,
+    )))
+    run = db.get(SolverRun, schedule.solver_run_id)
+    snapshot = db.get(DataSnapshot, run.snapshot_id) if run else None
+    frozen = {item["id"]: item for item in (
+        snapshot.payload.get("course_sessions", []) if snapshot else []
+    )}
+    columns = {column.name for column in CourseSession.__table__.columns}
+    result = {}
+    for item in current:
+        values = {column: getattr(item, column) for column in columns}
+        values.update({
+            key: value for key, value in frozen.get(item.id, {}).items() if key in columns
+        })
+        if isinstance(values.get("lesson_date"), str):
+            values["lesson_date"] = date.fromisoformat(values["lesson_date"])
+        result[item.id] = CourseSession(**values)
+    return result
 
 
 def _json_default(value: Any) -> str:
@@ -142,6 +167,7 @@ def build_snapshot_payload(db: Session, schedule_set_id: str) -> dict[str, objec
                     "original_room_business_id",
                     "candidate_room_business_ids",
                     "source_variant_count",
+                    "is_active",
                     "is_locked",
                 ],
             )

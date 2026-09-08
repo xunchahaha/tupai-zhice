@@ -577,6 +577,7 @@ class AssignmentResponse(BaseModel):
     slot_business_id: str
     room_business_id: str
     change_kind: str
+    course: CourseSessionResponse | None = None
 
 
 class ScheduleSummaryResponse(ORMModel):
@@ -680,6 +681,9 @@ class ImportResult(BaseModel):
     duplicate_lessons: int = 0
     class_slot_conflicts: int = 0
     orphans_deleted: int = 0
+    orphans_retained: int = 0
+    schedule_version_id: str | None = None
+    schedule_version_no: int | None = None
 
 
 class OverviewResponse(BaseModel):
@@ -1046,6 +1050,8 @@ class AssistantInterpretResponse(BaseModel):
     date_window_days: int = Field(default=7, ge=0, le=31)
     recognized_rules: list[str] = Field(default_factory=list)
     solver_rules: list[SolverRule] = Field(default_factory=default_solver_rules)
+    unsupported_requirements: list[str] = Field(default_factory=list)
+    coverage_warnings: list[str] = Field(default_factory=list)
     summary: str
 
 

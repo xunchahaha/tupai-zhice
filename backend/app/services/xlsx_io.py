@@ -11,7 +11,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import CourseSession, Room, ScheduleAssignment, ScheduleVersion, Teacher, TimeSlot
+from ..models import Room, ScheduleAssignment, ScheduleVersion, Teacher, TimeSlot
+from .snapshot import version_course_map
 
 
 def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
@@ -26,12 +27,7 @@ def export_schedule_xlsx(db: Session, schedule: ScheduleVersion) -> bytes:
             )
         )
     )
-    courses = {
-        item.id: item
-        for item in db.scalars(
-            select(CourseSession).where(CourseSession.schedule_set_id == schedule.schedule_set_id)
-        )
-    }
+    courses = version_course_map(db, schedule)
     rooms = {
         item.business_id: item
         for item in db.scalars(

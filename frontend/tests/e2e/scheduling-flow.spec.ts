@@ -63,7 +63,7 @@ test("管理员完成排课、调课、回滚和飞书生产接入引导流程",
   await expect(page.getByRole("heading", { name: "飞书生产连接" })).toBeVisible();
   await expect(page.getByText("应用配置", { exact: true })).toBeVisible();
   await expect(page.getByText("生产接入步骤", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "同步到飞书" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "一键同步当前方案" })).toBeDisabled();
 
   await page.getByRole("link", { name: "排课求解" }).click();
   const solverResponse = page.waitForResponse((response) =>
@@ -79,10 +79,10 @@ test("管理员完成排课、调课、回滚和飞书生产接入引导流程",
   // 求解结论的文案在 f076b9f 已改成「已证明最优」，与任务状态区分开。
   await expect(page.getByText("已证明最优", { exact: true }).first()).toBeVisible();
 
-  await page.getByRole("link", { name: "课表视图" }).click();
-  await expect(page.getByRole("heading", { name: "课表视图" })).toBeVisible();
-  await expect(page.getByText(/已显示 \d+ 个课次/)).toBeVisible();
-  await expect(page.getByText("B01-1", { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "课表视图", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "课表视图", exact: true })).toBeVisible();
+  await expect(page.getByText(/^已安排:\s*[1-9]\d*\s*节课次$/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "全部课次安排" })).toBeVisible();
 
   // 请假事件必须命中该教师真实占用的时段，否则它不与任何课冲突，零变更才是最优解。
   // 原来写死的 S03 只在求解器单线程时成立：36e55d0 起 num_search_workers=8，
@@ -142,9 +142,9 @@ test("管理员完成排课、调课、回滚和飞书生产接入引导流程",
   await page.getByRole("link", { name: "版本与回滚" }).click();
   await page.getByLabel("基准版本").selectOption(event.parent_schedule_id);
   await page.getByLabel("目标版本").selectOption(candidateScheduleId);
-  await expect(page.getByText("变更课次")).toBeVisible();
-  // 变更课次现在稳定是个位数，全页搜 "1" 会撞上别的文本，改成只在这块指标里断言。
-  await expect(page.getByText("变更课次").locator("..")).toContainText(String(diff.changed_count));
+  const changedSummary = page.getByText(/^变更:\s*\d+\s*节$/);
+  await expect(changedSummary).toBeVisible();
+  await expect(changedSummary.locator("strong")).toHaveText(String(diff.changed_count));
 
   // 卡片上现在不止一个按钮（草稿有“发布”和“删除”，归档版本有“回滚”和“删除”），按 aria-label 点。
   //

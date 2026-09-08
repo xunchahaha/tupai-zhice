@@ -82,6 +82,8 @@ def count_hard_conflicts(
     db: Any,
     assignments: list[dict[str, Any]],
     schedule_set_id: str = DEFAULT_SCHEDULE_SET_ID,
+    *,
+    course_overrides: dict[str, CourseSession] | None = None,
 ) -> dict[str, int]:
     """按维度实算硬冲突记录数。
 
@@ -94,6 +96,8 @@ def count_hard_conflicts(
             select(CourseSession).where(CourseSession.schedule_set_id == schedule_set_id)
         ).all()
     }
+    if course_overrides is not None:
+        courses = {key: course_overrides.get(key, value) for key, value in courses.items()}
     teachers = {
         item.business_id: item
         for item in db.scalars(
@@ -107,9 +111,15 @@ def count_hard_conflicts(
         ).all()
     }
     entries: list[tuple[dict[str, Any], Any, tuple[Any, ...]]] = []
+    rooms = set(db.scalars(select(Room.business_id).where(
+        Room.schedule_set_id == schedule_set_id
+    )))
+    integrity_errors = 0
     for item in assignments:
-        course = courses.get(item["course_session_id"])
-        if course is None:
+        course = courses.get(item.get("course_session_id"))
+        if (course is None or item.get("room_business_id") not in rooms
+                or item.get("slot_business_id") not in slots):
+            integrity_errors += 1
             continue
         entries.append((item, course, _occupancy_window(course, item, slots)))
 
@@ -168,7 +178,8 @@ def count_hard_conflicts(
                         involved.add(str(left_item["course_session_id"]))
                         involved.add(str(right_item["course_session_id"]))
         breakdown[name] = len(involved)
-    breakdown["total"] = sum(breakdown[name] for name in ("room", "class", "teacher", "calendar"))
+    breakdown["integrity"] = integrity_errors
+    breakdown["total"] = sum(breakdown.values())
     return breakdown
 
 
@@ -291,7 +302,10 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
                         )
                     )
                 }
+                excluded_ids = set(run.request_payload.get("excluded_course_session_ids", []))
                 for parent_item in parent_rows:
+                    if parent_item.course_session_id in excluded_ids:
+                        continue
                     parent_course = parent_courses.get(parent_item.course_session_id)
                     course_business_id = (
                         parent_course.business_id

@@ -6,6 +6,8 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ImportResultSkippedExamplesItem } from './importResultSkippedExamplesItem';
+import type { ImportResultScheduleVersionId } from './importResultScheduleVersionId';
+import type { ImportResultScheduleVersionNo } from './importResultScheduleVersionNo';
 
 export interface ImportResult {
   source: string;
@@ -32,4 +34,7 @@ export interface ImportResult {
   duplicate_lessons?: number;
   class_slot_conflicts?: number;
   orphans_deleted?: number;
+  orphans_retained?: number;
+  schedule_version_id?: ImportResultScheduleVersionId;
+  schedule_version_no?: ImportResultScheduleVersionNo;
 }

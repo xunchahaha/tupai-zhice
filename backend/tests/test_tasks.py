@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -96,7 +97,10 @@ def test_persist_result_writes_final_lesson_date(monkeypatch, tmp_path) -> None:
         assert assignment.room_business_id == "R1"
 
 
-def test_persist_result_merges_unselected_parent_assignments(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("exclude_removed", [False, True])
+def test_persist_result_merges_unselected_parent_assignments(
+    monkeypatch, tmp_path, exclude_removed
+) -> None:
     engine = create_engine(f"sqlite:///{(tmp_path / 'partial-tasks.db').as_posix()}")
     testing_session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     Base.metadata.create_all(engine)
@@ -150,6 +154,7 @@ def test_persist_result_merges_unselected_parent_assignments(monkeypatch, tmp_pa
             status="running",
             request_payload={
                 "parent_schedule_id": parent.id,
+                "excluded_course_session_ids": [courses[1].id] if exclude_removed else [],
                 "previous_assignments": [
                     {
                         "course_business_id": course.business_id,
@@ -196,7 +201,10 @@ def test_persist_result_merges_unselected_parent_assignments(monkeypatch, tmp_pa
             .filter(ScheduleAssignment.schedule_version_id == candidate.id)
             .all()
         )
-        assert len(assignments) == 2
+        assert len(assignments) == (1 if exclude_removed else 2)
+        if exclude_removed:
+            assert assignments[0].course_session_id == solved_course_id
+            return
         unchanged = next(item for item in assignments if item.course_session_id != solved_course_id)
         assert unchanged.lesson_date == date(2026, 9, 7)
         assert unchanged.change_kind == "unchanged"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -10,8 +11,17 @@ from openpyxl import Workbook, load_workbook
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.api import schedule_response
 from app.db import Base
-from app.models import ClassGroup, CourseSession, Room, ScheduleAssignment, Teacher, TimeSlot
+from app.models import (
+    ClassGroup,
+    CourseSession,
+    Room,
+    ScheduleAssignment,
+    ScheduleVersion,
+    Teacher,
+    TimeSlot,
+)
 from app.services.converter_zhengzhou import (
     PLACEHOLDER_ROOM,
     SHEET_NAME,
@@ -22,6 +32,9 @@ from app.services.converter_zhengzhou import (
     _split_placeholder_rows,
     import_schedule_workbook,
 )
+from app.services.snapshot import build_snapshot_payload
+from app.services.solver import solve_problem
+from app.services.xlsx_io import export_schedule_xlsx
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SAMPLE_WORKBOOK = PROJECT_ROOT / "data" / "imports" / "sample.xlsx"
@@ -227,7 +240,10 @@ def test_reimporting_the_same_workbook_does_not_duplicate_rows(db: Session) -> N
     assert first["course_sessions_created"] == before
     assert second["course_sessions_created"] == 0
     assert after == before
-    assert db.scalar(select(func.count(ScheduleAssignment.id))) == before
+    assert db.scalar(select(func.count(ScheduleAssignment.id))) == before * 2
+    versions = list(db.scalars(select(ScheduleVersion).order_by(ScheduleVersion.version_no)))
+    assert [version.status for version in versions] == ["draft", "draft"]
+    assert first["schedule_versions"][0]["id"] != second["schedule_versions"][0]["id"]
 
 
 def test_import_targets_the_requested_campus_not_a_hardcoded_one(db: Session) -> None:
@@ -440,7 +456,7 @@ def test_adding_a_class_does_not_duplicate_existing_lessons(db: Session, tmp_pat
     assert kept in {item.business_id for item in sessions}
 
 
-def test_rows_removed_from_the_workbook_are_deleted_on_reimport(
+def test_rows_removed_from_workbook_are_retained_when_history_references_them(
     db: Session, tmp_path: Path
 ) -> None:
     """导入必须收敛到源表当前状态，不能留下孤儿课次。"""
@@ -456,9 +472,15 @@ def test_rows_removed_from_the_workbook_are_deleted_on_reimport(
     result = import_schedule_workbook(db, trimmed)
     db.commit()
 
-    assert result["orphans"]["deleted"] == len(rows) - 1
-    assert db.scalar(select(func.count(CourseSession.id))) == 1
-    assert db.scalar(select(func.count(ScheduleAssignment.id))) == 1
+    assert result["orphans"]["deleted"] == 0
+    assert result["orphans"]["retained_by_schedule"] == len(rows) - 1
+    snapshot = build_snapshot_payload(db, "default")
+    assert sum(not item["is_active"] for item in snapshot["course_sessions"]) == len(rows) - 1
+    result = solve_problem({**snapshot, "date_window_days": 0, "time_limit_seconds": 3})
+    assert result["model_status"] in {"OPTIMAL", "FEASIBLE"}
+    assert len(result["assignments"]) == 1
+    assert db.scalar(select(func.count(CourseSession.id))) == len(rows)
+    assert db.scalar(select(func.count(ScheduleAssignment.id))) == len(rows) + 1
 
 
 def test_semantic_duplicates_are_collapsed_and_reported(db: Session, tmp_path: Path) -> None:
@@ -656,3 +678,45 @@ def test_planned_hours_check_uses_the_actual_lesson_duration(db: Session, tmp_pa
     db.commit()
 
     assert result["warnings"]["planned_hours_mismatch"] == []
+
+
+def test_reimport_keeps_published_version_and_historical_teacher_and_room(db, tmp_path):
+    base = next(row for row in _sample_rows() if row[3] != PLACEHOLDER_ROOM)
+    path = tmp_path / "history.xlsx"
+    _write_workbook(path, [base])
+    first = import_schedule_workbook(db, path)
+    db.commit()
+    v1 = db.get(ScheduleVersion, first["schedule_versions"][0]["id"])
+    v1.status = "archived"
+    second = import_schedule_workbook(db, path)
+    db.commit()
+    v2 = db.get(ScheduleVersion, second["schedule_versions"][0]["id"])
+    v2.status = "published"
+    db.commit()
+    old_response = schedule_response(db, v1).model_dump(mode="json")
+    old_xlsx = load_workbook(BytesIO(export_schedule_xlsx(db, v1)))
+    old_sheet = list(old_xlsx["课表"].values)
+    old_xlsx.close()
+    old_assignment_ids = list(db.scalars(select(ScheduleAssignment.id).where(
+        ScheduleAssignment.schedule_version_id == v1.id
+    )))
+    _write_workbook(path, [_edit_cell(_edit_cell(base, 3, "教室-999"), 13, "新老师")])
+    third = import_schedule_workbook(db, path)
+    db.commit()
+    db.expire_all()
+    assert schedule_response(db, v1).model_dump(mode="json") == old_response
+    exported = load_workbook(BytesIO(export_schedule_xlsx(db, v1)))
+    assert list(exported["课表"].values) == old_sheet
+    exported.close()
+    assert list(db.scalars(select(ScheduleAssignment.id).where(
+        ScheduleAssignment.schedule_version_id == v1.id
+    ))) == old_assignment_ids
+    assert list(db.scalars(select(ScheduleVersion.id).where(
+        ScheduleVersion.status == "published"
+    ))) == [v2.id]
+    v3 = db.get(ScheduleVersion, third["schedule_versions"][0]["id"])
+    assert v3.status == "draft"
+    assert v3.published_at is None
+    assignment = schedule_response(db, v3).assignments[0]
+    assert assignment.room_business_id == "教室-999"
+    assert assignment.teacher_business_id == "新老师"

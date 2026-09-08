@@ -10,9 +10,6 @@ import {
   Download,
   GraduationCap,
   LayoutGrid,
-  ListFilter,
-  Sparkles,
-  Timer,
   User,
   Users,
   Zap,
@@ -448,7 +445,7 @@ export function SchedulePage() {
                     const isLast = globalIndex === sortedAssignments.length - 1;
                     const weekday = item.lesson_date ? formatWeekday(item.lesson_date) : "";
                     const timeRange = getSlotTimeRange(slotRows, item.slot_business_id);
-                    const cs = courseMap.get(item.course_business_id);
+                    const cs = item.course ?? courseMap.get(item.course_business_id);
                     const courseName = cs?.subject || cs?.lesson_name || "课程课次";
 
                     return (
@@ -667,7 +664,7 @@ export function SchedulePage() {
                         )}
                       >
                         {items.map((assignment) => {
-                          const cs = courseMap.get(assignment.course_business_id);
+                          const cs = assignment.course ?? courseMap.get(assignment.course_business_id);
                           const courseName = cs?.subject || cs?.lesson_name || "";
 
                           return (
