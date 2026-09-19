@@ -2,7 +2,7 @@ import { expect, request, test } from "@playwright/test";
 
 const apiBaseURL = process.env.E2E_API_BASE_URL ?? "http://127.0.0.1:8001";
 
-test("管理员完成排课、调课、回滚和飞书生产接入引导流程", async ({ page }, testInfo) => {
+test("管理员完成排课、调课、回滚和集成接入引导流程", async ({ page }, testInfo) => {
   test.setTimeout(75_000);
   const anonymousApi = await request.newContext({ baseURL: apiBaseURL });
   const login = await anonymousApi.post("/api/v1/auth/token", {

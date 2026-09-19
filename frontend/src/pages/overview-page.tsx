@@ -550,7 +550,7 @@ export function OverviewPage() {
             <div className="flex items-center justify-between border-b border-zinc-100 pb-3">
               <div className="flex items-center gap-2">
                 <Server className="size-4 text-emerald-600" />
-                <h2 className="text-sm font-semibold text-zinc-900">飞书 / 多维表格同步健康度</h2>
+                <h2 className="text-sm font-semibold text-zinc-900">数据同步健康度</h2>
               </div>
               <Badge tone={!hasSyncSamples ? "neutral" : syncHealth?.failed_syncs === 0 ? "green" : "yellow"}>
                 {!hasSyncSamples

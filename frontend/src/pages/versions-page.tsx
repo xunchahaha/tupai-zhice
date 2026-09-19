@@ -93,7 +93,7 @@ export function VersionsPage() {
     mutation: {
       onSuccess: async (data) => {
         if (data.failed_count === 0) {
-          toast.success(`发布数据已同步到飞书（${data.records_written} 条）`);
+          toast.success(`发布数据已同步到外部集成（${data.records_written} 条）`);
         } else {
           toast.warning(`发布数据同步完成：${data.completed_count} 项成功，${data.failed_count} 项待重试。`);
         }
@@ -230,7 +230,7 @@ export function VersionsPage() {
         }
       >
         {canManageVersions
-          ? "发布/回滚会先更新本地当前版本，再自动同步当前方案的“课表”、领导展示汇总、班级链接目录和调课通知。同步失败不会撤销本地版本；可在“飞书集成”逐表重试，或在此重新同步发布数据。"
+          ? "发布/回滚会先更新本地当前版本，再自动同步到已启用的外部集成（如飞书多维表格），内容为当前方案的“课表”、领导展示汇总、班级链接目录和调课通知。同步失败不会撤销本地版本；可在“外部集成”逐表重试，或在此重新同步发布数据。"
           : "当前账号可以查看和比较版本记录；发布、回滚、删除等变更操作仅由具备相应权限的账号执行。"}
       </section>
 
@@ -599,5 +599,5 @@ function deleteDescription(item: ScheduleSummaryResponse, children: readonly Sch
     : "目前没有别的版本以它为来源。";
   return `删除 v${item.version_no}（${statusLabel(item.status)}）会连同它的 ${
     item.assignment_count ?? 0
-  } 条排课记录一起清除，无法恢复，版本对比与回滚都不再包含它。${lineage}求解任务和数据快照会保留；已下发飞书日历或被调课事件引用的版本，服务端同样会拒绝删除。`;
+  } 条排课记录一起清除，无法恢复，版本对比与回滚都不再包含它。${lineage}求解任务和数据快照会保留；已下发外部日历或被调课事件引用的版本，服务端同样会拒绝删除。`;
 }
