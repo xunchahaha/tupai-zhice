@@ -470,7 +470,7 @@ export function SettingsPage() {
         </div>
       </SettingsSection>
 
-      <SettingsSection title="集成" description="主数据与课表的外发目标通过集成适配器接入；未接入外部平台时本地模式即全部功能。">
+      <SettingsSection title="外部集成" description="主数据与课表的外发目标通过集成适配器接入；未接入外部平台时本地模式即全部功能。">
         <div className="divide-y divide-zinc-100">
           <div>
             <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
