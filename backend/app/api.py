@@ -21,6 +21,7 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
+    Form,
     Header,
     HTTPException,
     Query,
@@ -29,6 +30,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import ValidationError
 from sqlalchemy import (
     ColumnElement,
     String,
@@ -103,7 +105,14 @@ from .schemas import (
     FeishuSyncRequest,
     FeishuWorkspaceCreate,
     FeishuWorkspaceResponse,
+    ImportColumnMapping,
+    ImportCommitResponse,
+    ImportHeaderCandidate,
+    ImportMappingInput,
+    ImportPreviewResponse,
+    ImportPreviewStats,
     ImportResult,
+    ImportSheetOverview,
     IntegrationSyncResponse,
     MasterDataBatchDelete,
     OverviewAnalyticsResponse,
@@ -153,6 +162,11 @@ from .security import (
     verify_password,
 )
 from .services.ai import AIService, AIServiceError
+from .services.converter_core import (
+    TEMPLATE_HEADERS,
+    import_canonical_rows,
+    parse_template_records,
+)
 from .services.converter_zhengzhou import (
     CAMPUS_BUSINESS_ID,
     CAMPUS_NAME,
@@ -167,6 +181,18 @@ from .services.explain import (
     deterministic_summary,
 )
 from .services.feishu import FeishuService, FeishuServiceError, json_text
+from .services.import_mapping import (
+    ColumnMapping,
+    ImportMappingError,
+    apply_manual_mapping,
+    build_records,
+    column_samples,
+    detect_header_candidates,
+    header_texts,
+    parse_uploaded_workbook,
+    pick_default_sheet,
+    suggest_mapping,
+)
 from .services.overview_analytics import build_overview_analytics
 from .services.snapshot import build_snapshot_payload, create_snapshot, version_course_map
 from .services.solver import _has_date_information, _selected_sessions, _session_matches_rule
@@ -1065,6 +1091,41 @@ def overview_analytics(
     )
 
 
+def build_import_result(result: dict[str, Any], source: str) -> ImportResult:
+    """把核心管线的质量报告映射为导入响应（模板直通与智能导入共用）。"""
+    dropped = result["warnings"]["dropped_placeholder_room"]
+    preprocessing = result["duplicate_lessons"]
+    return ImportResult(
+        source=source,
+        campuses=1,
+        teachers=result["teachers"],
+        class_groups=result["class_groups"],
+        rooms=result["rooms"],
+        time_slots=result["time_slots"],
+        course_sessions=result["course_sessions_created"],
+        rules=0,
+        rows_total=result["rows_total"],
+        rows_dropped_placeholder_room=dropped["dropped_rows"],
+        dropped_lesson_groups=dropped["dropped_lesson_groups"],
+        dropped_classes=dropped["affected_classes"],
+        rows_kept=result["rows_kept"],
+        rows_deduped=result["rows_deduped"],
+        preprocessed_demands=preprocessing["preprocessed_demands"],
+        collapsed_source_variants=preprocessing["collapsed_source_variants"],
+        multi_product_demands=preprocessing["multi_product_demands"],
+        multi_lesson_name_demands=preprocessing["multi_lesson_name_demands"],
+        multi_slot_demands=preprocessing["multi_slot_demands"],
+        rows_skipped=result["rows_skipped"],
+        skipped_examples=result["skipped_examples"],
+        duplicate_lessons=result["duplicate_lessons"]["conflicting_lessons"],
+        class_slot_conflicts=result["class_slot_conflicts"]["conflicting_groups"],
+        orphans_deleted=result["orphans"]["deleted"],
+        orphans_retained=result["orphans"]["retained_by_schedule"],
+        schedule_version_id=result["schedule_versions"][0]["id"],
+        schedule_version_no=result["schedule_versions"][0]["version_no"],
+    )
+
+
 @router.get("/imports/sample.xlsx", tags=["imports"])
 def download_sample_workbook(user: CurrentUser) -> FileResponse:
     sample = PROJECT_ROOT / "data" / "imports" / "sample.xlsx"
@@ -1119,36 +1180,257 @@ def import_xlsx(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     audit(db, user, "import_xlsx", "workbook", file.filename, result)
     db.commit()
-    dropped = result["warnings"]["dropped_placeholder_room"]
-    preprocessing = result["duplicate_lessons"]
-    return ImportResult(
-        source=file.filename or target.name,
-        campuses=1,
-        teachers=result["teachers"],
-        class_groups=result["class_groups"],
-        rooms=result["rooms"],
-        time_slots=result["time_slots"],
-        course_sessions=result["course_sessions_created"],
-        rules=0,
-        rows_total=result["rows_total"],
-        rows_dropped_placeholder_room=dropped["dropped_rows"],
-        dropped_lesson_groups=dropped["dropped_lesson_groups"],
-        dropped_classes=dropped["affected_classes"],
-        rows_kept=result["rows_kept"],
-        rows_deduped=result["rows_deduped"],
-        preprocessed_demands=preprocessing["preprocessed_demands"],
-        collapsed_source_variants=preprocessing["collapsed_source_variants"],
-        multi_product_demands=preprocessing["multi_product_demands"],
-        multi_lesson_name_demands=preprocessing["multi_lesson_name_demands"],
-        multi_slot_demands=preprocessing["multi_slot_demands"],
-        rows_skipped=result["rows_skipped"],
-        skipped_examples=result["skipped_examples"],
-        duplicate_lessons=result["duplicate_lessons"]["conflicting_lessons"],
-        class_slot_conflicts=result["class_slot_conflicts"]["conflicting_groups"],
-        orphans_deleted=result["orphans"]["deleted"],
-        orphans_retained=result["orphans"]["retained_by_schedule"],
-        schedule_version_id=result["schedule_versions"][0]["id"],
-        schedule_version_no=result["schedule_versions"][0]["version_no"],
+    return build_import_result(result, file.filename or target.name)
+
+
+# ---------------------------------------------------------------------------
+# L2 智能映射导入：任意 XLSX/CSV → 列映射建议 → 行级校验 → 确认后落库。
+# 坐标（column_index / header_row_index）一律为 0-based 网格下标。
+# ---------------------------------------------------------------------------
+
+
+def _read_upload_bytes(file: UploadFile, extensions: tuple[str, ...], label: str) -> bytes:
+    name = (file.filename or "").lower()
+    if not name.endswith(extensions):
+        raise HTTPException(status_code=400, detail=f"{label}只接受 {' / '.join(extensions)} 文件")
+    payload = file.file.read(MAX_IMPORT_BYTES + 1)
+    if len(payload) > MAX_IMPORT_BYTES:
+        raise HTTPException(
+            status_code=413, detail=f"文件超过 {MAX_IMPORT_BYTES // (1024 * 1024)} MB 上限"
+        )
+    if not payload:
+        raise HTTPException(status_code=400, detail="上传的文件是空文件")
+    return payload
+
+
+def _parse_mapping_json(mapping_json: str | None) -> ImportMappingInput | None:
+    if mapping_json is None or not mapping_json.strip():
+        return None
+    try:
+        return ImportMappingInput.model_validate_json(mapping_json)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"mapping_json 不是合法的映射定义：{exc}"
+        ) from exc
+
+
+def _resolve_import_sheet(
+    grids: dict[str, list[list[Any]]], requested: str | None
+) -> tuple[str, list[list[Any]]]:
+    if requested is not None:
+        if requested not in grids:
+            raise HTTPException(
+                status_code=422,
+                detail=f"文件没有名为「{requested}」的工作表，实际为：{sorted(grids)}",
+            )
+        return requested, grids[requested]
+    selected = pick_default_sheet(grids)
+    return selected, grids[selected]
+
+
+def _resolve_header_row(
+    grid: list[list[Any]], requested: int | None
+) -> int:
+    if requested is not None:
+        if not 0 <= requested < len(grid):
+            raise HTTPException(
+                status_code=422,
+                detail=f"header_row_index={requested} 超出工作表范围（共 {len(grid)} 行）",
+            )
+        return requested
+    candidates = detect_header_candidates(grid)
+    if not candidates:
+        raise HTTPException(
+            status_code=422,
+            detail="无法在前 10 行内自动识别表头行，请在映射里指定 header_row_index",
+        )
+    return candidates[0].row_index
+
+
+def _manual_mapping_from_input(
+    grid: list[list[Any]], header_row_index: int, override: ImportMappingInput
+) -> list[ColumnMapping]:
+    headers = header_texts(grid, header_row_index)
+    name_to_index = {name: index for index, name in enumerate(headers) if name}
+    entries = []
+    for item in override.columns:
+        if item.column_index is not None:
+            column_index = item.column_index
+        elif item.column in name_to_index:
+            column_index = name_to_index[item.column]
+        else:
+            raise ImportMappingError(f"映射里的列「{item.column}」在工作表表头中不存在")
+        entries.append((column_index, item.column, item.target))
+    return apply_manual_mapping(headers, entries)
+
+
+def _ai_column_resolver(db: Session) -> Callable[[list[dict[str, Any]]], dict[int, str]] | None:
+    """AI 已配置时返回语义映射回调；未配置或不可用时返回 None，前三层照常工作。"""
+    service = AIService(settings, db)
+    try:
+        if not service.configuration_view()["configured"]:
+            return None
+    except AIServiceError:
+        return None
+
+    def resolver(columns: list[dict[str, Any]]) -> dict[int, str]:
+        return service.map_import_columns(columns, list(TEMPLATE_HEADERS))
+
+    return resolver
+
+
+def _import_mapping_view(mapping: list[ColumnMapping]) -> list[ImportColumnMapping]:
+    return [
+        ImportColumnMapping(
+            column=item.column,
+            column_index=item.column_index,
+            target=item.target,
+            confidence=item.confidence,
+            rationale=item.rationale,
+            matched_by=item.matched_by,
+            sample_values=item.sample_values,
+        )
+        for item in mapping
+    ]
+
+
+@router.post("/imports/preview", response_model=ImportPreviewResponse, tags=["imports"])
+def preview_import(
+    db: Db,
+    user: Admin,
+    scope: ViewerScope,
+    file: Annotated[UploadFile, File(...)],
+    mapping_json: Annotated[str | None, Form()] = None,
+) -> ImportPreviewResponse:
+    """解析上传文件并给出列映射建议与行级校验报告，只解析不落库。
+
+    携带 ``mapping_json``（用户修正后的映射）时按其重跑校验，用于 Fix 循环；
+    未配置 AI 语义层时只走别名/规范化/模糊/形状四层匹配。
+    """
+    payload = _read_upload_bytes(file, (".xlsx", ".csv"), "智能导入")
+    grids = parse_uploaded_workbook(file.filename or "", payload)
+    override = _parse_mapping_json(mapping_json)
+    sheet_name, grid = _resolve_import_sheet(grids, override.sheet if override else None)
+    candidates = detect_header_candidates(grid)
+    header_row_index = _resolve_header_row(
+        grid, override.header_row_index if override else None
+    )
+    headers = header_texts(grid, header_row_index)
+    try:
+        if override is not None:
+            mapping = _manual_mapping_from_input(grid, header_row_index, override)
+            ai_used = False
+        else:
+            mapping, ai_used = suggest_mapping(
+                headers,
+                column_samples(grid, header_row_index),
+                ai_resolver=_ai_column_resolver(db),
+            )
+    except ImportMappingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    targets = {item.column_index: item.target for item in mapping if item.target}
+    unmatched_columns = [item.column for item in mapping if item.target is None and item.column]
+    missing_fields = [name for name in TEMPLATE_HEADERS if name not in targets.values()]
+    records, row_numbers = build_records(grid, header_row_index, targets)
+    parsed, skipped, blank_rows = parse_template_records(records, row_numbers, max_skipped=200)
+    sheets = [
+        ImportSheetOverview(
+            name=name,
+            row_count=len(sheet_grid),
+            column_count=max((len(row) for row in sheet_grid), default=0),
+            nonempty_cells=sum(
+                1
+                for row in sheet_grid
+                for value in row
+                if value is not None and str(value).strip()
+            ),
+        )
+        for name, sheet_grid in grids.items()
+    ]
+    return ImportPreviewResponse(
+        source=file.filename or "upload",
+        sheets=sheets,
+        selected_sheet=sheet_name,
+        header_row_index=header_row_index,
+        header_candidates=[
+            ImportHeaderCandidate(
+                row_index=item.row_index, score=item.score, sample=item.sample
+            )
+            for item in candidates
+        ],
+        mapping=_import_mapping_view(mapping),
+        unmatched_columns=unmatched_columns,
+        missing_fields=missing_fields,
+        issues=skipped,
+        stats=ImportPreviewStats(
+            rows_total=len(records),
+            rows_valid=len(parsed),
+            # 真实跳过数按「总数 - 有效 - 空行」算，不受 skipped 清单截断影响。
+            rows_skipped=len(records) - len(parsed) - blank_rows,
+            rows_ignored_blank=blank_rows,
+            columns_total=len(headers),
+            mapped_columns=len(targets),
+            ai_mapping_used=ai_used,
+        ),
+    )
+
+
+@router.post("/imports/commit", response_model=ImportCommitResponse, tags=["imports"])
+def commit_import(
+    db: Db,
+    user: Admin,
+    scope: ViewerScope,
+    file: Annotated[UploadFile, File(...)],
+    mapping_json: Annotated[str, Form(...)],
+    mode: Annotated[Literal["insert", "upsert"], Form()] = "upsert",
+    campus_business_id: Annotated[str, Query(max_length=40)] = CAMPUS_BUSINESS_ID,
+    campus_name: Annotated[str, Query(max_length=120)] = CAMPUS_NAME,
+) -> ImportCommitResponse:
+    """按确认的映射把上传文件正式导入，返回与模板直通导入同构的质量报告。
+
+    ``mode=upsert`` 沿用现有业务键（班级+课次序号+课节名称+上课日期+上课时段）
+    重复导入即更新；``mode=insert`` 只新增，已存在的课次原样保留且不做孤儿清理。
+    """
+    payload = _read_upload_bytes(file, (".xlsx", ".csv"), "智能导入")
+    override = _parse_mapping_json(mapping_json)
+    if override is None:
+        raise HTTPException(status_code=422, detail="commit 必须携带 mapping_json")
+    grids = parse_uploaded_workbook(file.filename or "", payload)
+    _sheet, grid = _resolve_import_sheet(grids, override.sheet)
+    header_row_index = _resolve_header_row(grid, override.header_row_index)
+    try:
+        mapping = _manual_mapping_from_input(grid, header_row_index, override)
+    except ImportMappingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    targets = {item.column_index: item.target for item in mapping if item.target}
+    if not targets:
+        raise HTTPException(status_code=422, detail="映射没有命中任何规范字段，无法导入")
+    records, _row_numbers = build_records(grid, header_row_index, targets)
+    try:
+        result = import_canonical_rows(
+            db,
+            records,
+            campus_business_id=campus_business_id.strip() or CAMPUS_BUSINESS_ID,
+            campus_name=campus_name.strip() or CAMPUS_NAME,
+            schedule_set_id=scope.id,
+            source_name=file.filename or "upload",
+            checksum=hashlib.sha256(payload).hexdigest(),
+            import_mode=mode,
+        )
+    except WorkbookFormatError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    audit(db, user, "import_commit", "workbook", file.filename, result)
+    db.commit()
+    return ImportCommitResponse(
+        **build_import_result(result, file.filename or "upload").model_dump(),
+        mode=result["import_mode"],
+        course_sessions_updated=result["course_sessions_updated"],
+        course_sessions_skipped_existing=result["course_sessions_skipped_existing"],
     )
 
 

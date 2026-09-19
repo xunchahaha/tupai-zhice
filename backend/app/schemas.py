@@ -686,6 +686,87 @@ class ImportResult(BaseModel):
     schedule_version_no: int | None = None
 
 
+class ImportSheetOverview(BaseModel):
+    """导入向导：单个工作表的概览。"""
+
+    name: str
+    row_count: int
+    column_count: int
+    nonempty_cells: int
+
+
+class ImportHeaderCandidate(BaseModel):
+    """导入向导：表头行候选（按像表头的程度降序）。"""
+
+    row_index: int  # 0-based 网格行号
+    score: float
+    sample: list[str]
+
+
+class ImportColumnMapping(BaseModel):
+    """导入向导：一列到 14 列规范字段的映射建议。
+
+    confidence 低于 0.5 的列 target 恒为 None（不硬猜），由用户在向导中手动指定。
+    """
+
+    column: str
+    column_index: int  # 0-based 网格列号
+    target: str | None
+    confidence: float
+    rationale: str
+    matched_by: str  # exact / alias / normalized / fuzzy / llm / manual / unmatched
+    sample_values: list[str] = Field(default_factory=list)
+
+
+class ImportPreviewStats(BaseModel):
+    rows_total: int
+    rows_valid: int
+    rows_skipped: int
+    rows_ignored_blank: int = 0
+    columns_total: int
+    mapped_columns: int
+    ai_mapping_used: bool = False
+
+
+class ImportPreviewResponse(BaseModel):
+    """`POST /imports/preview` 响应：只解析不落库。"""
+
+    source: str
+    sheets: list[ImportSheetOverview]
+    selected_sheet: str
+    header_row_index: int
+    header_candidates: list[ImportHeaderCandidate]
+    mapping: list[ImportColumnMapping]
+    unmatched_columns: list[str]
+    missing_fields: list[str]
+    issues: list[dict[str, Any]] = Field(default_factory=list)
+    stats: ImportPreviewStats
+
+
+class ImportMappingColumnInput(BaseModel):
+    """用户修正后的单列映射（Fix 循环回传）。"""
+
+    column: str
+    column_index: int | None = None
+    target: str | None = None  # None 表示该列不导入
+
+
+class ImportMappingInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=False)
+
+    sheet: str | None = None  # 缺省取非空单元格最多的工作表
+    header_row_index: int | None = None  # 缺省用自动检测的最佳候选
+    columns: list[ImportMappingColumnInput] = Field(min_length=1)
+
+
+class ImportCommitResponse(ImportResult):
+    """`POST /imports/commit` 响应：与模板直通导入同构，另附映射导入的模式信息。"""
+
+    mode: str
+    course_sessions_updated: int = 0
+    course_sessions_skipped_existing: int = 0
+
+
 class OverviewResponse(BaseModel):
     counts: dict[str, int]
     latest_run: SolverRunResponse | None

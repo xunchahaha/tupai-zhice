@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -383,6 +384,62 @@ class AIService:
             "verdict": verdict,
             "concerns": [str(item) for item in concerns] if isinstance(concerns, list) else [],
         }
+
+    def map_import_columns(
+        self,
+        columns: list[dict[str, Any]],
+        valid_targets: Sequence[str],
+    ) -> dict[int, str]:
+        """导入向导的语义兜底层：把表头机械匹配失败的列交给模型提名。
+
+        模型可以对拿不准的列弃权（target=null），只输出候选目标字段列表内的字段。
+        这里只做白名单校验：列下标不存在、目标不在候选里、结构不对的输出一律丢弃——
+        模型只提名，映射决定权仍在向导和用户手里。
+        """
+        system_prompt = (
+            "你是排课系统导入向导的列映射助手。用户的表格里有一些未能通过表头匹配的列，"
+            "请根据列名和样本值，把它们映射到候选目标字段。\n"
+            "硬性要求：\n"
+            "1. 只输出一个 JSON 对象，不要输出 Markdown 或额外字段。\n"
+            "2. target 只能取候选目标字段的原文；拿不准就输出 null（弃权），禁止硬猜。\n"
+            "3. column_index 必须原样引用输入里的列下标。\n"
+            "输出结构："
+            '{"mappings":[{"column_index":0,"target":"目标字段或null"}]}'
+        )
+        user_content = json.dumps(
+            {
+                "候选目标字段": list(valid_targets),
+                "列": [
+                    {
+                        "column_index": item.get("column_index"),
+                        "column": item.get("column"),
+                        "样本值": item.get("样本值") or [],
+                    }
+                    for item in columns
+                ],
+            },
+            ensure_ascii=False,
+        )
+        parsed, _usage = self._chat_json(system_prompt, user_content)
+        known_indexes = {
+            item.get("column_index")
+            for item in columns
+            if isinstance(item.get("column_index"), int)
+        }
+        accepted: dict[int, str] = {}
+        for entry in parsed.get("mappings") or []:
+            if not isinstance(entry, dict):
+                continue
+            column_index = entry.get("column_index")
+            target = entry.get("target")
+            if (
+                isinstance(column_index, int)
+                and column_index in known_indexes
+                and isinstance(target, str)
+                and target in valid_targets
+            ):
+                accepted[column_index] = target
+        return accepted
 
     def interpret_instruction(
         self,

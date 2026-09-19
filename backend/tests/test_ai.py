@@ -156,12 +156,11 @@ def test_ai_service_explains_when_console_url_returns_html(monkeypatch: Any) -> 
         )
 
     monkeypatch.setattr("app.services.ai.httpx.post", fake_post)
-    with SessionLocal() as db:
-        with pytest.raises(AIServiceError, match="不要填写管理控制台地址"):
-            AIService(settings, db).interpret_instruction(
-                "解析考研课程",
-                context={"business_lines": ["考研"]},
-            )
+    with SessionLocal() as db, pytest.raises(AIServiceError, match="不要填写管理控制台地址"):
+        AIService(settings, db).interpret_instruction(
+            "解析考研课程",
+            context={"business_lines": ["考研"]},
+        )
 
 
 def test_assistant_interpret_uses_configured_ai_provider(

@@ -985,6 +985,158 @@
         }
       }
     },
+    "/api/v1/imports/preview": {
+      "post": {
+        "tags": [
+          "imports"
+        ],
+        "summary": "Preview Import",
+        "description": "解析上传文件并给出列映射建议与行级校验报告，只解析不落库。\n\n携带 ``mapping_json``（用户修正后的映射）时按其重跑校验，用于 Fix 循环；\n未配置 AI 语义层时只走别名/规范化/模糊/形状四层匹配。",
+        "operationId": "preview_import_api_v1_imports_preview_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_preview_import_api_v1_imports_preview_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportPreviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/imports/commit": {
+      "post": {
+        "tags": [
+          "imports"
+        ],
+        "summary": "Commit Import",
+        "description": "按确认的映射把上传文件正式导入，返回与模板直通导入同构的质量报告。\n\n``mode=upsert`` 沿用现有业务键（班级+课次序号+课节名称+上课日期+上课时段）\n重复导入即更新；``mode=insert`` 只新增，已存在的课次原样保留且不做孤儿清理。",
+        "operationId": "commit_import_api_v1_imports_commit_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campus_business_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 40,
+              "default": "CAMPUS-ZZ",
+              "title": "Campus Business Id"
+            }
+          },
+          {
+            "name": "campus_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 120,
+              "default": "郑州校区",
+              "title": "Campus Name"
+            }
+          },
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_commit_import_api_v1_imports_commit_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportCommitResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/campuses": {
       "get": {
         "tags": [
@@ -5600,6 +5752,34 @@
         ],
         "title": "BatchOperationResponse"
       },
+      "Body_commit_import_api_v1_imports_commit_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "mapping_json": {
+            "type": "string",
+            "title": "Mapping Json"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "insert",
+              "upsert"
+            ],
+            "title": "Mode",
+            "default": "upsert"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file",
+          "mapping_json"
+        ],
+        "title": "Body_commit_import_api_v1_imports_commit_post"
+      },
       "Body_import_xlsx_api_v1_imports_xlsx_post": {
         "properties": {
           "file": {
@@ -5672,6 +5852,31 @@
           "password"
         ],
         "title": "Body_login_api_v1_auth_token_post"
+      },
+      "Body_preview_import_api_v1_imports_preview_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "mapping_json": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mapping Json"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_preview_import_api_v1_imports_preview_post"
       },
       "CalendarConflict": {
         "properties": {
@@ -7371,6 +7576,381 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "ImportColumnMapping": {
+        "properties": {
+          "column": {
+            "type": "string",
+            "title": "Column"
+          },
+          "column_index": {
+            "type": "integer",
+            "title": "Column Index"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target"
+          },
+          "confidence": {
+            "type": "number",
+            "title": "Confidence"
+          },
+          "rationale": {
+            "type": "string",
+            "title": "Rationale"
+          },
+          "matched_by": {
+            "type": "string",
+            "title": "Matched By"
+          },
+          "sample_values": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sample Values"
+          }
+        },
+        "type": "object",
+        "required": [
+          "column",
+          "column_index",
+          "target",
+          "confidence",
+          "rationale",
+          "matched_by"
+        ],
+        "title": "ImportColumnMapping",
+        "description": "导入向导：一列到 14 列规范字段的映射建议。\n\nconfidence 低于 0.5 的列 target 恒为 None（不硬猜），由用户在向导中手动指定。"
+      },
+      "ImportCommitResponse": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "campuses": {
+            "type": "integer",
+            "title": "Campuses"
+          },
+          "teachers": {
+            "type": "integer",
+            "title": "Teachers"
+          },
+          "class_groups": {
+            "type": "integer",
+            "title": "Class Groups"
+          },
+          "rooms": {
+            "type": "integer",
+            "title": "Rooms"
+          },
+          "time_slots": {
+            "type": "integer",
+            "title": "Time Slots"
+          },
+          "course_sessions": {
+            "type": "integer",
+            "title": "Course Sessions"
+          },
+          "rules": {
+            "type": "integer",
+            "title": "Rules"
+          },
+          "rows_total": {
+            "type": "integer",
+            "title": "Rows Total",
+            "default": 0
+          },
+          "rows_dropped_placeholder_room": {
+            "type": "integer",
+            "title": "Rows Dropped Placeholder Room",
+            "default": 0
+          },
+          "dropped_lesson_groups": {
+            "type": "integer",
+            "title": "Dropped Lesson Groups",
+            "default": 0
+          },
+          "dropped_classes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Dropped Classes"
+          },
+          "rows_kept": {
+            "type": "integer",
+            "title": "Rows Kept",
+            "default": 0
+          },
+          "rows_deduped": {
+            "type": "integer",
+            "title": "Rows Deduped",
+            "default": 0
+          },
+          "preprocessed_demands": {
+            "type": "integer",
+            "title": "Preprocessed Demands",
+            "default": 0
+          },
+          "collapsed_source_variants": {
+            "type": "integer",
+            "title": "Collapsed Source Variants",
+            "default": 0
+          },
+          "multi_product_demands": {
+            "type": "integer",
+            "title": "Multi Product Demands",
+            "default": 0
+          },
+          "multi_lesson_name_demands": {
+            "type": "integer",
+            "title": "Multi Lesson Name Demands",
+            "default": 0
+          },
+          "multi_slot_demands": {
+            "type": "integer",
+            "title": "Multi Slot Demands",
+            "default": 0
+          },
+          "rows_skipped": {
+            "type": "integer",
+            "title": "Rows Skipped",
+            "default": 0
+          },
+          "skipped_examples": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Skipped Examples"
+          },
+          "duplicate_lessons": {
+            "type": "integer",
+            "title": "Duplicate Lessons",
+            "default": 0
+          },
+          "class_slot_conflicts": {
+            "type": "integer",
+            "title": "Class Slot Conflicts",
+            "default": 0
+          },
+          "orphans_deleted": {
+            "type": "integer",
+            "title": "Orphans Deleted",
+            "default": 0
+          },
+          "orphans_retained": {
+            "type": "integer",
+            "title": "Orphans Retained",
+            "default": 0
+          },
+          "schedule_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Version Id"
+          },
+          "schedule_version_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Version No"
+          },
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "course_sessions_updated": {
+            "type": "integer",
+            "title": "Course Sessions Updated",
+            "default": 0
+          },
+          "course_sessions_skipped_existing": {
+            "type": "integer",
+            "title": "Course Sessions Skipped Existing",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "campuses",
+          "teachers",
+          "class_groups",
+          "rooms",
+          "time_slots",
+          "course_sessions",
+          "rules",
+          "mode"
+        ],
+        "title": "ImportCommitResponse",
+        "description": "`POST /imports/commit` 响应：与模板直通导入同构，另附映射导入的模式信息。"
+      },
+      "ImportHeaderCandidate": {
+        "properties": {
+          "row_index": {
+            "type": "integer",
+            "title": "Row Index"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "sample": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sample"
+          }
+        },
+        "type": "object",
+        "required": [
+          "row_index",
+          "score",
+          "sample"
+        ],
+        "title": "ImportHeaderCandidate",
+        "description": "导入向导：表头行候选（按像表头的程度降序）。"
+      },
+      "ImportPreviewResponse": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "sheets": {
+            "items": {
+              "$ref": "#/components/schemas/ImportSheetOverview"
+            },
+            "type": "array",
+            "title": "Sheets"
+          },
+          "selected_sheet": {
+            "type": "string",
+            "title": "Selected Sheet"
+          },
+          "header_row_index": {
+            "type": "integer",
+            "title": "Header Row Index"
+          },
+          "header_candidates": {
+            "items": {
+              "$ref": "#/components/schemas/ImportHeaderCandidate"
+            },
+            "type": "array",
+            "title": "Header Candidates"
+          },
+          "mapping": {
+            "items": {
+              "$ref": "#/components/schemas/ImportColumnMapping"
+            },
+            "type": "array",
+            "title": "Mapping"
+          },
+          "unmatched_columns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unmatched Columns"
+          },
+          "missing_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Fields"
+          },
+          "issues": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Issues"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/ImportPreviewStats"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "sheets",
+          "selected_sheet",
+          "header_row_index",
+          "header_candidates",
+          "mapping",
+          "unmatched_columns",
+          "missing_fields",
+          "stats"
+        ],
+        "title": "ImportPreviewResponse",
+        "description": "`POST /imports/preview` 响应：只解析不落库。"
+      },
+      "ImportPreviewStats": {
+        "properties": {
+          "rows_total": {
+            "type": "integer",
+            "title": "Rows Total"
+          },
+          "rows_valid": {
+            "type": "integer",
+            "title": "Rows Valid"
+          },
+          "rows_skipped": {
+            "type": "integer",
+            "title": "Rows Skipped"
+          },
+          "rows_ignored_blank": {
+            "type": "integer",
+            "title": "Rows Ignored Blank",
+            "default": 0
+          },
+          "columns_total": {
+            "type": "integer",
+            "title": "Columns Total"
+          },
+          "mapped_columns": {
+            "type": "integer",
+            "title": "Mapped Columns"
+          },
+          "ai_mapping_used": {
+            "type": "boolean",
+            "title": "Ai Mapping Used",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "rows_total",
+          "rows_valid",
+          "rows_skipped",
+          "columns_total",
+          "mapped_columns"
+        ],
+        "title": "ImportPreviewStats"
+      },
       "ImportResult": {
         "properties": {
           "source": {
@@ -7530,6 +8110,35 @@
           "rules"
         ],
         "title": "ImportResult"
+      },
+      "ImportSheetOverview": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "row_count": {
+            "type": "integer",
+            "title": "Row Count"
+          },
+          "column_count": {
+            "type": "integer",
+            "title": "Column Count"
+          },
+          "nonempty_cells": {
+            "type": "integer",
+            "title": "Nonempty Cells"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "row_count",
+          "column_count",
+          "nonempty_cells"
+        ],
+        "title": "ImportSheetOverview",
+        "description": "导入向导：单个工作表的概览。"
       },
       "IntegrationSyncResponse": {
         "properties": {

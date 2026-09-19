@@ -33,6 +33,35 @@ uv run tupai-zhengzhou "E:\飞书大赛\郑州考研公职专升本课表数据�
   同一班级同一时段的多节课、孤儿清理数、占位教室丢弃明细、计划课时不一致的班型。
   计划课时按该班型自己的课节时长核对，不假定每课次固定 3 小时。
 
+### L2 智能映射导入（任意 XLSX/CSV）
+
+除了官方模板直通，管理员还可以上传**任意**教务导出的 XLSX/CSV，走「预览映射 → 修复 →
+确认提交」的导入向导：
+
+- `POST /api/v1/imports/preview`：上传文件（≤64MB）+ 可选 `mapping_json`（用户修正后的
+  映射，Fix 循环重跑校验），返回 sheet 概览、表头行候选、逐列映射建议（目标字段、
+  置信度、理由、样本值）、映射后的行级校验报告与统计。**只解析不落库。**
+- `POST /api/v1/imports/commit`：文件 + `mapping_json`（必填）+ `mode=insert|upsert`。
+  `upsert` 沿用现有业务键（班级+课次序号+课节名称+上课日期+上课时段）重复导入即更新；
+  `insert` 只新增，已存在课次原样保留且不做孤儿清理。响应与模板直通导入同构，
+  另附 `course_sessions_updated` / `course_sessions_skipped_existing`。
+
+列映射由 `app/services/import_mapping.py` 提供，按四层匹配并给出 0–1 置信度：
+
+1. **Exact / 别名表**：表头与 14 个规范字段或业务别名（「任课教师」→ 授课教师、
+   「时段」→ 上课时段等）逐字相等；
+2. **Normalized**：小写、去空白标点、全半角（NFKC）归一后相等；
+3. **Fuzzy**：`difflib` 编辑相似度（阈值 0.6，置信度随比例衰减），只用标准库；
+4. **样本形状校验**：前 20 行采样判断「日期列像日期、数字列像数字、时段列像
+   HH:MM-HH:MM」，形状不符直接把置信度压到阈值之下。
+
+置信度 < 0.5 的列一律返回未匹配（`target=null`），**不硬猜**。可选 LLM 语义层：AI
+接口已配置时对剩余未匹配列做语义提名（模型可弃权，输出按白名单过滤），未配置则
+自动跳过；行级校验与入库复用与模板导入同一条核心管线
+（`app/services/converter_core.py`），两条入口的校验口径与业务键语义完全一致。
+
+坐标约定：`column_index`、`header_row_index` 均为 0-based 网格下标，Fix 循环原样回传。
+
 质量检查：
 
 ```powershell
@@ -99,6 +128,9 @@ OpenAI-compatible `/chat/completions` 接口解析指令，并对 API Key 加密
 - API 前缀：`/api/v1`
 - 用户鉴权：OAuth2 password flow + JWT Bearer
 - Aily 鉴权：`X-Aily-Key`
+- 模板直通导入：`POST /api/v1/imports/xlsx`（官方 14 列表头，严格匹配）
+- 智能导入预览：`POST /api/v1/imports/preview`（任意 XLSX/CSV，映射建议 + 行级校验，不落库）
+- 智能导入提交：`POST /api/v1/imports/commit`（`mapping_json` + `mode=insert|upsert`）
 - AI 配置：`GET/POST /api/v1/integrations/ai/configuration`
 - 一句话解析：`POST /api/v1/assistant/interpret`
 - 求解进度：`GET /api/v1/solver-runs/{id}/events`
