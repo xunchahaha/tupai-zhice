@@ -1,13 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clipboard,
   CloudUpload,
   Database,
   ExternalLink,
+  HardDrive,
   KeyRound,
   Link2,
   LogOut,
+  Puzzle,
   RefreshCw,
   SendHorizontal,
   Settings2,
@@ -20,8 +24,10 @@ import { toast } from "sonner";
 import {
   getFeishuConnectionApiV1IntegrationsFeishuConnectionGetQueryKey,
   getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey,
+  useChangeOwnPasswordApiV1AuthChangePasswordPost,
   useConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost,
   useCreateFeishuWorkspaceApiV1IntegrationsFeishuWorkspacesPost,
+  useCurrentUserApiV1AuthMeGet,
   useDisconnectFeishuApiV1IntegrationsFeishuConnectionDelete,
   useFeishuSyncBatchApiV1IntegrationsFeishuSyncBatchPost,
   useFeishuConnectionApiV1IntegrationsFeishuConnectionGet,
@@ -30,7 +36,7 @@ import {
   useStartFeishuOauthApiV1IntegrationsFeishuOauthStartPost,
 } from "@/api/generated/client";
 import type { FeishuBatchSyncResponse, FeishuConnectionResponse } from "@/api/generated/models";
-import { API_BASE_URL, http } from "@/api/http";
+import { API_BASE_URL, authStore, http } from "@/api/http";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
@@ -42,9 +48,22 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { cn } from "@/lib/cn";
 import { datetime, errorMessage } from "@/lib/format";
-import { resourceLabel, statusLabel } from "@/lib/labels";
+import { resourceLabel, roleLabel, statusLabel } from "@/lib/labels";
 import { statusTone } from "@/lib/status";
+
+const APP_VERSION = "v0.1.0"; // 与 frontend/package.json 的 version 保持一致
+// 开源仓库与文档入口；正式开源发布后替换为最终地址。
+const REPO_URL = "https://github.com/tupai-zhice/tupai-zhice";
+const ROADMAP_DOCS_URL = `${REPO_URL}/tree/main/docs/roadmap`;
+
+// 这些平台的适配器尚未实现；占位卡片指引社区按 docs/integrations/ 的指南共建。
+const communityIntegrations = [
+  { name: "钉钉（DingTalk）" },
+  { name: "企业微信（WeCom）" },
+  { name: "Google Workspace" },
+] as const;
 
 const resources = [
   "teachers",
@@ -114,8 +133,9 @@ const permissionLabels: Record<string, string> = {
   "base:record:delete": "清理系统识别出的重复生成记录",
 };
 
-export function IntegrationsPage() {
+export function SettingsPage() {
   const queryClient = useQueryClient();
+  const currentUser = useCurrentUserApiV1AuthMeGet();
   const connection = useFeishuConnectionApiV1IntegrationsFeishuConnectionGet();
   const syncs = useListFeishuSyncsApiV1IntegrationsFeishuSyncsGet();
   const aiConfiguration = useQuery({
@@ -143,9 +163,11 @@ export function IntegrationsPage() {
   const [editingAI, setEditingAI] = useState(false);
   const [batchResult, setBatchResult] = useState<FeishuBatchSyncResponse | null>(null);
   const [syncReauthorizationPrompt, setSyncReauthorizationPrompt] = useState(false);
+  // null 表示跟随连接状态自动展开/收起；用户手动切换后以手动选择为准。
+  const [feishuExpanded, setFeishuExpanded] = useState<boolean | null>(null);
 
   const refresh = async () => {
-    await Promise.all([connection.refetch(), syncs.refetch(), aiConfiguration.refetch()]);
+    await Promise.all([connection.refetch(), syncs.refetch(), aiConfiguration.refetch(), currentUser.refetch()]);
   };
   const refreshConnection = useCallback(async () => {
     await queryClient.invalidateQueries({
@@ -294,6 +316,7 @@ export function IntegrationsPage() {
       setRedirectUri(configured.oauth_redirect_uri || "");
       setFrontendUrl(configured.frontend_url || "");
       if (new URLSearchParams(window.location.search).get("section") === "aily") {
+        setFeishuExpanded(true);
         setEditingApp(true);
         window.requestAnimationFrame(() => {
           document.getElementById("aily-configuration")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -331,10 +354,11 @@ export function IntegrationsPage() {
     }
   }, [aiConfiguration.data]);
 
-  if (connection.isPending || syncs.isPending || aiConfiguration.isPending) return <LoadingState />;
-  if (connection.isError || syncs.isError || aiConfiguration.isError || !connection.data || !aiConfiguration.data) return <ErrorState retry={() => void refresh()} />;
+  if (connection.isPending || syncs.isPending || aiConfiguration.isPending || currentUser.isPending) return <LoadingState />;
+  if (connection.isError || syncs.isError || aiConfiguration.isError || currentUser.isError || !connection.data || !aiConfiguration.data || !currentUser.data) return <ErrorState retry={() => void refresh()} />;
 
   const status = connection.data;
+  const me = currentUser.data;
   const grantedScopes = Array.isArray(status?.granted_scopes) ? status.granted_scopes : [];
   const missingScopes = Array.isArray(status?.missing_scopes) ? status.missing_scopes : [];
   const workspaceReady = workspaceHasAllResources(status.workspace);
@@ -353,6 +377,7 @@ export function IntegrationsPage() {
       missingBitableSyncScopes.length === 0 &&
       workspaceReady,
   );
+  const feishuExpandedOpen = feishuExpanded ?? !ready;
   const hasPublicCleanupScope = grantedScopes.includes("base:record:delete");
   const syncBlockers = [
     !status?.app_configured ? "还没有保存企业自建应用配置" : null,
@@ -373,6 +398,16 @@ export function IntegrationsPage() {
       : !workspaceReady
         ? 3
         : 4;
+  const feishuBadgeTone: BadgeTone = ready ? "green" : status.status === "reauthorization_required" ? "red" : "yellow";
+  const feishuBadgeLabel = ready
+    ? "已连接"
+    : status.status === "unconfigured"
+      ? "未配置"
+      : status.status === "not_authorized"
+        ? "待授权"
+        : status.status === "reauthorization_required"
+          ? "需重新授权"
+          : "配置中";
 
   const copyCallback = async () => {
     await navigator.clipboard.writeText(redirectUri);
@@ -388,260 +423,381 @@ export function IntegrationsPage() {
   return (
     <div className="space-y-5 animate-fade-in">
       <PageHeader
-        title="飞书集成"
+        title="设置"
         actions={
-          <>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setGuideStep(0);
-                setGuideOpen(true);
-              }}
-            >
-              <Link2 className="size-3.5" />接入向导
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => void refresh()}>
-              <RefreshCw className="size-3.5" />刷新状态
-            </Button>
-          </>
+          <Button size="sm" variant="outline" onClick={() => void refresh()}>
+            <RefreshCw className="size-3.5" />刷新状态
+          </Button>
         }
       >
-        <p className="mt-1 text-sm text-zinc-500">
-          管理员授权后，系统直接创建并管理排课多维表格，不需要复制任何表格标识。
-        </p>
+        <p className="mt-1 text-sm text-zinc-500">管理账户、AI 模型、外部集成与应用信息。</p>
       </PageHeader>
 
-      <ConnectionSummary status={status} ready={ready} ai={aiConfiguration.data} />
-
-      <section className="border-y border-zinc-200 bg-white">
-        <div className="border-b border-zinc-200 px-5 py-4">
-          <h2 className="text-sm font-semibold text-zinc-950">生产接入步骤</h2>
-          <p className="mt-1 text-xs text-zinc-500">当前需要完成第 {currentStep + 1} 步</p>
-        </div>
-        <div className="divide-y divide-zinc-100">
-          <FlowStep
-            number={1}
-            title="配置企业自建应用"
-            description="管理员填写飞书企业自建应用编号和应用密钥，后端自动加密保存。"
-            state={status.app_configured ? "completed" : "current"}
-            icon={Settings2}
-          >
-            <ApplicationConfiguration
-              status={status}
-              appId={appId}
-              setAppId={setAppId}
-              appSecret={appSecret}
-              setAppSecret={setAppSecret}
-              ailyAppId={ailyAppId}
-              setAilyAppId={setAilyAppId}
-              ailySkillId={ailySkillId}
-              setAilySkillId={setAilySkillId}
-              redirectUri={redirectUri}
-              editing={editingApp}
-              setEditing={setEditingApp}
-              saving={configureApp.isPending}
-              save={() =>
-                configureApp.mutate({
-                  data: {
-                    app_id: appId.trim(),
-                    app_secret: appSecret,
-                    oauth_redirect_uri: redirectUri.trim(),
-                    frontend_url: frontendUrl.trim(),
-                    aily_app_id: ailyAppId.trim(),
-                    aily_skill_id: ailySkillId.trim(),
-                  },
-                })
-              }
-              copiedCallback={copiedCallback}
-              copyCallback={() => void copyCallback()}
-            />
-          </FlowStep>
-
-          <FlowStep
-            number={2}
-            title="配置一句话排课 AI"
-            description="AI 负责理解教务人员的自然语言，CP-SAT 负责执行确定性排课。"
-            state={aiConfiguration.data.configured ? "completed" : "current"}
-            icon={Settings2}
-          >
-            <AIConfigurationPanel
-              configuration={aiConfiguration.data}
-              baseUrl={aiBaseUrl}
-              setBaseUrl={setAiBaseUrl}
-              apiKey={aiApiKey}
-              setApiKey={setAiApiKey}
-              model={aiModel}
-              setModel={setAiModel}
-              editing={editingAI}
-              setEditing={setEditingAI}
-              saving={configureAI.isPending}
-              save={() => configureAI.mutate()}
-            />
-          </FlowStep>
-
-          <FlowStep
-            number={3}
-            title="授权飞书管理员账号"
-            description="授权后，多维表格归属该管理员并出现在其飞书云空间。"
-            state={status.authorized ? "completed" : status.app_configured ? "current" : "pending"}
-            icon={KeyRound}
-          >
-            {status.authorized ? (
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className="text-sm text-emerald-700">管理员账号已授权</span>
-                  <span className="text-xs text-zinc-400">
-                    访问令牌到期：{datetime(status.access_expires_at)}
-                  </span>
-                  {!hasPublicCleanupScope ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => authorize.mutate()}
-                      disabled={authorize.isPending}
-                    >
-                      <ShieldCheck className="size-3.5" />补充公开表清理权限
-                    </Button>
-                  ) : null}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setDisconnectConfirmOpen(true)}
-                    disabled={disconnect.isPending}
-                  >
-                    <LogOut className="size-3.5" />解除连接
-                  </Button>
-                </div>
-                {missingScopes.length > 0 ? (
-                  <PermissionWarning scopes={missingScopes} />
-                ) : null}
-                {!hasPublicCleanupScope ? (
-                  <p className="border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-                    已有同步仍可使用；点击“补充公开表清理权限”重新授权一次后，系统会在同步“公开展示汇总”时自动删除历史重复记录。
-                  </p>
-                ) : null}
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {status.status === "reauthorization_required" ? (
-                  <div className="border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs leading-5 text-red-900">
-                    飞书用户授权已过期或缺少当前同步所需权限。请先在飞书开放平台发布最新权限版本，再点击下方按钮重新授权管理员账号。
-                  </div>
-                ) : null}
-                <Button
-                  onClick={() => authorize.mutate()}
-                  disabled={!status.app_configured || authorize.isPending}
-                >
-                  <ShieldCheck className="size-4" />
-                  {authorize.isPending
-                    ? "正在跳转"
-                    : status.status === "reauthorization_required"
-                      ? "重新授权管理员账号"
-                      : "授权飞书管理员账号"}
-                </Button>
-                {missingScopes.length > 0 ? (
-                  <PermissionWarning scopes={missingScopes} />
-                ) : null}
-              </div>
-            )}
-          </FlowStep>
-
-          <FlowStep
-            number={4}
-            title="创建排课多维表格"
-            description="系统会为当前课表方案创建独立的内部业务表，以及领导、班级入口目录和调课通知展示数据，并保存全部表格标识。"
-            state={workspaceReady ? "completed" : status.authorized ? "current" : "pending"}
-            icon={Database}
-          >
-            {workspaceReady && status.workspace ? (
-              <WorkspaceDetails workspace={status.workspace} />
-            ) : (
-              <div className="flex max-w-xl flex-col gap-2 sm:flex-row">
-                <input
-                  aria-label="多维表格基础名称"
-                  value={workspaceName}
-                  onChange={(event) => setWorkspaceName(event.target.value)}
-                  className="h-9 min-w-0 flex-1 rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-blue-500"
-                  placeholder="例如：排课协同"
-                />
-                <Button
-                  onClick={() => createWorkspace.mutate({ data: { name: workspaceName.trim() } })}
-                  disabled={
-                    !status.authorized || workspaceName.trim().length < 2 || createWorkspace.isPending
-                  }
-                >
-                  <TableProperties className="size-4" />
-                  {createWorkspace.isPending
-                    ? `正在补齐 ${resources.length} 张表`
-                    : status.workspace
-                      ? "补齐缺失业务表"
-                      : "自动创建排课表格"}
-                </Button>
-                <p className="text-xs leading-5 text-zinc-500 sm:col-span-2">{status.workspace ? `当前空间已有 ${workspaceResourceCount(status.workspace)} / ${resources.length} 张业务表；用同名空间补齐新增展示表，不会新建另一套课表。` : "创建时会自动加上当前课表方案名称，因此第 1、2、3……N 套课表会绑定到不同的飞书多维表格。"}</p>
-              </div>
-            )}
-          </FlowStep>
-
-          <FlowStep
-            number={5}
-            title="同步业务数据"
-            description="一键同步当前发布版本的业务数据、展示汇总和班级链接目录；发布或回滚后会自动更新当前版本。所有生成表按稳定业务标识覆盖更新并清理旧版本行；此按钮只同步，不会启动求解。"
-            state={ready ? "current" : "pending"}
-            icon={CloudUpload}
-          >
-            <div className="flex max-w-3xl flex-col gap-2 sm:flex-row">
-              <Button
-                onClick={() => batchSync.mutate({ data: {} })}
-                disabled={!ready || batchSync.isPending || sync.isPending}
-              >
-                <CloudUpload className="size-4" />
-                {batchSync.isPending ? `正在同步 ${resources.length} 类数据` : "一键同步当前方案"}
-              </Button>
-              <Select aria-label="同步资源" selectSize="sm" containerClassName="w-44" value={resource} onChange={(event) => setResource(event.target.value as typeof resource)}
-                className="h-9 min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-3 text-sm"
-                disabled={!ready || batchSync.isPending}
-              >
-                {resources.map((item) => (
-                  <option key={item} value={item}>
-                    {resourceLabel(item)}
-                  </option>
-                ))}
-              </Select>
-              <Button
-                onClick={() => sync.mutate({ data: { resource } })}
-                disabled={!ready || sync.isPending || batchSync.isPending}
-              >
-                <SendHorizontal className="size-4" />
-                {sync.isPending ? "正在同步单表" : "重试单表"}
-              </Button>
-              {status.workspace?.url ? <a href={status.workspace.url} target="_blank" rel="noreferrer"><Button type="button" variant="outline"><ExternalLink className="size-4" />打开当前多维表格</Button></a> : null}
+      <SettingsSection title="通用" description="当前登录账户与登录密码。">
+        <div className="space-y-5 px-5 py-4">
+          <div>
+            <div className="text-sm font-medium text-zinc-900">账户信息</div>
+            <div className="mt-1 divide-y divide-zinc-50 border-y border-zinc-100">
+              <InfoField label="用户名" value={me.username} />
+              <InfoField label="角色" value={roleLabel(me.role)} />
+              <InfoField label="账户 ID" value={me.id} mono />
+              <InfoField label="创建时间" value={datetime(me.created_at)} />
             </div>
-            {!ready ? (
-              <div className="mt-3 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-                <div className="font-medium">同步暂不可用，原因是：</div>
-                <ul className="mt-1 list-disc pl-4">{syncBlockers.map((item) => <li key={item}>{item}</li>)}</ul>
-              </div>
-            ) : <p className="mt-2 text-xs text-emerald-700">连接已就绪：一键同步只写入顶栏当前所选方案绑定的独立多维表格；求解必须在“排课求解”页单独点击“开始求解”。</p>}
-            {(syncReauthorizationPrompt || status.status === "reauthorization_required") ? (
-              <FeishuReauthorizationAction
-                authorize={() => authorize.mutate()}
-                authorizing={authorize.isPending}
-              />
-            ) : null}
-            {batchResult ? (
-              <BatchSyncResult
-                result={batchResult}
-                authorize={() => authorize.mutate()}
-                authorizing={authorize.isPending}
-              />
-            ) : null}
-          </FlowStep>
-
+          </div>
+          <div className="border-t border-zinc-100 pt-4">
+            <div className="text-sm font-medium text-zinc-900">修改密码</div>
+            <p className="mt-1 text-xs text-zinc-500">修改成功后当前登录状态会立即失效，需要使用新密码重新登录。</p>
+            <ChangePasswordForm />
+          </div>
         </div>
-      </section>
+      </SettingsSection>
 
-      <SyncHistory syncs={Array.isArray(syncs.data) ? syncs.data : []} />
+      <SettingsSection title="AI 模型（OpenAI-compatible）" description="一句话排课的自然语言理解模型，与具体平台无关。">
+        <div className="px-5 py-4">
+          <AIConfigurationPanel
+            configuration={aiConfiguration.data}
+            baseUrl={aiBaseUrl}
+            setBaseUrl={setAiBaseUrl}
+            apiKey={aiApiKey}
+            setApiKey={setAiApiKey}
+            model={aiModel}
+            setModel={setAiModel}
+            editing={editingAI}
+            setEditing={setEditingAI}
+            saving={configureAI.isPending}
+            save={() => configureAI.mutate()}
+          />
+        </div>
+      </SettingsSection>
+
+      <SettingsSection title="集成" description="主数据与课表的外发目标通过集成适配器接入；未接入外部平台时本地模式即全部功能。">
+        <div className="divide-y divide-zinc-100">
+          <div>
+            <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-full bg-blue-50 text-blue-700">
+                  <Link2 className="size-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-semibold text-zinc-950">飞书（Lark / 妙搭）</h3>
+                    <Badge tone={feishuBadgeTone}>{feishuBadgeLabel}</Badge>
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    管理员授权后，系统直接创建并管理排课多维表格，不需要复制任何表格标识。
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setGuideStep(0);
+                    setGuideOpen(true);
+                  }}
+                >
+                  <Link2 className="size-3.5" />接入向导
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  aria-expanded={feishuExpandedOpen}
+                  onClick={() => setFeishuExpanded(!feishuExpandedOpen)}
+                >
+                  {feishuExpandedOpen ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                  {feishuExpandedOpen ? "收起配置" : "展开配置"}
+                </Button>
+              </div>
+            </div>
+            {feishuExpandedOpen ? (
+              <div className="space-y-5 border-t border-zinc-100 px-5 py-5">
+                <ConnectionSummary status={status} ready={ready} ai={aiConfiguration.data} />
+
+                <section>
+                  <div className="border-b border-zinc-200 pb-3">
+                    <h2 className="text-sm font-semibold text-zinc-950">生产接入步骤</h2>
+                    <p className="mt-1 text-xs text-zinc-500">当前需要完成第 {currentStep + 1} 步</p>
+                  </div>
+                  <div className="divide-y divide-zinc-100">
+                    <FlowStep
+                      number={1}
+                      title="配置企业自建应用"
+                      description="管理员填写飞书企业自建应用编号和应用密钥，后端自动加密保存。"
+                      state={status.app_configured ? "completed" : "current"}
+                      icon={Settings2}
+                    >
+                      <ApplicationConfiguration
+                        status={status}
+                        appId={appId}
+                        setAppId={setAppId}
+                        appSecret={appSecret}
+                        setAppSecret={setAppSecret}
+                        ailyAppId={ailyAppId}
+                        setAilyAppId={setAilyAppId}
+                        ailySkillId={ailySkillId}
+                        setAilySkillId={setAilySkillId}
+                        redirectUri={redirectUri}
+                        editing={editingApp}
+                        setEditing={setEditingApp}
+                        saving={configureApp.isPending}
+                        save={() =>
+                          configureApp.mutate({
+                            data: {
+                              app_id: appId.trim(),
+                              app_secret: appSecret,
+                              oauth_redirect_uri: redirectUri.trim(),
+                              frontend_url: frontendUrl.trim(),
+                              aily_app_id: ailyAppId.trim(),
+                              aily_skill_id: ailySkillId.trim(),
+                            },
+                          })
+                        }
+                        copiedCallback={copiedCallback}
+                        copyCallback={() => void copyCallback()}
+                      />
+                    </FlowStep>
+
+                    <FlowStep
+                      number={2}
+                      title="配置一句话排课 AI"
+                      description="AI 负责理解教务人员的自然语言，CP-SAT 负责执行确定性排课。"
+                      state={aiConfiguration.data.configured ? "completed" : "current"}
+                      icon={Settings2}
+                    >
+                      <div className="space-y-2 text-sm">
+                        {aiConfiguration.data.configured ? (
+                          <div className="flex flex-wrap items-center gap-3">
+                            <span className="text-sm font-medium text-emerald-700">自然语言 AI 已接入</span>
+                            <span className="font-mono text-xs text-zinc-500">{aiConfiguration.data.model}</span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-amber-700">还未配置模型，请在本页「AI 模型（OpenAI-compatible）」分区完成配置。</span>
+                        )}
+                      </div>
+                    </FlowStep>
+
+                    <FlowStep
+                      number={3}
+                      title="授权飞书管理员账号"
+                      description="授权后，多维表格归属该管理员并出现在其飞书云空间。"
+                      state={status.authorized ? "completed" : status.app_configured ? "current" : "pending"}
+                      icon={KeyRound}
+                    >
+                      {status.authorized ? (
+                        <div className="space-y-3">
+                          <div className="flex flex-wrap items-center gap-3">
+                            <span className="text-sm text-emerald-700">管理员账号已授权</span>
+                            <span className="text-xs text-zinc-400">
+                              访问令牌到期：{datetime(status.access_expires_at)}
+                            </span>
+                            {!hasPublicCleanupScope ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => authorize.mutate()}
+                                disabled={authorize.isPending}
+                              >
+                                <ShieldCheck className="size-3.5" />补充公开表清理权限
+                              </Button>
+                            ) : null}
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => setDisconnectConfirmOpen(true)}
+                              disabled={disconnect.isPending}
+                            >
+                              <LogOut className="size-3.5" />解除连接
+                            </Button>
+                          </div>
+                          {missingScopes.length > 0 ? (
+                            <PermissionWarning scopes={missingScopes} />
+                          ) : null}
+                          {!hasPublicCleanupScope ? (
+                            <p className="border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                              已有同步仍可使用；点击“补充公开表清理权限”重新授权一次后，系统会在同步“公开展示汇总”时自动删除历史重复记录。
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {status.status === "reauthorization_required" ? (
+                            <div className="border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs leading-5 text-red-900">
+                              飞书用户授权已过期或缺少当前同步所需权限。请先在飞书开放平台发布最新权限版本，再点击下方按钮重新授权管理员账号。
+                            </div>
+                          ) : null}
+                          <Button
+                            onClick={() => authorize.mutate()}
+                            disabled={!status.app_configured || authorize.isPending}
+                          >
+                            <ShieldCheck className="size-4" />
+                            {authorize.isPending
+                              ? "正在跳转"
+                              : status.status === "reauthorization_required"
+                                ? "重新授权管理员账号"
+                                : "授权飞书管理员账号"}
+                          </Button>
+                          {missingScopes.length > 0 ? (
+                            <PermissionWarning scopes={missingScopes} />
+                          ) : null}
+                        </div>
+                      )}
+                    </FlowStep>
+
+                    <FlowStep
+                      number={4}
+                      title="创建排课多维表格"
+                      description="系统会为当前课表方案创建独立的内部业务表，以及领导、班级入口目录和调课通知展示数据，并保存全部表格标识。"
+                      state={workspaceReady ? "completed" : status.authorized ? "current" : "pending"}
+                      icon={Database}
+                    >
+                      {workspaceReady && status.workspace ? (
+                        <WorkspaceDetails workspace={status.workspace} />
+                      ) : (
+                        <div className="flex max-w-xl flex-col gap-2 sm:flex-row">
+                          <input
+                            aria-label="多维表格基础名称"
+                            value={workspaceName}
+                            onChange={(event) => setWorkspaceName(event.target.value)}
+                            className="h-9 min-w-0 flex-1 rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-blue-500"
+                            placeholder="例如：排课协同"
+                          />
+                          <Button
+                            onClick={() => createWorkspace.mutate({ data: { name: workspaceName.trim() } })}
+                            disabled={
+                              !status.authorized || workspaceName.trim().length < 2 || createWorkspace.isPending
+                            }
+                          >
+                            <TableProperties className="size-4" />
+                            {createWorkspace.isPending
+                              ? `正在补齐 ${resources.length} 张表`
+                              : status.workspace
+                                ? "补齐缺失业务表"
+                                : "自动创建排课表格"}
+                          </Button>
+                          <p className="text-xs leading-5 text-zinc-500 sm:col-span-2">{status.workspace ? `当前空间已有 ${workspaceResourceCount(status.workspace)} / ${resources.length} 张业务表；用同名空间补齐新增展示表，不会新建另一套课表。` : "创建时会自动加上当前课表方案名称，因此第 1、2、3……N 套课表会绑定到不同的飞书多维表格。"}</p>
+                        </div>
+                      )}
+                    </FlowStep>
+
+                    <FlowStep
+                      number={5}
+                      title="同步业务数据"
+                      description="一键同步当前发布版本的业务数据、展示汇总和班级链接目录；发布或回滚后会自动更新当前版本。所有生成表按稳定业务标识覆盖更新并清理旧版本行；此按钮只同步，不会启动求解。"
+                      state={ready ? "current" : "pending"}
+                      icon={CloudUpload}
+                    >
+                      <div className="flex max-w-3xl flex-col gap-2 sm:flex-row">
+                        <Button
+                          onClick={() => batchSync.mutate({ data: {} })}
+                          disabled={!ready || batchSync.isPending || sync.isPending}
+                        >
+                          <CloudUpload className="size-4" />
+                          {batchSync.isPending ? `正在同步 ${resources.length} 类数据` : "一键同步当前方案"}
+                        </Button>
+                        <Select aria-label="同步资源" selectSize="sm" containerClassName="w-44" value={resource} onChange={(event) => setResource(event.target.value as typeof resource)}
+                          className="h-9 min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-3 text-sm"
+                          disabled={!ready || batchSync.isPending}
+                        >
+                          {resources.map((item) => (
+                            <option key={item} value={item}>
+                              {resourceLabel(item)}
+                            </option>
+                          ))}
+                        </Select>
+                        <Button
+                          onClick={() => sync.mutate({ data: { resource } })}
+                          disabled={!ready || sync.isPending || batchSync.isPending}
+                        >
+                          <SendHorizontal className="size-4" />
+                          {sync.isPending ? "正在同步单表" : "重试单表"}
+                        </Button>
+                        {status.workspace?.url ? <a href={status.workspace.url} target="_blank" rel="noreferrer"><Button type="button" variant="outline"><ExternalLink className="size-4" />打开当前多维表格</Button></a> : null}
+                      </div>
+                      {!ready ? (
+                        <div className="mt-3 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                          <div className="font-medium">同步暂不可用，原因是：</div>
+                          <ul className="mt-1 list-disc pl-4">{syncBlockers.map((item) => <li key={item}>{item}</li>)}</ul>
+                        </div>
+                      ) : <p className="mt-2 text-xs text-emerald-700">连接已就绪：一键同步只写入顶栏当前所选方案绑定的独立多维表格；求解必须在“排课求解”页单独点击“开始求解”。</p>}
+                      {(syncReauthorizationPrompt || status.status === "reauthorization_required") ? (
+                        <FeishuReauthorizationAction
+                          authorize={() => authorize.mutate()}
+                          authorizing={authorize.isPending}
+                        />
+                      ) : null}
+                      {batchResult ? (
+                        <BatchSyncResult
+                          result={batchResult}
+                          authorize={() => authorize.mutate()}
+                          authorizing={authorize.isPending}
+                        />
+                      ) : null}
+                    </FlowStep>
+
+                  </div>
+                </section>
+
+                <SyncHistory syncs={Array.isArray(syncs.data) ? syncs.data : []} />
+              </div>
+            ) : null}
+          </div>
+
+          {communityIntegrations.map((item) => (
+            <div key={item.name} className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-full bg-zinc-100 text-zinc-400">
+                  <Puzzle className="size-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-semibold text-zinc-950">{item.name}</h3>
+                    <Badge>规划中</Badge>
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-500">社区共建中 · 接入指南见 docs/integrations/</p>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-full bg-emerald-50 text-emerald-700">
+                <HardDrive className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-sm font-semibold text-zinc-950">本地模式</h3>
+                  <Badge tone="green">已启用</Badge>
+                </div>
+                <p className="mt-1 text-xs text-zinc-500">默认可用 · 无需配置；全部核心功能不依赖任何外部平台。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection title="关于" description="版本与开源信息。">
+        <div className="divide-y divide-zinc-50 px-5 py-2">
+          <InfoField label="版本" value={APP_VERSION} />
+          <InfoField
+            label="开源仓库"
+            value={
+              <a className="inline-flex items-center gap-1 text-blue-700 hover:underline" href={REPO_URL} target="_blank" rel="noreferrer">
+                github.com/tupai-zhice/tupai-zhice<ExternalLink className="size-3.5" />
+              </a>
+            }
+          />
+          <InfoField
+            label="文档"
+            value={
+              <a className="inline-flex items-center gap-1 text-blue-700 hover:underline" href={ROADMAP_DOCS_URL} target="_blank" rel="noreferrer">
+                docs/roadmap · 开源化升级路线与设计决策<ExternalLink className="size-3.5" />
+              </a>
+            }
+          />
+        </div>
+      </SettingsSection>
 
       <OnboardingDialog
         open={guideOpen}
@@ -698,6 +854,103 @@ export function IntegrationsPage() {
         onConfirm={() => disconnect.mutate()}
       />
     </div>
+  );
+}
+
+function SettingsSection({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
+  return (
+    <section className="rounded-lg border border-zinc-200 bg-white shadow-2xs">
+      <div className="border-b border-zinc-200 px-5 py-4">
+        <h2 className="text-sm font-semibold text-zinc-950">{title}</h2>
+        <p className="mt-1 text-xs text-zinc-500">{description}</p>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function InfoField({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
+  return <div className="grid grid-cols-[96px_1fr] gap-3 py-2.5 text-sm"><span className="text-zinc-400">{label}</span><span className={cn("min-w-0 break-all text-zinc-700", mono && "font-mono text-xs")}>{value}</span></div>;
+}
+
+function ChangePasswordForm() {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const changePassword = useChangeOwnPasswordApiV1AuthChangePasswordPost({
+    mutation: {
+      onSuccess: () => {
+        toast.success("密码已更新，请使用新密码重新登录");
+        // 改密会递增 token_version，旧令牌立即失效；清理本地凭据，由 AuthBoundary 回到登录页。
+        authStore.clear();
+        window.dispatchEvent(new Event("tupai:unauthorized"));
+      },
+      onError: (error) => toast.error(errorMessage(error)),
+    },
+  });
+  const confirmPasswordMismatch = confirmPassword.length > 0 && confirmPassword !== newPassword;
+  const canSubmit =
+    currentPassword.length > 0 &&
+    newPassword.length >= 8 &&
+    confirmPassword.length >= 8 &&
+    !confirmPasswordMismatch &&
+    !changePassword.isPending;
+
+  return (
+    <form
+      className="mt-4 max-w-md space-y-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (canSubmit) {
+          changePassword.mutate({ data: { current_password: currentPassword, new_password: newPassword } });
+        }
+      }}
+    >
+      <label className="block text-sm text-zinc-700">
+        当前密码
+        <input
+          aria-label="当前密码"
+          type="password"
+          autoComplete="current-password"
+          maxLength={128}
+          value={currentPassword}
+          onChange={(event) => setCurrentPassword(event.target.value)}
+          className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-blue-500"
+        />
+      </label>
+      <label className="block text-sm text-zinc-700">
+        新密码
+        <input
+          aria-label="新密码"
+          type="password"
+          autoComplete="new-password"
+          maxLength={128}
+          value={newPassword}
+          onChange={(event) => setNewPassword(event.target.value)}
+          className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-blue-500"
+        />
+        <span className="mt-1 block text-xs leading-5 text-zinc-500">至少 8 个字符，且不能与当前密码相同。</span>
+      </label>
+      <label className="block text-sm text-zinc-700">
+        确认新密码
+        <input
+          aria-label="确认新密码"
+          type="password"
+          autoComplete="new-password"
+          maxLength={128}
+          value={confirmPassword}
+          onChange={(event) => setConfirmPassword(event.target.value)}
+          className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-blue-500"
+        />
+      </label>
+      {confirmPasswordMismatch ? <p className="text-xs text-red-600">两次输入的新密码不一致。</p> : null}
+      <div className="pt-1">
+        <Button type="submit" disabled={!canSubmit}>
+          <KeyRound className="size-4" />
+          {changePassword.isPending ? "正在更新" : "更新密码"}
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -799,7 +1052,7 @@ function FlowStep({
   children: React.ReactNode;
 }) {
   return (
-    <div className={`grid gap-4 px-5 py-5 lg:grid-cols-[260px_1fr] ${state === "pending" ? "opacity-60" : ""}`}>
+    <div className={`grid gap-4 py-5 lg:grid-cols-[260px_1fr] ${state === "pending" ? "opacity-60" : ""}`}>
       <div className="flex gap-3">
         <div className={`grid size-8 shrink-0 place-items-center rounded-full ${state === "completed" ? "bg-emerald-100 text-emerald-700" : state === "current" ? "bg-blue-600 text-white" : "bg-zinc-100 text-zinc-400"}`}>
           {state === "completed" ? <CheckCircle2 className="size-4" /> : <span className="text-xs font-semibold">{number}</span>}
@@ -925,7 +1178,7 @@ function ApplicationConfiguration({
           />
         </label>
       </div>
-      <details className="border border-zinc-200 bg-zinc-50 p-4">
+      <details id="aily-configuration" className="border border-zinc-200 bg-zinc-50 p-4">
         <summary className="cursor-pointer text-sm font-medium text-zinc-700">Aily Workflow 高级接入（可选）</summary>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <label className="text-sm text-zinc-700">Aily 应用标识<input aria-label="飞书 Aily 应用标识" value={ailyAppId} onChange={(event) => setAilyAppId(event.target.value)} placeholder="spring_xxxxxxxxxx" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" /></label>
@@ -1330,7 +1583,7 @@ function GuideFinish({ status }: { status: FeishuConnectionResponse }) {
     <div className="space-y-4">
       <GuideCompleted
         title={ready ? "飞书接入已经就绪" : "接入步骤还未完成"}
-        text={ready ? "先在“版本与回滚”发布课表，再回到飞书集成同步课表；主数据和规则也可以分别同步。" : "返回前面的步骤完成账号授权和自动建表。"}
+        text={ready ? "先在“版本与回滚”发布课表，再回到设置页的飞书卡片同步课表；主数据和规则也可以分别同步。" : "返回前面的步骤完成账号授权和自动建表。"}
       />
       {status.workspace?.url ? <a href={status.workspace.url} target="_blank" rel="noreferrer"><Button variant="outline"><ExternalLink className="size-4" />打开排课多维表格</Button></a> : null}
     </div>

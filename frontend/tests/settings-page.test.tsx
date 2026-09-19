@@ -3,10 +3,11 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { IntegrationsPage } from "@/pages/integrations-page";
+import { SettingsPage } from "@/pages/settings-page";
 
 const mocks = vi.hoisted(() => ({
   connection: { current: {} as Record<string, unknown> },
+  currentUser: { current: {} as Record<string, unknown> },
   createWorkspace: vi.fn(),
   configureApp: vi.fn(),
   disconnect: vi.fn(),
@@ -15,8 +16,11 @@ const mocks = vi.hoisted(() => ({
   batchSync: vi.fn(),
   aiGet: vi.fn(),
   aiPost: vi.fn(),
+  changePassword: vi.fn(),
+  authClear: vi.fn(),
   refetchConnection: vi.fn(),
   refetchSyncs: vi.fn(),
+  refetchCurrentUser: vi.fn(),
 }));
 
 vi.mock("@/api/http", () => ({
@@ -24,6 +28,9 @@ vi.mock("@/api/http", () => ({
   http: {
     get: mocks.aiGet,
     post: mocks.aiPost,
+  },
+  authStore: {
+    clear: mocks.authClear,
   },
 }));
 
@@ -33,6 +40,12 @@ vi.mock("@/api/generated/client", () => ({
   useConfigureFeishuAppApiV1IntegrationsFeishuAppConfigurationPost: () => ({
     mutate: mocks.configureApp,
     isPending: false,
+  }),
+  useCurrentUserApiV1AuthMeGet: () => ({
+    data: mocks.currentUser.current,
+    isPending: false,
+    isError: false,
+    refetch: mocks.refetchCurrentUser,
   }),
   useFeishuConnectionApiV1IntegrationsFeishuConnectionGet: () => ({
     data: mocks.connection.current,
@@ -66,6 +79,14 @@ vi.mock("@/api/generated/client", () => ({
     mutate: mocks.batchSync,
     isPending: false,
   }),
+  useChangeOwnPasswordApiV1AuthChangePasswordPost: (options?: { mutation?: { onSuccess?: (data: unknown, variables: { data: unknown }, context: unknown) => void } }) => ({
+    // 模拟真实 mutation 的成功路径，便于断言组件在 onSuccess 里的登出行为。
+    mutate: (variables: { data: unknown }) => {
+      mocks.changePassword(variables);
+      options?.mutation?.onSuccess?.(undefined, variables, undefined);
+    },
+    isPending: false,
+  }),
 }));
 
 const baseConnection = {
@@ -93,16 +114,24 @@ const baseConnection = {
   workspace: null,
 };
 
+const baseUser = {
+  id: "user-1",
+  username: "admin",
+  role: "admin",
+  is_active: true,
+  created_at: "2026-01-01T00:00:00Z",
+};
+
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <IntegrationsPage />
+      <SettingsPage />
     </QueryClientProvider>,
   );
 }
 
-describe("飞书生产接入页", () => {
+describe("设置页", () => {
   afterEach(cleanup);
 
   beforeEach(() => {
@@ -114,8 +143,11 @@ describe("飞书生产接入页", () => {
       mocks.startAuthorization,
       mocks.sync,
       mocks.batchSync,
+      mocks.changePassword,
+      mocks.authClear,
       mocks.refetchConnection,
       mocks.refetchSyncs,
+      mocks.refetchCurrentUser,
       mocks.aiGet,
       mocks.aiPost,
     ]) {
@@ -124,6 +156,7 @@ describe("飞书生产接入页", () => {
     mocks.aiGet.mockResolvedValue({ data: { configured: true, source: "frontend", provider: "openai_compatible", base_url: "https://model.example/v1", api_key_configured: true, model: "scheduling-model" } });
     mocks.aiPost.mockResolvedValue({ data: { configured: true, source: "frontend", provider: "openai_compatible", base_url: "https://model.example/v1", api_key_configured: true, model: "scheduling-model" } });
     mocks.connection.current = { ...baseConnection };
+    mocks.currentUser.current = { ...baseUser };
   });
 
   it("可在前端一次保存应用凭据，不再要求手工填写环境变量", async () => {
@@ -183,6 +216,29 @@ describe("飞书生产接入页", () => {
       api_key: "secret-ai-key",
       model: "scheduling-model",
     });
+  });
+
+  it("展示当前账户信息并提供修改密码表单", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByText("admin")).toBeVisible();
+    expect(screen.getByText("user-1")).toBeVisible();
+
+    // 两次输入的新密码不一致时按钮保持禁用。
+    await user.type(screen.getByLabelText("当前密码"), "old-password-1");
+    await user.type(screen.getByLabelText("新密码"), "new-password-1");
+    await user.type(screen.getByLabelText("确认新密码"), "different-pass");
+    expect(screen.getByRole("button", { name: "更新密码" })).toBeDisabled();
+
+    await user.clear(screen.getByLabelText("确认新密码"));
+    await user.type(screen.getByLabelText("确认新密码"), "new-password-1");
+    await user.click(screen.getByRole("button", { name: "更新密码" }));
+    expect(mocks.changePassword).toHaveBeenCalledWith({
+      data: { current_password: "old-password-1", new_password: "new-password-1" },
+    });
+    // 改密会递增 token_version，旧令牌立即失效，因此必须清理本地凭据要求重新登录。
+    expect(mocks.authClear).toHaveBeenCalled();
   });
 
   it("管理员授权后可以直接创建排课多维表格", async () => {
@@ -258,6 +314,8 @@ describe("飞书生产接入页", () => {
     const user = userEvent.setup();
     renderPage();
 
+    // 连接完全就绪时飞书卡片默认收起，先展开再操作同步区。
+    await user.click(await screen.findByRole("button", { name: "展开配置" }));
     expect(await screen.findByRole("link", { name: "打开多维表格" })).toHaveAttribute(
       "href",
       "https://example.feishu.cn/base/test",
