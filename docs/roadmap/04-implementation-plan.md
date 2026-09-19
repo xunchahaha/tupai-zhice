@@ -16,17 +16,17 @@
 | 批次 | 内容 | 状态 | 提交 |
 | --- | --- | --- | --- |
 | DOC-0 | roadmap 骨架 + 四大设计文档定稿 | ✅ 完成 | ceb0a8d, 3b8cc34, 8a04445, 515925c |
-| IMP-A | 后端导入管线 v2（映射服务 + preview/commit + L1 补强） | 🔄 实现中 | — |
-| INT-A | 后端集成抽象层（Protocol 能力接口 + registry，飞书 strangler 收敛为首个适配器，LocalAdapter 默认可用） | 排队（等 IMP-A 释放 api.py） | — |
+| IMP-A | 后端导入管线 v2（映射服务 + preview/commit + L1 补强） | ✅ 完成（18 新用例 + 74 回归全绿） | ae32a95 |
+| INT-A | 后端集成抽象层（Protocol 能力接口 + registry，飞书 strangler 收敛为首个适配器，LocalAdapter 默认可用） | 🔄 实现中 | — |
 | SET-A | 前端「设置」页重构（/settings 四分区：通用+改密 / AI 模型 / 集成卡片 / 关于；旧 /integrations 重定向） | 🔄 实现中（文件与 SET-B 不相交，并行） | — |
-| SET-B | 前端飞书露出中性化（文案级，5 文件 + e2e 名称；不含 integrations-page 与 app-shell 导航，那两处归 SET-A） | 🔄 实现中（与 IMP-A 并行，文件不相交） | — |
+| SET-B | 前端飞书露出中性化（文案级，5 文件 + e2e 名称；不含 integrations-page 与 app-shell 导航，那两处归 SET-A） | ✅ 完成（44/44 vitest 全绿，abdcb15） | abdcb15 |
 | UX-0 | 求解页交互断点与侧边栏 IA 调研（Workflow：勘察→业界参考→三方案→评审综合） | 🔄 运行中（只读，与实现批次零冲突） | — |
 | UX-A | 求解页交互闭环（日期窗口与规则联动、AI 解析后渐进披露参数、解析加载态 + thinking 展示） | 待 UX-0 简报 | — |
 | UX-B | 侧边栏与全局 SOP 重排（参考开源项目 IA；视觉风格不变） | 待 UX-0 简报 | — |
 | PUB-0 | 公开展示层调研（脱离妙搭后，面向老师/学生/家长的课表展示：免登录链接 / ICS 订阅 / 移动只读视图） | 🔄 专项 Workflow 运行中 | — |
 | PUB-A | 后端公开课表 API（匿名 token 链接、ICS 订阅端点、调课通知；复用 public_* 数据资产与权限体系） | 待 PUB-0 简报 | — |
 | PUB-B | 前端公开课表页（移动优先只读视图、二维码/链接分发、复用课表渲染组件） | 待 PUB-A | — |
-| IMP-B | 前端导入向导（上传→映射→校验→修复→提交，复用现有组件与动效） | 排队（等 IMP-A） | — |
+| IMP-B | 前端导入向导（上传→映射→校验→提交，复用现有组件与动效；原地修复属 IMP-4 二期） | 🔄 实现中（与 SET-A 文件不相交） | — |
 | MEM-A | 后端记忆层（PreferenceEntry + 一键归因 + 挖掘循环 + 求解权重编译器） | 排队（等 INT-A） | — |
 | MEM-B | 前端记忆 UI（待确认收件箱 + 详情页偏好区块 + 解释引用） | 排队（等 MEM-A） | — |
 | OSS-A | 开源文档套件（架构文档、README 重写、接入指南模板 feishu/local/dingtalk、LICENSE 建议） | 排队（等 INT-A 定形后写，避免返工） | — |
