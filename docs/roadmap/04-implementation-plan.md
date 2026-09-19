@@ -18,7 +18,7 @@
 | DOC-0 | roadmap 骨架 + 四大设计文档定稿 | ✅ 完成 | ceb0a8d, 3b8cc34, 8a04445, 515925c |
 | IMP-A | 后端导入管线 v2（映射服务 + preview/commit + L1 补强） | ✅ 完成（18 新用例 + 74 回归全绿） | ae32a95 |
 | INT-A | 后端集成抽象层（Protocol 能力接口 + registry，飞书 strangler 收敛为首个适配器，LocalAdapter 默认可用） | 🔄 实现中 | — |
-| SET-A | 前端「设置」页重构（/settings 四分区：通用+改密 / AI 模型 / 集成卡片 / 关于；旧 /integrations 重定向） | 🔄 实现中（文件与 SET-B 不相交，并行） | — |
+| SET-A | 前端「设置」页重构（/settings 四分区：通用+改密 / AI 模型 / 集成卡片 / 关于；旧 /integrations 重定向） | ✅ 完成（45/45 vitest + tsc 零错误，7769e14） | 7769e14 |
 | SET-B | 前端飞书露出中性化（文案级，5 文件 + e2e 名称；不含 integrations-page 与 app-shell 导航，那两处归 SET-A） | ✅ 完成（44/44 vitest 全绿，abdcb15） | abdcb15 |
 | UX-0 | 求解页交互断点与侧边栏 IA 调研（Workflow：勘察→业界参考→三方案→评审综合） | 🔄 运行中（只读，与实现批次零冲突） | — |
 | UX-A | 求解页交互闭环（日期窗口与规则联动、AI 解析后渐进披露参数、解析加载态 + thinking 展示） | 待 UX-0 简报 | — |
