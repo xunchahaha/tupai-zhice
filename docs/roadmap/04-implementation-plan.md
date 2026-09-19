@@ -15,16 +15,16 @@
 
 | 批次 | 内容 | 状态 | 提交 |
 | --- | --- | --- | --- |
-| DOC-0 | roadmap 骨架 + 三大设计文档 | 进行中 | ceb0a8d, 3b8cc34 |
-| IMP-A | 后端导入管线 v2（映射服务 + preview/commit + L1 补强） | 进行中（实现代理 backend-import） | — |
-| INT-A | 后端集成抽象层（registry + 能力接口，飞书降级为首个适配器） | 待集成调研合入 | — |
-| SET-A | 前端「设置」页重构（通用/AI/集成 分区 + 改密 UI 补齐反向差距） | 待 INT-A | — |
-| SET-B | 前端飞书露出点中性化（130 处 → 平台无关文案，风格不变） | 待 INT-A | — |
-| IMP-B | 前端导入向导（上传→映射→校验→修复→提交，复用现有组件与动效） | 待 IMP-A | — |
-| MEM-A | 后端记忆层（偏好条目 + 挖掘循环 + 求解联动） | 待记忆调研合入 | — |
-| MEM-B | 前端记忆 UI（待确认收件箱 + 详情页偏好区块 + 解释引用） | 待 MEM-A | — |
-| OSS-A | 开源文档套件（架构文档、README 重写、接入指南模板、CONTRIBUTING） | 部分 |
-| VER-1 | 里程碑统一验证：后端全量 pytest + 前端 vitest + build + orval 再生成 | 里程碑 | — |
+| DOC-0 | roadmap 骨架 + 四大设计文档定稿 | ✅ 完成 | ceb0a8d, 3b8cc34, 8a04445, 515925c |
+| IMP-A | 后端导入管线 v2（映射服务 + preview/commit + L1 补强） | 🔄 实现中 | — |
+| INT-A | 后端集成抽象层（Protocol 能力接口 + registry，飞书 strangler 收敛为首个适配器，LocalAdapter 默认可用） | 排队（等 IMP-A 释放 api.py） | — |
+| SET-A | 前端「设置」页重构（/settings 分区：通用+改密 / AI 模型 / 集成卡片 / 关于；旧 /integrations 重定向） | 排队（等 INT-A） | — |
+| SET-B | 前端飞书露出中性化（文案级，5 文件 + e2e 名称；不含 integrations-page 与 app-shell 导航，那两处归 SET-A） | 🔄 实现中（与 IMP-A 并行，文件不相交） | — |
+| IMP-B | 前端导入向导（上传→映射→校验→修复→提交，复用现有组件与动效） | 排队（等 IMP-A） | — |
+| MEM-A | 后端记忆层（PreferenceEntry + 一键归因 + 挖掘循环 + 求解权重编译器） | 排队（等 INT-A） | — |
+| MEM-B | 前端记忆 UI（待确认收件箱 + 详情页偏好区块 + 解释引用） | 排队（等 MEM-A） | — |
+| OSS-A | 开源文档套件（架构文档、README 重写、接入指南模板 feishu/local/dingtalk、LICENSE 建议） | 排队（等 INT-A 定形后写，避免返工） | — |
+| VER-1 | 里程碑统一验证：后端全量 pytest + ruff/mypy + 前端 vitest + build + orval 再生成 | 里程碑 | — |
 
 ## 依赖关系
 
