@@ -22,6 +22,7 @@ import {
   type ClassGroupResponse,
   type CourseSessionResponse,
   type PreferenceResponse,
+  type PreferenceTransitionRejectionReason,
   type RoomResponse,
   type SolverRunResponse,
   type TeacherResponse,
@@ -31,6 +32,7 @@ import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DataTable } from "@/components/data-table";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Select } from "@/components/ui/select";
 import { asArray, datetime, errorMessage, formatRoom, formatSlot } from "@/lib/format";
@@ -66,6 +68,37 @@ const STATUS_LABELS: Record<string, string> = {
   rejected: "已拒绝",
   expired: "已失效",
 };
+
+// 拒绝原因五选（MEM-C2 修正 4）：与后端 PreferenceTransition.rejection_reason
+// 枚举一一对应；前端必填，API 缺省「其他」。
+const REJECTION_REASONS: { value: string; label: string }[] = [
+  { value: "temporary_leave", label: "临时请假" },
+  { value: "subject_misidentified", label: "主体识别错误" },
+  { value: "wrong_generalization", label: "归纳错误" },
+  { value: "preference_changed", label: "确实有偏好但已改变" },
+  { value: "other", label: "其他" },
+];
+
+const REJECTION_REASON_LABELS: Record<string, string> = Object.fromEntries(
+  REJECTION_REASONS.map((item) => [item.value, item.label]),
+);
+
+interface PreviouslyRejected {
+  reason?: string;
+  note?: string | null;
+  rejected_at?: string;
+}
+
+function previouslyRejected(entry: PreferenceResponse): PreviouslyRejected | null {
+  const value = (entry.provenance as { previously_rejected?: unknown } | null | undefined)
+    ?.previously_rejected;
+  return value && typeof value === "object" ? (value as PreviouslyRejected) : null;
+}
+
+function conflictWithIds(entry: PreferenceResponse): string[] {
+  const value = (entry.provenance as { conflict_with?: unknown } | null | undefined)?.conflict_with;
+  return Array.isArray(value) ? value.map(String) : [];
+}
 
 function predicateLabel(value: string): string {
   return PREDICATE_LABELS[value] ?? value;
@@ -185,7 +218,7 @@ export function MemoryPage() {
           vars.data.target_status === "confirmed"
             ? "已采纳该偏好，下次求解开始生效"
             : vars.data.target_status === "rejected"
-              ? "已拒绝该候选，同类归纳将被降权"
+              ? "已拒绝该候选，同批证据的同类归纳不再提醒"
               : "偏好已停用",
         );
       },
@@ -236,6 +269,45 @@ export function MemoryPage() {
   };
   const slotLabel = (id: string): string => nameMaps.slots.get(id) ?? formatSlot(id);
   const summaryOf = (entry: PreferenceResponse): string => constraintSummary(entry.constraint, slotLabel);
+  // 矛盾消解（MEM-C2 修正 4）一键裁决：复用现有 expire 能力。
+  // 保留旧弃新 = 把 provenance.conflict_with 里的对方条目停用；以新替旧 = 停用本条。
+  const resolveConflictKeep = (entry: PreferenceResponse) => {
+    for (const otherId of conflictWithIds(entry)) {
+      transition.mutate({
+        entryId: otherId,
+        data: { target_status: "expired", reason: "冲突处理：保留本条，弃置对方" },
+      });
+    }
+  };
+  const resolveConflictReplace = (entry: PreferenceResponse) => {
+    transition.mutate({
+      entryId: entry.id,
+      data: { target_status: "expired", reason: "冲突处理：以新偏好替换旧偏好" },
+    });
+  };
+  const conflictActions = (entry: PreferenceResponse) =>
+    entry.conflict ? (
+      <>
+        <Button size="sm" variant="outline" onClick={() => resolveConflictKeep(entry)}>
+          保留旧弃新
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => resolveConflictReplace(entry)}>
+          以新替旧
+        </Button>
+      </>
+    ) : null;
+  // amber 提示徽标：与旧偏好冲突 / 此前被拒（带新证据重提的候选）。
+  const memoryBadges = (entry: PreferenceResponse) => (
+    <>
+      {entry.conflict ? <Badge tone="yellow">与旧偏好冲突</Badge> : null}
+      {previouslyRejected(entry) ? (
+        <Badge tone="yellow">
+          此前被拒：
+          {REJECTION_REASON_LABELS[previouslyRejected(entry)!.reason ?? "other"] ?? "其他"}
+        </Badge>
+      ) : null}
+    </>
+  );
 
   if (preferences.isPending) return <LoadingState />;
   if (preferences.isError) return <ErrorState error={preferences.error} retry={() => void preferences.refetch()} />;
@@ -272,7 +344,10 @@ export function MemoryPage() {
       header: "状态",
       accessorKey: "status",
       cell: ({ row }) => (
-        <Badge tone={prefStatusTone(row.original.status)}>{STATUS_LABELS[row.original.status] ?? row.original.status}</Badge>
+        <span className="flex flex-wrap items-center gap-1">
+          <Badge tone={prefStatusTone(row.original.status)}>{STATUS_LABELS[row.original.status] ?? row.original.status}</Badge>
+          {memoryBadges(row.original)}
+        </span>
       ),
     },
     { header: "权重", accessorKey: "weight" },
@@ -320,8 +395,11 @@ export function MemoryPage() {
             <Button size="sm" variant="outline" onClick={() => setExpiring(row.original)}>
               停用
             </Button>
+            {conflictActions(row.original)}
           </span>
-        ) : null,
+        ) : (
+          conflictActions(row.original)
+        ),
     },
   ];
 
@@ -362,6 +440,7 @@ export function MemoryPage() {
                       <span className="text-sm font-medium text-zinc-900">{subjectName(entry)}</span>
                       <span className="text-sm text-zinc-600">{predicateLabel(entry.predicate)}</span>
                       <span className="text-sm text-zinc-800">「{summaryOf(entry)}」</span>
+                      {memoryBadges(entry)}
                     </div>
                     {typeof entry.provenance?.rationale === "string" && entry.provenance.rationale ? (
                       <p className="mt-1 text-xs text-zinc-500">{entry.provenance.rationale}</p>
@@ -417,6 +496,7 @@ export function MemoryPage() {
                             转为硬规则
                           </Button>
                         ) : null}
+                        {conflictActions(entry)}
                       </div>
                     )}
                   </div>
@@ -469,23 +549,26 @@ export function MemoryPage() {
         </>
       )}
 
-      <ConfirmDialog
-        open={Boolean(rejecting)}
-        title="拒绝这条候选偏好？"
-        description={
-          rejecting
-            ? `「${subjectName(rejecting)} · ${predicateLabel(rejecting.predicate)}」将被标记为已拒绝，不再参与排课；系统会把同类归纳降权。`
-            : ""
+      <RejectDialog
+        key={rejecting?.id ?? "none"}
+        entry={rejecting}
+        subjectLabel={
+          rejecting ? `${subjectName(rejecting)} · ${predicateLabel(rejecting.predicate)}` : ""
         }
-        confirmLabel="确认拒绝"
-        danger
         pending={transition.isPending}
         onOpenChange={(open) => {
           if (!open) setRejecting(null);
         }}
-        onConfirm={() => {
+        onConfirm={(reason, note) => {
           if (!rejecting) return;
-          transition.mutate({ entryId: rejecting.id, data: { target_status: "rejected" } });
+          transition.mutate({
+            entryId: rejecting.id,
+            data: {
+              target_status: "rejected",
+              rejection_reason: reason as PreferenceTransitionRejectionReason,
+              reason: note,
+            },
+          });
           setRejecting(null);
         }}
       />
@@ -546,6 +629,79 @@ function ChipRemove({ label, onRemove }: { label: string; onRemove: () => void }
         <X className="size-3" />
       </button>
     </span>
+  );
+}
+
+/** 「拒绝」弹窗（MEM-C2 修正 4）：原因五选必填 + 选「其他」时显示备注输入框。
+ *  提交后后端把拒绝原因落 preference_rejections，同批证据的候选不再复现。 */
+function RejectDialog({
+  entry,
+  subjectLabel,
+  pending,
+  onOpenChange,
+  onConfirm,
+}: {
+  entry: PreferenceResponse | null;
+  subjectLabel: string;
+  pending?: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: (reason: string, note: string | null) => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [note, setNote] = useState("");
+  return (
+    <Dialog open={Boolean(entry)} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
+      <DialogContent className="max-w-md">
+        <DialogTitle className="text-base font-semibold text-zinc-950">拒绝这条候选偏好？</DialogTitle>
+        <DialogDescription className="mt-2 text-sm leading-6 text-zinc-500">
+          {entry
+            ? `「${subjectLabel}」将被标记为已拒绝，不再参与排课；同一批证据的同类归纳不再提醒。`
+            : ""}
+        </DialogDescription>
+        <fieldset className="mt-4">
+          <legend className="text-sm font-medium text-zinc-700">拒绝原因</legend>
+          <div className="mt-2 space-y-1.5">
+            {REJECTION_REASONS.map((item) => (
+              <label key={item.value} className="flex items-center gap-2 text-sm text-zinc-700">
+                <input
+                  type="radio"
+                  name="rejection-reason"
+                  value={item.value}
+                  checked={reason === item.value}
+                  onChange={() => setReason(item.value)}
+                />
+                {item.label}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+        {reason === "other" ? (
+          <label className="mt-3 block text-sm text-zinc-700">
+            备注
+            <textarea
+              aria-label="备注"
+              rows={2}
+              className="mt-1.5 w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5"
+              placeholder="补充说明（可选）"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+            />
+          </label>
+        ) : null}
+        <div className="mt-6 flex justify-end gap-2 border-t border-zinc-100 pt-4">
+          <Button variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button
+            variant="danger"
+            disabled={pending || !reason}
+            onClick={() => onConfirm(reason, reason === "other" && note.trim() ? note.trim() : null)}
+          >
+            确认拒绝
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

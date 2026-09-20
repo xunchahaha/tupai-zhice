@@ -28,6 +28,7 @@ export interface PreferenceResponse {
   valid_until?: PreferenceResponseValidUntil;
   trial_authorized?: boolean;
   trial_until?: PreferenceResponseTrialUntil;
+  conflict?: boolean;
   provenance: PreferenceResponseProvenance;
   created_at: string;
   updated_at: string;

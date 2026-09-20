@@ -528,7 +528,48 @@ class PreferenceEntry(TimestampMixin, Base):
     # 参与求解，trial_until 到期自动退出；纯候选永远不影响排课。
     trial_authorized: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     trial_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 矛盾消解（MEM-C2 修正 4）：与同主体同谓词的另一活跃条目窗口重叠且约束互斥时
+    # 置位，编译期跳过该条目（outcome=conflict_unresolved），由教务一键裁决后清除。
+    conflict: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PreferenceRejection(TimestampMixin, Base):
+    """拒绝记忆（MEM-C2 修正 4）：拒绝候选时落库，防止同类候选重复打扰。
+
+    去重口径 = subject_type + subject_id + predicate + constraint 规范化 JSON 签名；
+    evidence 保存被拒候选引用的证据事件 id 集合——再挖掘时证据 ⊆ 已拒证据则
+    不复现，出现实质新证据才允许重提（候选 provenance 标注此前被拒原因）。
+    reason 是受控枚举字符串（临时请假/主体识别错误/归纳错误/确实有偏好但已改变/
+    其他），自由文本备注放 note。
+    """
+
+    __tablename__ = "preference_rejections"
+    __table_args__ = (
+        # 拒绝记录按「方案+主体+谓词」检索，约束签名比对在写入方用规范化 JSON 完成。
+        Index(
+            "ix_preference_rejections_subject",
+            "schedule_set_id",
+            "subject_type",
+            "subject_id",
+            "predicate",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
+    subject_type: Mapped[str] = mapped_column(String(20))
+    subject_id: Mapped[str] = mapped_column(String(50))
+    predicate: Mapped[str] = mapped_column(String(40))
+    constraint: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    reason: Mapped[str] = mapped_column(String(40))
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
+    rejected_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 
 class IntegrationSync(TimestampMixin, Base):

@@ -63,6 +63,7 @@ from .models import (
     ImportMappingHistory,
     IntegrationSync,
     PreferenceEntry,
+    PreferenceRejection,
     PublicLinkToken,
     RescheduleEvent,
     Room,
@@ -226,6 +227,7 @@ from .services.memory_solver import (
     MINED_DEFAULT_CONFIDENCE,
     MINED_DEFAULT_WEIGHT,
     MINING_EVENT_LIMIT,
+    MINING_EVENT_WINDOW_DAYS,
     PREDICATE_SOLVER_PATHS,
     PREFERENCE_RULE_KINDS,
     PREFERENCE_TRANSITIONS,
@@ -237,6 +239,8 @@ from .services.memory_solver import (
     deterministic_preference_candidates,
     mining_event_view,
     normalized_constraint,
+    refresh_conflict_flags,
+    resolve_conflicts_for_new_entry,
     validate_ai_candidates,
 )
 from .services.overview_analytics import build_overview_analytics
@@ -3426,6 +3430,9 @@ def create_preference(
         },
     )
     db.add(entry)
+    # 矛盾消解（MEM-C2 修正 4）：手工创建同样做三分支消解（替代/分时段/存疑冲突）。
+    db.flush()  # 先取 id，供旧条目 provenance 记 superseded_by / conflict_with
+    resolve_conflicts_for_new_entry(db, entry)
     audit(db, user, "create", "preference_entry", entry.id, payload.model_dump(mode="json"))
     db.commit()
     db.refresh(entry)
@@ -3528,10 +3535,67 @@ def transition_preference(
         "last_transition_at": shanghai_now().isoformat(),
         "last_transition_reason": payload.reason,
     }
+    if payload.target_status == "rejected":
+        # 拒绝记忆（MEM-C2 修正 4）：拒绝原因按受控枚举落 preference_rejections，
+        # 同签名同证据的候选不再复现；API 缺省「其他」，前端必填。同签名同证据
+        # 同原因的重复拒绝不重复落库（幂等，审计靠 preference_entries 链）。
+        _record_preference_rejection(
+            db,
+            entry=entry,
+            reason=payload.rejection_reason or "other",
+            note=payload.reason,
+            rejected_by=user.id,
+        )
+    # 矛盾消解（MEM-C2 修正 4）：条目离开活跃集（rejected/expired）后重算同组
+    # conflict 标，剩余条目不再互斥时自动清标。
+    refresh_conflict_flags(
+        db, entry.schedule_set_id, entry.subject_type, entry.subject_id, entry.predicate
+    )
     audit(db, user, "transition", "preference_entry", entry.id, payload.model_dump(mode="json"))
     db.commit()
     db.refresh(entry)
     return entry
+
+
+def _record_preference_rejection(
+    db: Session, *, entry: PreferenceEntry, reason: str, note: str | None, rejected_by: str | None
+) -> None:
+    """把一次拒绝写入 preference_rejections（幂等：完全相同的签名+证据+原因跳过）。"""
+    signature = (
+        entry.subject_type,
+        entry.subject_id,
+        entry.predicate,
+        normalized_constraint(entry.constraint),
+        reason,
+    )
+    evidence = sorted({str(item) for item in entry.evidence or []})
+    for existing in db.scalars(
+        select(PreferenceRejection).where(
+            PreferenceRejection.schedule_set_id == entry.schedule_set_id,
+            PreferenceRejection.subject_type == entry.subject_type,
+            PreferenceRejection.subject_id == entry.subject_id,
+            PreferenceRejection.predicate == entry.predicate,
+            PreferenceRejection.reason == reason,
+        )
+    ):
+        if (
+            normalized_constraint(existing.constraint) == signature[3]
+            and sorted({str(item) for item in existing.evidence or []}) == evidence
+        ):
+            return
+    db.add(
+        PreferenceRejection(
+            schedule_set_id=entry.schedule_set_id,
+            subject_type=entry.subject_type,
+            subject_id=entry.subject_id,
+            predicate=entry.predicate,
+            constraint=entry.constraint or {},
+            reason=reason,
+            note=note,
+            evidence=evidence,
+            rejected_by=rejected_by,
+        )
+    )
 
 
 @router.post(
@@ -3637,11 +3701,16 @@ def _persist_mining_candidates(
     candidates: list[dict[str, Any]],
     *,
     provenance_base: dict[str, Any],
-) -> tuple[list[PreferenceEntry], int]:
-    """候选一律落库为 probation + induced_from_adjustment；重复候选去重。
+) -> tuple[list[PreferenceEntry], int, int]:
+    """候选一律落库为 probation + induced_from_adjustment；重复候选与已拒候选去重。
 
-    「同 subject+predicate+constraint 已存在 active/probation 则跳过」：
-    与 probation/confirmed 条目的规范化约束比对，同一次挖掘内部也去重。
+    去重三道（MEM-C2 修正 4）：
+    ① 同 subject+predicate+constraint 已存在 probation/confirmed 则跳过；
+    ② 同签名的拒绝记录里，候选 evidence ⊆ 已拒 evidence → 跳过（不再打扰）；
+    ③ 含新证据 → 允许重提，但候选 provenance.previously_rejected 标注此前被拒
+       原因，前端卡片渲染「此前被拒」徽标。
+    落库后对每个新条目做同主体同谓词的矛盾消解（替代/分时段/存疑冲突）。
+    返回（新建条目, 跳过-已存在, 跳过-已拒）。
     """
     existing = db.scalars(
         select(PreferenceEntry).where(
@@ -3658,9 +3727,25 @@ def _persist_mining_candidates(
         )
         for item in existing
     }
+    # 拒绝记录按签名归集：{签名 -> [拒绝记录]}。拒绝记录量级 = 拒绝次数，全量
+    # 取回后在 Python 比对规范化 JSON（SQLite/MySQL 对 JSON 索引语义不一致）。
+    rejections: dict[tuple[str, str, str, str], list[PreferenceRejection]] = {}
+    for record in db.scalars(
+        select(PreferenceRejection).where(
+            PreferenceRejection.schedule_set_id == schedule_set_id
+        )
+    ):
+        key = (
+            record.subject_type,
+            record.subject_id,
+            record.predicate,
+            normalized_constraint(record.constraint),
+        )
+        rejections.setdefault(key, []).append(record)
     today = shanghai_now().date()
     created: list[PreferenceEntry] = []
     skipped_existing = 0
+    skipped_rejected = 0
     seen: set[tuple[str, str, str, str]] = set()
     for candidate in candidates:
         key = (
@@ -3672,7 +3757,18 @@ def _persist_mining_candidates(
         if key in existing_keys or key in seen:
             skipped_existing += 1
             continue
+        candidate_evidence = {str(item) for item in candidate.get("evidence_ids") or []}
+        prior = rejections.get(key) or []
+        if prior:
+            rejected_evidence: set[str] = set()
+            for record in prior:
+                rejected_evidence.update(str(item) for item in record.evidence or [])
+            if candidate_evidence and candidate_evidence <= rejected_evidence:
+                skipped_rejected += 1
+                continue
         seen.add(key)
+        # 带新证据重提：标注此前被拒原因（取最近一次拒绝记录），教务可见。
+        latest_rejection = max(prior, key=lambda record: record.created_at) if prior else None
         entry = PreferenceEntry(
             schedule_set_id=schedule_set_id,
             subject_type=key[0],
@@ -3685,18 +3781,31 @@ def _persist_mining_candidates(
             # 资格都要等教务确认后才生效。
             source="induced_from_adjustment",
             status="probation",
-            evidence=[str(item) for item in candidate.get("evidence_ids") or []],
+            evidence=sorted(candidate_evidence),
             weight=MINED_DEFAULT_WEIGHT,
             valid_from=today,
             valid_until=default_valid_until(today),
             provenance={
                 **provenance_base,
                 "rationale": candidate.get("rationale"),
+                **(
+                    {
+                        "previously_rejected": {
+                            "reason": latest_rejection.reason,
+                            "note": latest_rejection.note,
+                            "rejected_at": latest_rejection.created_at.isoformat(),
+                        }
+                    }
+                    if latest_rejection is not None
+                    else {}
+                ),
             },
         )
         db.add(entry)
+        db.flush()  # 先取 id，供旧条目 provenance 记 superseded_by / conflict_with
+        resolve_conflicts_for_new_entry(db, entry)
         created.append(entry)
-    return created, skipped_existing
+    return created, skipped_existing, skipped_rejected
 
 
 @router.post("/memory/mining-runs", response_model=MiningRunResponse, tags=["memory"])
@@ -3705,13 +3814,19 @@ def create_memory_mining_run(
 ) -> MiningRunResponse:
     """回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。
 
-    配置了 AI 走模型归纳（模型只提名，代码按白名单裁决）；未配置或调用失败
-    优雅降级为确定性统计：同主体+同类型调课 ≥2 次即产生候选。
+    事件范围（MEM-C2 修正 3）：当前方案内、最近 90 天的调课事件（按 created_at
+    滚动窗口，口径见 memory_solver.MINING_EVENT_WINDOW_DAYS）。配置了 AI 走模型
+    归纳（模型只提名，代码按白名单与证据支持性裁决）；未配置或调用失败优雅降级
+    为确定性统计：同主体+同类型+同归因类调课 ≥2 次即产生候选。
     """
+    cutoff = shanghai_now() - timedelta(days=MINING_EVENT_WINDOW_DAYS)
     events = list(
         db.scalars(
             select(RescheduleEvent)
-            .where(RescheduleEvent.schedule_set_id == scope.id)
+            .where(
+                RescheduleEvent.schedule_set_id == scope.id,
+                RescheduleEvent.created_at >= cutoff,
+            )
             .order_by(RescheduleEvent.created_at.desc())
             .limit(MINING_EVENT_LIMIT)
         )
@@ -3736,7 +3851,7 @@ def create_memory_mining_run(
         candidates, skipped_invalid = validate_ai_candidates(raw_candidates, views)
     else:
         candidates = deterministic_preference_candidates(views)
-    created, skipped_existing = _persist_mining_candidates(
+    created, skipped_existing, skipped_rejected = _persist_mining_candidates(
         db,
         scope.id,
         candidates,
@@ -3761,6 +3876,7 @@ def create_memory_mining_run(
             "events_scanned": len(views),
             "created": len(created),
             "skipped_existing": skipped_existing,
+            "skipped_rejected": skipped_rejected,
             "skipped_invalid": skipped_invalid,
         },
     )
@@ -3772,6 +3888,7 @@ def create_memory_mining_run(
         events_scanned=len(views),
         created=[PreferenceResponse.model_validate(entry) for entry in created],
         skipped_existing=skipped_existing,
+        skipped_rejected=skipped_rejected,
         skipped_invalid=skipped_invalid,
         ai_error=ai_error,
     )

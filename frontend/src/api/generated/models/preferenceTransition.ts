@@ -9,12 +9,15 @@ import type { PreferenceTransitionAction } from './preferenceTransitionAction';
 import type { PreferenceTransitionTargetStatus } from './preferenceTransitionTargetStatus';
 import type { PreferenceTransitionTargetModality } from './preferenceTransitionTargetModality';
 import type { PreferenceTransitionReason } from './preferenceTransitionReason';
+import type { PreferenceTransitionRejectionReason } from './preferenceTransitionRejectionReason';
 
 /**
  * 状态迁移（action=transition，默认）或授权试用（action=authorize_trial）。
 
 三态拆分（MEM-C1）：授权试用只对 probation 条目可用，条目保持 probation，
 以 trial_authorized + trial_until 参与小权重试用；采纳（confirmed）仍是正式生效路径。
+MEM-C2 修正 4：target_status=rejected 时建议带 rejection_reason（拒绝原因五选，
+落 preference_rejections 供去重）；缺省按「其他」处理。前端必填，API 兜底。
  */
 export interface PreferenceTransition {
   action?: PreferenceTransitionAction;
@@ -26,4 +29,5 @@ export interface PreferenceTransition {
    */
   trial_days?: number;
   reason?: PreferenceTransitionReason;
+  rejection_reason?: PreferenceTransitionRejectionReason;
 }

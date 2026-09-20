@@ -552,6 +552,8 @@ class PreferenceTransition(BaseModel):
 
     三态拆分（MEM-C1）：授权试用只对 probation 条目可用，条目保持 probation，
     以 trial_authorized + trial_until 参与小权重试用；采纳（confirmed）仍是正式生效路径。
+    MEM-C2 修正 4：target_status=rejected 时建议带 rejection_reason（拒绝原因五选，
+    落 preference_rejections 供去重）；缺省按「其他」处理。前端必填，API 兜底。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -562,6 +564,15 @@ class PreferenceTransition(BaseModel):
     target_modality: Literal["hard", "soft"] | None = None
     trial_days: int = Field(default=30, ge=1, le=365)
     reason: str | None = Field(default=None, max_length=500)
+    # 拒绝原因（MEM-C2 修正 4）：临时请假 / 主体识别错误 / 归纳错误 /
+    # 确实有偏好但已改变 / 其他（自由文本备注仍走 reason 字段）。
+    rejection_reason: Literal[
+        "temporary_leave",
+        "subject_misidentified",
+        "wrong_generalization",
+        "preference_changed",
+        "other",
+    ] | None = None
 
     @model_validator(mode="after")
     def validate_action(self) -> PreferenceTransition:
@@ -597,18 +608,27 @@ class PreferenceResponse(ORMModel):
     valid_until: date | None = None
     trial_authorized: bool = False
     trial_until: date | None = None
+    # 矛盾消解（MEM-C2 修正 4）：与同主体同类条目窗口重叠且约束互斥时为 True，
+    # 编译期跳过（outcome=conflict_unresolved），前端以 amber 徽标提示。
+    conflict: bool = False
     provenance: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 
 
 class MiningRunResponse(BaseModel):
-    """一次偏好挖掘的结果。created 即落库后的候选清单（status=probation）。"""
+    """一次偏好挖掘的结果。created 即落库后的候选清单（status=probation）。
+
+    MEM-C2 修正 4：skipped_rejected 计入「证据 ⊆ 已拒证据被跳过」的候选数；
+    带新证据重提的候选照常落库，但其 provenance.previously_rejected 标注此前
+    被拒原因，由前端卡片渲染。
+    """
 
     engine: Literal["ai", "deterministic"]
     events_scanned: int
     created: list[PreferenceResponse]
     skipped_existing: int = 0
+    skipped_rejected: int = 0
     skipped_invalid: int = 0
     ai_error: str | None = None
 

@@ -27,6 +27,7 @@ const OUTCOME_LABELS: Record<string, string> = {
   unsupported_predicate: "暂不支持求解",
   converted_to_rule: "已转正式规则",
   hard_requires_conversion: "待转正式规则",
+  conflict_unresolved: "冲突待处理",
   compile_error: "编译失败",
 };
 

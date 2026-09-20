@@ -11,12 +11,17 @@ import type { MiningRunResponseAiError } from './miningRunResponseAiError';
 
 /**
  * 一次偏好挖掘的结果。created 即落库后的候选清单（status=probation）。
+
+MEM-C2 修正 4：skipped_rejected 计入「证据 ⊆ 已拒证据被跳过」的候选数；
+带新证据重提的候选照常落库，但其 provenance.previously_rejected 标注此前
+被拒原因，由前端卡片渲染。
  */
 export interface MiningRunResponse {
   engine: MiningRunResponseEngine;
   events_scanned: number;
   created: PreferenceResponse[];
   skipped_existing?: number;
+  skipped_rejected?: number;
   skipped_invalid?: number;
   ai_error?: MiningRunResponseAiError;
 }

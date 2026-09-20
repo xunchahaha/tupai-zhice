@@ -1,6 +1,6 @@
 """记忆层（L1 偏好库）的纯逻辑：偏好编译进求解器 + 调课偏好挖掘候选。
 
-设计边界见 docs/roadmap/02-agent-memory.md §3 与 §6（MEM-C1 修正）。职责：
+设计边界见 docs/roadmap/02-agent-memory.md §3 与 §6（MEM-C1/C2 修正）。职责：
 
 1. ``compile_memory_state`` 把偏好条目编译成可冻结的完整状态节点（条目快照、
    编译后的内部软规则、逐条使用结果），创建求解任务时整体写入快照与
@@ -9,8 +9,12 @@
    probation 条目进入求解输入；纯候选一律不进（无感采集，不无感改变排课）。
 3. 偏好库只管理软偏好（§6 修正 2）：modality=hard 的条目不再编译进求解，
    逐条标记 hard_requires_conversion，由教务走 convert-to-rule 转正式 Rule。
-4. 挖掘候选的确定性统计与 AI 输出校验：同主体同类型调课 ≥2 次即产生候选，
-   AI 未配置或失败时功能照常可用（优雅降级）。
+4. 挖掘候选的确定性统计与 AI 输出校验（§6 修正 3）：除结构白名单外，还做
+   「证据支持性」校验——约束必须来自候选引用的证据事件、每条证据事件的主体
+   必须与候选主体一致、至少 2 条不同证据；同主体同类型调课 ≥2 次才产生候选，
+   AI 未配置或失败时功能照常可用（优雅降级，文案明确建议教务确认）。
+5. 拒绝记忆与矛盾消解（§6 修正 4）：拒绝记录按规范化签名落库，同批证据被拒
+   的候选不再复现；同主体同谓词新旧条目按生效窗口区分 替代/分时段/存疑冲突。
 
 红线（与 API 层共同保证）：induced_from_adjustment 条目在本模块也只会以
 软规则形态进入模型——硬约束路径不接收任何记忆来源。
@@ -35,15 +39,19 @@ MINED_DEFAULT_CONFIDENCE = 0.5
 MINED_DEFAULT_WEIGHT = 40
 # 挖掘扫描的近期调课事件上限：偏好量级是数百条，事件回看窗口不需要全量。
 MINING_EVENT_LIMIT = 200
+# 挖掘事件的时间窗（MEM-C2 修正 3）：只回顾最近 90 天的调课事件，避免把上学期
+# 的历史一次性灌进挖掘。口径为「事件 created_at 距今 ≤90 天」的滚动窗口；
+# 相比「自方案最新课次日期起算」，它不随排课进度漂移，行为更可预期。
+MINING_EVENT_WINDOW_DAYS = 90
 # 创建偏好未显式给有效期时的默认时长（红线②：可空但创建 API 默认 +180 天；
 # MEM-C1 起仅在方案内查不到任何上课日期时才回落到它）。
 DEFAULT_VALIDITY_DAYS = 180
 
 # 编译器版本：随冻结的 memory 节一起落快照，用于解释「这版课表是哪版编译器排的」。
-MEMORY_COMPILER_VERSION = 2
+MEMORY_COMPILER_VERSION = 3
 
-# 逐条使用结果枚举（§6 修正 2/6）：随 memory 节冻结，解释层与前端按它展示
-# 「已应用 X / 未使用 Y 及原因」。
+# 逐条使用结果枚举（§6 修正 2/6 + MEM-C2 修正 4）：随 memory 节冻结，解释层与
+# 前端按它展示「已应用 X / 未使用 Y 及原因」。
 MEMORY_OUTCOMES = (
     "applied",
     "not_authorized",
@@ -51,6 +59,7 @@ MEMORY_OUTCOMES = (
     "unsupported_predicate",
     "converted_to_rule",
     "hard_requires_conversion",
+    "conflict_unresolved",
     "compile_error",
 )
 
@@ -128,6 +137,166 @@ def default_valid_until_for_scope(db: Session, schedule_set_id: str) -> date:
 
 def normalized_constraint(constraint: dict[str, Any] | None) -> str:
     return json.dumps(constraint or {}, ensure_ascii=False, sort_keys=True)
+
+
+# ---------------------------------------------------------------- 矛盾消解（MEM-C2 修正 4）
+# 同主体+同谓词新旧条目按生效窗口三分支：new_replaces（窗口不重叠 → 旧条目
+# expired、provenance 记 superseded_by）/ time_sliced（相邻不重叠 → 并存）/
+# conflict_flagged（窗口重叠且约束互斥 → 旧条目打 conflict 标，待教务裁决）。
+
+# 「相邻」的判定容差：旧窗口结束日 +1 天即为新窗口开始日视为首尾相接。
+ADJACENT_TOLERANCE_DAYS = 1
+
+# 同主体同谓词下，约束互斥的判定（保守口径，只拦真正不能同时成立的组合）：
+# prefer_* 目标集完全不相交 → 互斥（不可能同时偏好两个不相交的目标）；
+# avoid_* 取并集即可同时成立 → 不互斥；数值型谓词目标值不同 → 互斥。
+_CONFLICT_VALUE_KEYS = ("minimum_consecutive", "max_daily_load", "daily_max")
+
+
+def _constraint_targets(constraint: dict[str, Any] | None, predicate: str) -> set[str]:
+    key = "slot_ids" if predicate in {"avoid_slot", "prefer_slot"} else "room_ids"
+    values = (constraint or {}).get(key) or []
+    return {str(item) for item in values if item}
+
+
+def constraints_conflict(
+    predicate: str, a: dict[str, Any] | None, b: dict[str, Any] | None
+) -> bool:
+    """判断同谓词的两份约束是否互斥（不能同时成立）。保守：拿不准一律不互斥。"""
+    if predicate in {"prefer_slot", "prefer_room"}:
+        targets_a = _constraint_targets(a, predicate)
+        targets_b = _constraint_targets(b, predicate)
+        if targets_a and targets_b:
+            return targets_a.isdisjoint(targets_b)
+        return False
+    if predicate in {"avoid_slot", "avoid_room"}:
+        # 回避类取并集即可同时满足，永不互斥。
+        return False
+    keys = [key for key in _CONFLICT_VALUE_KEYS if key in (a or {})]
+    for key in keys:
+        value_a = (a or {}).get(key)
+        value_b = (b or {}).get(key)
+        if value_a is not None and value_b is not None and value_a != value_b:
+            return True
+    return False
+
+
+def _entry_window(entry: PreferenceEntry) -> tuple[date, date]:
+    """条目的生效窗口；空端按开区间处理（-inf / +inf）。"""
+    return (
+        entry.valid_from or date.min,
+        entry.valid_until or date.max,
+    )
+
+
+def _windows_overlap(
+    window_a: tuple[date, date], window_b: tuple[date, date]
+) -> bool:
+    return window_a[0] <= window_b[1] and window_b[0] <= window_a[1]
+
+
+def _windows_adjacent(
+    window_a: tuple[date, date], window_b: tuple[date, date]
+) -> bool:
+    """不重叠且首尾相接（间隙 ≤1 天）：同一偏好的时间切片，允许并存。"""
+    gap_low = (window_b[0] - window_a[1]).days
+    gap_high = (window_a[0] - window_b[1]).days
+    return 0 < gap_low <= ADJACENT_TOLERANCE_DAYS or 0 < gap_high <= ADJACENT_TOLERANCE_DAYS
+
+
+def _active_others(
+    db: Session, new_entry: PreferenceEntry
+) -> list[PreferenceEntry]:
+    """同方案、同主体、同谓词的其他活跃条目（probation/confirmed）。"""
+    return list(
+        db.scalars(
+            select(PreferenceEntry).where(
+                PreferenceEntry.schedule_set_id == new_entry.schedule_set_id,
+                PreferenceEntry.subject_type == new_entry.subject_type,
+                PreferenceEntry.subject_id == new_entry.subject_id,
+                PreferenceEntry.predicate == new_entry.predicate,
+                PreferenceEntry.status.in_(["probation", "confirmed"]),
+                PreferenceEntry.id != new_entry.id,
+            )
+        )
+    )
+
+
+def resolve_conflicts_for_new_entry(db: Session, new_entry: PreferenceEntry) -> str:
+    """新条目落库后调用（未 commit）：对同主体同谓词的旧活跃条目做三分支消解。
+
+    返回本次发生的最强分支：conflict_flagged > new_replaces > time_sliced > coexist。
+    只改旧条目（expired / conflict 标记 / provenance），不修改新条目状态。
+    """
+    new_window = _entry_window(new_entry)
+    branch = "coexist"
+    for old in _active_others(db, new_entry):
+        old_window = _entry_window(old)
+        if _windows_overlap(new_window, old_window):
+            if constraints_conflict(new_entry.predicate, new_entry.constraint, old.constraint):
+                # 存疑保留：旧条目打 conflict 标（编译期跳过），双方 provenance
+                # 互记对方 id，前端给出「保留旧弃新 / 以新替旧」一键裁决。
+                old.conflict = True
+                old.provenance = {
+                    **(old.provenance or {}),
+                    "conflict_with": sorted(
+                        {str(item) for item in (old.provenance or {}).get("conflict_with") or []}
+                        | {str(new_entry.id)}
+                    ),
+                    "conflict_flagged_at": shanghai_now().isoformat(),
+                }
+                new_entry.provenance = {
+                    **(new_entry.provenance or {}),
+                    "conflict_with": sorted(
+                        {
+                            str(item)
+                            for item in (new_entry.provenance or {}).get("conflict_with") or []
+                        }
+                        | {str(old.id)}
+                    ),
+                }
+                branch = "conflict_flagged"
+            # 重叠但约束兼容（如回避两个不同时段）：两者可同时成立，并存不动。
+            continue
+        if _windows_adjacent(new_window, old_window):
+            # 分时段并存：编译时日期窗口已进规则 scope，互不越界。
+            branch = branch if branch in {"conflict_flagged", "new_replaces"} else "time_sliced"
+            continue
+        # 窗口不重叠也不相邻：新条目取代旧条目（旧 expired，链路保留审计）。
+        old.status = "expired"
+        old.provenance = {
+            **(old.provenance or {}),
+            "superseded_by": str(new_entry.id),
+            "superseded_at": shanghai_now().isoformat(),
+        }
+        branch = branch if branch == "conflict_flagged" else "new_replaces"
+    return branch
+
+
+def refresh_conflict_flags(
+    db: Session, schedule_set_id: str, subject_type: str, subject_id: str, predicate: str
+) -> None:
+    """一条目离开活跃集（expired/rejected）后重算同组 conflict 标：剩余活跃条目
+    两两互斥则保持打标，否则清标——教务一键裁决后标记自动解除。"""
+    db.flush()  # SessionLocal 是 autoflush=False：先落状态变更，重算才能看到
+    actives = list(
+        db.scalars(
+            select(PreferenceEntry).where(
+                PreferenceEntry.schedule_set_id == schedule_set_id,
+                PreferenceEntry.subject_type == subject_type,
+                PreferenceEntry.subject_id == subject_id,
+                PreferenceEntry.predicate == predicate,
+                PreferenceEntry.status.in_(["probation", "confirmed"]),
+            )
+        )
+    )
+    for entry in actives:
+        has_conflict = any(
+            constraints_conflict(predicate, entry.constraint, other.constraint)
+            for other in actives
+            if other.id != entry.id
+        )
+        entry.conflict = has_conflict
 
 
 def _is_expired(entry: PreferenceEntry, today: date) -> bool:
@@ -218,6 +387,14 @@ def _entry_outcome(entry: PreferenceEntry, today: date) -> tuple[str, str]:
     if _is_expired(entry, today):
         until = entry.valid_until
         return "expired", f"有效期至 {until.isoformat() if until else '?'}，已过期作废"
+    if entry.conflict:
+        # MEM-C2 修正 4：与其他活跃条目窗口重叠且约束互斥——在教务裁决前不进
+        # 求解输入（最小处理），避免两条互斥偏好同时参与目标函数。
+        others = (entry.provenance or {}).get("conflict_with") or []
+        detail = "与同主体同类偏好冲突，待教务处理"
+        if others:
+            detail += f"：{'、'.join(map(str, others))}"
+        return "conflict_unresolved", detail
     if entry.status == "probation" and not trial_active(entry, today):
         if entry.trial_authorized and entry.trial_until is not None:
             return "expired", f"授权试用已于 {entry.trial_until.isoformat()} 到期"
@@ -311,6 +488,30 @@ def compile_preferences(db: Session, schedule_set_id: str) -> list[dict[str, Any
     return list(compile_memory_state(db, schedule_set_id)["compiled_rules"])
 
 
+# ---------------------------------------------------------------- 挖掘候选（确定性 + AI 校验）
+
+# 统计降级的 declared_reason 消噪（MEM-C2 修正 3）：被迫/临时类调课（一次性事件）
+# 不产生长期偏好候选；「教师要求」类或未注明理由的重复事件才参与统计，最终仍由
+# 教务确认把关（human-in-the-loop）。未识别的自由文本按 unknown 中性处理。
+FORCED_REASON_MARKERS = ("临时", "公差", "请假", "冲突", "停用", "停电", "故障")
+TEACHER_REQUEST_MARKERS = ("教师要求",)
+
+REASON_NOISE_CLASSES = ("forced", "request", "unknown")
+
+
+def reason_noise_class(declared_reason: str | None) -> str:
+    """declared_reason 三分类：forced（被迫/临时，不出候选）/ request（教师要求）/
+    unknown（空或自由文本，按中性参与统计）。"""
+    text = str(declared_reason or "").strip()
+    if not text:
+        return "unknown"
+    if any(marker in text for marker in FORCED_REASON_MARKERS):
+        return "forced"
+    if any(marker in text for marker in TEACHER_REQUEST_MARKERS):
+        return "request"
+    return "unknown"
+
+
 def mining_event_view(event: RescheduleEvent) -> dict[str, Any]:
     """把调课事件压成挖掘需要的最小事实包（含归因理由）。"""
     payload = event.payload or {}
@@ -348,18 +549,30 @@ def _event_subject(view: dict[str, Any]) -> tuple[str, str] | None:
 def deterministic_preference_candidates(
     views: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """无 LLM 的退化路径：同主体+同类型调课 ≥2 次即产生候选。"""
-    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    """无 LLM 的退化路径：同主体+同类型+同归因类调课 ≥2 次即产生候选。
+
+    MEM-C2 修正 3：按 reason 分组——临时公差/教师请假等被迫类不出候选；只对
+    「教师要求」类或 reason 为空/自由文本的重复事件产生候选。文案改为
+    「发现 N 次相似调整，建议教务确认是否存在长期需求」的建议口吻。
+    """
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for view in views:
         subject = _event_subject(view)
         if subject is None:
             continue
-        key = (*subject, str(view.get("event_type") or ""))
+        key = (
+            *subject,
+            str(view.get("event_type") or ""),
+            reason_noise_class(view.get("declared_reason")),
+        )
         groups.setdefault(key, []).append(view)
 
     candidates: list[dict[str, Any]] = []
-    for (subject_type, subject_id, event_type), items in sorted(groups.items()):
+    for (subject_type, subject_id, event_type, noise), items in sorted(groups.items()):
         if len(items) < 2:
+            continue
+        if noise == "forced":
+            # 临时公差/教师请假等被迫调课：一次性事件，不产生长期偏好候选。
             continue
         _subject_type, predicate = EVENT_PATTERNS[event_type]
         if predicate == "avoid_room":
@@ -376,42 +589,100 @@ def deterministic_preference_candidates(
                 "predicate": predicate,
                 "constraint": constraint,
                 "evidence_ids": [str(item["id"]) for item in items],
-                "rationale": f"本学期同主体同类型调课 {len(items)} 次（确定性统计，未使用 AI）",
+                "rationale": (
+                    f"发现 {len(items)} 次相似调整，建议教务确认是否存在长期需求"
+                    "（确定性统计，未使用 AI）"
+                ),
             }
         )
     return candidates
+
+
+def _constraint_backed_by_evidence(
+    constraint: dict[str, Any], predicate: str, evidence_views: list[dict[str, Any]]
+) -> bool:
+    """结构校验（MEM-C2 修正 3）：约束里的每个时段/教室/日期必须有证据出处。
+
+    口径：时段必须出现在证据事件的 ``slot_business_ids`` 内；教室必须出现在
+    证据事件的 ``room_business_id`` 内（调课事件载荷没有 before/after 快照字段，
+    停用教室是事件里能稳定取得的唯一教室出处，按此口径归集）；日期必须落在
+    证据事件的 ``date_from ~ date_to`` 范围内。约束未引用任何目标时放行。
+    """
+    slots: set[str] = set()
+    rooms: set[str] = set()
+    date_ranges: list[tuple[str | None, str | None]] = []
+    for view in evidence_views:
+        slots.update(str(item) for item in view.get("slot_business_ids") or [])
+        room = view.get("room_business_id")
+        if room:
+            rooms.add(str(room))
+        date_ranges.append((view.get("date_from"), view.get("date_to")))
+    if predicate in {"avoid_slot", "prefer_slot"}:
+        targets = _constraint_targets(constraint, predicate)
+        if targets and not targets <= slots:
+            return False
+    if predicate in {"avoid_room", "prefer_room"}:
+        targets = _constraint_targets(constraint, predicate)
+        if targets and not targets <= rooms:
+            return False
+    for key in ("date_from", "date_to"):
+        value = constraint.get(key)
+        if value is None:
+            continue
+        text = str(value)
+        if not any(
+            (low is None or str(low) <= text) and (high is None or text <= str(high))
+            for low, high in date_ranges
+        ):
+            return False
+    return True
 
 
 def validate_ai_candidates(
     raw_candidates: list[dict[str, Any]],
     views: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], int]:
-    """白名单校验模型提名的候选：只做结构过滤，不做语义加工。
+    """白名单校验模型提名的候选：结构校验 + 证据支持性校验（MEM-C2 修正 3）。
 
-    主体必须在事件里出现过、证据必须引用真实事件 id，防止模型臆造记忆。
+    结构校验：主体类型合法且主体在事件里出现过、谓词在白名单内、constraint 是
+    对象、约束里的时段/教室/日期必须来自该候选引用的证据事件（见
+    ``_constraint_backed_by_evidence`` 的口径注释）。
+    证据校验：候选至少 2 条不同证据；每条证据事件的主体必须与候选主体一致——
+    李老师的请假事件不能支持张老师的候选。归属口径：事件按 payload 的
+    ``teacher/room/course_business_id`` 归属主体；调课事件载荷没有 before/after
+    快照字段，教师变化事件同样只按其 payload 主体字段归集（当前能稳定取得的
+    唯一口径，与 ``_event_subject`` 的挖掘分组一致）。
     返回（合法候选, 被丢弃数）。
     """
-    known_subjects = set()
-    known_event_ids: set[str] = set()
-    for view in views:
-        subject = _event_subject(view)
-        if subject is not None:
-            known_subjects.add(subject)
-        known_event_ids.add(str(view.get("id")))
+    views_by_id = {str(view.get("id")): view for view in views}
+    known_subjects = {
+        subject
+        for view in views
+        if (subject := _event_subject(view)) is not None
+    }
     accepted: list[dict[str, Any]] = []
     rejected = 0
     for item in raw_candidates:
         subject_type = str(item.get("subject_type") or "")
         subject_id = str(item.get("subject_id") or "")
         predicate = str(item.get("predicate") or "")
-        evidence_ids = [str(value) for value in item.get("evidence_ids") or []]
+        evidence_ids = list(
+            dict.fromkeys(str(value) for value in item.get("evidence_ids") or [] if value)
+        )
+        raw_constraint = item.get("constraint")
+        constraint = raw_constraint if isinstance(raw_constraint, dict) else None
+        evidence_views = [views_by_id.get(event_id) for event_id in evidence_ids]
+        known_views = [view for view in evidence_views if view is not None]
         if (
             subject_type not in SUBJECT_TYPES
             or (subject_type, subject_id) not in known_subjects
             or predicate not in ALL_PREDICATES
-            or not evidence_ids
-            or any(event_id not in known_event_ids for event_id in evidence_ids)
-            or not isinstance(item.get("constraint") or {}, dict)
+            or constraint is None
+            # 证据校验：至少 2 条不同证据，且每条证据事件的主体与候选一致。
+            or len(evidence_ids) < 2
+            or any(view is None for view in evidence_views)
+            or any(_event_subject(view) != (subject_type, subject_id) for view in known_views)
+            or not _constraint_backed_by_evidence(constraint, predicate, known_views)
         ):
             rejected += 1
             continue
@@ -420,8 +691,8 @@ def validate_ai_candidates(
                 "subject_type": subject_type,
                 "subject_id": subject_id,
                 "predicate": predicate,
-                "constraint": dict(item.get("constraint") or {}),
-                "evidence_ids": list(dict.fromkeys(evidence_ids)),
+                "constraint": dict(constraint),
+                "evidence_ids": evidence_ids,
                 "rationale": str(item.get("rationale") or ""),
             }
         )

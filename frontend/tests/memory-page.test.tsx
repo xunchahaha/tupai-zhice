@@ -238,7 +238,7 @@ describe("MemoryPage", () => {
     expect(mocks.success).toHaveBeenCalledWith("已采纳该偏好，下次求解开始生效");
   });
 
-  it("gates rejection behind a confirm dialog and does not transition until confirmed", async () => {
+  it("gates rejection behind a required reason dialog and posts the rejection_reason", async () => {
     const user = userEvent.setup();
     renderPage();
 
@@ -246,17 +246,47 @@ describe("MemoryPage", () => {
 
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveTextContent("拒绝这条候选偏好？");
+    // 未选原因前确认按钮禁用，也不发 transition 请求。
+    const confirm = screen.getByRole("button", { name: "确认拒绝" });
+    expect(confirm).toBeDisabled();
     expect(
       mocks.request.mock.calls.filter(([config]) => String(config.url).includes("/transition")),
     ).toHaveLength(0);
 
-    await user.click(screen.getByRole("button", { name: "确认拒绝" }));
+    await user.click(screen.getByLabelText("归纳错误"));
+    await user.click(confirm);
     await waitFor(() =>
       expect(mocks.request).toHaveBeenCalledWith(
         expect.objectContaining({
           url: "/api/v1/memory/preferences/pref-1/transition",
           method: "POST",
-          data: { target_status: "rejected" },
+          data: { target_status: "rejected", rejection_reason: "wrong_generalization", reason: null },
+        }),
+      ),
+    );
+  });
+
+  it("shows a note field when the rejection reason is 其他 and sends it along", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "拒绝" }));
+    await user.click(screen.getByLabelText("其他"));
+
+    const note = screen.getByLabelText("备注");
+    await user.type(note, "教务口头说明过这不是偏好");
+    await user.click(screen.getByRole("button", { name: "确认拒绝" }));
+
+    await waitFor(() =>
+      expect(mocks.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "/api/v1/memory/preferences/pref-1/transition",
+          method: "POST",
+          data: {
+            target_status: "rejected",
+            rejection_reason: "other",
+            reason: "教务口头说明过这不是偏好",
+          },
         }),
       ),
     );

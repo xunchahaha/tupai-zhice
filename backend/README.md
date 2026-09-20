@@ -203,14 +203,30 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
   并回显；③ 挖掘条目初始 `status` 恒为 `probation`；④ 偏好的生效日期窗口
   （`valid_from`/`valid_until`）随编译进入规则 scope，只约束窗口内的课次。
 - **挖掘**：`POST /api/v1/memory/mining-runs` 回顾近期调课事件（含一键归因
-  `declared_reason`）。配置 AI 时走 `services/ai.py::mine_preferences`（模型只提名，
-  主体/谓词/证据按白名单校验，允许弃权）；未配置或失败时退化为确定性统计——
-  同主体+同类型调课 ≥2 次即产生候选，无 LLM 也能用。重复候选（同主体+谓词+约束
-  且已存在 `probation`/`confirmed`）自动跳过。
+  `declared_reason`；事件范围限当前方案内**最近 90 天**的滚动窗口，上限 200 条）。
+  配置 AI 时走 `services/ai.py::mine_preferences`（模型只提名，允许弃权并可输出
+  `reasons` 自述失败原因）；代码做**两道校验**（MEM-C2 修正 3）：结构校验（主体
+  在事件里出现过、约束的时段/教室/日期必须来自候选引用的证据事件——教室按事件
+  payload `room_business_id` 口径，调课事件载荷没有 before/after 快照）+ 证据校验
+  （至少 2 条不同证据，且每条证据事件的主体与候选主体一致，李老师的证据不能支持
+  张老师的候选）。未配置或失败时退化为确定性统计——同主体+同类型+同归因类调课
+  ≥2 次即产生候选；**临时公差/教师请假等被迫类不出长期候选**，文案为「发现 N 次
+  相似调整，建议教务确认是否存在长期需求」。重复候选（同主体+谓词+约束且已存在
+  `probation`/`confirmed`）自动跳过。
+- **拒绝记忆与矛盾消解（MEM-C2 修正 4）**：transition 到 `rejected` 时按受控枚举
+  `rejection_reason`（临时请假/主体识别错误/归纳错误/确实有偏好但已改变/其他，
+  API 缺省「其他」）落 `preference_rejections` 表；再挖掘时同签名候选证据 ⊆ 已拒
+  证据则跳过（响应 `skipped_rejected`），含新证据允许重提并在 provenance 标
+  「此前被拒：<原因>」（前端 amber 徽标）。创建/挖掘落库时对同主体同谓词旧活跃
+  条目做三分支消解：窗口不重叠 → 旧条目 `expired`（provenance 记 `superseded_by`）；
+  相邻不重叠 → 时间切片并存；窗口重叠且约束互斥（`prefer_*` 目标集不相交或数值
+  谓词取值不同；`avoid_*` 取并集恒兼容）→ 旧条目打 `conflict` 标，编译期跳过
+  （outcome=`conflict_unresolved`），前端 amber 徽标 + 一键「保留旧弃新 / 以新替旧」
+  （复用 expire，一侧退出后互斥标记自动解除）。
 - **求解联动（创建时冻结）**：`api.create_solver_run` 在创建任务时即调
   `services/memory_solver.py::compile_memory_state`，把条目快照、编译后的内部软规则、
   逐条使用结果（applied/not_authorized/expired/unsupported_predicate/converted_to_rule/
-  hard_requires_conversion/compile_error）冻结进 `DataSnapshot.payload["memory"]` 与
+  hard_requires_conversion/conflict_unresolved/compile_error）冻结进 `DataSnapshot.payload["memory"]` 与
   `SolverRun.memory_usage`；执行路径（`services/tasks.py::_attach_memory_preferences`）
   只读快照，改记忆不影响在途求解的可复现性。目标权重 =
   `weight × (confirmed?1.0:0.3 授权试用衰减) × confidence`，v1 只映射

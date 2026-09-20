@@ -3811,7 +3811,7 @@
           "memory"
         ],
         "summary": "Create Memory Mining Run",
-        "description": "回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。\n\n配置了 AI 走模型归纳（模型只提名，代码按白名单裁决）；未配置或调用失败\n优雅降级为确定性统计：同主体+同类型调课 ≥2 次即产生候选。",
+        "description": "回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。\n\n事件范围（MEM-C2 修正 3）：当前方案内、最近 90 天的调课事件（按 created_at\n滚动窗口，口径见 memory_solver.MINING_EVENT_WINDOW_DAYS）。配置了 AI 走模型\n归纳（模型只提名，代码按白名单与证据支持性裁决）；未配置或调用失败优雅降级\n为确定性统计：同主体+同类型+同归因类调课 ≥2 次即产生候选。",
         "operationId": "create_memory_mining_run_api_v1_memory_mining_runs_post",
         "security": [
           {
@@ -9550,6 +9550,11 @@
             "title": "Skipped Existing",
             "default": 0
           },
+          "skipped_rejected": {
+            "type": "integer",
+            "title": "Skipped Rejected",
+            "default": 0
+          },
           "skipped_invalid": {
             "type": "integer",
             "title": "Skipped Invalid",
@@ -9574,7 +9579,7 @@
           "created"
         ],
         "title": "MiningRunResponse",
-        "description": "一次偏好挖掘的结果。created 即落库后的候选清单（status=probation）。"
+        "description": "一次偏好挖掘的结果。created 即落库后的候选清单（status=probation）。\n\nMEM-C2 修正 4：skipped_rejected 计入「证据 ⊆ 已拒证据被跳过」的候选数；\n带新证据重提的候选照常落库，但其 provenance.previously_rejected 标注此前\n被拒原因，由前端卡片渲染。"
       },
       "OptimizationPenaltyBreakdown": {
         "properties": {
@@ -10115,6 +10120,11 @@
             ],
             "title": "Trial Until"
           },
+          "conflict": {
+            "type": "boolean",
+            "title": "Conflict",
+            "default": false
+          },
           "provenance": {
             "additionalProperties": true,
             "type": "object",
@@ -10211,12 +10221,30 @@
               }
             ],
             "title": "Reason"
+          },
+          "rejection_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "temporary_leave",
+                  "subject_misidentified",
+                  "wrong_generalization",
+                  "preference_changed",
+                  "other"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejection Reason"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "PreferenceTransition",
-        "description": "状态迁移（action=transition，默认）或授权试用（action=authorize_trial）。\n\n三态拆分（MEM-C1）：授权试用只对 probation 条目可用，条目保持 probation，\n以 trial_authorized + trial_until 参与小权重试用；采纳（confirmed）仍是正式生效路径。"
+        "description": "状态迁移（action=transition，默认）或授权试用（action=authorize_trial）。\n\n三态拆分（MEM-C1）：授权试用只对 probation 条目可用，条目保持 probation，\n以 trial_authorized + trial_until 参与小权重试用；采纳（confirmed）仍是正式生效路径。\nMEM-C2 修正 4：target_status=rejected 时建议带 rejection_reason（拒绝原因五选，\n落 preference_rejections 供去重）；缺省按「其他」处理。前端必填，API 兜底。"
       },
       "PreferenceUpdate": {
         "properties": {

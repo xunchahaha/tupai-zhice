@@ -4888,8 +4888,10 @@ export const useConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRul
 /**
  * 回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。
 
-配置了 AI 走模型归纳（模型只提名，代码按白名单裁决）；未配置或调用失败
-优雅降级为确定性统计：同主体+同类型调课 ≥2 次即产生候选。
+事件范围（MEM-C2 修正 3）：当前方案内、最近 90 天的调课事件（按 created_at
+滚动窗口，口径见 memory_solver.MINING_EVENT_WINDOW_DAYS）。配置了 AI 走模型
+归纳（模型只提名，代码按白名单与证据支持性裁决）；未配置或调用失败优雅降级
+为确定性统计：同主体+同类型+同归因类调课 ≥2 次即产生候选。
  * @summary Create Memory Mining Run
  */
 export const createMemoryMiningRunApiV1MemoryMiningRunsPost = (

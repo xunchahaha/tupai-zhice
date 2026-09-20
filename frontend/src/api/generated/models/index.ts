@@ -219,6 +219,7 @@ export * from './preferenceResponseValidUntil';
 export * from './preferenceTransition';
 export * from './preferenceTransitionAction';
 export * from './preferenceTransitionReason';
+export * from './preferenceTransitionRejectionReason';
 export * from './preferenceTransitionTargetModality';
 export * from './preferenceTransitionTargetStatus';
 export * from './preferenceUpdate';
