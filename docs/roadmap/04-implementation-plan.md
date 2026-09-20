@@ -29,7 +29,7 @@
 | IMP-B | 前端导入向导（上传→映射→校验→提交，复用现有组件与动效；原地修复属 IMP-4 二期） | ✅ 完成（10 文件 53 用例全绿，86227a2） | 86227a2 |
 | MEM-A | 后端记忆层（PreferenceEntry + 一键归因 + 挖掘循环 + 求解权重编译器） | ✅ 完成（红线内建、求解零侵入注入软规则，83 定向全绿，f65eb16） | f65eb16 |
 | MEM-B | 前端记忆 UI（待确认收件箱 + 详情页偏好区块 + 解释引用） | ✅ 完成 v1（收件箱/挖掘/偏好表 + 归因 chips；解释引用与教师可见属 v2，72 用例全绿，7a5640f） | 7a5640f |
-| OSS-A | 开源文档套件（架构文档、README 重写、接入指南 feishu/local/dingtalk、LICENSE 建议） | 🔄 收尾实现中（ARCHITECTURE.md + README 开源化重写；接入指南已完成 44f7c16；LICENSE 文件待用户拍板后补） | 44f7c16 |
+| OSS-A | 开源文档套件（架构文档、README 重写、接入指南 feishu/local/dingtalk、LICENSE 建议） | ✅ 完成（ARCHITECTURE.md + README 开源版 7c7d61a；接入指南 44f7c16；**LICENSE 文件待用户拍板 Apache-2.0/MIT**；VER-1 顺带清理 backend README 的 tupai-seed 幽灵命令） | 44f7c16, 7c7d61a |
 | VER-1 | 里程碑统一验证：后端全量 pytest + ruff/mypy + 前端 vitest + build + orval 再生成 | 里程碑 | — |
 
 ## 依赖关系
