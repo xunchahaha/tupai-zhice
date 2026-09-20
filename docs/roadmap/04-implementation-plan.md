@@ -57,8 +57,10 @@ VER-1 收口
 | UX-SSE | interpret SSE 流式（后端 stream 端点 + 前端 fetch reader + 失败回退） | ✅（后端 13 用例 + 前端 12 用例，全量 279 passed，e5c2890） | e5c2890 |
 | CN-A | 钉钉 + 企业微信适配器 v1（真实 API 实现 + mock 单测 + 凭据加密配置端点） | ✅（12 用例，全量 279 passed，01e746e；未经生产凭据联调已在文档声明） | 01e746e |
 | PUB-C | ICS RRULE 循环课次 + school 单班端点 + 按发布版本批量生成链接 + verify 端点 + Lark base_url settings 化 | ✅（7 新用例，全量 286 passed，b39b738） | b39b738 |
-| IMP-C | 导入收尾：historical mapping（表头指纹记忆）+ 单元格原地修复（cell overrides） | 🔄 实现中 | — |
-| MEM-C | 记忆收尾：解释引用偏好 + solver_defaults 系统级默认参数 + 置信度衰减 + Stop Policy + 偏好全员可见 | 排队 | — |
+| IMP-C | 导入收尾：historical mapping（表头指纹记忆）+ 单元格原地修复（cell overrides） | ✅（断点接手完成，52 后端 + 104 前端用例绿，33e1859） | 33e1859 |
+| MEM-C1 | 审查修正第一波：三态拆分（待确认/授权试用/已确认）、hard 转正式 Rule、课程适用日期窗口、实体匹配严格化、偏好冻结进快照、逐条使用结果 | 🔄 实现中（依 02 文档 §6） | — |
+| MEM-C2 | 审查修正第二波：挖掘证据支持性校验（≥2 条不同证据/主体一致/约束来自证据/declared_reason 消噪/学期过滤）+ 拒绝记忆与矛盾消解 | 排队 | — |
+| MEM-C3 | 审查修正第三波：Goal 验收闭环（逐项验收清单 + 代码化验收器 + 报告回灌 + 停止规则） | 排队 | — |
 | OSS-C | print CSS 张榜打印 + README「规划中」节清零 + VER-2 全量（含 e2e） | 排队 | — |
 
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
