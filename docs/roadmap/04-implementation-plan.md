@@ -17,11 +17,11 @@
 | --- | --- | --- | --- |
 | DOC-0 | roadmap 骨架 + 四大设计文档定稿 | ✅ 完成 | ceb0a8d, 3b8cc34, 8a04445, 515925c |
 | IMP-A | 后端导入管线 v2（映射服务 + preview/commit + L1 补强） | ✅ 完成（18 新用例 + 74 回归全绿） | ae32a95 |
-| INT-A | 后端集成抽象层（Protocol 能力接口 + registry，飞书 strangler 收敛为首个适配器，LocalAdapter 默认可用） | 🔄 实现中 | — |
+| INT-A | 后端集成抽象层（Protocol 能力接口 + registry，飞书 strangler 收敛为首个适配器，LocalAdapter 默认可用） | ✅ 完成（10 新用例 67 全绿，4212479） | 4212479 |
 | SET-A | 前端「设置」页重构（/settings 四分区：通用+改密 / AI 模型 / 集成卡片 / 关于；旧 /integrations 重定向） | ✅ 完成（45/45 vitest + tsc 零错误，7769e14） | 7769e14 |
 | SET-B | 前端飞书露出中性化（文案级，5 文件 + e2e 名称；不含 integrations-page 与 app-shell 导航，那两处归 SET-A） | ✅ 完成（44/44 vitest 全绿，abdcb15） | abdcb15 |
 | UX-0 | 求解页交互断点与侧边栏 IA 调研（Workflow：勘察→业界参考→三方案→评审综合） | ✅ 完成（简报=05-ux-sop.md，6784ac1） | — |
-| UX-A | 求解页交互闭环（日期窗口与规则联动、AI 解析后渐进披露参数、解析加载态 + thinking 展示） | 待 UX-0 简报 | — |
+| UX-A | 求解页交互闭环（日期窗口与规则联动、AI 解析后渐进披露参数、解析加载态 + thinking 展示） | 🔄 实现中（PR1，按 05 文档 D1-D8） | — |
 | UX-B | 侧边栏与全局 SOP 重排（参考开源项目 IA；视觉风格不变） | 待 UX-0 简报 | — |
 | PUB-0 | 公开展示层调研（脱离妙搭后，面向老师/学生/家长的课表展示：免登录链接 / ICS 订阅 / 移动只读视图） | ✅ 完成（简报=06-public-showcase.md，6784ac1） | — |
 | PUB-A | 后端公开课表 API（匿名 token 链接、ICS 订阅端点、调课通知；复用 public_* 数据资产与权限体系） | 待 PUB-0 简报 | — |
