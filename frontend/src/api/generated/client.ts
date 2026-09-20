@@ -35,8 +35,10 @@ import type {
   AssistantSolveRequest,
   AuditLogResponse,
   BatchOperationResponse,
+  BodyCommitImportApiV1ImportsCommitPost,
   BodyImportXlsxApiV1ImportsXlsxPost,
   BodyLoginApiV1AuthTokenPost,
+  BodyPreviewImportApiV1ImportsPreviewPost,
   CalendarEventBindingResponse,
   CalendarPublishRequest,
   CalendarPublishResponse,
@@ -44,6 +46,7 @@ import type {
   CampusResponse,
   ClassGroupPayload,
   ClassGroupResponse,
+  CommitImportApiV1ImportsCommitPostParams,
   CompleteFeishuOauthApiV1IntegrationsFeishuOauthCallbackGetParams,
   ConstraintCatalogEntry,
   CourseSessionBatchDelete,
@@ -64,6 +67,8 @@ import type {
   HTTPValidationError,
   HealthLiveApiV1HealthLiveGet200,
   HealthReadyApiV1HealthReadyGet200,
+  ImportCommitResponse,
+  ImportPreviewResponse,
   ImportResult,
   ImportXlsxApiV1ImportsXlsxPostParams,
   IntegrationSyncResponse,
@@ -1680,6 +1685,157 @@ export const useImportXlsxApiV1ImportsXlsxPost = <TError = HTTPValidationError,
       > => {
 
       const mutationOptions = getImportXlsxApiV1ImportsXlsxPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * 解析上传文件并给出列映射建议与行级校验报告，只解析不落库。
+
+携带 ``mapping_json``（用户修正后的映射）时按其重跑校验，用于 Fix 循环；
+未配置 AI 语义层时只走别名/规范化/模糊/形状四层匹配。
+ * @summary Preview Import
+ */
+export const previewImportApiV1ImportsPreviewPost = (
+    bodyPreviewImportApiV1ImportsPreviewPost: BodyPreviewImportApiV1ImportsPreviewPost,
+ signal?: AbortSignal
+) => {
+      
+      const formData = new FormData();
+formData.append(`file`, bodyPreviewImportApiV1ImportsPreviewPost.file)
+if(bodyPreviewImportApiV1ImportsPreviewPost.mapping_json !== undefined && bodyPreviewImportApiV1ImportsPreviewPost.mapping_json !== null) {
+ formData.append(`mapping_json`, bodyPreviewImportApiV1ImportsPreviewPost.mapping_json)
+ }
+
+      return customInstance<ImportPreviewResponse>(
+      {url: `/api/v1/imports/preview`, method: 'POST',
+      headers: {'Content-Type': 'multipart/form-data', },
+       data: formData, signal
+    },
+      );
+    }
+  
+
+
+export const getPreviewImportApiV1ImportsPreviewPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof previewImportApiV1ImportsPreviewPost>>, TError,{data: BodyPreviewImportApiV1ImportsPreviewPost}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof previewImportApiV1ImportsPreviewPost>>, TError,{data: BodyPreviewImportApiV1ImportsPreviewPost}, TContext> => {
+
+const mutationKey = ['previewImportApiV1ImportsPreviewPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof previewImportApiV1ImportsPreviewPost>>, {data: BodyPreviewImportApiV1ImportsPreviewPost}> = (props) => {
+          const {data} = props ?? {};
+
+          return  previewImportApiV1ImportsPreviewPost(data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PreviewImportApiV1ImportsPreviewPostMutationResult = NonNullable<Awaited<ReturnType<typeof previewImportApiV1ImportsPreviewPost>>>
+    export type PreviewImportApiV1ImportsPreviewPostMutationBody = BodyPreviewImportApiV1ImportsPreviewPost
+    export type PreviewImportApiV1ImportsPreviewPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Preview Import
+ */
+export const usePreviewImportApiV1ImportsPreviewPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof previewImportApiV1ImportsPreviewPost>>, TError,{data: BodyPreviewImportApiV1ImportsPreviewPost}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof previewImportApiV1ImportsPreviewPost>>,
+        TError,
+        {data: BodyPreviewImportApiV1ImportsPreviewPost},
+        TContext
+      > => {
+
+      const mutationOptions = getPreviewImportApiV1ImportsPreviewPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * 按确认的映射把上传文件正式导入，返回与模板直通导入同构的质量报告。
+
+``mode=upsert`` 沿用现有业务键（班级+课次序号+课节名称+上课日期+上课时段）
+重复导入即更新；``mode=insert`` 只新增，已存在的课次原样保留且不做孤儿清理。
+ * @summary Commit Import
+ */
+export const commitImportApiV1ImportsCommitPost = (
+    bodyCommitImportApiV1ImportsCommitPost: BodyCommitImportApiV1ImportsCommitPost,
+    params?: CommitImportApiV1ImportsCommitPostParams,
+ signal?: AbortSignal
+) => {
+      
+      const formData = new FormData();
+formData.append(`file`, bodyCommitImportApiV1ImportsCommitPost.file)
+formData.append(`mapping_json`, bodyCommitImportApiV1ImportsCommitPost.mapping_json)
+if(bodyCommitImportApiV1ImportsCommitPost.mode !== undefined) {
+ formData.append(`mode`, bodyCommitImportApiV1ImportsCommitPost.mode)
+ }
+
+      return customInstance<ImportCommitResponse>(
+      {url: `/api/v1/imports/commit`, method: 'POST',
+      headers: {'Content-Type': 'multipart/form-data', },
+       data: formData,
+        params, signal
+    },
+      );
+    }
+  
+
+
+export const getCommitImportApiV1ImportsCommitPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof commitImportApiV1ImportsCommitPost>>, TError,{data: BodyCommitImportApiV1ImportsCommitPost;params?: CommitImportApiV1ImportsCommitPostParams}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof commitImportApiV1ImportsCommitPost>>, TError,{data: BodyCommitImportApiV1ImportsCommitPost;params?: CommitImportApiV1ImportsCommitPostParams}, TContext> => {
+
+const mutationKey = ['commitImportApiV1ImportsCommitPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof commitImportApiV1ImportsCommitPost>>, {data: BodyCommitImportApiV1ImportsCommitPost;params?: CommitImportApiV1ImportsCommitPostParams}> = (props) => {
+          const {data,params} = props ?? {};
+
+          return  commitImportApiV1ImportsCommitPost(data,params,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CommitImportApiV1ImportsCommitPostMutationResult = NonNullable<Awaited<ReturnType<typeof commitImportApiV1ImportsCommitPost>>>
+    export type CommitImportApiV1ImportsCommitPostMutationBody = BodyCommitImportApiV1ImportsCommitPost
+    export type CommitImportApiV1ImportsCommitPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Commit Import
+ */
+export const useCommitImportApiV1ImportsCommitPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof commitImportApiV1ImportsCommitPost>>, TError,{data: BodyCommitImportApiV1ImportsCommitPost;params?: CommitImportApiV1ImportsCommitPostParams}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof commitImportApiV1ImportsCommitPost>>,
+        TError,
+        {data: BodyCommitImportApiV1ImportsCommitPost;params?: CommitImportApiV1ImportsCommitPostParams},
+        TContext
+      > => {
+
+      const mutationOptions = getCommitImportApiV1ImportsCommitPostMutationOptions(options);
 
       return useMutation(mutationOptions, queryClient);
     }

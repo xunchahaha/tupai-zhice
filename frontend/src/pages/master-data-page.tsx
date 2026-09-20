@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ColumnDef, type RowSelectionState } from "@tanstack/react-table";
-import { CalendarDays, Columns3, Download, Eraser, FileUp, ListChecks, Pencil, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { CalendarDays, Columns3, Download, Eraser, FileUp, ListChecks, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, X } from "lucide-react";
 import { type Dispatch, type FormEvent, type ReactNode, type SetStateAction, useEffect, useMemo, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { toast } from "sonner";
@@ -36,6 +36,7 @@ import {
   type CourseSessionFilter,
   type CourseSessionPayload,
   type CourseSessionResponse,
+  type ImportCommitResponse,
   type ImportResult,
   type RoomResponse,
   type TeacherResponse,
@@ -45,6 +46,7 @@ import { http } from "@/api/http";
 import { type AppOutletContext } from "@/app/user-context";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DataTable } from "@/components/data-table";
+import { ImportWizard } from "@/components/import-wizard";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { ColumnHeader, CopyableId, TableText, TagList } from "@/components/table-cell";
 import { Button } from "@/components/ui/button";
@@ -251,6 +253,7 @@ export function MasterDataPage() {
   const client = useQueryClient();
   const file = useRef<HTMLInputElement>(null);
   const [importReport, setImportReport] = useState<ImportResult | null>(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
   const [entityDialog, setEntityDialog] = useState<EntityDialogState | null>(null);
   const [courseDialogMode, setCourseDialogMode] = useState<CourseDialogMode | null>(null);
   const [courseDraft, setCourseDraft] = useState<CourseDraft>(emptyCourseDraft());
@@ -381,7 +384,7 @@ export function MasterDataPage() {
   });
 
   const refresh = () => void Promise.all([campusQuery.refetch(), teacherQuery.refetch(), classQuery.refetch(), roomQuery.refetch(), slotQuery.refetch(), courseQuery.refetch()]);
-  const afterImport = (result: ImportResult) => {
+  const afterAnyImport = (result: ImportResult) => {
     [getListCampusesApiV1CampusesGetQueryKey(), getListTeachersApiV1TeachersGetQueryKey(), getListClassGroupsApiV1ClassGroupsGetQueryKey(), getListRoomsApiV1RoomsGetQueryKey(), getListTimeSlotsApiV1TimeSlotsGetQueryKey(), getListCourseSessionsApiV1CourseSessionsGetQueryKey()].forEach(invalidate);
     setTeacherSelection({});
     setClassSelection({});
@@ -390,9 +393,18 @@ export function MasterDataPage() {
     setCourseSelection({});
     setImportReport(result);
     void client.invalidateQueries({ queryKey: ["/api/v1/schedules"] });
+  };
+  const afterImport = (result: ImportResult) => {
+    afterAnyImport(result);
     toast.success(`主数据已导入：新建 ${result.course_sessions} 个课次；导入版本为草稿，待审核发布`);
   };
   const upload = useImportXlsxApiV1ImportsXlsxPost({ mutation: { onSuccess: afterImport, onError: createError } });
+  // 智能导入与模板导入共用同一套收尾（失效缓存 + 同款导入报告），只提示文案按模式区分。
+  const afterWizardImport = (result: ImportCommitResponse) => {
+    afterAnyImport(result);
+    setWizardOpen(false);
+    toast.success(`智能导入完成（${result.mode === "insert" ? "全新追加" : "按业务键更新"}）：新建 ${result.course_sessions} 个课次${result.course_sessions_updated ? `、更新 ${result.course_sessions_updated} 个` : ""}；导入版本为草稿，待审核发布`);
+  };
 
   const courseOptions = useMemo(() => {
     const source = Array.isArray(courseQuery.data) ? courseQuery.data : [];
@@ -709,7 +721,7 @@ export function MasterDataPage() {
   return (
     <div className="space-y-5">
       <input ref={file} className="hidden" type="file" accept=".xlsx" onChange={(event) => { const selected = event.target.files?.[0]; if (selected) upload.mutate({ data: { file: selected as unknown as string } }); event.target.value = ""; }} />
-      <PageHeader title="主数据" actions={<><Button size="sm" variant="outline" onClick={refresh}><RefreshCw className="size-3.5" />刷新</Button><Button size="sm" variant="outline" onClick={() => void downloadSample()}><Download className="size-3.5" />下载官方模板</Button>{!readOnly ? <Button size="sm" variant="secondary" onClick={() => file.current?.click()} disabled={upload.isPending}><FileUp className="size-3.5" />导入 XLSX</Button> : null}</>} />
+      <PageHeader title="主数据" actions={<><Button size="sm" variant="outline" onClick={refresh}><RefreshCw className="size-3.5" />刷新</Button><Button size="sm" variant="outline" onClick={() => void downloadSample()}><Download className="size-3.5" />下载官方模板</Button>{!readOnly ? <><Button size="sm" variant="secondary" onClick={() => setWizardOpen(true)}><Sparkles className="size-3.5" />智能导入</Button><Button size="sm" variant="secondary" onClick={() => file.current?.click()} disabled={upload.isPending}><FileUp className="size-3.5" />导入 XLSX</Button></> : null}</>} />
       {readOnly ? <section className="border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">教师、班级、教室和课程场次在所有课表方案中复用；为避免影响其他方案，只有管理员可以修改或导入。</section> : null}
       {importReport ? <ImportReportPanel report={importReport} onDismiss={() => setImportReport(null)} /> : null}
       {loading ? <LoadingState /> : failed ? <ErrorState retry={refresh} /> : (
@@ -785,6 +797,7 @@ export function MasterDataPage() {
       <BatchCourseDialog open={batchAction !== null} action={batchAction ?? "date"} affected={courseBatchCount} allFiltered={courseSelectionStats.allFiltered} date={batchDate} setDate={setBatchDate} room={batchRoom} setRoom={setBatchRoom} rooms={Array.isArray(roomQuery.data) ? roomQuery.data : []} saving={isBatchSaving} close={() => setBatchAction(null)} submit={runBatchAction} />
       <EntityBatchDialog open={entityBatch !== null} state={entityBatch} selected={entityBatch ? idsForEntityKind(entityBatch.kind).length : 0} value={entityBatchValue} setValue={setEntityBatchValue} saving={batchUpdateEntities.isPending || batchDeleteEntities.isPending} close={() => setEntityBatch(null)} submit={runEntityBatch} />
       <ClassTracksDialog item={tracksTarget} close={() => setTracksTarget(null)} />
+      <ImportWizard open={wizardOpen} onOpenChange={setWizardOpen} onCommitted={afterWizardImport} />
       <ConfirmDialog open={deleteTarget !== null} title={deleteTarget ? `删除${deleteTarget.resourceLabel}` : "删除记录"} description={deleteTarget ? `确认删除“${deleteTarget.label}”？被课程、课表版本或日历账号引用的记录会被系统拦截。` : ""} confirmLabel="确认删除" danger pending={remove.isPending} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }} onConfirm={executeDelete} />
     </div>
   );
