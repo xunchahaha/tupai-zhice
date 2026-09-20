@@ -56,8 +56,8 @@ VER-1 收口
 | SCR-0 | 一键启动脚本（start.bat / scripts/start.sh + README 指引） | ✅ | 5e2aaba |
 | UX-SSE | interpret SSE 流式（后端 stream 端点 + 前端 fetch reader + 失败回退） | ✅（后端 13 用例 + 前端 12 用例，全量 279 passed，e5c2890） | e5c2890 |
 | CN-A | 钉钉 + 企业微信适配器 v1（真实 API 实现 + mock 单测 + 凭据加密配置端点） | ✅（12 用例，全量 279 passed，01e746e；未经生产凭据联调已在文档声明） | 01e746e |
-| PUB-C | ICS RRULE 循环课次 + school 单班端点 + 按发布版本批量生成链接 + verify 端点 + Lark base_url settings 化 | 🔄 实现中 | — |
-| IMP-C | 导入收尾：historical mapping（表头指纹记忆）+ 单元格原地修复（cell overrides） | 排队 | — |
+| PUB-C | ICS RRULE 循环课次 + school 单班端点 + 按发布版本批量生成链接 + verify 端点 + Lark base_url settings 化 | ✅（7 新用例，全量 286 passed，b39b738） | b39b738 |
+| IMP-C | 导入收尾：historical mapping（表头指纹记忆）+ 单元格原地修复（cell overrides） | 🔄 实现中 | — |
 | MEM-C | 记忆收尾：解释引用偏好 + solver_defaults 系统级默认参数 + 置信度衰减 + Stop Policy + 偏好全员可见 | 排队 | — |
 | OSS-C | print CSS 张榜打印 + README「规划中」节清零 + VER-2 全量（含 e2e） | 排队 | — |
 
