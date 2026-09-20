@@ -29,7 +29,7 @@
 | IMP-B | 前端导入向导（上传→映射→校验→提交，复用现有组件与动效；原地修复属 IMP-4 二期） | 🔄 实现中（与 SET-A 文件不相交） | — |
 | MEM-A | 后端记忆层（PreferenceEntry + 一键归因 + 挖掘循环 + 求解权重编译器） | 🔄 实现中 | — |
 | MEM-B | 前端记忆 UI（待确认收件箱 + 详情页偏好区块 + 解释引用） | 排队（等 MEM-A） | — |
-| OSS-A | 开源文档套件（架构文档、README 重写、接入指南模板 feishu/local/dingtalk、LICENSE 建议） | 排队（等 INT-A 定形后写，避免返工） | — |
+| OSS-A | 开源文档套件（架构文档、README 重写、接入指南模板 feishu/local/dingtalk、LICENSE 建议） | 🔄 接入指南四文件实现中（oss-guides）；架构文档与 README 重写待 MEM-A/PUB-A 定形 | — |
 | VER-1 | 里程碑统一验证：后端全量 pytest + ruff/mypy + 前端 vitest + build + orval 再生成 | 里程碑 | — |
 
 ## 依赖关系
