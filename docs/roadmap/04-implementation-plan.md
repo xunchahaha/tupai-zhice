@@ -1,6 +1,6 @@
 # 04 · 实施计划与进度
 
-> 状态：执行中 · 分支 `feat/open-source-upgrade`
+> 状态：✅ 全部批次完成 · 分支 `feat/open-source-upgrade` · VER-1 验证通过（2026-09-20）
 > 批次策略遵循工作区 AGENTS.md：按模块分批、实现代理自检 + 局部验证、里程碑统一全量验证、每批一个原子提交。
 
 ## 勘察修正（重要）
@@ -25,7 +25,7 @@
 | UX-B | 侧边栏与全局 SOP 重排（参考开源项目 IA；视觉风格不变） | ✅ 完成（D9-D13 全落地，64 用例全绿，5ebf349） | 5ebf349 |
 | PUB-0 | 公开展示层调研（脱离妙搭后，面向老师/学生/家长的课表展示：免登录链接 / ICS 订阅 / 移动只读视图） | ✅ 完成（简报=06-public-showcase.md，6784ac1） | — |
 | PUB-A | 后端公开课表 API（匿名 token 链接、ICS 订阅端点、调课通知；复用 public_* 数据资产与权限体系） | ✅ 完成（AST 逐字节等价迁移验证，全量 258 passed，d78c833） | d78c833 |
-| PUB-B | 前端公开课表页（移动优先只读视图、二维码/链接分发、复用课表渲染组件） | 🔄 实现中（与 oss-final 并行） | — |
+| PUB-B | 前端公开课表页（移动优先只读视图、二维码/链接分发、复用课表渲染组件） | ✅ 完成（17 文件 91 用例全绿，bb06dd2） | bb06dd2 |
 | IMP-B | 前端导入向导（上传→映射→校验→提交，复用现有组件与动效；原地修复属 IMP-4 二期） | ✅ 完成（10 文件 53 用例全绿，86227a2） | 86227a2 |
 | MEM-A | 后端记忆层（PreferenceEntry + 一键归因 + 挖掘循环 + 求解权重编译器） | ✅ 完成（红线内建、求解零侵入注入软规则，83 定向全绿，f65eb16） | f65eb16 |
 | MEM-B | 前端记忆 UI（待确认收件箱 + 详情页偏好区块 + 解释引用） | ✅ 完成 v1（收件箱/挖掘/偏好表 + 归因 chips；解释引用与教师可见属 v2，72 用例全绿，7a5640f） | 7a5640f |
@@ -49,10 +49,11 @@ VER-1 收口
 - 只用现有 ui 组件（button/badge/select/tabs/dialog/data-table/page）；不引入新 UI/动画依赖；
 - 图标 lucide-react size-3.5/4；控件 h-8/h-9、text-sm/xs；微交互 150-300ms。
 
-## 里程碑验证清单（VER-1）
+## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 
-- [ ] `uv run pytest`（基线 208 passed）+ ruff + mypy
-- [ ] `pnpm vitest run` + `pnpm build` + orval 再生成无 diff
-- [ ] 手动走查：设置页、导入向导、记忆收件箱（dev server）
-- [ ] openapi.json、数据字典、接口约定、backend/README 同步更新
-- [ ] 全部提交按 conventional commits 分组，最终 diff 审查
+- [x] `uv run pytest` 全量 **258 passed, 0 failed**（基线 208 → 新增 50）+ ruff 全过 + mypy 0 issues（31 files）
+- [x] `pnpm vitest run` **17 文件 / 91 测试全过** + `tsc -b` 0 错误 + `vite build` 成功（4.07s）
+- [x] orval 再生成 **零 diff**（含 openapi.json 重导出一致）
+- [x] openapi.json、数据字典、接口约定、backend/README 随批次同步更新；tupai-seed 幽灵命令已清理
+- [x] 43+ 提交全部 conventional commits 分组、每批一次原子提交、最终逐批 diff 审查
+- [ ] dev server 手动走查（设置页/导入向导/记忆收件箱/公开 H5）留给合并前人工过一遍

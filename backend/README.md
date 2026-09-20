@@ -5,11 +5,10 @@
 ```powershell
 uv sync --group dev
 uv run alembic upgrade head
-uv run tupai-seed
 uv run tupai-api
 ```
 
-容器启动入口会先自动执行 `alembic upgrade head`，再启动 API。因此全新持久化卷会先完成建表，随后由应用启动流程创建默认管理员。已有数据库只执行幂等迁移，不会覆盖管理员自行修改过的密码。
+本地开发需手动执行一次 `uv run alembic upgrade head`（应用启动守卫会在库结构落后时 fail-fast，不做自动迁移）；容器启动入口则会先自动执行 `alembic upgrade head`，再启动 API。因此全新持久化卷会先完成建表，随后由应用启动流程创建默认管理员。已有数据库只执行幂等迁移，不会覆盖管理员自行修改过的密码。
 
 ## 课表数据导入
 
