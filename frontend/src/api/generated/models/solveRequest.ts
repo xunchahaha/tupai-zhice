@@ -8,6 +8,7 @@
 import type { SolveRequestDateFrom } from './solveRequestDateFrom';
 import type { SolveRequestDateTo } from './solveRequestDateTo';
 import type { SolveRequestSolverRulesItem } from './solveRequestSolverRulesItem';
+import type { SolveRequestGoalId } from './solveRequestGoalId';
 
 export interface SolveRequest {
   /**
@@ -32,5 +33,6 @@ export interface SolveRequest {
    */
   date_window_days?: number;
   solver_rules?: SolveRequestSolverRulesItem[];
+  goal_id?: SolveRequestGoalId;
   wait?: boolean;
 }

@@ -9,6 +9,7 @@ import type { AssistantInterpretResponseSource } from './assistantInterpretRespo
 import type { AssistantInterpretResponseDateFrom } from './assistantInterpretResponseDateFrom';
 import type { AssistantInterpretResponseDateTo } from './assistantInterpretResponseDateTo';
 import type { AssistantInterpretResponseSolverRulesItem } from './assistantInterpretResponseSolverRulesItem';
+import type { GoalChecklistItem } from './goalChecklistItem';
 import type { AssistantInterpretResponseThinking } from './assistantInterpretResponseThinking';
 
 export interface AssistantInterpretResponse {
@@ -30,6 +31,8 @@ export interface AssistantInterpretResponse {
   solver_rules?: AssistantInterpretResponseSolverRulesItem[];
   unsupported_requirements?: string[];
   coverage_warnings?: string[];
+  goal_checklist_draft?: GoalChecklistItem[];
+  checklist_warnings?: string[];
   summary: string;
   thinking?: AssistantInterpretResponseThinking;
 }

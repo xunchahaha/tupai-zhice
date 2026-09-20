@@ -6,6 +6,7 @@ import { RouteErrorElement } from "@/app/error-boundary";
 import { RoleRoute } from "@/app/role-route";
 import { AccountsPage } from "@/pages/accounts-page";
 import { DiagnosticsPage } from "@/pages/diagnostics-page";
+import { GoalsPage } from "@/pages/goals-page";
 import { LoginPage } from "@/pages/login-page";
 import { MasterDataPage } from "@/pages/master-data-page";
 import { MemoryPage } from "@/pages/memory-page";
@@ -41,6 +42,7 @@ export const router = createBrowserRouter([
     { path: "/diagnostics", element: <DiagnosticsPage /> },
     { path: "/reschedule", element: <RoleRoute roles={["admin", "scheduler"]}><ReschedulePage /></RoleRoute> },
     { path: "/memory", element: <RoleRoute roles={["admin", "scheduler"]}><MemoryPage /></RoleRoute> },
+    { path: "/goals", element: <RoleRoute roles={["admin", "scheduler"]}><GoalsPage /></RoleRoute> },
     { path: "/versions", element: <VersionsPage /> },
     { path: "/public-links", element: <RoleRoute roles={["admin", "scheduler"]}><PublicLinksPage /></RoleRoute> },
     { path: "/settings", element: <RoleRoute roles={["admin", "scheduler"]}><SettingsPage /></RoleRoute> },

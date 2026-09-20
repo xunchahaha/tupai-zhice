@@ -11,6 +11,8 @@ import type { SolverRunResponseBestBound } from './solverRunResponseBestBound';
 import type { SolverRunResponseWallTimeSeconds } from './solverRunResponseWallTimeSeconds';
 import type { SolverRunResponseExplanation } from './solverRunResponseExplanation';
 import type { SolverRunResponseMemoryUsage } from './solverRunResponseMemoryUsage';
+import type { SolverRunResponseGoalId } from './solverRunResponseGoalId';
+import type { SolverRunResponseGoalReport } from './solverRunResponseGoalReport';
 import type { SolverRunResponseErrorMessage } from './solverRunResponseErrorMessage';
 
 export interface SolverRunResponse {
@@ -28,6 +30,8 @@ export interface SolverRunResponse {
   priority_explanations: string[];
   explanation?: SolverRunResponseExplanation;
   memory_usage?: SolverRunResponseMemoryUsage;
+  goal_id?: SolverRunResponseGoalId;
+  goal_report?: SolverRunResponseGoalReport;
   error_message: SolverRunResponseErrorMessage;
   created_at: string;
   updated_at: string;

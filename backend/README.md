@@ -235,6 +235,41 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
   不会把课表变成无解。编译整体失败时 memory 节标 `compile_failed`，求解照常但
   `services/explain.py` 与前端解释面板必须显式提示「本次未使用偏好记忆」，不无声降级。
 
+## 目标验收闭环（MEM-C3）
+
+求解任务结束 ≠ 目标完成；找到可行解 ≠ 用户全部要求都完成。一句话目标被拆成
+**可逐项验收的清单**，每次关联的 SolverRun 到达 `completed` 后由**代码验收器**
+出报告（缺口 + 证据 + 允许的下一步）回灌同一目标。设计见
+`docs/roadmap/02-agent-memory.md` §6「目标闭环要点」。
+
+- **存储**：`solve_goals` 表（`app/models.py::SolveGoal`：原始指令原文、checklist
+  JSON、状态机）+ `solver_runs.goal_id` / `solver_runs.goal_report`（迁移
+  `b8a4d2e6f9c1`）。
+- **checklist kind 与验收器一一对应**（`app/services/goal.py`）：`coverage`
+  （目标课次集合与结果集合**逐项比对**，并借快照+请求范围把缺口拆成「没进求解
+  范围」与「进了范围没安置」两类）、`forbidden_slot_free`（独立复核指定主体+
+  时段是否仍被占用，不信任求解器自报；参数未量化永远不通过）、`no_hard_conflicts`
+  （复用 `count_hard_conflicts` 独立重算）、`max_changes`（与基准版本 diff 后只设
+  上限——「尽量少改」是优化目标，**绝不升级为「绝不改」**）、`draft_only`
+  （查审计日志：目标期间无 publish/calendar_publish 动作；发布永远不在目标自动
+  动作里）、`date_range_match`（范围端点核对）。没有可核对对象（无课表/缺参数）
+  一律不通过，绝不静默放行。
+- **状态机**：`open → achieved`（全部通过；draft_only 目标在合格草稿交付即达成）；
+  存在「必须由教务放宽或裁决」的缺口（硬冲突未消、求解未能安置、禁排仍被占、
+  目标期间发生了发布）→ `awaiting_decision`；存在允许的补救动作（范围提取漏课次
+  → 修正范围重跑；超时/上限未达 → 加大预算重跑）→ 保持 `open` 并附建议；不存在
+  允许动作同样保持 `open` 附终态报告。**验收器只出报告，绝不自动重跑**；状态
+  永远反映最近一次验收，`abandoned` 是人工终态，验收器不越权改动。
+- **关联求解**：`POST /api/v1/solver-runs` 与 `POST /api/v1/assistant/solve` 可选
+  `goal_id`；自动验收钩子在 `services/tasks.py::_persist_result` 的事务之外单独
+  提交——验收层任何异常都不影响求解结果落库。已放弃目标拒绝再关联新任务（409）。
+- **与 interpret 打通**：`/assistant/interpret`（含流式）响应携带
+  `goal_checklist_draft`（业务范围→coverage、日期→date_range_match、禁排语→
+  forbidden_slot_free 占位）与 `checklist_warnings`；占位项 `needs_params=true`，
+  补齐主体与时段前验收不会通过。前端可增删项后再创建 goal。
+- **解释层**：带 goal 的 run 在事实包附 `goal_acceptance` 摘要
+  （`services/explain.py`，改动仅限附加事实字段）。
+
 ## 公开课表层（capability-link）
 
 脱离飞书妙搭后，面向老师（对外）/学生/家长/督导的免登录课表门户由 capability-link

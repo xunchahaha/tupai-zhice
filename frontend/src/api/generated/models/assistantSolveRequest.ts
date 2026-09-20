@@ -8,6 +8,7 @@
 import type { AssistantSolveRequestDateFrom } from './assistantSolveRequestDateFrom';
 import type { AssistantSolveRequestDateTo } from './assistantSolveRequestDateTo';
 import type { AssistantSolveRequestSolverRulesItem } from './assistantSolveRequestSolverRulesItem';
+import type { AssistantSolveRequestGoalId } from './assistantSolveRequestGoalId';
 
 export interface AssistantSolveRequest {
   /**
@@ -32,4 +33,5 @@ export interface AssistantSolveRequest {
   date_window_days?: number;
   solver_rules?: AssistantSolveRequestSolverRulesItem[];
   wait?: boolean;
+  goal_id?: AssistantSolveRequestGoalId;
 }

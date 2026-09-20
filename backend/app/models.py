@@ -397,6 +397,13 @@ class SolverRun(TimestampMixin, Base):
     # 偏好记忆使用情况（MEM-C1）：创建任务时即编译并冻结，求解与解释只读这里，
     # 改记忆不影响在途求解的可复现性。结构与 snapshot.payload["memory"] 一致。
     memory_usage: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # 目标验收闭环（MEM-C3）：关联的持久目标与最近一次验收报告。
+    # goal_id 在创建任务时指定（POST /solver-runs body.goal_id），任务到达
+    # completed 后由 services/goal.py 自动验收并落 goal_report。
+    goal_id: Mapped[str | None] = mapped_column(
+        ForeignKey("solve_goals.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    goal_report: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
@@ -570,6 +577,43 @@ class PreferenceRejection(TimestampMixin, Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
     rejected_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class SolveGoal(TimestampMixin, Base):
+    """L3 当前任务工作记录：持久目标验收闭环（docs/roadmap/02 §6 MEM-C3）。
+
+    核心思想：求解任务结束 ≠ 目标完成。把用户的一句话目标拆成可逐项验收的
+    checklist（kind 与 services/goal.py 验收器一一对应），每次关联的 SolverRun
+    到达 completed 后由**代码验收器**出报告（缺口 + 证据 + 允许的下一步），
+    回灌同一目标；报告落在 SolverRun.goal_report，本表只保留最新状态。
+
+    状态机：open → achieved（逐项通过；draft_only 目标在合格草稿交付即完成，
+    发布永远不在目标自动动作里）／awaiting_decision（存在需教务放宽或裁决的
+    缺口）／abandoned（人工放弃）。停止规则写死在验收器里：不存在允许的补救
+    动作就保持 open 并附终态报告，绝不自动无限重跑。latest_run_id 是展示用
+    快捷指针（无外键，避免与 solver_runs.goal_id 成环），权威关联以
+    SolverRun.goal_id 为准。
+    """
+
+    __tablename__ = "solve_goals"
+    __table_args__ = (
+        Index("ix_solve_goals_scope_status", "schedule_set_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
+    # 原始指令原文：验收口径永远能回溯到用户的原话，而不是解析中间产物。
+    instruction: Mapped[str] = mapped_column(Text)
+    # 逐项验收清单：[{key, requirement, kind, params}]，kind 枚举见
+    # services/goal.py GOAL_CHECKLIST_KINDS。
+    checklist: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)
+    latest_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 
 class IntegrationSync(TimestampMixin, Base):

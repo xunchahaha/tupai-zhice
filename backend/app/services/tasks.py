@@ -17,6 +17,7 @@ from ..models import (
     Room,
     ScheduleAssignment,
     ScheduleVersion,
+    SolveGoal,
     SolverRun,
     Teacher,
     TimeSlot,
@@ -257,10 +258,12 @@ def calculate_metrics(
 
 
 def _persist_result(run_id: str, result: dict[str, Any]) -> None:
+    run_goal_id: str | None = None
     with SessionLocal() as db:
         run = db.get(SolverRun, run_id)
         if run is None:
             return
+        run_goal_id = run.goal_id
         result["solved_course_business_ids"] = sorted(
             {
                 str(item.get("course_business_id") or "")
@@ -402,6 +405,27 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
                 event.status = "candidate_ready"
                 event.candidate_schedule_id = schedule.id
         db.commit()
+    # 目标验收闭环（MEM-C3）：run 到达 completed 后对关联目标自动出验收报告。
+    # 放在求解结果事务之外单独提交——验收层的任何异常都不得影响求解落库，
+    # 也不得让报告与课表版本处于同一失败域。
+    if run_goal_id:
+        _evaluate_goal_for_run(run_id, str(run_goal_id))
+
+
+def _evaluate_goal_for_run(run_id: str, goal_id: str) -> None:
+    # 延迟导入：goal.py 验收器复用本模块的 count_hard_conflicts，顶层互相引用成环。
+    from .goal import apply_goal_evaluation
+
+    try:
+        with SessionLocal() as db:
+            run = db.get(SolverRun, run_id)
+            goal = db.get(SolveGoal, goal_id)
+            if run is None or goal is None:
+                return
+            apply_goal_evaluation(db, run)
+            db.commit()
+    except Exception:  # noqa: BLE001 - 验收失败只记日志，求解结果不受影响
+        logger.exception("目标验收执行失败：求解结果不受影响，目标状态保持上一次验收")
 
 
 def _persist_failure(run_id: str, message: str) -> None:

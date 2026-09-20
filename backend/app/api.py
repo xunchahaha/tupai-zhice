@@ -72,6 +72,7 @@ from .models import (
     ScheduleSet,
     ScheduleSetMember,
     ScheduleVersion,
+    SolveGoal,
     SolverRun,
     Teacher,
     TimeSlot,
@@ -114,6 +115,10 @@ from .schemas import (
     FeishuSyncRequest,
     FeishuWorkspaceCreate,
     FeishuWorkspaceResponse,
+    GoalChecklistItem,
+    GoalCreateRequest,
+    GoalDetailResponse,
+    GoalResponse,
     ImportColumnMapping,
     ImportCommitResponse,
     ImportHeaderCandidate,
@@ -206,6 +211,12 @@ from .services.explain import (
     deterministic_summary,
 )
 from .services.feishu import FeishuService, FeishuServiceError, json_text
+from .services.goal import (
+    GOAL_CHECKLIST_KINDS,
+    build_checklist,
+    draft_checklist_from_interpretation,
+    goal_run_counts,
+)
 from .services.ics import build_public_calendar_ics, calendar_etag
 from .services.import_mapping import (
     ColumnMapping,
@@ -3918,6 +3929,24 @@ def _validate_rule_coverage(payload: dict[str, Any]) -> None:
         ))
 
 
+def _resolve_goal_for_run(
+    db: Session, goal_id: str | None, schedule_set_id: str
+) -> SolveGoal | None:
+    """求解任务关联目标（MEM-C3）的守卫：404 防跨方案探测，409 拒绝已放弃目标。
+
+    已放弃的目标不接受新任务——验收器对 abandoned 不出报告，静默接受会造出
+    一条永远不会被验收的求解记录。
+    """
+    if not goal_id:
+        return None
+    goal = get_or_404(db, SolveGoal, goal_id)
+    if goal.schedule_set_id != schedule_set_id:
+        raise HTTPException(status_code=404, detail="资源不存在")
+    if goal.status == "abandoned":
+        raise HTTPException(status_code=409, detail="目标已放弃，不能再关联新的求解任务")
+    return goal
+
+
 def create_solver_run(
     db: Session,
     user_id: str | None,
@@ -3925,6 +3954,7 @@ def create_solver_run(
     schedule_set_id: str = DEFAULT_SCHEDULE_SET_ID,
     run_type: str = "initial",
     extra: dict[str, Any] | None = None,
+    goal_id: str | None = None,
 ) -> SolverRun:
     # MEM-C1（§6 修正 6）：创建任务时即编译偏好记忆并冻结——快照带 memory 节，
     # run 落 memory_usage；执行路径只读快照，改记忆不影响在途求解的可复现性。
@@ -3984,6 +4014,7 @@ def create_solver_run(
         status="queued",
         request_payload=payload,
         memory_usage=memory_state,
+        goal_id=goal_id,
         created_by=user_id,
     )
     db.add(run)
@@ -4018,8 +4049,16 @@ class SolverRunDetailResponse(SolverRunResponse):
 def submit_solver_run(
     request: SolveRequest, db: Db, user: AdminOrScheduler, scope: SchedulerScope
 ) -> SolverRun:
-    run = create_solver_run(db, user.id, request, scope.id)
-    audit(db, user, "submit", "solver_run", run.id)
+    goal = _resolve_goal_for_run(db, request.goal_id, scope.id)
+    run = create_solver_run(db, user.id, request, scope.id, goal_id=goal.id if goal else None)
+    audit(
+        db,
+        user,
+        "submit",
+        "solver_run",
+        run.id,
+        {"goal_id": run.goal_id} if run.goal_id else None,
+    )
     db.commit()
     if request.wait:
         execute_solver_run(run.id)
@@ -4142,6 +4181,131 @@ async def solver_run_events(
             await asyncio.sleep(0.5)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+def _goal_response(db: Session, goal: SolveGoal, run_count: int | None = None) -> GoalResponse:
+    if run_count is None:
+        run_count = int(
+            db.scalar(select(func.count(SolverRun.id)).where(SolverRun.goal_id == goal.id))
+            or 0
+        )
+    response = GoalResponse.model_validate(goal)
+    response.run_count = run_count
+    return response
+
+
+@router.post("/goals", response_model=GoalResponse, status_code=201, tags=["goals"])
+def create_goal(
+    payload: GoalCreateRequest, db: Db, user: AdminOrScheduler, scope: SchedulerScope
+) -> GoalResponse:
+    """把一句话目标登记为可逐项验收的持久目标（MEM-C3）。
+
+    checklist 缺省时按结构化范围字段确定性生成；显式传入则原样保存（kind 由
+    schema 枚举把关）。基准版本必须属于当前方案，「尽量少改」的验收上限在这里
+    一次定清，验收器绝不会把「尽量」升级为「绝不」。
+    """
+    if payload.checklist is not None:
+        if not payload.checklist:
+            raise HTTPException(status_code=422, detail="验收清单不能为空")
+        keys = [item.key for item in payload.checklist]
+        if len(set(keys)) != len(keys):
+            raise HTTPException(status_code=422, detail="验收清单的 key 不能重复")
+        checklist = [item.model_dump() for item in payload.checklist]
+    else:
+        checklist = build_checklist(
+            payload.instruction,
+            business_lines=payload.business_lines,
+            product_types=payload.product_types,
+            class_business_ids=payload.class_business_ids,
+            course_business_ids=payload.course_business_ids,
+            date_from=payload.date_from.isoformat() if payload.date_from else None,
+            date_to=payload.date_to.isoformat() if payload.date_to else None,
+            forbidden_slots=[item.model_dump() for item in payload.forbidden_slots],
+            max_changes=payload.max_changes,
+            baseline_schedule_version_id=payload.baseline_schedule_version_id,
+            forbid_publish=payload.forbid_publish,
+        )
+    if payload.baseline_schedule_version_id:
+        baseline = db.get(ScheduleVersion, payload.baseline_schedule_version_id)
+        if baseline is None or baseline.schedule_set_id != scope.id:
+            raise HTTPException(status_code=422, detail="基准版本不存在或不属于当前方案")
+    goal = SolveGoal(
+        schedule_set_id=scope.id,
+        instruction=payload.instruction,
+        checklist=checklist,
+        status="open",
+        created_by=user.id,
+    )
+    db.add(goal)
+    db.flush()
+    audit(
+        db,
+        user,
+        "create",
+        "solve_goal",
+        goal.id,
+        {
+            "checklist_kinds": sorted(
+                {
+                    str(item.get("kind"))
+                    for item in checklist
+                    if str(item.get("kind")) in GOAL_CHECKLIST_KINDS
+                }
+            ),
+            "forbid_publish": payload.forbid_publish,
+        },
+    )
+    db.commit()
+    db.refresh(goal)
+    return _goal_response(db, goal, 0)
+
+
+@router.get("/goals", response_model=list[GoalResponse], tags=["goals"])
+def list_goals(db: Db, user: CurrentUser, scope: ViewerScope) -> list[GoalResponse]:
+    goals = list(
+        db.scalars(
+            select(SolveGoal)
+            .where(SolveGoal.schedule_set_id == scope.id)
+            .order_by(SolveGoal.created_at.desc())
+            .limit(100)
+        )
+    )
+    counts = goal_run_counts(db, scope.id)
+    return [_goal_response(db, goal, counts.get(goal.id, 0)) for goal in goals]
+
+
+@router.get("/goals/{goal_id}", response_model=GoalDetailResponse, tags=["goals"])
+def get_goal(goal_id: str, db: Db, user: CurrentUser, scope: ViewerScope) -> GoalDetailResponse:
+    goal = get_scoped_or_404(db, SolveGoal, goal_id, scope)
+    runs = list(
+        db.scalars(
+            select(SolverRun)
+            .where(SolverRun.goal_id == goal.id)
+            .order_by(SolverRun.created_at.desc())
+            .limit(50)
+        )
+    )
+    response = GoalDetailResponse.model_validate(goal)
+    response.runs = [SolverRunResponse.model_validate(run) for run in runs]
+    latest = next((run for run in runs if run.id == goal.latest_run_id), None)
+    response.latest_report = latest.goal_report if latest is not None else None
+    response.run_count = len(runs)
+    return response
+
+
+@router.post("/goals/{goal_id}/abandon", response_model=GoalResponse, tags=["goals"])
+def abandon_goal(
+    goal_id: str, db: Db, user: AdminOrScheduler, scope: SchedulerScope
+) -> GoalResponse:
+    """人工放弃目标（终态）。放弃是显式的人的决定，验收器不会自动放弃任何目标。"""
+    goal = get_scoped_or_404(db, SolveGoal, goal_id, scope)
+    if goal.status == "abandoned":
+        raise HTTPException(status_code=409, detail="目标已经放弃")
+    goal.status = "abandoned"
+    audit(db, user, "abandon", "solve_goal", goal.id, {"instruction": goal.instruction[:200]})
+    db.commit()
+    db.refresh(goal)
+    return _goal_response(db, goal)
 
 
 @router.get("/schedules", response_model=list[ScheduleSummaryResponse], tags=["schedules"])
@@ -6417,12 +6581,21 @@ def _finalize_assistant_interpret(
     parsed["solver_rules"] = _solver_rules_from_labels(parsed["recognized_rules"])
     try:
         parsed = _validated_assistant_scope(db, parsed, schedule_set_id)
+        # 目标验收闭环（MEM-C3）：解析成功即按结构化范围预填清单草稿，前端可
+        # 增删项后再创建 goal。草稿由代码确定性生成，不依赖模型措辞。
+        checklist_draft, checklist_warnings = draft_checklist_from_interpretation(
+            request.instruction, parsed
+        )
         return AssistantInterpretResponse(
             instruction=request.instruction,
             source=source,
             ai_configured=ai_configured,
             aily_configured=aily_configured,
             **parsed,
+            goal_checklist_draft=[
+                GoalChecklistItem.model_validate(item) for item in checklist_draft
+            ],
+            checklist_warnings=checklist_warnings,
             thinking=thinking,
             summary=(
                 "通用 AI 模型已解析排课范围和固定业务规则"
@@ -6669,14 +6842,23 @@ def assistant_solve(
     same CP-SAT path as the regular solver is used for deterministic execution.
     """
     _validated_assistant_scope(db, request.model_dump(), schedule_scope.id)
+    goal = _resolve_goal_for_run(db, request.goal_id, schedule_scope.id)
     run = create_solver_run(
         db,
         user.id,
         request,
         schedule_scope.id,
         extra={"assistant_entry": True},
+        goal_id=goal.id if goal else None,
     )
-    audit(db, user, "assistant_solve", "solver_run", run.id, {"instruction": request.instruction})
+    audit(
+        db,
+        user,
+        "assistant_solve",
+        "solver_run",
+        run.id,
+        {"instruction": request.instruction, "goal_id": run.goal_id},
+    )
     db.commit()
     if request.wait:
         execute_solver_run(run.id)

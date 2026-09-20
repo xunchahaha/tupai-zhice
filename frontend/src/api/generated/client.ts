@@ -64,6 +64,9 @@ import type {
   FeishuSyncRequest,
   FeishuWorkspaceCreate,
   FeishuWorkspaceResponse,
+  GoalCreateRequest,
+  GoalDetailResponse,
+  GoalResponse,
   HTTPValidationError,
   HealthLiveApiV1HealthLiveGet200,
   HealthReadyApiV1HealthReadyGet200,
@@ -5367,6 +5370,326 @@ export function useSolverRunEventsApiV1SolverRunsRunIdEventsGet<TData = Awaited<
 
 
 
+/**
+ * 把一句话目标登记为可逐项验收的持久目标（MEM-C3）。
+
+checklist 缺省时按结构化范围字段确定性生成；显式传入则原样保存（kind 由
+schema 枚举把关）。基准版本必须属于当前方案，「尽量少改」的验收上限在这里
+一次定清，验收器绝不会把「尽量」升级为「绝不」。
+ * @summary Create Goal
+ */
+export const createGoalApiV1GoalsPost = (
+    goalCreateRequest: GoalCreateRequest,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<GoalResponse>(
+      {url: `/api/v1/goals`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: goalCreateRequest, signal
+    },
+      );
+    }
+  
+
+
+export const getCreateGoalApiV1GoalsPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createGoalApiV1GoalsPost>>, TError,{data: GoalCreateRequest}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof createGoalApiV1GoalsPost>>, TError,{data: GoalCreateRequest}, TContext> => {
+
+const mutationKey = ['createGoalApiV1GoalsPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createGoalApiV1GoalsPost>>, {data: GoalCreateRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  createGoalApiV1GoalsPost(data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateGoalApiV1GoalsPostMutationResult = NonNullable<Awaited<ReturnType<typeof createGoalApiV1GoalsPost>>>
+    export type CreateGoalApiV1GoalsPostMutationBody = GoalCreateRequest
+    export type CreateGoalApiV1GoalsPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Create Goal
+ */
+export const useCreateGoalApiV1GoalsPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createGoalApiV1GoalsPost>>, TError,{data: GoalCreateRequest}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof createGoalApiV1GoalsPost>>,
+        TError,
+        {data: GoalCreateRequest},
+        TContext
+      > => {
+
+      const mutationOptions = getCreateGoalApiV1GoalsPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * @summary List Goals
+ */
+export const listGoalsApiV1GoalsGet = (
+    
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<GoalResponse[]>(
+      {url: `/api/v1/goals`, method: 'GET', signal
+    },
+      );
+    }
+  
+
+
+
+export const getListGoalsApiV1GoalsGetQueryKey = () => {
+    return [
+    `/api/v1/goals`
+    ] as const;
+    }
+
+    
+export const getListGoalsApiV1GoalsGetQueryOptions = <TData = Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>, TError = HTTPValidationError>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListGoalsApiV1GoalsGetQueryKey();
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>> = ({ signal }) => listGoalsApiV1GoalsGet(signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ListGoalsApiV1GoalsGetQueryResult = NonNullable<Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>>
+export type ListGoalsApiV1GoalsGetQueryError = HTTPValidationError
+
+
+export function useListGoalsApiV1GoalsGet<TData = Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>, TError = HTTPValidationError>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>,
+          TError,
+          Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListGoalsApiV1GoalsGet<TData = Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>, TError = HTTPValidationError>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>,
+          TError,
+          Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListGoalsApiV1GoalsGet<TData = Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>, TError = HTTPValidationError>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List Goals
+ */
+
+export function useListGoalsApiV1GoalsGet<TData = Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>, TError = HTTPValidationError>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listGoalsApiV1GoalsGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getListGoalsApiV1GoalsGetQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * @summary Get Goal
+ */
+export const getGoalApiV1GoalsGoalIdGet = (
+    goalId: string,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<GoalDetailResponse>(
+      {url: `/api/v1/goals/${goalId}`, method: 'GET', signal
+    },
+      );
+    }
+  
+
+
+
+export const getGetGoalApiV1GoalsGoalIdGetQueryKey = (goalId?: string,) => {
+    return [
+    `/api/v1/goals/${goalId}`
+    ] as const;
+    }
+
+    
+export const getGetGoalApiV1GoalsGoalIdGetQueryOptions = <TData = Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>, TError = HTTPValidationError>(goalId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetGoalApiV1GoalsGoalIdGetQueryKey(goalId);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>> = ({ signal }) => getGoalApiV1GoalsGoalIdGet(goalId, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, enabled: !!(goalId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetGoalApiV1GoalsGoalIdGetQueryResult = NonNullable<Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>>
+export type GetGoalApiV1GoalsGoalIdGetQueryError = HTTPValidationError
+
+
+export function useGetGoalApiV1GoalsGoalIdGet<TData = Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>, TError = HTTPValidationError>(
+ goalId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>,
+          TError,
+          Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetGoalApiV1GoalsGoalIdGet<TData = Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>, TError = HTTPValidationError>(
+ goalId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>,
+          TError,
+          Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetGoalApiV1GoalsGoalIdGet<TData = Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>, TError = HTTPValidationError>(
+ goalId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Get Goal
+ */
+
+export function useGetGoalApiV1GoalsGoalIdGet<TData = Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>, TError = HTTPValidationError>(
+ goalId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getGoalApiV1GoalsGoalIdGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetGoalApiV1GoalsGoalIdGetQueryOptions(goalId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * 人工放弃目标（终态）。放弃是显式的人的决定，验收器不会自动放弃任何目标。
+ * @summary Abandon Goal
+ */
+export const abandonGoalApiV1GoalsGoalIdAbandonPost = (
+    goalId: string,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<GoalResponse>(
+      {url: `/api/v1/goals/${goalId}/abandon`, method: 'POST', signal
+    },
+      );
+    }
+  
+
+
+export const getAbandonGoalApiV1GoalsGoalIdAbandonPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof abandonGoalApiV1GoalsGoalIdAbandonPost>>, TError,{goalId: string}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof abandonGoalApiV1GoalsGoalIdAbandonPost>>, TError,{goalId: string}, TContext> => {
+
+const mutationKey = ['abandonGoalApiV1GoalsGoalIdAbandonPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof abandonGoalApiV1GoalsGoalIdAbandonPost>>, {goalId: string}> = (props) => {
+          const {goalId} = props ?? {};
+
+          return  abandonGoalApiV1GoalsGoalIdAbandonPost(goalId,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AbandonGoalApiV1GoalsGoalIdAbandonPostMutationResult = NonNullable<Awaited<ReturnType<typeof abandonGoalApiV1GoalsGoalIdAbandonPost>>>
+    
+    export type AbandonGoalApiV1GoalsGoalIdAbandonPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Abandon Goal
+ */
+export const useAbandonGoalApiV1GoalsGoalIdAbandonPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof abandonGoalApiV1GoalsGoalIdAbandonPost>>, TError,{goalId: string}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof abandonGoalApiV1GoalsGoalIdAbandonPost>>,
+        TError,
+        {goalId: string},
+        TContext
+      > => {
+
+      const mutationOptions = getAbandonGoalApiV1GoalsGoalIdAbandonPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
 /**
  * @summary List Schedules
  */

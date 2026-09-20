@@ -633,6 +633,80 @@ class MiningRunResponse(BaseModel):
     ai_error: str | None = None
 
 
+GoalChecklistKind = Literal[
+    "coverage",
+    "forbidden_slot_free",
+    "no_hard_conflicts",
+    "max_changes",
+    "draft_only",
+    "date_range_match",
+]
+
+
+class GoalChecklistItem(BaseModel):
+    """逐项验收项（MEM-C3）。kind 与 services/goal.py 验收器一一对应。
+
+    params 是各验收器自己的参数包（coverage 的范围条件、forbidden_slot_free 的
+    主体+时段、max_changes 的上限与基准版本、date_range_match 的日期端点）；
+    结构由验收器解释，这里不做 cross-field 校验——未知参数在验收时按
+    「无法核对=不通过」处理，绝不静默放行。
+    """
+
+    key: str = Field(min_length=1, max_length=80)
+    requirement: str = Field(min_length=1, max_length=500)
+    kind: GoalChecklistKind
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class GoalForbiddenSlot(BaseModel):
+    """创建目标时声明禁排复核项：主体 + 时段集合（独立于求解器自报）。"""
+
+    subject_type: Literal["teacher", "classroom", "cohort", "course"] = "teacher"
+    subject_ids: list[str] = Field(default_factory=list)
+    slot_business_ids: list[str] = Field(min_length=1)
+
+
+class GoalCreateRequest(BaseModel):
+    """创建持久目标。
+
+    checklist 缺省时由 services/goal.build_checklist 按下方结构化范围字段
+    确定性生成（业务范围→coverage、日期→date_range_match、forbidden_slots→
+    逐条 forbidden_slot_free、forbid_publish→draft_only、max_changes→上限项）。
+    """
+
+    instruction: str = Field(min_length=2, max_length=2000)
+    checklist: list[GoalChecklistItem] | None = None
+    business_lines: list[str] = Field(default_factory=list)
+    product_types: list[str] = Field(default_factory=list)
+    class_business_ids: list[str] = Field(default_factory=list)
+    course_business_ids: list[str] = Field(default_factory=list)
+    date_from: date | None = None
+    date_to: date | None = None
+    forbidden_slots: list[GoalForbiddenSlot] = Field(default_factory=list)
+    max_changes: int | None = Field(default=None, ge=0, le=100000)
+    baseline_schedule_version_id: str | None = None
+    forbid_publish: bool = True
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> GoalCreateRequest:
+        if self.date_from and self.date_to and self.date_from > self.date_to:
+            raise ValueError("date_from 必须早于或等于 date_to")
+        return self
+
+
+class GoalResponse(ORMModel):
+    id: str
+    schedule_set_id: str
+    instruction: str
+    checklist: list[dict[str, Any]]
+    status: str
+    latest_run_id: str | None = None
+    run_count: int = 0
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class SolveRequest(BaseModel):
     time_limit_seconds: float = Field(default=30, ge=1, le=900)
     course_business_ids: list[str] = Field(default_factory=list)
@@ -644,6 +718,8 @@ class SolveRequest(BaseModel):
     date_to: date | None = None
     date_window_days: int = Field(default=7, ge=0, le=31)
     solver_rules: list[SolverRule] = Field(default_factory=default_solver_rules)
+    # 目标验收闭环（MEM-C3）：可选关联持久目标，run 到达 completed 后自动验收。
+    goal_id: str | None = None
     wait: bool = False
 
     @model_validator(mode="after")
@@ -689,9 +765,19 @@ class SolverRunResponse(ORMModel):
     explanation: SolverRunExplanation | None = None
     # 创建任务时冻结的偏好记忆使用情况（结构同 snapshot.payload["memory"]）。
     memory_usage: dict[str, Any] | None = None
+    # 目标验收闭环（MEM-C3）：关联目标与最近一次自动验收报告（completed 后生成）。
+    goal_id: str | None = None
+    goal_report: dict[str, Any] | None = None
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class GoalDetailResponse(GoalResponse):
+    """目标详情：runs 历史（各 run 带自己的 goal_report）+ 最近一次验收报告。"""
+
+    runs: list[SolverRunResponse] = Field(default_factory=list)
+    latest_report: dict[str, Any] | None = None
 
 
 class AssignmentResponse(BaseModel):
@@ -1288,6 +1374,8 @@ class AilySolveRequest(BaseModel):
 
 class AssistantSolveRequest(AilySolveRequest):
     wait: bool = False
+    # 目标验收闭环（MEM-C3）：一句话排课确认后可关联持久目标跟踪验收。
+    goal_id: str | None = None
 
 
 class AssistantInterpretRequest(BaseModel):
@@ -1309,6 +1397,11 @@ class AssistantInterpretResponse(BaseModel):
     solver_rules: list[SolverRule] = Field(default_factory=default_solver_rules)
     unsupported_requirements: list[str] = Field(default_factory=list)
     coverage_warnings: list[str] = Field(default_factory=list)
+    # 目标验收闭环（MEM-C3）：解析成功即预填清单草稿（业务范围→coverage、
+    # 禁排语→forbidden_slot_free 占位、日期→date_range_match），前端可增删项
+    # 后再创建 goal。草稿项的 params 结构同 GoalChecklistItem.params。
+    goal_checklist_draft: list[GoalChecklistItem] = Field(default_factory=list)
+    checklist_warnings: list[str] = Field(default_factory=list)
     summary: str
     # 模型思考过程（reasoning_content 与 <think> 块拼接）；Aily 通道与无思考模型为 None。
     thinking: str | None = None

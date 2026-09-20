@@ -4180,6 +4180,254 @@
         }
       }
     },
+    "/api/v1/goals": {
+      "post": {
+        "tags": [
+          "goals"
+        ],
+        "summary": "Create Goal",
+        "description": "把一句话目标登记为可逐项验收的持久目标（MEM-C3）。\n\nchecklist 缺省时按结构化范围字段确定性生成；显式传入则原样保存（kind 由\nschema 枚举把关）。基准版本必须属于当前方案，「尽量少改」的验收上限在这里\n一次定清，验收器绝不会把「尽量」升级为「绝不」。",
+        "operationId": "create_goal_api_v1_goals_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoalCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "goals"
+        ],
+        "summary": "List Goals",
+        "operationId": "list_goals_api_v1_goals_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GoalResponse"
+                  },
+                  "title": "Response List Goals Api V1 Goals Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/goals/{goal_id}": {
+      "get": {
+        "tags": [
+          "goals"
+        ],
+        "summary": "Get Goal",
+        "operationId": "get_goal_api_v1_goals__goal_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "goal_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Goal Id"
+            }
+          },
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/goals/{goal_id}/abandon": {
+      "post": {
+        "tags": [
+          "goals"
+        ],
+        "summary": "Abandon Goal",
+        "description": "人工放弃目标（终态）。放弃是显式的人的决定，验收器不会自动放弃任何目标。",
+        "operationId": "abandon_goal_api_v1_goals__goal_id__abandon_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "goal_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Goal Id"
+            }
+          },
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/schedules": {
       "get": {
         "tags": [
@@ -6671,6 +6919,20 @@
             "type": "array",
             "title": "Coverage Warnings"
           },
+          "goal_checklist_draft": {
+            "items": {
+              "$ref": "#/components/schemas/GoalChecklistItem"
+            },
+            "type": "array",
+            "title": "Goal Checklist Draft"
+          },
+          "checklist_warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Checklist Warnings"
+          },
           "summary": {
             "type": "string",
             "title": "Summary"
@@ -6783,6 +7045,17 @@
             "type": "boolean",
             "title": "Wait",
             "default": false
+          },
+          "goal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal Id"
           }
         },
         "type": "object",
@@ -8693,6 +8966,373 @@
           "created_at"
         ],
         "title": "FeishuWorkspaceResponse"
+      },
+      "GoalChecklistItem": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Key"
+          },
+          "requirement": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Requirement"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "coverage",
+              "forbidden_slot_free",
+              "no_hard_conflicts",
+              "max_changes",
+              "draft_only",
+              "date_range_match"
+            ],
+            "title": "Kind"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "requirement",
+          "kind"
+        ],
+        "title": "GoalChecklistItem",
+        "description": "逐项验收项（MEM-C3）。kind 与 services/goal.py 验收器一一对应。\n\nparams 是各验收器自己的参数包（coverage 的范围条件、forbidden_slot_free 的\n主体+时段、max_changes 的上限与基准版本、date_range_match 的日期端点）；\n结构由验收器解释，这里不做 cross-field 校验——未知参数在验收时按\n「无法核对=不通过」处理，绝不静默放行。"
+      },
+      "GoalCreateRequest": {
+        "properties": {
+          "instruction": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 2,
+            "title": "Instruction"
+          },
+          "checklist": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/GoalChecklistItem"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checklist"
+          },
+          "business_lines": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Business Lines"
+          },
+          "product_types": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Product Types"
+          },
+          "class_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Class Business Ids"
+          },
+          "course_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Course Business Ids"
+          },
+          "date_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date From"
+          },
+          "date_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date To"
+          },
+          "forbidden_slots": {
+            "items": {
+              "$ref": "#/components/schemas/GoalForbiddenSlot"
+            },
+            "type": "array",
+            "title": "Forbidden Slots"
+          },
+          "max_changes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 100000.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Changes"
+          },
+          "baseline_schedule_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Schedule Version Id"
+          },
+          "forbid_publish": {
+            "type": "boolean",
+            "title": "Forbid Publish",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "instruction"
+        ],
+        "title": "GoalCreateRequest",
+        "description": "创建持久目标。\n\nchecklist 缺省时由 services/goal.build_checklist 按下方结构化范围字段\n确定性生成（业务范围→coverage、日期→date_range_match、forbidden_slots→\n逐条 forbidden_slot_free、forbid_publish→draft_only、max_changes→上限项）。"
+      },
+      "GoalDetailResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "schedule_set_id": {
+            "type": "string",
+            "title": "Schedule Set Id"
+          },
+          "instruction": {
+            "type": "string",
+            "title": "Instruction"
+          },
+          "checklist": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Checklist"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "latest_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Run Id"
+          },
+          "run_count": {
+            "type": "integer",
+            "title": "Run Count",
+            "default": 0
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/SolverRunResponse"
+            },
+            "type": "array",
+            "title": "Runs"
+          },
+          "latest_report": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Report"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "schedule_set_id",
+          "instruction",
+          "checklist",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "GoalDetailResponse",
+        "description": "目标详情：runs 历史（各 run 带自己的 goal_report）+ 最近一次验收报告。"
+      },
+      "GoalForbiddenSlot": {
+        "properties": {
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "teacher",
+              "classroom",
+              "cohort",
+              "course"
+            ],
+            "title": "Subject Type",
+            "default": "teacher"
+          },
+          "subject_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Subject Ids"
+          },
+          "slot_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Slot Business Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slot_business_ids"
+        ],
+        "title": "GoalForbiddenSlot",
+        "description": "创建目标时声明禁排复核项：主体 + 时段集合（独立于求解器自报）。"
+      },
+      "GoalResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "schedule_set_id": {
+            "type": "string",
+            "title": "Schedule Set Id"
+          },
+          "instruction": {
+            "type": "string",
+            "title": "Instruction"
+          },
+          "checklist": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Checklist"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "latest_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Run Id"
+          },
+          "run_count": {
+            "type": "integer",
+            "title": "Run Count",
+            "default": 0
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "schedule_set_id",
+          "instruction",
+          "checklist",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "GoalResponse"
       },
       "HTTPValidationError": {
         "properties": {
@@ -12388,6 +13028,17 @@
             "type": "array",
             "title": "Solver Rules"
           },
+          "goal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal Id"
+          },
           "wait": {
             "type": "boolean",
             "title": "Wait",
@@ -12506,6 +13157,29 @@
               }
             ],
             "title": "Memory Usage"
+          },
+          "goal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal Id"
+          },
+          "goal_report": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal Report"
           },
           "error_message": {
             "anyOf": [
@@ -12808,6 +13482,29 @@
               }
             ],
             "title": "Memory Usage"
+          },
+          "goal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal Id"
+          },
+          "goal_report": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal Report"
           },
           "error_message": {
             "anyOf": [

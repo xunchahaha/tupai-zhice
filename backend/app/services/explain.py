@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import ColumnElement, exists, func, literal, or_, select
 from sqlalchemy.orm import Session
 
-from ..models import CourseSession, Rule, ScheduleVersion, SolverRun
+from ..models import CourseSession, Rule, ScheduleVersion, SolveGoal, SolverRun
 
 # 求解器内建约束的业务口径。这些 SYSTEM-* 标识不对应教务录入的规则，
 # 直接展示等于把内部符号丢给用户，所以先在代码里翻译一次。
@@ -259,6 +259,42 @@ def memory_headline(memory: dict[str, Any]) -> str:
     )
 
 
+def _goal_acceptance_facts(db: Session, run: SolverRun) -> dict[str, Any] | None:
+    """目标验收摘要（MEM-C3）：带 goal 的 run 在事实包里附上次验收结论。
+
+    只引用已落库的 run.goal_report 与目标原话，不再重算——解释层的职责是
+    转述，验收口径以 services/goal.py 为准。
+    """
+    if not run.goal_id:
+        return None
+    goal = db.get(SolveGoal, run.goal_id)
+    report = dict(run.goal_report or {})
+    if not report:
+        # 尚未验收（run 未到达 completed）：不预填空结论。
+        return None
+    items = [entry for entry in report.get("items") or [] if isinstance(entry, dict)]
+    return {
+        "goal_id": run.goal_id,
+        "instruction": goal.instruction if goal is not None else None,
+        "goal_status": goal.status if goal is not None else None,
+        "all_passed": report.get("all_passed"),
+        "passed_count": report.get("passed_count"),
+        "failed_count": report.get("failed_count"),
+        "decision": report.get("decision"),
+        "items": [
+            {
+                "key": entry.get("key"),
+                "kind": entry.get("kind"),
+                "requirement": entry.get("requirement"),
+                "passed": entry.get("passed"),
+                "detail": entry.get("detail"),
+            }
+            for entry in items
+        ],
+        "gaps": [entry for entry in report.get("gaps") or [] if isinstance(entry, dict)],
+    }
+
+
 def build_explanation_facts(db: Session, run: SolverRun) -> dict[str, Any]:
     """整理一次求解的确定性事实包。这里出现的每个数字都来自代码，不来自模型。"""
     result = dict(run.result_payload or {})
@@ -302,6 +338,8 @@ def build_explanation_facts(db: Session, run: SolverRun) -> dict[str, Any]:
         "scope_candidates": _scope_candidates(db, request_scope),
         # 偏好记忆使用情况：编译失败必须原样传达，不许把「无声无偏好」说成正常。
         "memory_usage": _memory_usage_facts(dict(run.memory_usage or {})),
+        # 目标验收闭环（MEM-C3）：带 goal 的 run 附验收摘要（改动仅限附加事实字段）。
+        "goal_acceptance": _goal_acceptance_facts(db, run),
         "conflicts": {
             "rule_ids": list(run.conflict_rule_ids or []),
             "rules": [

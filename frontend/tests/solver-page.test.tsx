@@ -190,6 +190,134 @@ describe("SolverPage interpret phases", () => {
   });
 });
 
+describe("SolverPage goal acceptance loop (MEM-C3)", () => {
+  afterEach(cleanup);
+  beforeEach(() => {
+    mocks.diff.mockClear();
+    mocks.runs = [];
+    mocks.schedules = [{ id: "v1", status: "published", solver_run_id: "run-1", version_no: 1, name: "已发布课表" }];
+    // userEvent 实例跨测试共享会把 pointer 状态带进下一个用例（上一用例卸载
+    // 组件时指针未释放），这里每条用例独立 setup 并复位接口 mock。
+    mocks.get.mockReset().mockResolvedValue({ data: { configured: true, model: "text-model", app_configuration: { aily_configured: false } } });
+    mocks.post.mockReset().mockResolvedValue({ data: {} });
+    mocks.stream.mockReset().mockRejectedValue(new Error("stream unavailable"));
+  });
+
+  it("creates a tracking goal with the prefilled checklist, then solves with goal_id", async () => {
+    mockAiConfigured();
+    const interpretation = mockInterpretation() as ReturnType<typeof mockInterpretation> & {
+      goal_checklist_draft: Array<{ key: string; requirement: string; kind: string; params: Record<string, never> }>;
+    };
+    interpretation.goal_checklist_draft = [
+      { key: "coverage", requirement: "覆盖全部目标课次", kind: "coverage", params: {} },
+      { key: "draft_only", requirement: "只交付草稿", kind: "draft_only", params: {} },
+    ];
+    mocks.stream.mockResolvedValue(interpretation);
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      const url = String(args[0]);
+      if (url === "/api/v1/goals") return { data: { id: "goal-1", status: "open", checklist: [] } };
+      return { data: { id: "run-1", status: "queued", model_status: null } };
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    expect(await screen.findByLabelText("以此为目标跟踪")).toBeChecked();
+    await user.click(screen.getByRole("button", { name: /确认并开始求解/ }));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
+    const [goalUrl, goalBody] = mocks.post.mock.calls[0] as [string, Record<string, unknown>];
+    expect(goalUrl).toBe("/api/v1/goals");
+    expect(goalBody.instruction).toBe("请在三天内重排考研课程");
+    expect((goalBody.checklist as unknown[]).length).toBe(2);
+    expect(goalBody.forbid_publish).toBe(true);
+    const [solveUrl, solveBody] = mocks.post.mock.calls[1] as [string, Record<string, unknown>];
+    expect(solveUrl).toBe("/api/v1/assistant/solve");
+    expect(solveBody.goal_id).toBe("goal-1");
+    // 第二次确认同一解析复用同一目标，不再重复建 goal。
+    mocks.post.mockClear();
+    mocks.post.mockImplementation(async () => ({ data: { id: "run-2", status: "queued" } }));
+    await user.click(screen.getByRole("button", { name: /确认并开始求解/ }));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
+    expect((mocks.post.mock.calls[0] as unknown[])[0]).toBe("/api/v1/assistant/solve");
+  });
+
+  it("skips goal creation when tracking is toggled off and sends goal_id null", async () => {
+    mockAiConfigured();
+    mocks.stream.mockResolvedValue(mockInterpretation());
+    mocks.post.mockResolvedValue({ data: { id: "run-3", status: "queued" } });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    await user.click(await screen.findByLabelText("以此为目标跟踪"));
+    expect(screen.queryByLabelText("基准版本")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /确认并开始求解/ }));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
+    const [solveUrl, solveBody] = mocks.post.mock.calls[0] as [string, Record<string, unknown>];
+    expect(solveUrl).toBe("/api/v1/assistant/solve");
+    expect(solveBody.goal_id).toBeNull();
+  });
+
+  it("renders the acceptance report with per-item results and gap next steps", async () => {
+    mocks.schedules = [];
+    mocks.runs = [{
+      id: "run-goal",
+      status: "completed",
+      model_status: "OPTIMAL",
+      goal_id: "goal-9",
+      goal_report: {
+        goal_id: "goal-9",
+        instruction: "重排 B1 班三天课",
+        all_passed: false,
+        passed_count: 2,
+        failed_count: 1,
+        items: [
+          { key: "coverage", requirement: "覆盖全部目标课次", kind: "coverage", passed: true, detail: "目标课次 3 个，结果命中 3 个" },
+          { key: "draft_only", requirement: "只交付草稿", kind: "draft_only", passed: true, detail: "目标期间无发布动作" },
+          { key: "forbidden_slot_free-1", requirement: "T9 不占 S1", kind: "forbidden_slot_free", passed: false, detail: "禁排时段仍被占用 1 处：C24" },
+        ],
+        gaps: [
+          { key: "forbidden_slot_free-1", kind: "forbidden_slot_free", summary: "禁排时段仍被占用", next_step: "等待教务放宽或调整排课", remedy: "await_admin" },
+        ],
+        decision: { status: "awaiting_decision", reason: "1 项未通过；其中存在必须由教务放宽或裁决的缺口" },
+      },
+    }];
+    renderPage();
+    expect(await screen.findByText("目标验收报告")).toBeInTheDocument();
+    // 徽标与 amber 提示条各出现一次「目标未完成」。
+    expect(screen.getAllByText(/目标未完成：1 项缺口/)).toHaveLength(2);
+    expect(screen.getByText("目标未完成：1 项缺口，建议的下一步")).toBeInTheDocument();
+    expect(screen.getByText(/课次覆盖/)).toBeInTheDocument();
+    expect(screen.getByText(/禁排复核/)).toBeInTheDocument();
+    expect(screen.getByText(/等待教务放宽或调整排课/)).toBeInTheDocument();
+    expect(screen.getAllByText("✓")).toHaveLength(2);
+    expect(screen.getAllByText("✗")).toHaveLength(1);
+  });
+
+  it("renders an all-passed report as goal achieved without the amber banner", async () => {
+    mocks.schedules = [];
+    mocks.runs = [{
+      id: "run-goal-ok",
+      status: "completed",
+      model_status: "OPTIMAL",
+      goal_report: {
+        goal_id: "goal-8",
+        instruction: "重排 B1 班三天课",
+        all_passed: true,
+        passed_count: 2,
+        failed_count: 0,
+        items: [
+          { key: "coverage", requirement: "覆盖全部目标课次", kind: "coverage", passed: true, detail: "目标课次 1 个，结果命中 1 个" },
+          { key: "draft_only", requirement: "只交付草稿", kind: "draft_only", passed: true, detail: "目标期间无发布/日历下发动作" },
+        ],
+        gaps: [],
+        decision: { status: "achieved", reason: "全部验收项通过" },
+      },
+    }];
+    renderPage();
+    expect(await screen.findByText(/全部 2 项通过 · 目标达成/)).toBeInTheDocument();
+    expect(screen.queryByText(/目标未完成/)).not.toBeInTheDocument();
+  });
+});
+
 describe("SolverPage preference memory usage (MEM-C1)", () => {
   afterEach(cleanup);
   beforeEach(() => {
