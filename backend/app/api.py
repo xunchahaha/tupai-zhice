@@ -60,6 +60,7 @@ from .models import (
     Campus,
     ClassGroup,
     CourseSession,
+    ImportMappingHistory,
     IntegrationSync,
     PreferenceEntry,
     PublicLinkToken,
@@ -207,11 +208,14 @@ from .services.ics import build_public_calendar_ics, calendar_etag
 from .services.import_mapping import (
     ColumnMapping,
     ImportMappingError,
+    apply_historical_mapping,
     apply_manual_mapping,
     build_records,
     column_samples,
     detect_header_candidates,
+    header_fingerprint,
     header_texts,
+    history_payload,
     parse_uploaded_workbook,
     pick_default_sheet,
     suggest_mapping,
@@ -1679,6 +1683,125 @@ def _import_mapping_view(mapping: list[ColumnMapping]) -> list[ImportColumnMappi
     ]
 
 
+def _lookup_import_mapping_history(
+    db: Session, schedule_set_id: str, fingerprint: str
+) -> ImportMappingHistory | None:
+    return db.scalar(
+        select(ImportMappingHistory).where(
+            ImportMappingHistory.schedule_set_id == schedule_set_id,
+            ImportMappingHistory.header_fingerprint == fingerprint,
+        )
+    )
+
+
+def _record_import_mapping_history(
+    db: Session,
+    *,
+    schedule_set_id: str,
+    fingerprint: str,
+    mapping: list[ColumnMapping],
+    sheet: str | None,
+    header_row_index: int,
+) -> None:
+    """commit 成功后按指纹记忆本次生效的映射（含手动修正），同一指纹只留最新一份。
+
+    调用方负责在 import 成功之后、事务提交之前调用——失败导入不留决策记忆。
+    """
+    payload = history_payload(mapping, sheet=sheet, header_row_index=header_row_index)
+    history = _lookup_import_mapping_history(db, schedule_set_id, fingerprint)
+    if history is None:
+        db.add(
+            ImportMappingHistory(
+                schedule_set_id=schedule_set_id,
+                header_fingerprint=fingerprint,
+                mapping=payload,
+                sheet_name=sheet or "",
+                used_count=1,
+                last_used_at=shanghai_now(),
+            )
+        )
+        return
+    history.mapping = payload
+    history.sheet_name = sheet or ""
+    history.used_count += 1
+    history.last_used_at = shanghai_now()
+
+
+def _parse_cell_overrides(raw: str | None) -> dict[str, dict[str, Any]]:
+    """解析 ``cell_overrides`` 表单字段：`{行号: {表头文本: 新值}}`。
+
+    行号与 issues 报告同口径（工作表内 1-based Excel 行号）。结构不对直接 422，
+    让调用方立刻发现传错了形状，而不是静默丢修复。
+    """
+    if raw is None or not raw.strip():
+        return {}
+    try:
+        parsed: Any = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"cell_overrides 不是合法的 JSON：{exc}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="cell_overrides 必须是 {行号: {表头文本: 新值}} 形式的 JSON 对象",
+        )
+    for row_key, cells in parsed.items():
+        if not isinstance(cells, dict):
+            raise HTTPException(
+                status_code=422,
+                detail=f"cell_overrides 第「{row_key}」行必须是 {{表头文本: 新值}} 对象",
+            )
+        for column_key, value in cells.items():
+            if not isinstance(column_key, str):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"cell_overrides 的表头文本必须是字符串：{column_key!r}",
+                )
+            if isinstance(value, (dict, list)):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"cell_overrides 的单元格新值必须是标量：{column_key!r}",
+                )
+    return parsed
+
+
+def _apply_cell_overrides(
+    records: list[dict[str, Any]],
+    row_numbers: Sequence[int],
+    overrides: dict[str, dict[str, Any]],
+    targets: dict[int, str],
+    headers: Sequence[str],
+) -> tuple[int, int]:
+    """把单元格修复写到记录流上（解析后、校验前），返回（生效数, 忽略数）。
+
+    列名允许两种写法：14 列规范字段名，或原文件表头文本（经映射反查目标字段）。
+    行号不存在（超界、指向表头行）或列未映射的条目一律忽略并计数，不猜测。
+    """
+    applied = 0
+    ignored = 0
+    row_index = {number: offset for offset, number in enumerate(row_numbers)}
+    header_to_target = {
+        headers[index]: target for index, target in targets.items() if index < len(headers)
+    }
+    for row_key, cells in overrides.items():
+        try:
+            record = records[row_index[int(row_key)]]
+        except (KeyError, ValueError):
+            ignored += len(cells)
+            continue
+        for column_key, value in cells.items():
+            if column_key in record:
+                record[column_key] = value
+            elif column_key in header_to_target:
+                record[header_to_target[column_key]] = value
+            else:
+                ignored += 1
+                continue
+            applied += 1
+    return applied, ignored
+
+
 @router.post("/imports/preview", response_model=ImportPreviewResponse, tags=["imports"])
 def preview_import(
     db: Db,
@@ -1686,11 +1809,14 @@ def preview_import(
     scope: ViewerScope,
     file: Annotated[UploadFile, File(...)],
     mapping_json: Annotated[str | None, Form()] = None,
+    cell_overrides: Annotated[str | None, Form()] = None,
 ) -> ImportPreviewResponse:
     """解析上传文件并给出列映射建议与行级校验报告，只解析不落库。
 
     携带 ``mapping_json``（用户修正后的映射）时按其重跑校验，用于 Fix 循环；
-    未配置 AI 语义层时只走别名/规范化/模糊/形状四层匹配。
+    未配置 AI 语义层时只走别名/规范化/模糊/形状四层匹配。无 ``mapping_json`` 时
+    若表头指纹命中上次导入的映射记忆（同方案内），直接按历史决策预填。可选
+    ``cell_overrides``（``{行号: {表头文本: 新值}}``）在解析后、校验前原地修复单元格。
     """
     payload = _read_upload_bytes(file, (".xlsx", ".csv"), "智能导入")
     grids = parse_uploaded_workbook(file.filename or "", payload)
@@ -1701,16 +1827,29 @@ def preview_import(
         grid, override.header_row_index if override else None
     )
     headers = header_texts(grid, header_row_index)
+    fingerprint = header_fingerprint(headers)
+    historical_match = False
     try:
         if override is not None:
             mapping = _manual_mapping_from_input(grid, header_row_index, override)
             ai_used = False
         else:
-            mapping, ai_used = suggest_mapping(
-                headers,
-                column_samples(grid, header_row_index),
-                ai_resolver=_ai_column_resolver(db),
+            # 历史命中时整份覆盖自动建议（用户上次亲手确认过，含手动修正的列），
+            # 命中就不再问 AI——记忆比语义提名更可信。
+            history = _lookup_import_mapping_history(db, scope.id, fingerprint)
+            historical = (
+                apply_historical_mapping(headers, history.mapping) if history else None
             )
+            if historical is not None:
+                mapping = historical
+                historical_match = True
+                ai_used = False
+            else:
+                mapping, ai_used = suggest_mapping(
+                    headers,
+                    column_samples(grid, header_row_index),
+                    ai_resolver=_ai_column_resolver(db),
+                )
     except ImportMappingError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1718,6 +1857,9 @@ def preview_import(
     unmatched_columns = [item.column for item in mapping if item.target is None and item.column]
     missing_fields = [name for name in TEMPLATE_HEADERS if name not in targets.values()]
     records, row_numbers = build_records(grid, header_row_index, targets)
+    overrides_applied, ignored_overrides = _apply_cell_overrides(
+        records, row_numbers, _parse_cell_overrides(cell_overrides), targets, headers
+    )
     parsed, skipped, blank_rows = parse_template_records(records, row_numbers, max_skipped=200)
     sheets = [
         ImportSheetOverview(
@@ -1748,6 +1890,8 @@ def preview_import(
         unmatched_columns=unmatched_columns,
         missing_fields=missing_fields,
         issues=skipped,
+        historical_match=historical_match,
+        ignored_overrides=ignored_overrides,
         stats=ImportPreviewStats(
             rows_total=len(records),
             rows_valid=len(parsed),
@@ -1757,6 +1901,7 @@ def preview_import(
             columns_total=len(headers),
             mapped_columns=len(targets),
             ai_mapping_used=ai_used,
+            overrides_applied=overrides_applied,
         ),
     )
 
@@ -1769,6 +1914,7 @@ def commit_import(
     file: Annotated[UploadFile, File(...)],
     mapping_json: Annotated[str, Form(...)],
     mode: Annotated[Literal["insert", "upsert"], Form()] = "upsert",
+    cell_overrides: Annotated[str | None, Form()] = None,
     campus_business_id: Annotated[str, Query(max_length=40)] = CAMPUS_BUSINESS_ID,
     campus_name: Annotated[str, Query(max_length=120)] = CAMPUS_NAME,
 ) -> ImportCommitResponse:
@@ -1776,13 +1922,15 @@ def commit_import(
 
     ``mode=upsert`` 沿用现有业务键（班级+课次序号+课节名称+上课日期+上课时段）
     重复导入即更新；``mode=insert`` 只新增，已存在的课次原样保留且不做孤儿清理。
+    ``cell_overrides``（``{行号: {表头文本: 新值}}``）与 preview 同口径，解析后、
+    校验前原地修复单元格；导入成功后把生效映射（含手动修正）按表头指纹记忆。
     """
     payload = _read_upload_bytes(file, (".xlsx", ".csv"), "智能导入")
     override = _parse_mapping_json(mapping_json)
     if override is None:
         raise HTTPException(status_code=422, detail="commit 必须携带 mapping_json")
     grids = parse_uploaded_workbook(file.filename or "", payload)
-    _sheet, grid = _resolve_import_sheet(grids, override.sheet)
+    sheet_name, grid = _resolve_import_sheet(grids, override.sheet)
     header_row_index = _resolve_header_row(grid, override.header_row_index)
     try:
         mapping = _manual_mapping_from_input(grid, header_row_index, override)
@@ -1791,7 +1939,11 @@ def commit_import(
     targets = {item.column_index: item.target for item in mapping if item.target}
     if not targets:
         raise HTTPException(status_code=422, detail="映射没有命中任何规范字段，无法导入")
-    records, _row_numbers = build_records(grid, header_row_index, targets)
+    headers = header_texts(grid, header_row_index)
+    records, row_numbers = build_records(grid, header_row_index, targets)
+    overrides_applied, ignored_overrides = _apply_cell_overrides(
+        records, row_numbers, _parse_cell_overrides(cell_overrides), targets, headers
+    )
     try:
         result = import_canonical_rows(
             db,
@@ -1809,6 +1961,15 @@ def commit_import(
     except RuntimeError as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # 导入成功才记忆映射决策：失败导入的记忆只会把坏映射二次带给用户。
+    _record_import_mapping_history(
+        db,
+        schedule_set_id=scope.id,
+        fingerprint=header_fingerprint(headers),
+        mapping=mapping,
+        sheet=override.sheet,
+        header_row_index=header_row_index,
+    )
     audit(db, user, "import_commit", "workbook", file.filename, result)
     db.commit()
     return ImportCommitResponse(
@@ -1816,6 +1977,8 @@ def commit_import(
         mode=result["import_mode"],
         course_sessions_updated=result["course_sessions_updated"],
         course_sessions_skipped_existing=result["course_sessions_skipped_existing"],
+        overrides_applied=overrides_applied,
+        ignored_overrides=ignored_overrides,
     )
 
 

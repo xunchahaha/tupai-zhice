@@ -1,7 +1,7 @@
 import { useCommitImportApiV1ImportsCommitPost, usePreviewImportApiV1ImportsPreviewPost } from "@/api/generated/client";
 import { type ImportColumnMapping, type ImportCommitResponse, type ImportPreviewResponse } from "@/api/generated/models";
 import { AlertCircle, Check, FileUp, Sparkles } from "lucide-react";
-import { type DragEvent, useRef, useState } from "react";
+import { type DragEvent, Fragment, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Skeleton } from "@/components/page";
@@ -42,6 +42,7 @@ const MATCHED_BY_LABELS: Record<string, string> = {
   normalized: "归一化",
   fuzzy: "相似度",
   llm: "语义",
+  historical: "上次导入",
   manual: "手动",
   unmatched: "未匹配",
 };
@@ -52,6 +53,36 @@ type BadgeTone = "neutral" | "blue" | "green" | "yellow";
 
 /** overrides 按列名记录用户决策（含「忽略该列」= ""），换文件重传时同名列自动沿用。 */
 type ColumnOverrides = Record<string, string>;
+
+/**
+ * 行级单元格修复暂存：`{"7": {"上课日期": "2026-09-12"}}`，行号与 issues 报告同口径
+ * （工作表内 1-based）。键用规范字段名（后端两者都收，规范名与源文件表头别名无关，
+ * 换映射也不失效）；换文件/工作表/表头行后行号口径变了，必须整体清空。
+ */
+type CellOverrides = Record<string, Record<string, string>>;
+
+interface CellEditDraft {
+  row: string;
+  field: string;
+  value: string;
+  /** 该行问题对应的可修复字段候选（「修复」下拉的内容）。 */
+  candidates: string[];
+  /** 问题报告里的原始值，切换修复字段时用于回填。 */
+  original: string;
+}
+
+/**
+ * 从跳过原因推断可修复的规范字段候选。「上课日期无法解析：X」钉死上课日期；
+ * 「缺少上课日期或上课时段」等复合原因给候选清单让用户选。未知原因退回全字段。
+ */
+function issueFieldCandidates(reason: string): string[] {
+  if (reason.includes("必须是数字")) return ["计划课次", "计划课时", "课次序号", "课节时长(小时)"];
+  if (reason.includes("上课日期或上课时段")) return ["上课日期", "上课时段"];
+  if (reason.includes("班级标签")) return ["班级标签"];
+  if (reason.includes("上课时段")) return ["上课时段"];
+  if (reason.includes("上课日期")) return ["上课日期"];
+  return TEMPLATE_FIELDS;
+}
 
 interface ImportWizardProps {
   open: boolean;
@@ -121,6 +152,8 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
   const [file, setFile] = useState<File | null>(null);
   const [analysis, setAnalysis] = useState<ImportPreviewResponse | null>(null);
   const [overrides, setOverrides] = useState<ColumnOverrides>({});
+  const [cellEdits, setCellEdits] = useState<CellOverrides>({});
+  const [cellEditing, setCellEditing] = useState<CellEditDraft | null>(null);
   const [ackUnmatched, setAckUnmatched] = useState(false);
   const [mode, setMode] = useState<"upsert" | "insert">("upsert");
   const [issueFilter, setIssueFilter] = useState<IssueFilter>("errors");
@@ -145,6 +178,8 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
     setFile(null);
     setAnalysis(null);
     setOverrides({});
+    setCellEdits({});
+    setCellEditing(null);
     setAckUnmatched(false);
     setMode("upsert");
     setIssueFilter("errors");
@@ -169,6 +204,9 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
     setFile(selected);
     setAnalysis(null);
     setManualAnalysis(false);
+    // 行级修复按行号定位，换文件后行号口径变了，旧修复一律作废（列映射 overrides 保留）。
+    setCellEdits({});
+    setCellEditing(null);
     preview.mutate({ data: { file: selected as unknown as string } });
   };
 
@@ -198,6 +236,9 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
 
   const reanalyze = (patch: { sheet?: string; header_row_index?: number }) => {
     if (!file || preview.isPending) return;
+    // 切换工作表/表头行后数据行的行号整体位移，未提交的行级修复按新口径作废。
+    setCellEdits({});
+    setCellEditing(null);
     preview.mutate(
       { data: { file: file as unknown as string, mapping_json: reanalyzeMappingJson(patch) } },
       { onSuccess: () => setManualAnalysis(true) },
@@ -209,8 +250,32 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
     if (!file || !payload) return;
     // 后端确认成功后清掉「手动解析」提示与未匹配勾选：回到本步时按新的校验结果重新判定。
     preview.mutate(
-      { data: { file: file as unknown as string, mapping_json: JSON.stringify(payload) } },
+      {
+        data: {
+          file: file as unknown as string,
+          mapping_json: JSON.stringify(payload),
+          // 已暂存的行级修复随重跑一起生效，返回第 3 步时校验结果与提交口径一致。
+          ...(Object.keys(cellEdits).length ? { cell_overrides: JSON.stringify(cellEdits) } : {}),
+        },
+      },
       { onSuccess: () => { setManualAnalysis(false); setAckUnmatched(false); setStep(3); } },
+    );
+  };
+
+  // 第 3 步的「重新校验」：与确认映射同一条 preview 通道，但显式带着行级修复，
+  // 错误清零（rows_skipped === 0）才放行进入提交步。
+  const revalidateWithFixes = () => {
+    const payload = buildMappingPayload();
+    if (!file || !payload || !Object.keys(cellEdits).length) return;
+    preview.mutate(
+      {
+        data: {
+          file: file as unknown as string,
+          mapping_json: JSON.stringify(payload),
+          cell_overrides: JSON.stringify(cellEdits),
+        },
+      },
+      { onSuccess: () => setStep(3) },
     );
   };
 
@@ -218,7 +283,15 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
     const payload = buildMappingPayload();
     if (!file || !payload) return;
     commit.mutate(
-      { data: { file: file as unknown as string, mapping_json: JSON.stringify(payload), mode } },
+      {
+        data: {
+          file: file as unknown as string,
+          mapping_json: JSON.stringify(payload),
+          mode,
+          // 提交必须带上与最后校验同一份修复，否则报告与落库数据不一致。
+          ...(Object.keys(cellEdits).length ? { cell_overrides: JSON.stringify(cellEdits) } : {}),
+        },
+      },
       { onSuccess: (result) => { resetWizard(); onCommitted(result); } },
     );
   };
@@ -240,6 +313,25 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
   const visibleIssues = issues.filter((item) => issueFilter === "all" || (typeof item["级别"] === "string" ? item["级别"] : "error") !== "warning");
   const stats = analysis?.stats;
   const busy = preview.isPending || commit.isPending;
+  // 暂存的修复按「处」（单元格）计数展示；错误清零（rows_skipped === 0）才放行提交。
+  const cellEditCount = Object.values(cellEdits).reduce((sum, cells) => sum + Object.keys(cells).length, 0);
+
+  const startCellEdit = (item: Record<string, unknown>) => {
+    const reason = typeof item["原因"] === "string" ? item["原因"] : "";
+    const row = String(item["行号"] ?? "");
+    const candidates = issueFieldCandidates(reason);
+    const original = splitIssueReason(reason)[1];
+    const field = candidates[0] ?? "";
+    setCellEditing({ row, field, value: cellEdits[row]?.[field] ?? original, candidates, original });
+  };
+
+  const saveCellEdit = () => {
+    if (!cellEditing || !cellEditing.field) return;
+    const { row, field, value } = cellEditing;
+    setCellEdits((current) => ({ ...current, [row]: { ...current[row], [field]: value } }));
+    setCellEditing(null);
+  };
+
   // 残留的 overrides（换文件后列名同名沿用）可能与新建议撞字段：提交前必须保证一个字段只对应一列。
   const targetClaimCounts = new Map<string, number>();
   for (const item of mappingRows) {
@@ -374,6 +466,11 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
                 已按你选择的工作表 / 表头行重新解析，自动映射建议不再适用，请逐列指定目标字段或忽略。
               </p>
             ) : null}
+            {analysis.historical_match ? (
+              <p className="border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs leading-5 text-blue-800">
+                表头与上次导入一致，已自动沿用上次确认的映射决策（含忽略的列），可逐列调整后再校验。
+              </p>
+            ) : null}
             <div className="overflow-x-auto rounded-lg border border-zinc-200">
               <table className="w-full min-w-[720px] border-collapse text-left text-sm">
                 <thead className="bg-zinc-50/90 text-xs text-zinc-500">
@@ -490,38 +587,84 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
               </p>
             </div>
             <div className="overflow-x-auto rounded-lg border border-zinc-200">
-              <table className="w-full min-w-[560px] border-collapse text-left text-sm">
+              <table className="w-full min-w-[640px] border-collapse text-left text-sm">
                 <thead className="bg-zinc-50/90 text-xs text-zinc-500">
                   <tr>
                     <th className="h-9 border-b border-zinc-200 px-3 font-medium">行号</th>
                     <th className="h-9 border-b border-zinc-200 px-3 font-medium">问题</th>
                     <th className="h-9 border-b border-zinc-200 px-3 font-medium">原始值</th>
+                    <th className="h-9 border-b border-zinc-200 px-3 font-medium">修复</th>
                   </tr>
                 </thead>
                 <tbody>
                   {visibleIssues.length ? visibleIssues.map((item, index) => {
                     const reason = typeof item["原因"] === "string" ? item["原因"] : JSON.stringify(item);
                     const [problem, raw] = splitIssueReason(reason);
+                    const row = String(item["行号"] ?? "-");
                     return (
-                      <tr key={index} className="border-b border-zinc-100 last:border-0 transition-colors duration-100 hover:bg-blue-50/20">
-                        <td className="h-10 px-3 align-middle tabular-nums text-zinc-700">{String(item["行号"] ?? "-")}</td>
-                        <td className="h-10 px-3 align-middle text-zinc-700">{problem}</td>
-                        <td className="h-10 px-3 align-middle text-zinc-500">{raw || "—"}</td>
-                      </tr>
+                      <Fragment key={index}>
+                        <tr className="border-b border-zinc-100 transition-colors duration-100 hover:bg-blue-50/20">
+                          <td className="h-10 px-3 align-middle tabular-nums text-zinc-700">{row}</td>
+                          <td className="h-10 px-3 align-middle text-zinc-700">{problem}</td>
+                          <td className="h-10 px-3 align-middle text-zinc-500">{raw || "—"}</td>
+                          <td className="h-10 px-3 align-middle">
+                            <Button size="sm" variant="ghost" disabled={busy} onClick={() => startCellEdit(item)}>修复</Button>
+                          </td>
+                        </tr>
+                        {cellEditing?.row === row ? (
+                          <tr className="border-b border-zinc-100 bg-blue-50/40">
+                            <td colSpan={4} className="px-3 py-2.5">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs text-zinc-500">修复第 {cellEditing.row} 行</span>
+                                <Select
+                                  aria-label={`修复字段：第 ${cellEditing.row} 行`}
+                                  selectSize="sm"
+                                  containerClassName="w-40"
+                                  value={cellEditing.field}
+                                  onChange={(event) => {
+                                    const field = event.target.value;
+                                    setCellEditing((current) => current ? { ...current, field, value: cellEdits[current.row]?.[field] ?? current.original } : current);
+                                  }}
+                                >
+                                  {cellEditing.candidates.map((field) => <option key={field} value={field}>{field}</option>)}
+                                </Select>
+                                <input
+                                  type="text"
+                                  aria-label={`修复值：第 ${cellEditing.row} 行`}
+                                  value={cellEditing.value}
+                                  onChange={(event) => setCellEditing((current) => current ? { ...current, value: event.target.value } : current)}
+                                  className="h-8 w-44 rounded-md border border-zinc-300 bg-white px-2.5 text-xs shadow-2xs outline-none transition-all focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20"
+                                />
+                                <Button size="sm" disabled={!cellEditing.field} onClick={saveCellEdit}>保存修改</Button>
+                                <Button size="sm" variant="ghost" onClick={() => setCellEditing(null)}>取消</Button>
+                              </div>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
                     );
                   }) : (
-                    <tr><td colSpan={3} className="h-24 px-3 text-center text-zinc-400">没有需要修复的行，全部数据校验通过</td></tr>
+                    <tr><td colSpan={4} className="h-24 px-3 text-center text-zinc-400">没有需要修复的行，全部数据校验通过</td></tr>
                   )}
                 </tbody>
               </table>
             </div>
             <p className="text-xs leading-5 text-zinc-500">
-              要修复数据，可以直接修改源文件后<a className="text-blue-600 hover:underline" href="#" onClick={(event) => { event.preventDefault(); setStep(1); }}>重新上传</a>，已确认的列映射方案会保留；也可以回到上一步继续调整映射。
+              在问题行点「修复」直接改单元格，再点「重新校验」确认错误清零后提交；也可以修改源文件后<a className="text-blue-600 hover:underline" href="#" onClick={(event) => { event.preventDefault(); setStep(1); }}>重新上传</a>，已确认的列映射方案会保留；还可以回到上一步继续调整映射。
             </p>
             <div className="flex items-center justify-end gap-2 border-t border-zinc-100 pt-4">
-              {stats.rows_valid === 0 ? <p className="mr-auto text-xs text-amber-700">没有校验通过的行，请调整映射或修改源文件后重新上传</p> : null}
+              {stats.rows_valid === 0 ? (
+                <p className="mr-auto text-xs text-amber-700">没有校验通过的行，请调整映射或修改源文件后重新上传</p>
+              ) : stats.rows_skipped > 0 ? (
+                <p className="mr-auto text-xs text-amber-700">还有 {stats.rows_skipped} 行校验未通过，请修复问题行后再提交</p>
+              ) : null}
               <Button variant="outline" disabled={busy} onClick={() => setStep(2)}>上一步</Button>
-              <Button disabled={stats.rows_valid === 0} onClick={() => setStep(4)}>下一步：确认提交</Button>
+              {cellEditCount > 0 ? (
+                <Button variant="outline" disabled={busy} onClick={revalidateWithFixes}>
+                  {preview.isPending ? "校验中…" : `重新校验（${cellEditCount} 处修改）`}
+                </Button>
+              ) : null}
+              <Button disabled={busy || stats.rows_valid === 0 || stats.rows_skipped > 0} onClick={() => setStep(4)}>下一步：确认提交</Button>
             </div>
           </div>
         ) : null}

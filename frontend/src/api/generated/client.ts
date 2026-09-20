@@ -71,8 +71,11 @@ import type {
   ImportPreviewResponse,
   ImportResult,
   ImportXlsxApiV1ImportsXlsxPostParams,
+  IntegrationConfigurationInput,
+  IntegrationConfigurationResponse,
   IntegrationManifestResponse,
   IntegrationSyncResponse,
+  IntegrationVerifyResponse,
   ListAuditLogsApiV1AuditLogsGetParams,
   ListPreferencesApiV1MemoryPreferencesGetParams,
   ListRulesApiV1RulesGetParams,
@@ -86,9 +89,11 @@ import type {
   PreferenceResponse,
   PreferenceTransition,
   PreferenceUpdate,
+  PublicLinkBatchResponse,
   PublicLinkCreate,
   PublicLinkResponse,
   PublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet200,
+  PublicLinkSchedulePayload,
   PublicLinkSecretResponse,
   RescheduleCreate,
   RescheduleResponse,
@@ -899,6 +904,73 @@ export const useCreatePublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPost = 
       > => {
 
       const mutationOptions = getCreatePublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * 按当前发布版本（public_class_index）为全部班级批量创建 class 链接。
+
+校验、默认有效期与审计沿用单条创建（06 §3 B5）；明文 token 只在本响应
+出现一次，库内只存哈希；单个班级目标校验不过不中断其余班级。
+ * @summary Create Public Links Batch
+ */
+export const createPublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPost = (
+    scheduleSetId: string,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<PublicLinkBatchResponse>(
+      {url: `/api/v1/schedule-sets/${scheduleSetId}/public-links/batch`, method: 'POST', signal
+    },
+      );
+    }
+  
+
+
+export const getCreatePublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createPublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPost>>, TError,{scheduleSetId: string}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof createPublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPost>>, TError,{scheduleSetId: string}, TContext> => {
+
+const mutationKey = ['createPublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createPublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPost>>, {scheduleSetId: string}> = (props) => {
+          const {scheduleSetId} = props ?? {};
+
+          return  createPublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPost(scheduleSetId,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreatePublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPostMutationResult = NonNullable<Awaited<ReturnType<typeof createPublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPost>>>
+    
+    export type CreatePublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Create Public Links Batch
+ */
+export const useCreatePublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createPublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPost>>, TError,{scheduleSetId: string}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof createPublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPost>>,
+        TError,
+        {scheduleSetId: string},
+        TContext
+      > => {
+
+      const mutationOptions = getCreatePublicLinksBatchApiV1ScheduleSetsScheduleSetIdPublicLinksBatchPostMutationOptions(options);
 
       return useMutation(mutationOptions, queryClient);
     }
@@ -1988,7 +2060,9 @@ export const useImportXlsxApiV1ImportsXlsxPost = <TError = HTTPValidationError,
  * 解析上传文件并给出列映射建议与行级校验报告，只解析不落库。
 
 携带 ``mapping_json``（用户修正后的映射）时按其重跑校验，用于 Fix 循环；
-未配置 AI 语义层时只走别名/规范化/模糊/形状四层匹配。
+未配置 AI 语义层时只走别名/规范化/模糊/形状四层匹配。无 ``mapping_json`` 时
+若表头指纹命中上次导入的映射记忆（同方案内），直接按历史决策预填。可选
+``cell_overrides``（``{行号: {表头文本: 新值}}``）在解析后、校验前原地修复单元格。
  * @summary Preview Import
  */
 export const previewImportApiV1ImportsPreviewPost = (
@@ -2000,6 +2074,9 @@ export const previewImportApiV1ImportsPreviewPost = (
 formData.append(`file`, bodyPreviewImportApiV1ImportsPreviewPost.file)
 if(bodyPreviewImportApiV1ImportsPreviewPost.mapping_json !== undefined && bodyPreviewImportApiV1ImportsPreviewPost.mapping_json !== null) {
  formData.append(`mapping_json`, bodyPreviewImportApiV1ImportsPreviewPost.mapping_json)
+ }
+if(bodyPreviewImportApiV1ImportsPreviewPost.cell_overrides !== undefined && bodyPreviewImportApiV1ImportsPreviewPost.cell_overrides !== null) {
+ formData.append(`cell_overrides`, bodyPreviewImportApiV1ImportsPreviewPost.cell_overrides)
  }
 
       return customInstance<ImportPreviewResponse>(
@@ -2063,6 +2140,8 @@ export const usePreviewImportApiV1ImportsPreviewPost = <TError = HTTPValidationE
 
 ``mode=upsert`` 沿用现有业务键（班级+课次序号+课节名称+上课日期+上课时段）
 重复导入即更新；``mode=insert`` 只新增，已存在的课次原样保留且不做孤儿清理。
+``cell_overrides``（``{行号: {表头文本: 新值}}``）与 preview 同口径，解析后、
+校验前原地修复单元格；导入成功后把生效映射（含手动修正）按表头指纹记忆。
  * @summary Commit Import
  */
 export const commitImportApiV1ImportsCommitPost = (
@@ -2076,6 +2155,9 @@ formData.append(`file`, bodyCommitImportApiV1ImportsCommitPost.file)
 formData.append(`mapping_json`, bodyCommitImportApiV1ImportsCommitPost.mapping_json)
 if(bodyCommitImportApiV1ImportsCommitPost.mode !== undefined) {
  formData.append(`mode`, bodyCommitImportApiV1ImportsCommitPost.mode)
+ }
+if(bodyCommitImportApiV1ImportsCommitPost.cell_overrides !== undefined && bodyCommitImportApiV1ImportsCommitPost.cell_overrides !== null) {
+ formData.append(`cell_overrides`, bodyCommitImportApiV1ImportsCommitPost.cell_overrides)
  }
 
       return customInstance<ImportCommitResponse>(
@@ -6194,10 +6276,10 @@ export function useListAuditLogsApiV1AuditLogsGet<TData = Awaited<ReturnType<typ
 /**
  * 集成清单：manifest 元数据 + 运行时状态，供「设置 → 集成」卡片渲染。
 
-v1 为只读清单，不触发 verify 探测（verify 端点与 integration_installations
-安装表留待二期）。status 规则：仅声明 manifest 的 planned 集成为 planned；
-适配器集成运行时能提供任一能力即 configured，否则回落到 manifest 的
-status_class（如飞书未配置应用时为 available）。
+清单本身不触发网络探测；「测试连接」经 POST /integrations/{id}/verify
+显式发起。status 规则：仅声明 manifest 的 planned 集成为 planned；适配器
+集成运行时能提供任一能力即 configured，否则回落到 manifest 的 status_class
+（如飞书未配置应用时为 available）。
  * @summary List Integrations
  */
 export const listIntegrationsApiV1IntegrationsGet = (
@@ -6290,6 +6372,75 @@ export function useListIntegrationsApiV1IntegrationsGet<TData = Awaited<ReturnTy
 
 
 
+/**
+ * 统一「测试连接」（≈ Airbyte Check / Grafana testDatasource）。
+
+registry 在请求现场实例化适配器后执行其轻量探测：local 恒 ok；飞书只读
+本地配置状态；钉钉/企业微信用一次 access_token 请求探测（带缓存）。适配器
+契约（integrations/base.py）：verify() 不抛异常，失败以 VerifyResult 表达；
+planned 集成（无适配器实例）与未知 id 同形 404。
+ * @summary Verify Integration
+ */
+export const verifyIntegrationApiV1IntegrationsIntegrationIdVerifyPost = (
+    integrationId: string,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<IntegrationVerifyResponse>(
+      {url: `/api/v1/integrations/${integrationId}/verify`, method: 'POST', signal
+    },
+      );
+    }
+  
+
+
+export const getVerifyIntegrationApiV1IntegrationsIntegrationIdVerifyPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof verifyIntegrationApiV1IntegrationsIntegrationIdVerifyPost>>, TError,{integrationId: string}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof verifyIntegrationApiV1IntegrationsIntegrationIdVerifyPost>>, TError,{integrationId: string}, TContext> => {
+
+const mutationKey = ['verifyIntegrationApiV1IntegrationsIntegrationIdVerifyPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof verifyIntegrationApiV1IntegrationsIntegrationIdVerifyPost>>, {integrationId: string}> = (props) => {
+          const {integrationId} = props ?? {};
+
+          return  verifyIntegrationApiV1IntegrationsIntegrationIdVerifyPost(integrationId,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type VerifyIntegrationApiV1IntegrationsIntegrationIdVerifyPostMutationResult = NonNullable<Awaited<ReturnType<typeof verifyIntegrationApiV1IntegrationsIntegrationIdVerifyPost>>>
+    
+    export type VerifyIntegrationApiV1IntegrationsIntegrationIdVerifyPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Verify Integration
+ */
+export const useVerifyIntegrationApiV1IntegrationsIntegrationIdVerifyPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof verifyIntegrationApiV1IntegrationsIntegrationIdVerifyPost>>, TError,{integrationId: string}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof verifyIntegrationApiV1IntegrationsIntegrationIdVerifyPost>>,
+        TError,
+        {integrationId: string},
+        TContext
+      > => {
+
+      const mutationOptions = getVerifyIntegrationApiV1IntegrationsIntegrationIdVerifyPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
 /**
  * @summary Ai Configuration
  */
@@ -6444,6 +6595,169 @@ export const useConfigureAiProviderApiV1IntegrationsAiConfigurationPost = <TErro
       > => {
 
       const mutationOptions = getConfigureAiProviderApiV1IntegrationsAiConfigurationPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * 集成凭据配置回读（脱敏）：密钥字段只给「是否已配置」布尔。
+ * @summary Get Integration Configuration
+ */
+export const getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet = (
+    integrationId: string,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<IntegrationConfigurationResponse>(
+      {url: `/api/v1/integrations/${integrationId}/configuration`, method: 'GET', signal
+    },
+      );
+    }
+  
+
+
+
+export const getGetIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGetQueryKey = (integrationId?: string,) => {
+    return [
+    `/api/v1/integrations/${integrationId}/configuration`
+    ] as const;
+    }
+
+    
+export const getGetIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGetQueryOptions = <TData = Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>, TError = HTTPValidationError>(integrationId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGetQueryKey(integrationId);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>> = ({ signal }) => getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet(integrationId, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, enabled: !!(integrationId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type GetIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGetQueryResult = NonNullable<Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>>
+export type GetIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGetQueryError = HTTPValidationError
+
+
+export function useGetIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet<TData = Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>, TError = HTTPValidationError>(
+ integrationId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>,
+          TError,
+          Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet<TData = Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>, TError = HTTPValidationError>(
+ integrationId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>,
+          TError,
+          Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useGetIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet<TData = Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>, TError = HTTPValidationError>(
+ integrationId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Get Integration Configuration
+ */
+
+export function useGetIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet<TData = Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>, TError = HTTPValidationError>(
+ integrationId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getGetIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationGetQueryOptions(integrationId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * 按 manifest config schema 直填并加密保存集成凭据（v1 无 OAuth 安装流）。
+
+保存语义为合并（见 IntegrationConfigurationInput）；保存后清空对应平台
+的 access_token 内存缓存，避免旧凭据的令牌继续生效。
+ * @summary Put Integration Configuration
+ */
+export const putIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPut = (
+    integrationId: string,
+    integrationConfigurationInput: IntegrationConfigurationInput,
+ ) => {
+      
+      
+      return customInstance<IntegrationConfigurationResponse>(
+      {url: `/api/v1/integrations/${integrationId}/configuration`, method: 'PUT',
+      headers: {'Content-Type': 'application/json', },
+      data: integrationConfigurationInput
+    },
+      );
+    }
+  
+
+
+export const getPutIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPutMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof putIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPut>>, TError,{integrationId: string;data: IntegrationConfigurationInput}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof putIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPut>>, TError,{integrationId: string;data: IntegrationConfigurationInput}, TContext> => {
+
+const mutationKey = ['putIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPut'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof putIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPut>>, {integrationId: string;data: IntegrationConfigurationInput}> = (props) => {
+          const {integrationId,data} = props ?? {};
+
+          return  putIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPut(integrationId,data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PutIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPutMutationResult = NonNullable<Awaited<ReturnType<typeof putIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPut>>>
+    export type PutIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPutMutationBody = IntegrationConfigurationInput
+    export type PutIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPutMutationError = HTTPValidationError
+
+    /**
+ * @summary Put Integration Configuration
+ */
+export const usePutIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPut = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof putIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPut>>, TError,{integrationId: string;data: IntegrationConfigurationInput}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof putIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPut>>,
+        TError,
+        {integrationId: string;data: IntegrationConfigurationInput},
+        TContext
+      > => {
+
+      const mutationOptions = getPutIntegrationConfigurationApiV1IntegrationsIntegrationIdConfigurationPutMutationOptions(options);
 
       return useMutation(mutationOptions, queryClient);
     }
@@ -7407,6 +7721,78 @@ export const useAssistantInterpretApiV1AssistantInterpretPost = <TError = HTTPVa
     }
     
 /**
+ * 一句话排课的 SSE 流式解析，事件协议见 docs/对接资料 的「后端接口与运行约定」。
+
+事件序列：`stage`（connect/read/validate）→ 若干 `thinking` 增量 → `result`
+（完整 AssistantInterpretResponse JSON，与同步接口同构）→ 出错时 `error`。
+首包立即下行，既作连接确认也让反代尽早开始转发；客户端断开时
+StreamingResponse 会取消本生成器，httpx 上游流随之关闭。Aily 无流式，
+退化为单条 result 事件（伪流式）。AI 未配置且无 Aily 时仍返回 409 JSON。
+ * @summary Assistant Interpret Stream
+ */
+export const assistantInterpretStreamApiV1AssistantInterpretStreamPost = (
+    assistantInterpretRequest: AssistantInterpretRequest,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<unknown>(
+      {url: `/api/v1/assistant/interpret/stream`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: assistantInterpretRequest, signal
+    },
+      );
+    }
+  
+
+
+export const getAssistantInterpretStreamApiV1AssistantInterpretStreamPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof assistantInterpretStreamApiV1AssistantInterpretStreamPost>>, TError,{data: AssistantInterpretRequest}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof assistantInterpretStreamApiV1AssistantInterpretStreamPost>>, TError,{data: AssistantInterpretRequest}, TContext> => {
+
+const mutationKey = ['assistantInterpretStreamApiV1AssistantInterpretStreamPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof assistantInterpretStreamApiV1AssistantInterpretStreamPost>>, {data: AssistantInterpretRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  assistantInterpretStreamApiV1AssistantInterpretStreamPost(data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AssistantInterpretStreamApiV1AssistantInterpretStreamPostMutationResult = NonNullable<Awaited<ReturnType<typeof assistantInterpretStreamApiV1AssistantInterpretStreamPost>>>
+    export type AssistantInterpretStreamApiV1AssistantInterpretStreamPostMutationBody = AssistantInterpretRequest
+    export type AssistantInterpretStreamApiV1AssistantInterpretStreamPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Assistant Interpret Stream
+ */
+export const useAssistantInterpretStreamApiV1AssistantInterpretStreamPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof assistantInterpretStreamApiV1AssistantInterpretStreamPost>>, TError,{data: AssistantInterpretRequest}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof assistantInterpretStreamApiV1AssistantInterpretStreamPost>>,
+        TError,
+        {data: AssistantInterpretRequest},
+        TContext
+      > => {
+
+      const mutationOptions = getAssistantInterpretStreamApiV1AssistantInterpretStreamPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
  * Login-session entry point for Aily's natural-language scheduling skill.
 
 Aily may call this endpoint after turning the instruction into structured
@@ -7557,6 +7943,117 @@ export function usePublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet<TData 
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getPublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGetQueryOptions(token,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * school 目录链接下钻到单个班级的公开 payload（06 §3 B6 督导公示）。
+
+仅 school scope token 有效：class/teacher 链接本就绑定单一资源，无需下钻。
+scope 不符与伪造/过期/停用一样同形 404；节流计数沿用现有公开端点模式。
+ * @summary Public Link Class Schedule
+ */
+export const publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet = (
+    token: string,
+    campusId: string,
+    classBusinessId: string,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<PublicLinkSchedulePayload>(
+      {url: `/api/v1/public/links/${token}/class/${campusId}/${classBusinessId}/schedule.json`, method: 'GET', signal
+    },
+      );
+    }
+  
+
+
+
+export const getPublicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGetQueryKey = (token?: string,
+    campusId?: string,
+    classBusinessId?: string,) => {
+    return [
+    `/api/v1/public/links/${token}/class/${campusId}/${classBusinessId}/schedule.json`
+    ] as const;
+    }
+
+    
+export const getPublicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGetQueryOptions = <TData = Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>, TError = HTTPValidationError>(token: string,
+    campusId: string,
+    classBusinessId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPublicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGetQueryKey(token,campusId,classBusinessId);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>> = ({ signal }) => publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet(token,campusId,classBusinessId, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, enabled: !!(token && campusId && classBusinessId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PublicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGetQueryResult = NonNullable<Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>>
+export type PublicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGetQueryError = HTTPValidationError
+
+
+export function usePublicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet<TData = Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>, TError = HTTPValidationError>(
+ token: string,
+    campusId: string,
+    classBusinessId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>,
+          TError,
+          Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePublicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet<TData = Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>, TError = HTTPValidationError>(
+ token: string,
+    campusId: string,
+    classBusinessId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>,
+          TError,
+          Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePublicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet<TData = Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>, TError = HTTPValidationError>(
+ token: string,
+    campusId: string,
+    classBusinessId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Public Link Class Schedule
+ */
+
+export function usePublicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet<TData = Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>, TError = HTTPValidationError>(
+ token: string,
+    campusId: string,
+    classBusinessId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPublicLinkClassScheduleApiV1PublicLinksTokenClassCampusIdClassBusinessIdScheduleJsonGetQueryOptions(token,campusId,classBusinessId,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

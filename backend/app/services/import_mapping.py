@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import csv
 import difflib
+import hashlib
 import io
 import re
 import unicodedata
@@ -42,6 +43,10 @@ AI_CONFIDENCE = 0.65
 SAMPLE_SIZE = 20
 # 形状校验通过所需的最低样本命中率。
 SHAPE_MIN_RATIO = 0.5
+# 历史映射的固定置信度：这是用户上次亲手确认过的决策，高于一切自动层。
+HISTORICAL_CONFIDENCE = 0.95
+# 指纹拼接分隔符：防止相邻表头规范化后首尾相接产生碰撞（「ab」+「c」vs「a」+「bc」）。
+_FINGERPRINT_SEPARATOR = "\x1f"
 
 AIResolver = Callable[[list[dict[str, Any]]], dict[int, str]]
 
@@ -527,19 +532,101 @@ def build_records(
     return records, row_numbers
 
 
+# ---------------------------------------------------------------------------
+# historical mapping：按表头指纹记忆上次生效的映射（docs/roadmap/01 IMP-4）
+# ---------------------------------------------------------------------------
+
+
+def header_fingerprint(headers: Sequence[Any]) -> str:
+    """表头指纹：规范化表头序列（列序敏感）的 sha256 十六进制。
+
+    规范化复用 :func:`_normalize`——同一份教务导出改大小写/全半角/空白不换指纹，
+    调换列序或增删列就算新指纹。分隔符拼接防相邻表头首尾相接的碰撞。
+    """
+    joined = _FINGERPRINT_SEPARATOR.join(
+        _normalize(str(value)) if value is not None else "" for value in headers
+    )
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def history_payload(
+    mapping: Sequence[ColumnMapping], *, sheet: str | None, header_row_index: int
+) -> dict[str, Any]:
+    """把生效映射（含手动修正）序列化成与 ``ImportMappingInput`` 同构的可回放结构。"""
+    return {
+        "sheet": sheet,
+        "header_row_index": header_row_index,
+        "columns": [
+            {
+                "column": item.column,
+                "column_index": item.column_index,
+                "target": item.target,
+            }
+            for item in mapping
+            if item.column
+        ],
+    }
+
+
+def apply_historical_mapping(
+    headers: Sequence[str], stored: Any
+) -> list[ColumnMapping] | None:
+    """把历史映射记录回放成映射清单；记录不合法时返回 None（退回自动建议）。
+
+    指纹已经钉死表头序列，列名对不上只可能是脏数据（历史结构损坏、手工改库），
+    宁可整份弃用也不硬套。回放走 :func:`apply_manual_mapping` 的确定性路径，
+    上次「用户指定不导入」的列同样以历史为准。
+    """
+    if not isinstance(stored, dict) or not isinstance(stored.get("columns"), list):
+        return None
+    entries: list[tuple[int, str, str | None]] = []
+    for item in stored["columns"]:
+        if not isinstance(item, dict):
+            return None
+        column = item.get("column")
+        column_index = item.get("column_index")
+        target = item.get("target")
+        if not isinstance(column, str) or not column:
+            return None
+        if not isinstance(column_index, int) or isinstance(column_index, bool):
+            return None
+        if target is not None and (not isinstance(target, str) or target not in TEMPLATE_HEADERS):
+            return None
+        entries.append((column_index, column, target))
+    if not entries:
+        return None
+    try:
+        mapping = apply_manual_mapping(headers, entries)
+    except ImportMappingError:
+        return None
+    for item in mapping:
+        item.confidence = HISTORICAL_CONFIDENCE
+        item.matched_by = "historical"
+        item.rationale = (
+            "沿用上次导入时确认的映射决策"
+            if item.target is not None
+            else "沿用上次导入时「不导入」的决策"
+        )
+    return mapping
+
+
 __all__ = [
     "AI_CONFIDENCE",
     "CONFIDENCE_THRESHOLD",
+    "HISTORICAL_CONFIDENCE",
     "ColumnMapping",
     "FIELD_ALIASES",
     "HeaderCandidate",
     "ImportMappingError",
     "WorkbookFormatError",
+    "apply_historical_mapping",
     "apply_manual_mapping",
     "build_records",
     "column_samples",
     "detect_header_candidates",
+    "header_fingerprint",
     "header_texts",
+    "history_payload",
     "parse_uploaded_workbook",
     "pick_default_sheet",
     "suggest_mapping",

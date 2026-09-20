@@ -556,6 +556,28 @@ class IntegrationCredential(TimestampMixin, Base):
     configured_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 
+class ImportMappingHistory(TimestampMixin, Base):
+    """L2 智能导入：按表头指纹记忆上次生效的列映射（docs/roadmap/01 IMP-4）。
+
+    指纹是「规范化表头序列」的 sha256，列序敏感——同一份教务导出改大小写/全半角
+    不换指纹，调列序或增删列就算新表。映射决策是方案内私有数据，按 schedule_set_id
+    隔离并复合唯一：每个指纹只保留最近一次 commit 生效的映射（含手动修正）。
+    """
+
+    __tablename__ = "import_mapping_history"
+    __table_args__ = (UniqueConstraint("schedule_set_id", "header_fingerprint"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"), index=True
+    )
+    header_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    mapping: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    sheet_name: Mapped[str] = mapped_column(String(255), default="")
+    used_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_used_at: Mapped[datetime] = mapped_column(ShanghaiDateTime(), default=shanghai_now)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

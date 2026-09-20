@@ -45,7 +45,16 @@ const previewValidated = {
     { 行号: 4, 原因: "缺少上课日期或上课时段" },
     { 行号: 7, 原因: "上课日期无法解析：2026/13/01" },
   ],
-  stats: { ...previewSuggestion.stats, rows_valid: 9, rows_skipped: 1 },
+  stats: { ...previewSuggestion.stats, rows_valid: 8, rows_skipped: 2 },
+};
+
+// 第三次 preview（带 cell_overrides）：行内修复生效，错误清零。
+const previewFixed = {
+  ...previewValidated,
+  issues: [],
+  stats: { ...previewValidated.stats, rows_valid: 10, rows_skipped: 0, overrides_applied: 2 },
+  historical_match: false,
+  ignored_overrides: 0,
 };
 
 const commitResult = {
@@ -55,11 +64,13 @@ const commitResult = {
   class_groups: 1,
   rooms: 1,
   time_slots: 0,
-  course_sessions: 9,
+  course_sessions: 10,
   rules: 0,
   mode: "upsert",
   course_sessions_updated: 3,
   course_sessions_skipped_existing: 0,
+  overrides_applied: 2,
+  ignored_overrides: 0,
 };
 
 function requestUrl(call: unknown[]): string {
@@ -99,6 +110,8 @@ describe("智能导入向导", () => {
     mocks.request.mockReset();
     mocks.request.mockImplementation((config: { url: string; data: FormData }) => {
       if (config.url === "/api/v1/imports/preview") {
+        // 带 cell_overrides 的是修复后的重新校验：错误清零。
+        if (config.data.get("cell_overrides")) return Promise.resolve(previewFixed);
         const mappingJson = config.data.get("mapping_json");
         return Promise.resolve(mappingJson ? previewValidated : previewSuggestion);
       }
@@ -159,30 +172,84 @@ describe("智能导入向导", () => {
     expect(screen.getByText("2026/13/01")).toBeInTheDocument();
   });
 
-  it("第三步提示重传保留映射，进入第四步默认 upsert 并在提交后回调结果", async () => {
+  it("第三步内联修复问题行，重新校验错误清零后才放行提交，提交携带同一份修复", async () => {
     const { onCommitted } = renderWizard();
     await uploadAndOpenMapping();
     await user.click(screen.getByLabelText(/我已确认这些列的处理方式/));
     await user.click(screen.getByRole("button", { name: "确认映射并校验" }));
     await screen.findByText("校验通过");
 
+    // 错误未清零：提交被门控，也还没有可点的重新校验（没有暂存修改）
+    expect(screen.getByRole("button", { name: "下一步：确认提交" })).toBeDisabled();
+    expect(screen.getByText(/还有 2 行校验未通过/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /重新校验/ })).not.toBeInTheDocument();
+
+    // 行 7「上课日期无法解析：2026/13/01」：字段自动推断为上课日期，原值预填
+    const row7 = screen.getByText("上课日期无法解析").closest("tr") as HTMLElement;
+    await user.click(within(row7).getByRole("button", { name: "修复" }));
+    expect(screen.getByLabelText("修复字段：第 7 行")).toHaveValue("上课日期");
+    const value7 = screen.getByLabelText("修复值：第 7 行") as HTMLInputElement;
+    expect(value7.value).toBe("2026/13/01");
+    await user.clear(value7);
+    await user.type(value7, "2026-09-12");
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    // 行 4「缺少上课日期或上课时段」：复合原因给候选下拉，默认第一项上课日期
+    const row4 = screen.getByText("缺少上课日期或上课时段").closest("tr") as HTMLElement;
+    await user.click(within(row4).getByRole("button", { name: "修复" }));
+    expect(screen.getByLabelText("修复字段：第 4 行")).toHaveValue("上课日期");
+    await user.type(screen.getByLabelText("修复值：第 4 行"), "2026-08-20");
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    // 重新校验必须带 mapping_json + cell_overrides，修复按行号 + 规范字段名提交
+    await user.click(screen.getByRole("button", { name: "重新校验（2 处修改）" }));
+    await waitFor(() => expect(mocks.request.mock.calls.filter((call) => requestUrl(call) === "/api/v1/imports/preview")).toHaveLength(3));
+    const third = mocks.request.mock.calls.filter((call) => requestUrl(call) === "/api/v1/imports/preview")[2];
+    expect(JSON.parse(formField(third, "cell_overrides"))).toEqual({
+      "7": { 上课日期: "2026-09-12" },
+      "4": { 上课日期: "2026-08-20" },
+    });
+    expect(JSON.parse(formField(third, "mapping_json")).columns.length).toBeGreaterThan(0);
+
+    // 错误清零：门禁解除，保留的「改源文件重传」路径文案仍在
+    expect(await screen.findByText(/没有需要修复的行/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下一步：确认提交" })).toBeEnabled();
     expect(screen.getByText(/已确认的列映射方案会保留/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "下一步：确认提交" }));
 
-    // 第四步：默认 upsert，二次确认文案说明影响面
+    // 第四步确认提交：commit 带同一份 overrides
     const dialog = screen.getByRole("dialog");
-    expect(within(dialog).getByLabelText("导入模式")).toHaveValue("upsert");
-    expect(within(dialog).getByText(/即将把 9 行数据写入主数据/)).toBeInTheDocument();
-
+    expect(within(dialog).getByText(/即将把 10 行数据写入主数据/)).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: /确认导入/ }));
 
     await waitFor(() => expect(onCommitted).toHaveBeenCalledWith(commitResult));
     const commitCall = mocks.request.mock.calls.find((call) => requestUrl(call) === "/api/v1/imports/commit");
     expect(commitCall).toBeTruthy();
     expect(formField(commitCall!, "mode")).toBe("upsert");
-    expect(JSON.parse(formField(commitCall!, "mapping_json")).columns).toEqual(expect.arrayContaining([
-      expect.objectContaining({ column: "上课日期", target: "上课日期" }),
-    ]));
+    expect(JSON.parse(formField(commitCall!, "cell_overrides"))).toEqual({
+      "7": { 上课日期: "2026-09-12" },
+      "4": { 上课日期: "2026-08-20" },
+    });
+  });
+
+  it("命中上次导入的映射记忆时，映射表提示沿用决策且匹配来源标注为「上次导入」", async () => {
+    mocks.request.mockImplementation((config: { url: string }) => {
+      if (config.url === "/api/v1/imports/preview") {
+        return Promise.resolve({
+          ...previewSuggestion,
+          historical_match: true,
+          mapping: previewSuggestion.mapping.map((item) => ({ ...item, matched_by: "historical" })),
+        });
+      }
+      return Promise.resolve({});
+    });
+    renderWizard();
+    await user.upload(screen.getByLabelText("选择导入文件"), XLSX_FILE);
+    await user.click(screen.getByRole("button", { name: "下一步：确认列映射" }));
+    await screen.findByText("目标字段");
+
+    expect(screen.getByText(/已自动沿用上次确认的映射决策/)).toBeInTheDocument();
+    expect(screen.getAllByText(/上次导入 · /).length).toBeGreaterThan(0);
   });
 
   it("用户可以在映射表里改目标字段，mapping_json 按修改后的值回传", async () => {

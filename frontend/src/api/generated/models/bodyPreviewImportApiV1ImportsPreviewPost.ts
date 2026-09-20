@@ -6,8 +6,10 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { BodyPreviewImportApiV1ImportsPreviewPostMappingJson } from './bodyPreviewImportApiV1ImportsPreviewPostMappingJson';
+import type { BodyPreviewImportApiV1ImportsPreviewPostCellOverrides } from './bodyPreviewImportApiV1ImportsPreviewPostCellOverrides';
 
 export interface BodyPreviewImportApiV1ImportsPreviewPost {
   file: string;
   mapping_json?: BodyPreviewImportApiV1ImportsPreviewPostMappingJson;
+  cell_overrides?: BodyPreviewImportApiV1ImportsPreviewPostCellOverrides;
 }

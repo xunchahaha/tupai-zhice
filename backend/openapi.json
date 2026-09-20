@@ -1232,7 +1232,7 @@
           "imports"
         ],
         "summary": "Preview Import",
-        "description": "解析上传文件并给出列映射建议与行级校验报告，只解析不落库。\n\n携带 ``mapping_json``（用户修正后的映射）时按其重跑校验，用于 Fix 循环；\n未配置 AI 语义层时只走别名/规范化/模糊/形状四层匹配。",
+        "description": "解析上传文件并给出列映射建议与行级校验报告，只解析不落库。\n\n携带 ``mapping_json``（用户修正后的映射）时按其重跑校验，用于 Fix 循环；\n未配置 AI 语义层时只走别名/规范化/模糊/形状四层匹配。无 ``mapping_json`` 时\n若表头指纹命中上次导入的映射记忆（同方案内），直接按历史决策预填。可选\n``cell_overrides``（``{行号: {表头文本: 新值}}``）在解析后、校验前原地修复单元格。",
         "operationId": "preview_import_api_v1_imports_preview_post",
         "security": [
           {
@@ -1297,7 +1297,7 @@
           "imports"
         ],
         "summary": "Commit Import",
-        "description": "按确认的映射把上传文件正式导入，返回与模板直通导入同构的质量报告。\n\n``mode=upsert`` 沿用现有业务键（班级+课次序号+课节名称+上课日期+上课时段）\n重复导入即更新；``mode=insert`` 只新增，已存在的课次原样保留且不做孤儿清理。",
+        "description": "按确认的映射把上传文件正式导入，返回与模板直通导入同构的质量报告。\n\n``mode=upsert`` 沿用现有业务键（班级+课次序号+课节名称+上课日期+上课时段）\n重复导入即更新；``mode=insert`` 只新增，已存在的课次原样保留且不做孤儿清理。\n``cell_overrides``（``{行号: {表头文本: 新值}}``）与 preview 同口径，解析后、\n校验前原地修复单元格；导入成功后把生效映射（含手动修正）按表头指纹记忆。",
         "operationId": "commit_import_api_v1_imports_commit_post",
         "security": [
           {
@@ -6806,6 +6806,17 @@
             ],
             "title": "Mode",
             "default": "upsert"
+          },
+          "cell_overrides": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cell Overrides"
           }
         },
         "type": "object",
@@ -6905,6 +6916,17 @@
               }
             ],
             "title": "Mapping Json"
+          },
+          "cell_overrides": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cell Overrides"
           }
         },
         "type": "object",
@@ -8823,6 +8845,16 @@
             "type": "integer",
             "title": "Course Sessions Skipped Existing",
             "default": 0
+          },
+          "overrides_applied": {
+            "type": "integer",
+            "title": "Overrides Applied",
+            "default": 0
+          },
+          "ignored_overrides": {
+            "type": "integer",
+            "title": "Ignored Overrides",
+            "default": 0
           }
         },
         "type": "object",
@@ -8926,6 +8958,16 @@
           },
           "stats": {
             "$ref": "#/components/schemas/ImportPreviewStats"
+          },
+          "historical_match": {
+            "type": "boolean",
+            "title": "Historical Match",
+            "default": false
+          },
+          "ignored_overrides": {
+            "type": "integer",
+            "title": "Ignored Overrides",
+            "default": 0
           }
         },
         "type": "object",
@@ -8974,6 +9016,11 @@
             "type": "boolean",
             "title": "Ai Mapping Used",
             "default": false
+          },
+          "overrides_applied": {
+            "type": "integer",
+            "title": "Overrides Applied",
+            "default": 0
           }
         },
         "type": "object",

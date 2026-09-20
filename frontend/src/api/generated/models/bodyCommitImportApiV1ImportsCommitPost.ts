@@ -6,9 +6,11 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { BodyCommitImportApiV1ImportsCommitPostMode } from './bodyCommitImportApiV1ImportsCommitPostMode';
+import type { BodyCommitImportApiV1ImportsCommitPostCellOverrides } from './bodyCommitImportApiV1ImportsCommitPostCellOverrides';
 
 export interface BodyCommitImportApiV1ImportsCommitPost {
   file: string;
   mapping_json: string;
   mode?: BodyCommitImportApiV1ImportsCommitPostMode;
+  cell_overrides?: BodyCommitImportApiV1ImportsCommitPostCellOverrides;
 }

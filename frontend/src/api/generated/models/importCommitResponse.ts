@@ -43,4 +43,6 @@ export interface ImportCommitResponse {
   mode: string;
   course_sessions_updated?: number;
   course_sessions_skipped_existing?: number;
+  overrides_applied?: number;
+  ignored_overrides?: number;
 }

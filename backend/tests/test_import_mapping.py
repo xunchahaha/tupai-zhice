@@ -11,14 +11,22 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
+from sqlalchemy import select
 
+from app.db import SessionLocal
+from app.models import ImportMappingHistory
 from app.services.converter_core import parse_template_records
 from app.services.import_mapping import (
     CONFIDENCE_THRESHOLD,
+    HISTORICAL_CONFIDENCE,
     ColumnMapping,
+    apply_historical_mapping,
     build_records,
     column_samples,
     detect_header_candidates,
+    header_fingerprint,
+    header_texts,
+    history_payload,
     parse_uploaded_workbook,
     pick_default_sheet,
     suggest_mapping,
@@ -514,3 +522,258 @@ def test_preview_rejects_unsupported_files(
     )
     assert response.status_code == 400
     assert "只接受" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# historical mapping：按表头指纹记忆上次生效的映射
+# ---------------------------------------------------------------------------
+
+
+def test_header_fingerprint_is_order_sensitive_and_normalized() -> None:
+    assert header_fingerprint(["上课日期", "上课时段"]) == header_fingerprint(
+        ["上课日期", "上课时段"]
+    )
+    # 列序敏感：调换列序就算新表，避免「同名不同位」的表头误用旧决策。
+    assert header_fingerprint(["上课日期", "上课时段"]) != header_fingerprint(
+        ["上课时段", "上课日期"]
+    )
+    # 规范化层复用：空白/全角差异不影响指纹。
+    assert header_fingerprint(["上 课 日 期", "时段"]) == header_fingerprint(
+        ["上课日期", "时　段"]
+    )
+    # 分隔符拼接：防止相邻表头规范化后首尾相接产生碰撞。
+    assert header_fingerprint(["ab", "c"]) != header_fingerprint(["a", "bc"])
+    assert len(header_fingerprint(["x"])) == 64
+
+
+def test_history_payload_round_trips_through_historical_replay() -> None:
+    grid = _renamed_grid()
+    headers = header_texts(grid, 1)
+    mapping, _ai_used = suggest_mapping(headers, column_samples(grid, 1))
+    payload = history_payload(mapping, sheet="Sheet", header_row_index=1)
+
+    replayed = apply_historical_mapping(headers, payload)
+    assert replayed is not None
+    by_column = _mapping_by_column(replayed)
+    assert by_column["任课教师"].target == "授课教师"
+    assert by_column["任课教师"].matched_by == "historical"
+    assert by_column["任课教师"].confidence == HISTORICAL_CONFIDENCE
+    assert (
+        {item.column_index: item.target for item in replayed}
+        == {item.column_index: item.target for item in mapping}
+    )
+
+    # 脏数据（历史结构损坏、手工改库）整份弃用，返回 None 退回自动建议。
+    assert apply_historical_mapping(headers, None) is None
+    assert apply_historical_mapping(headers, {"columns": "oops"}) is None
+    assert apply_historical_mapping(headers, {"columns": []}) is None
+    assert (
+        apply_historical_mapping(
+            headers,
+            {"columns": [{"column": "任课教师", "column_index": 13, "target": "不是规范字段"}]},
+        )
+        is None
+    )
+    assert (
+        apply_historical_mapping(
+            headers, {"columns": [{"column": "任课教师", "column_index": "十三", "target": None}]}
+        )
+        is None
+    )
+
+
+def _mapping_json_with_ignored_room(preview: dict[str, Any]) -> str:
+    """把「上课教室」列手动改为不导入——制造与自动建议不同的用户决策。"""
+    payload = json.loads(_mapping_input(preview, skip_note=False))
+    for item in payload["columns"]:
+        if item["column"] == "上课教室":
+            item["target"] = None
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def test_commit_remembers_mapping_and_next_preview_replays_it(
+    client: TestClient, auth_headers: dict[str, str], import_set_headers: dict[str, str]
+) -> None:
+    payload = _grid_to_xlsx(_renamed_grid())
+    first = _preview(client, import_set_headers, payload)
+    assert first["historical_match"] is False
+
+    mapping_json = _mapping_json_with_ignored_room(first)
+    committed = client.post(
+        "/api/v1/imports/commit",
+        headers=import_set_headers,
+        files={"file": ("renamed.xlsx", payload, "application/octet-stream")},
+        data={"mapping_json": mapping_json, "mode": "upsert"},
+    )
+    assert committed.status_code == 200, committed.text
+
+    # 同一表头第二次导入：自动带出上次决策，手动忽略的列以历史为准。
+    second = _preview(client, import_set_headers, payload)
+    assert second["historical_match"] is True
+    by_column = {item["column"]: item for item in second["mapping"]}
+    assert by_column["上课教室"]["target"] is None
+    assert by_column["上课教室"]["matched_by"] == "historical"
+    assert by_column["任课教师"]["target"] == "授课教师"
+    assert by_column["任课教师"]["matched_by"] == "historical"
+    assert by_column["任课教师"]["confidence"] == HISTORICAL_CONFIDENCE
+    assert "教室标签" in second["missing_fields"]
+
+    # 再次 commit：同一指纹 upsert，used_count 累加而不是新增一行。
+    again = client.post(
+        "/api/v1/imports/commit",
+        headers=import_set_headers,
+        files={"file": ("renamed.xlsx", payload, "application/octet-stream")},
+        data={"mapping_json": mapping_json, "mode": "upsert"},
+    )
+    assert again.status_code == 200, again.text
+    schedule_set_id = import_set_headers["X-Schedule-Set-Id"]
+    with SessionLocal() as db:
+        rows = list(
+            db.scalars(
+                select(ImportMappingHistory).where(
+                    ImportMappingHistory.schedule_set_id == schedule_set_id
+                )
+            )
+        )
+        assert len(rows) == 1
+        assert rows[0].used_count == 2
+        stored = {item["column"]: item["target"] for item in rows[0].mapping["columns"]}
+        assert stored["上课教室"] is None
+        assert rows[0].sheet_name == "Sheet"
+
+    # 不同表头不误命中：指纹不同，退回自动建议。
+    other_workbook = _grid_to_xlsx([["甲", "乙"], ["1", "2"]])
+    other = _preview(client, import_set_headers, other_workbook)
+    assert other["historical_match"] is False
+    assert all(item["matched_by"] != "historical" for item in other["mapping"])
+
+    # 方案隔离：同一文件换一个课表方案，历史不跨方案共享。
+    created = client.post(
+        "/api/v1/schedule-sets",
+        headers=auth_headers,
+        json={"name": f"导入隔离-{uuid.uuid4().hex[:8]}"},
+    )
+    assert created.status_code in (200, 201), created.text
+    other_set_headers = {**auth_headers, "X-Schedule-Set-Id": created.json()["id"]}
+    isolated = _preview(client, other_set_headers, payload)
+    assert isolated["historical_match"] is False
+    assert all(item["matched_by"] != "historical" for item in isolated["mapping"])
+
+
+# ---------------------------------------------------------------------------
+# 单元格原地修复（cell overrides）
+# ---------------------------------------------------------------------------
+
+
+def _preview_with_data(
+    client: TestClient, headers: dict[str, str], payload: bytes, data: dict[str, str]
+) -> dict[str, Any]:
+    response = client.post(
+        "/api/v1/imports/preview",
+        headers=headers,
+        files={"file": ("renamed.xlsx", payload, "application/octet-stream")},
+        data=data,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_cell_overrides_fix_broken_row_before_validation(
+    client: TestClient, auth_headers: dict[str, str], import_set_headers: dict[str, str]
+) -> None:
+    payload = _grid_to_xlsx(_renamed_grid())
+    preview = _preview(client, import_set_headers, payload)
+    bad_row = len(_sample_rows()) + 3  # 与 issues 报告同口径的 1-based 工作表行号
+    assert [issue["行号"] for issue in preview["issues"]] == [bad_row]
+    mapping_json = _mapping_input(preview)
+
+    fixed = _preview_with_data(
+        client,
+        import_set_headers,
+        payload,
+        {
+            "mapping_json": mapping_json,
+            "cell_overrides": json.dumps(
+                {str(bad_row): {"上课日期": "2026-09-12"}}, ensure_ascii=False
+            ),
+        },
+    )
+    assert fixed["issues"] == []
+    assert fixed["stats"]["overrides_applied"] == 1
+    assert fixed["ignored_overrides"] == 0
+    assert fixed["stats"]["rows_valid"] == preview["stats"]["rows_total"]
+    assert fixed["stats"]["rows_skipped"] == 0
+
+    # 未知行/列一律忽略并计数，不猜测。
+    partial = _preview_with_data(
+        client,
+        import_set_headers,
+        payload,
+        {
+            "mapping_json": mapping_json,
+            "cell_overrides": json.dumps(
+                {
+                    str(bad_row): {"上课日期": "2026-09-12", "不存在的列": "x"},
+                    "9999": {"上课日期": "y"},
+                    "0": {"上课日期": "z"},  # 表头行，不是数据行
+                },
+                ensure_ascii=False,
+            ),
+        },
+    )
+    assert partial["stats"]["overrides_applied"] == 1
+    assert partial["ignored_overrides"] == 3
+
+    # 列名也接受原文件表头文本（「日期」= 上课日期 的业务别名）。
+    by_source_header = _preview_with_data(
+        client,
+        import_set_headers,
+        payload,
+        {
+            "mapping_json": mapping_json,
+            "cell_overrides": json.dumps(
+                {str(bad_row): {"日期": "2026-09-12"}}, ensure_ascii=False
+            ),
+        },
+    )
+    assert by_source_header["stats"]["overrides_applied"] == 1
+    assert by_source_header["issues"] == []
+
+    # 非法结构的 cell_overrides 直接 422，让调用方立刻发现传错了形状。
+    malformed = client.post(
+        "/api/v1/imports/preview",
+        headers=import_set_headers,
+        files={"file": ("renamed.xlsx", payload, "application/octet-stream")},
+        data={"mapping_json": mapping_json, "cell_overrides": "[1, 2]"},
+    )
+    assert malformed.status_code == 422
+    assert "cell_overrides" in malformed.json()["detail"]
+
+
+def test_commit_applies_same_overrides_and_stores_fixed_value(
+    client: TestClient, auth_headers: dict[str, str], import_set_headers: dict[str, str]
+) -> None:
+    payload = _grid_to_xlsx(_renamed_grid())
+    preview = _preview(client, import_set_headers, payload)
+    bad_row = len(_sample_rows()) + 3
+    mapping_json = _mapping_input(preview)
+    overrides = json.dumps({str(bad_row): {"上课日期": "2026-09-12"}}, ensure_ascii=False)
+
+    committed = client.post(
+        "/api/v1/imports/commit",
+        headers=import_set_headers,
+        files={"file": ("renamed.xlsx", payload, "application/octet-stream")},
+        data={"mapping_json": mapping_json, "mode": "upsert", "cell_overrides": overrides},
+    )
+    assert committed.status_code == 200, committed.text
+    result = committed.json()
+    # 坏行被修复后进入管线：比基线（跳过该行）多 1 行、多 1 条课次。
+    assert result["overrides_applied"] == 1
+    assert result["ignored_overrides"] == 0
+    assert result["rows_total"] == preview["stats"]["rows_total"]
+    assert result["course_sessions"] == 3
+
+    sessions = client.get("/api/v1/course-sessions", headers=import_set_headers)
+    assert sessions.status_code == 200
+    dates = {item["lesson_date"] for item in sessions.json()}
+    assert "2026-09-12" in dates

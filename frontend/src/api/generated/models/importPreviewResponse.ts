@@ -25,4 +25,6 @@ export interface ImportPreviewResponse {
   missing_fields: string[];
   issues?: ImportPreviewResponseIssuesItem[];
   stats: ImportPreviewStats;
+  historical_match?: boolean;
+  ignored_overrides?: number;
 }

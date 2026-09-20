@@ -794,7 +794,8 @@ class ImportColumnMapping(BaseModel):
     target: str | None
     confidence: float
     rationale: str
-    matched_by: str  # exact / alias / normalized / fuzzy / llm / manual / unmatched
+    # exact / alias / normalized / fuzzy / llm / historical / manual / unmatched
+    matched_by: str
     sample_values: list[str] = Field(default_factory=list)
 
 
@@ -806,6 +807,7 @@ class ImportPreviewStats(BaseModel):
     columns_total: int
     mapped_columns: int
     ai_mapping_used: bool = False
+    overrides_applied: int = 0
 
 
 class ImportPreviewResponse(BaseModel):
@@ -821,6 +823,10 @@ class ImportPreviewResponse(BaseModel):
     missing_fields: list[str]
     issues: list[dict[str, Any]] = Field(default_factory=list)
     stats: ImportPreviewStats
+    # 无 mapping_json 时命中了「上次导入的映射记忆」（按表头指纹匹配）。
+    historical_match: bool = False
+    # cell_overrides 里行号/列名对不上的条数：宁可忽略报数也不猜。
+    ignored_overrides: int = 0
 
 
 class ImportMappingColumnInput(BaseModel):
@@ -845,6 +851,8 @@ class ImportCommitResponse(ImportResult):
     mode: str
     course_sessions_updated: int = 0
     course_sessions_skipped_existing: int = 0
+    overrides_applied: int = 0
+    ignored_overrides: int = 0
 
 
 class OverviewResponse(BaseModel):

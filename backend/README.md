@@ -38,12 +38,28 @@ uv run tupai-zhengzhou "E:\飞书大赛\郑州考研公职专升本课表数据�
 确认提交」的导入向导：
 
 - `POST /api/v1/imports/preview`：上传文件（≤64MB）+ 可选 `mapping_json`（用户修正后的
-  映射，Fix 循环重跑校验），返回 sheet 概览、表头行候选、逐列映射建议（目标字段、
-  置信度、理由、样本值）、映射后的行级校验报告与统计。**只解析不落库。**
-- `POST /api/v1/imports/commit`：文件 + `mapping_json`（必填）+ `mode=insert|upsert`。
-  `upsert` 沿用现有业务键（班级+课次序号+课节名称+上课日期+上课时段）重复导入即更新；
-  `insert` 只新增，已存在课次原样保留且不做孤儿清理。响应与模板直通导入同构，
-  另附 `course_sessions_updated` / `course_sessions_skipped_existing`。
+  映射，Fix 循环重跑校验）+ 可选 `cell_overrides`，返回 sheet 概览、表头行候选、逐列
+  映射建议（目标字段、置信度、理由、样本值）、映射后的行级校验报告与统计。
+  **只解析不落库。**
+- `POST /api/v1/imports/commit`：文件 + `mapping_json`（必填）+ `mode=insert|upsert` +
+  可选 `cell_overrides`。`upsert` 沿用现有业务键（班级+课次序号+课节名称+上课日期+
+  上课时段）重复导入即更新；`insert` 只新增，已存在课次原样保留且不做孤儿清理。
+  响应与模板直通导入同构，另附 `course_sessions_updated` /
+  `course_sessions_skipped_existing`。
+
+**历史映射记忆（historical mapping）**：无 `mapping_json` 时，preview 会把当前表头
+序列规范化后算 sha256 指纹（列序敏感），按 `schedule_set_id + 指纹` 查
+`import_mapping_history` 表；命中则直接按上次 commit 生效的映射（含手动修正与
+「不导入」决策）预填，`matched_by="historical"`、置信度 0.95，响应置
+`historical_match=true`，且不再询问 AI。commit 成功后把本次生效映射 upsert 进历史
+（`used_count` 累加），失败的导入不记忆。历史记录只在同一课表方案内复用，结构损坏
+的记录整份弃用、退回自动建议。
+
+**单元格原地修复（cell_overrides）**：preview/commit 均接受可选表单字段
+`cell_overrides`，JSON 形如 `{"<sheet 内 1-based 行号>": {"<表头文本或规范字段名>":
+"<新值>"}}`，在解析后、校验前原地改写单元格。行号对不上或列名无法解析的条目一律
+忽略并计入响应 `ignored_overrides`，不猜测；生效数计入 `stats.overrides_applied`。
+前端向导第 3 步据此在问题行内联修复后重新校验，错误清零才放行提交。
 
 列映射由 `app/services/import_mapping.py` 提供，按四层匹配并给出 0–1 置信度：
 
@@ -230,8 +246,8 @@ RBAC 正交：链接的签发/轮换/停用复用 `admin/scheduler` 角色，撤
 - 用户鉴权：OAuth2 password flow + JWT Bearer
 - Aily 鉴权：`X-Aily-Key`
 - 模板直通导入：`POST /api/v1/imports/xlsx`（官方 14 列表头，严格匹配）
-- 智能导入预览：`POST /api/v1/imports/preview`（任意 XLSX/CSV，映射建议 + 行级校验，不落库）
-- 智能导入提交：`POST /api/v1/imports/commit`（`mapping_json` + `mode=insert|upsert`）
+- 智能导入预览：`POST /api/v1/imports/preview`（任意 XLSX/CSV，映射建议 + 行级校验，不落库；支持历史映射记忆与 `cell_overrides`）
+- 智能导入提交：`POST /api/v1/imports/commit`（`mapping_json` + `mode=insert|upsert`，支持 `cell_overrides`）
 - AI 配置：`GET/POST /api/v1/integrations/ai/configuration`
 - 集成清单：`GET /api/v1/integrations`（管理员/排课员；manifest + 运行时状态，不触发探测）
 - 集成凭据配置：`GET/PUT /api/v1/integrations/{id}/configuration`（钉钉/企业微信；GET 管理员/排课员脱敏回读，PUT 管理员加密落库）

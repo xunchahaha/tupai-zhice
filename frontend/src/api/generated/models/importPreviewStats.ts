@@ -14,4 +14,5 @@ export interface ImportPreviewStats {
   columns_total: number;
   mapped_columns: number;
   ai_mapping_used?: boolean;
+  overrides_applied?: number;
 }
