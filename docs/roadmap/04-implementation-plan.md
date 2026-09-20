@@ -1,6 +1,6 @@
 # 04 · 实施计划与进度
 
-> 状态：✅ 全部批次完成 · 分支 `feat/open-source-upgrade` · VER-1 验证通过（2026-09-20）
+> 状态：VER-1 通过后用户要求「规划中清零」——二期批次进行中（2026-09-20）
 > 批次策略遵循工作区 AGENTS.md：按模块分批、实现代理自检 + 局部验证、里程碑统一全量验证、每批一个原子提交。
 
 ## 勘察修正（重要）
@@ -48,6 +48,18 @@ VER-1 收口
 - 页面根节点 `<div className="space-y-5 animate-fade-in">`；卡片 `rounded-lg border border-zinc-200 bg-white shadow-2xs`；
 - 只用现有 ui 组件（button/badge/select/tabs/dialog/data-table/page）；不引入新 UI/动画依赖；
 - 图标 lucide-react size-3.5/4；控件 h-8/h-9、text-sm/xs；微交互 150-300ms。
+
+## 二期「规划中清零」批次（用户指令：文档里没做完的全部做完）
+
+| 批次 | 内容 | 状态 | 提交 |
+| --- | --- | --- | --- |
+| SCR-0 | 一键启动脚本（start.bat / scripts/start.sh + README 指引） | ✅ | 5e2aaba |
+| UX-SSE | interpret SSE 流式（后端 stream 端点 + 前端 fetch reader + 失败回退） | 🔄 | — |
+| CN-A | 钉钉 + 企业微信适配器 v1（真实 API 实现 + mock 单测 + 凭据加密配置端点） | 🔄 | — |
+| PUB-C | ICS RRULE 循环课次 + school 单班端点 + 按发布版本批量生成链接 + verify 端点 + Lark base_url settings 化 | 排队（等 UX-SSE 释放 api.py） | — |
+| IMP-C | 导入收尾：historical mapping（表头指纹记忆）+ 单元格原地修复（cell overrides） | 排队 | — |
+| MEM-C | 记忆收尾：解释引用偏好 + solver_defaults 系统级默认参数 + 置信度衰减 + Stop Policy + 偏好全员可见 | 排队 | — |
+| OSS-C | print CSS 张榜打印 + README「规划中」节清零 + VER-2 全量（含 e2e） | 排队 | — |
 
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 
