@@ -86,6 +86,10 @@ import type {
   PreferenceResponse,
   PreferenceTransition,
   PreferenceUpdate,
+  PublicLinkCreate,
+  PublicLinkResponse,
+  PublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet200,
+  PublicLinkSecretResponse,
   RescheduleCreate,
   RescheduleResponse,
   RoomBatchUpdate,
@@ -736,6 +740,290 @@ export const useRevokeScheduleSetMemberApiV1ScheduleSetsScheduleSetIdMembersUser
       > => {
 
       const mutationOptions = getRevokeScheduleSetMemberApiV1ScheduleSetsScheduleSetIdMembersUserIdDeleteMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * @summary List Public Links
+ */
+export const listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet = (
+    scheduleSetId: string,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<PublicLinkResponse[]>(
+      {url: `/api/v1/schedule-sets/${scheduleSetId}/public-links`, method: 'GET', signal
+    },
+      );
+    }
+  
+
+
+
+export const getListPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGetQueryKey = (scheduleSetId?: string,) => {
+    return [
+    `/api/v1/schedule-sets/${scheduleSetId}/public-links`
+    ] as const;
+    }
+
+    
+export const getListPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGetQueryOptions = <TData = Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>, TError = HTTPValidationError>(scheduleSetId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGetQueryKey(scheduleSetId);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>> = ({ signal }) => listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet(scheduleSetId, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, enabled: !!(scheduleSetId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ListPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGetQueryResult = NonNullable<Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>>
+export type ListPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGetQueryError = HTTPValidationError
+
+
+export function useListPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet<TData = Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>, TError = HTTPValidationError>(
+ scheduleSetId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>,
+          TError,
+          Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet<TData = Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>, TError = HTTPValidationError>(
+ scheduleSetId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>,
+          TError,
+          Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet<TData = Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>, TError = HTTPValidationError>(
+ scheduleSetId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List Public Links
+ */
+
+export function useListPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet<TData = Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>, TError = HTTPValidationError>(
+ scheduleSetId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getListPublicLinksApiV1ScheduleSetsScheduleSetIdPublicLinksGetQueryOptions(scheduleSetId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * @summary Create Public Link
+ */
+export const createPublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPost = (
+    scheduleSetId: string,
+    publicLinkCreate: PublicLinkCreate,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<PublicLinkSecretResponse>(
+      {url: `/api/v1/schedule-sets/${scheduleSetId}/public-links`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: publicLinkCreate, signal
+    },
+      );
+    }
+  
+
+
+export const getCreatePublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createPublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPost>>, TError,{scheduleSetId: string;data: PublicLinkCreate}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof createPublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPost>>, TError,{scheduleSetId: string;data: PublicLinkCreate}, TContext> => {
+
+const mutationKey = ['createPublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createPublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPost>>, {scheduleSetId: string;data: PublicLinkCreate}> = (props) => {
+          const {scheduleSetId,data} = props ?? {};
+
+          return  createPublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPost(scheduleSetId,data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreatePublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPostMutationResult = NonNullable<Awaited<ReturnType<typeof createPublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPost>>>
+    export type CreatePublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPostMutationBody = PublicLinkCreate
+    export type CreatePublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Create Public Link
+ */
+export const useCreatePublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createPublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPost>>, TError,{scheduleSetId: string;data: PublicLinkCreate}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof createPublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPost>>,
+        TError,
+        {scheduleSetId: string;data: PublicLinkCreate},
+        TContext
+      > => {
+
+      const mutationOptions = getCreatePublicLinkApiV1ScheduleSetsScheduleSetIdPublicLinksPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * @summary Rotate Public Link
+ */
+export const rotatePublicLinkApiV1PublicLinksLinkIdRotatePost = (
+    linkId: string,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<PublicLinkSecretResponse>(
+      {url: `/api/v1/public-links/${linkId}/rotate`, method: 'POST', signal
+    },
+      );
+    }
+  
+
+
+export const getRotatePublicLinkApiV1PublicLinksLinkIdRotatePostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rotatePublicLinkApiV1PublicLinksLinkIdRotatePost>>, TError,{linkId: string}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof rotatePublicLinkApiV1PublicLinksLinkIdRotatePost>>, TError,{linkId: string}, TContext> => {
+
+const mutationKey = ['rotatePublicLinkApiV1PublicLinksLinkIdRotatePost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof rotatePublicLinkApiV1PublicLinksLinkIdRotatePost>>, {linkId: string}> = (props) => {
+          const {linkId} = props ?? {};
+
+          return  rotatePublicLinkApiV1PublicLinksLinkIdRotatePost(linkId,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RotatePublicLinkApiV1PublicLinksLinkIdRotatePostMutationResult = NonNullable<Awaited<ReturnType<typeof rotatePublicLinkApiV1PublicLinksLinkIdRotatePost>>>
+    
+    export type RotatePublicLinkApiV1PublicLinksLinkIdRotatePostMutationError = HTTPValidationError
+
+    /**
+ * @summary Rotate Public Link
+ */
+export const useRotatePublicLinkApiV1PublicLinksLinkIdRotatePost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rotatePublicLinkApiV1PublicLinksLinkIdRotatePost>>, TError,{linkId: string}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof rotatePublicLinkApiV1PublicLinksLinkIdRotatePost>>,
+        TError,
+        {linkId: string},
+        TContext
+      > => {
+
+      const mutationOptions = getRotatePublicLinkApiV1PublicLinksLinkIdRotatePostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * @summary Revoke Public Link
+ */
+export const revokePublicLinkApiV1PublicLinksLinkIdDelete = (
+    linkId: string,
+ ) => {
+      
+      
+      return customInstance<void>(
+      {url: `/api/v1/public-links/${linkId}`, method: 'DELETE'
+    },
+      );
+    }
+  
+
+
+export const getRevokePublicLinkApiV1PublicLinksLinkIdDeleteMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof revokePublicLinkApiV1PublicLinksLinkIdDelete>>, TError,{linkId: string}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof revokePublicLinkApiV1PublicLinksLinkIdDelete>>, TError,{linkId: string}, TContext> => {
+
+const mutationKey = ['revokePublicLinkApiV1PublicLinksLinkIdDelete'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof revokePublicLinkApiV1PublicLinksLinkIdDelete>>, {linkId: string}> = (props) => {
+          const {linkId} = props ?? {};
+
+          return  revokePublicLinkApiV1PublicLinksLinkIdDelete(linkId,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RevokePublicLinkApiV1PublicLinksLinkIdDeleteMutationResult = NonNullable<Awaited<ReturnType<typeof revokePublicLinkApiV1PublicLinksLinkIdDelete>>>
+    
+    export type RevokePublicLinkApiV1PublicLinksLinkIdDeleteMutationError = HTTPValidationError
+
+    /**
+ * @summary Revoke Public Link
+ */
+export const useRevokePublicLinkApiV1PublicLinksLinkIdDelete = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof revokePublicLinkApiV1PublicLinksLinkIdDelete>>, TError,{linkId: string}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof revokePublicLinkApiV1PublicLinksLinkIdDelete>>,
+        TError,
+        {linkId: string},
+        TContext
+      > => {
+
+      const mutationOptions = getRevokePublicLinkApiV1PublicLinksLinkIdDeleteMutationOptions(options);
 
       return useMutation(mutationOptions, queryClient);
     }
@@ -7187,3 +7475,185 @@ export const useAssistantSolveApiV1AssistantSolvePost = <TError = HTTPValidation
 
       return useMutation(mutationOptions, queryClient);
     }
+    
+/**
+ * @summary Public Link Schedule
+ */
+export const publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet = (
+    token: string,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<PublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet200>(
+      {url: `/api/v1/public/links/${token}/schedule.json`, method: 'GET', signal
+    },
+      );
+    }
+  
+
+
+
+export const getPublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGetQueryKey = (token?: string,) => {
+    return [
+    `/api/v1/public/links/${token}/schedule.json`
+    ] as const;
+    }
+
+    
+export const getPublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGetQueryOptions = <TData = Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>, TError = HTTPValidationError>(token: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGetQueryKey(token);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>> = ({ signal }) => publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet(token, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, enabled: !!(token), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGetQueryResult = NonNullable<Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>>
+export type PublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGetQueryError = HTTPValidationError
+
+
+export function usePublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet<TData = Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>, TError = HTTPValidationError>(
+ token: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>,
+          TError,
+          Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet<TData = Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>, TError = HTTPValidationError>(
+ token: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>,
+          TError,
+          Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet<TData = Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>, TError = HTTPValidationError>(
+ token: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Public Link Schedule
+ */
+
+export function usePublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet<TData = Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>, TError = HTTPValidationError>(
+ token: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkScheduleApiV1PublicLinksTokenScheduleJsonGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPublicLinkScheduleApiV1PublicLinksTokenScheduleJsonGetQueryOptions(token,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * @summary Public Link Calendar
+ */
+export const publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet = (
+    token: string,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<unknown>(
+      {url: `/api/v1/public/links/${token}/calendar.ics`, method: 'GET', signal
+    },
+      );
+    }
+  
+
+
+
+export const getPublicLinkCalendarApiV1PublicLinksTokenCalendarIcsGetQueryKey = (token?: string,) => {
+    return [
+    `/api/v1/public/links/${token}/calendar.ics`
+    ] as const;
+    }
+
+    
+export const getPublicLinkCalendarApiV1PublicLinksTokenCalendarIcsGetQueryOptions = <TData = Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>, TError = HTTPValidationError>(token: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getPublicLinkCalendarApiV1PublicLinksTokenCalendarIcsGetQueryKey(token);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>> = ({ signal }) => publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet(token, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, enabled: !!(token), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type PublicLinkCalendarApiV1PublicLinksTokenCalendarIcsGetQueryResult = NonNullable<Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>>
+export type PublicLinkCalendarApiV1PublicLinksTokenCalendarIcsGetQueryError = HTTPValidationError
+
+
+export function usePublicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet<TData = Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>, TError = HTTPValidationError>(
+ token: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>,
+          TError,
+          Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePublicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet<TData = Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>, TError = HTTPValidationError>(
+ token: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>,
+          TError,
+          Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function usePublicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet<TData = Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>, TError = HTTPValidationError>(
+ token: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Public Link Calendar
+ */
+
+export function usePublicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet<TData = Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>, TError = HTTPValidationError>(
+ token: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof publicLinkCalendarApiV1PublicLinksTokenCalendarIcsGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getPublicLinkCalendarApiV1PublicLinksTokenCalendarIcsGetQueryOptions(token,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}

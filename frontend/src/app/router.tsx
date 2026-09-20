@@ -10,6 +10,8 @@ import { LoginPage } from "@/pages/login-page";
 import { MasterDataPage } from "@/pages/master-data-page";
 import { MemoryPage } from "@/pages/memory-page";
 import { OverviewPage } from "@/pages/overview-page";
+import { PublicLinksPage } from "@/pages/public-links-page";
+import { PublicSchedulePage } from "@/pages/public/public-schedule-page";
 import { ReschedulePage } from "@/pages/reschedule-page";
 import { RulesPage } from "@/pages/rules-page";
 import { SchedulePage } from "@/pages/schedule-page";
@@ -25,6 +27,8 @@ function IntegrationsRedirect() {
 
 export const router = createBrowserRouter([
   { path: "/login", element: <LoginPage />, errorElement: <RouteErrorElement /> },
+  // 公开课表 H5：免登录匿名路由，与 /login 平级、AuthBoundary 外（06 §3 B1）。
+  { path: "/public/t/:token", element: <PublicSchedulePage />, errorElement: <RouteErrorElement /> },
   {
     element: <AuthBoundary />,
     errorElement: <RouteErrorElement />,
@@ -38,6 +42,7 @@ export const router = createBrowserRouter([
     { path: "/reschedule", element: <RoleRoute roles={["admin", "scheduler"]}><ReschedulePage /></RoleRoute> },
     { path: "/memory", element: <RoleRoute roles={["admin", "scheduler"]}><MemoryPage /></RoleRoute> },
     { path: "/versions", element: <VersionsPage /> },
+    { path: "/public-links", element: <RoleRoute roles={["admin", "scheduler"]}><PublicLinksPage /></RoleRoute> },
     { path: "/settings", element: <RoleRoute roles={["admin", "scheduler"]}><SettingsPage /></RoleRoute> },
     { path: "/integrations", element: <IntegrationsRedirect /> },
     { path: "/accounts", element: <RoleRoute roles={["admin"]}><AccountsPage /></RoleRoute> },

@@ -26,6 +26,7 @@ const navigation = [
   { to: "/reschedule", label: "局部调课", group: "变更", memberVisible: false, roles: ["admin", "scheduler"] },
   { to: "/memory", label: "记忆与偏好", group: "变更", memberVisible: false, roles: ["admin", "scheduler"] },
   { to: "/versions", label: "版本与回滚", group: "变更", memberVisible: true },
+  { to: "/public-links", label: "公开链接", group: "变更", memberVisible: false, roles: ["admin", "scheduler"] },
   { to: "/settings", label: "设置", group: "设置", memberVisible: false, roles: ["admin", "scheduler"], icon: Settings },
   { to: "/accounts", label: "账号管理", group: "设置", memberVisible: false, adminOnly: true },
 ];

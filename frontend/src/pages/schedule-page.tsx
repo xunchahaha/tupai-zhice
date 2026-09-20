@@ -10,6 +10,7 @@ import {
   Download,
   GraduationCap,
   LayoutGrid,
+  Share2,
   User,
   Users,
   Zap,
@@ -320,6 +321,13 @@ export function SchedulePage() {
               <Download className="size-3.5" />
               导出 XLSX
             </Button>
+            {/* 公开分享入口（06 §3 B4）：明文链接只在公开链接页创建/轮换后可见，这里跳管理页。 */}
+            {canReschedule ? (
+              <Button size="sm" variant="outline" onClick={() => navigate("/public-links")} title="创建二维码、H5 链接与日历订阅">
+                <Share2 className="size-3.5" />
+                分享
+              </Button>
+            ) : null}
             {/* D12 断头路：课表发现问题后下一步是局部调课；仅排课角色可见。 */}
             {canReschedule ? (
               <Button size="sm" onClick={() => navigate("/reschedule")}>
