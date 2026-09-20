@@ -13,7 +13,7 @@
 | 求解器 | OR-Tools CP-SAT | 硬约束强制 + 软约束加权目标，进程池异步执行 |
 | 数据库 | SQLite（WAL） | 默认单文件零部署依赖；连接层启用 WAL 与 busy_timeout |
 | LLM 通道 | OpenAI-compatible `/chat/completions` | 平台无关，可接豆包 Ark、DeepSeek 或企业模型网关；可选项，未配置自动降级 |
-| 前端 | React 19 · Vite · Tailwind CSS 4 | 管理端（12 个页面）+ 公开课表页（免登录 H5） |
+| 前端 | React 19 · Vite · Tailwind CSS 4 | 管理端（13 个页面）+ 公开课表页（免登录 H5） |
 | API Client | orval | 由 `openapi.json` 生成的 TypeScript client，单一事实源（见 §5.5） |
 | 前端数据层 | TanStack Query · react-router 7 · zod | 服务端状态与路由，表单用 zod 校验 |
 | 测试 | pytest · vitest · Playwright | 后端集成测试走真实迁移链路（见 §7） |
@@ -42,7 +42,7 @@ flowchart TB
         MEM["memory_solver 偏好编译<br/>只产软约束"]
         PROJ["public_projection 发布投影<br/>公开端点与集成同步共用口径"]
         ICS["ics.py ICS 日历订阅"]
-        INTEG["integrations 能力注册表<br/>LocalAdapter 默认 · FeishuAdapter · planned 占位"]
+        INTEG["integrations 能力注册表<br/>LocalAdapter 默认 · 飞书 / 钉钉 / 企业微信适配器"]
     end
 
     subgraph DATA["数据层 · SQLite（WAL）+ Alembic"]
@@ -85,7 +85,7 @@ flowchart TB
 | `services/memory_solver.py` | 偏好 → 内部软规则编译器：只把 `confirmed`/`probation` 且未过期的偏好并入现有软约束管线，权重 = `weight × 试用期衰减 × confidence` |
 | `services/public_projection.py` | 公开 payload 纯函数（显式字段白名单），公开端点与飞书公开表同步共用同一份投影口径 |
 | `services/ics.py` | ICS 订阅生成：`TZID=Asia/Shanghai`、UID 跨版本稳定、`SEQUENCE=version_no`、ETag 支持 304 |
-| `app/integrations/` | 集成抽象层：`Capability` 枚举 + `Integration` Protocol + manifest 清单 + 显式 `@register` 注册表；LocalAdapter 默认可用，FeishuAdapter 纯委托 `services/feishu.py` |
+| `app/integrations/` | 集成抽象层：`Capability` 枚举 + `Integration` Protocol + manifest 清单 + 显式 `@register` 注册表；LocalAdapter 默认可用，FeishuAdapter 纯委托 `services/feishu.py`，钉钉/企业微信适配器 v1（各自 `client.py` + `adapter.py`，凭据 Fernet 加密） |
 | `services/feishu.py` | 飞书生产逻辑：OAuth、凭据 Fernet 加密、多维表格自动建表与幂等同步、日历、Aily——作为集成层的第一个适配器被消费，不因抽象层重写 |
 | `services/explain.py` | 求解解释层：「事实由代码算，措辞由模型写」——确定性事实包 + 不依赖模型的兜底解释，AI 只负责翻译与意图核对 |
 | `services/snapshot.py` | 求解前数据快照，保证结果可复现、可解释 |
@@ -181,7 +181,7 @@ backend/
     config.py          Pydantic Settings（.env）；生产环境示例密钥守卫
     db.py              engine（WAL/busy_timeout）、迁移版本守卫
     timezone.py        Asia/Shanghai 业务时间与 UTC 协议边界的转换
-    integrations/      集成抽象层（base / registry / local / feishu），新增集成见包内 README
+    integrations/      集成抽象层（base / registry / local / feishu / dingtalk / wecom），新增集成见包内 README
     services/          15 个业务模块，见 §2.2
   alembic/             24 个迁移；版本落后时应用拒绝启动
   scripts/             export_openapi.py / reset_e2e_db.py / reset_to_official.py
@@ -192,7 +192,7 @@ frontend/
     app/               app-shell（侧边栏 IA 与 SOP 分组）· router · AuthBoundary · RoleRoute
     components/        ui/ 基础组件 · data-table · import-wizard · sop-steps · setup-checklist
     lib/               sop.ts（SOP 步骤单一事实源）· labels / format / status / schedule
-    pages/             12 个管理页（总览/主数据/规则/求解/课表/诊断/调课/记忆/版本/设置/账号/登录）
+    pages/             13 个管理页（总览/主数据/规则/求解/目标/课表/诊断/调课/记忆/版本/设置/账号/登录）
   tests/               vitest 单测 + tests/e2e Playwright
 docs/
   roadmap/             六份设计/实施文档（导入 · 记忆 · 集成 · 实施计划 · UX · 公开层），README 含 ADR

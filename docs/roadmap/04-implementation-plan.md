@@ -61,7 +61,7 @@ VER-1 收口
 | MEM-C1 | 审查修正第一波：三态拆分（待确认/授权试用/已确认）、hard 转正式 Rule、课程适用日期窗口、实体匹配严格化、偏好冻结进快照、逐条使用结果 | ✅ 完成（七条验收全过，全量 298 passed / 前端 108 passed，69a70df） | 69a70df |
 | MEM-C2 | 审查修正第二波：挖掘证据支持性校验（≥2 条不同证据/主体一致/约束来自证据/declared_reason 消噪/学期过滤）+ 拒绝记忆与矛盾消解 | ✅ 完成（8 新用例，全量 306 passed / 前端 109 passed，9109537） | 9109537 |
 | MEM-C3 | 审查修正第三波：Goal 验收闭环（逐项验收清单 + 代码化验收器 + 报告回灌 + 停止规则） | ✅ 完成（13 新用例，全量 319 passed / 前端 117 passed，ee172a7） | ee172a7 |
-| OSS-C | print CSS 张榜打印 + README「规划中」节清零 + VER-2 全量（含 e2e） | 🔄 实现中 | — |
+| OSS-C | print CSS 张榜打印 + README「规划中」节清零 + VER-2 全量（含 e2e） | ✅ 完成（后端 ruff/mypy 全过 + 319 passed；前端 tsc 0 + vitest 117 passed + build 成功 + orval 零 diff；e2e 3 passed；README「项目状态」改为已实现 + 已知边界，ARCHITECTURE 同步） | — |
 
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 

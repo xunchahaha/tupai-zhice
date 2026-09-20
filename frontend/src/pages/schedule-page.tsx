@@ -299,11 +299,11 @@ export function SchedulePage() {
   };
 
   return (
-    <div className="space-y-5 animate-fade-in">
+    <div className="space-y-5 animate-fade-in print:bg-white">
       <PageHeader
         title="课表视图"
         actions={
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5 print:hidden">
             <Select
               aria-label="课表版本"
               selectSize="sm"
@@ -338,8 +338,8 @@ export function SchedulePage() {
         }
       />
 
-      {/* View Mode Switcher and Subject Select Bar */}
-      <section className="flex flex-col gap-3.5 rounded-xl border border-zinc-200 bg-white p-4 shadow-2xs">
+      {/* View Mode Switcher and Subject Select Bar（交互工具栏，print 隐藏） */}
+      <section className="flex flex-col gap-3.5 rounded-xl border border-zinc-200 bg-white p-4 shadow-2xs print:hidden">
         <div className="flex flex-wrap items-center justify-between gap-3">
           {/* View Category: Class / Teacher / Room */}
           <div className="flex items-center gap-1.5 rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-1">
@@ -561,8 +561,8 @@ export function SchedulePage() {
       {/* VIEW 2: Standard 7-Day Weekly Calendar with First/Last Active Week Jumper in ONE LINE */}
       {layout === "matrix" && (
         <section className="space-y-4">
-          {/* Active Weeks Selector Bar - Fully aligned in ONE Single Line */}
-          <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 rounded-xl border border-zinc-200 bg-white p-3 shadow-2xs">
+          {/* Active Weeks Selector Bar - Fully aligned in ONE Single Line（交互层，print 隐藏） */}
+          <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 rounded-xl border border-zinc-200 bg-white p-3 shadow-2xs print:hidden">
             {/* Left: Quick Jumper Buttons (First Week / Last Week) */}
             <div className="flex items-center gap-2 shrink-0">
               <Button
@@ -786,8 +786,8 @@ export function SchedulePage() {
         </section>
       )}
 
-      {/* Footer Info Legend */}
-      <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-500 bg-zinc-50/60 p-3 rounded-lg border border-zinc-200/80">
+      {/* Footer Info Legend（print 保留对象与统计，白底） */}
+      <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-500 bg-zinc-50/60 p-3 rounded-lg border border-zinc-200/80 print:bg-white print:border-zinc-300">
         <div className="flex items-center gap-2">
           <Badge tone="blue">
             {mode === "class" ? "班级" : mode === "teacher" ? "教师" : "教室"}

@@ -1,4 +1,4 @@
-import { BellRing, CalendarDays, CalendarPlus, ChevronLeft, ChevronRight, Copy, Info, RefreshCw, ShieldCheck } from "lucide-react";
+import { BellRing, CalendarDays, CalendarPlus, ChevronLeft, ChevronRight, Copy, Info, Printer, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { toast } from "sonner";
@@ -161,9 +161,9 @@ export function PublicSchedulePage() {
         </div>
       </header>
 
-      {/* ② sticky 调课横幅（amber 语义色） */}
+      {/* ② sticky 调课横幅（amber 语义色；print 时取消 sticky 与阴影，保留内容） */}
       {adjustments.length > 0 ? (
-        <div className="sticky top-0 z-20 mt-4 px-4">
+        <div className="sticky top-0 z-20 mt-4 px-4 print:static print:z-auto print:px-0">
           <button
             type="button"
             onClick={() => setAdjustOpen((open) => !open)}
@@ -198,8 +198,8 @@ export function PublicSchedulePage() {
 
       {schedule ? (
         <>
-          {/* ③ 日期 chips 横滑 */}
-          <div className="mt-4 px-4">
+          {/* ③ 日期 chips 横滑（交互层，print 时整层隐藏，「打印」按钮也住在这里） */}
+          <div className="mt-4 px-4 print:hidden">
             <div className="flex items-center justify-between">
               <Button size="sm" variant="ghost" onClick={() => setWeekOffset((value) => value - 1)} aria-label="上一周">
                 <ChevronLeft className="size-4" />
@@ -208,10 +208,17 @@ export function PublicSchedulePage() {
               <Button size="sm" variant="ghost" disabled={weekOffset === 0} onClick={() => setWeekOffset(0)}>
                 回到本周
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => setWeekOffset((value) => value + 1)} aria-label="下一周">
-                下一周
-                <ChevronRight className="size-4" />
-              </Button>
+              <span className="flex items-center">
+                <Button size="sm" variant="ghost" onClick={() => setWeekOffset((value) => value + 1)} aria-label="下一周">
+                  下一周
+                  <ChevronRight className="size-4" />
+                </Button>
+                {/* 06 §3 B5：张榜打印——调起浏览器打印，配合 print: 变体输出白底黑字课表 */}
+                <Button size="sm" variant="ghost" onClick={() => window.print()}>
+                  <Printer className="size-4" />
+                  打印
+                </Button>
+              </span>
             </div>
             <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
               {chipDates.map((date) => {
@@ -239,13 +246,13 @@ export function PublicSchedulePage() {
             </div>
           </div>
 
-          {/* ④ 按日分组卡片流 */}
-          <div className="mt-3 space-y-4 px-4 pb-28">
+          {/* ④ 按日分组卡片流（print：白底黑字、去阴影，卡片不断行分页） */}
+          <div className="mt-3 space-y-4 px-4 pb-28 print:mt-4 print:px-0 print:pb-0">
             {visibleDates.map((date) => {
               const rows = rowsByDate.get(date) ?? [];
               return (
-                <section key={date}>
-                  <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-zinc-700">
+                <section key={date} className="print:break-inside-avoid">
+                  <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-zinc-700 print:text-black">
                     <CalendarDays className="size-4 text-blue-600" />
                     {date.slice(5).replace("-", "/")} {weekdayOf(date)}
                     {date === today ? <span className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">今天</span> : null}
@@ -266,8 +273,8 @@ export function PublicSchedulePage() {
             })}
           </div>
 
-          {/* ⑤ 底部固定订阅按钮 */}
-          <div className="fixed inset-x-0 bottom-0 z-30 border-t border-zinc-200 bg-white/95 px-4 pb-[max(env(safe-area-inset-bottom),12px)] pt-3 backdrop-blur-xs">
+          {/* ⑤ 底部固定订阅按钮（print 隐藏） */}
+          <div className="fixed inset-x-0 bottom-0 z-30 border-t border-zinc-200 bg-white/95 px-4 pb-[max(env(safe-area-inset-bottom),12px)] pt-3 backdrop-blur-xs print:hidden">
             <Button
               className="h-11 w-full bg-blue-600 text-base text-white hover:bg-blue-700"
               onClick={() => {
@@ -355,15 +362,15 @@ function ScheduleCard({ row, ongoing, showClassName, showTeacher }: { row: Publi
   return (
     <div
       className={cn(
-        "flex items-start gap-3 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm",
-        ongoing && "ring-2 ring-blue-500",
+        "flex items-start gap-3 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm print:break-inside-avoid print:border-zinc-300 print:bg-white print:shadow-none",
+        ongoing && "ring-2 ring-blue-500 print:ring-0",
       )}
     >
-      <div className="shrink-0 text-sm font-semibold tabular-nums text-blue-600">
+      <div className="shrink-0 text-sm font-semibold tabular-nums text-blue-600 print:text-blue-800">
         {row.start}-{row.end}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="break-words text-sm font-semibold text-zinc-900">
+        <div className="break-words text-sm font-semibold text-zinc-900 print:text-black">
           {row.subject}
           {row.lesson_name && row.lesson_name !== row.subject ? (
             <span className="ml-1.5 text-xs font-normal text-zinc-500">{row.lesson_name}</span>
@@ -371,12 +378,12 @@ function ScheduleCard({ row, ongoing, showClassName, showTeacher }: { row: Publi
         </div>
         {showClassName ? <div className="mt-0.5 text-xs text-zinc-500">{row.class_name}</div> : null}
         {showTeacher && row.teacher_names.length > 0 ? (
-          <div className="mt-1 text-xs text-zinc-600">教师：{row.teacher_names.join("、")}</div>
+          <div className="mt-1 text-xs text-zinc-600 print:text-zinc-700">教师：{row.teacher_names.join("、")}</div>
         ) : null}
       </div>
       <div className="shrink-0 text-right">
-        {ongoing ? <div className="mb-1 text-[10px] font-semibold text-blue-600">进行中</div> : null}
-        <div className="break-words text-xs text-zinc-500">{row.location}</div>
+        {ongoing ? <div className="mb-1 text-[10px] font-semibold text-blue-600 print:hidden">进行中</div> : null}
+        <div className="break-words text-xs text-zinc-500 print:text-zinc-700">{row.location}</div>
       </div>
     </div>
   );
@@ -384,7 +391,7 @@ function ScheduleCard({ row, ongoing, showClassName, showTeacher }: { row: Publi
 
 function PublicShell({ children }: { children: React.ReactNode }) {
   return (
-    <main className="mx-auto min-h-dvh w-full max-w-md bg-zinc-50">
+    <main className="mx-auto min-h-dvh w-full max-w-md bg-zinc-50 print:min-h-0 print:max-w-none print:bg-white">
       {children}
     </main>
   );
