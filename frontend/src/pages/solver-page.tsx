@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
 import { getListSchedulesApiV1SchedulesGetQueryKey, getListSolverRunsApiV1SolverRunsGetQueryKey, getOverviewApiV1OverviewGetQueryKey, useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet, useGetSolverRunApiV1SolverRunsRunIdGet, useGetScheduleApiV1SchedulesScheduleIdGet, useListCourseSessionsApiV1CourseSessionsGet, useListRulesApiV1RulesGet, useListSchedulesApiV1SchedulesGet, useListSolverRunsApiV1SolverRunsGet, useSubmitSolverRunApiV1SolverRunsPost } from "@/api/generated/client";
-import { type CourseSessionResponse, type AssistantInterpretResponse, type ScheduleDiffResponse, type ScheduleSummaryResponse, type SolveRequest, type SolverRunExplanation, type SolverRunResponse } from "@/api/generated/models";
+import { type CourseSessionResponse, type ScheduleDiffResponse, type ScheduleSummaryResponse, type SolveRequest, type SolverRunExplanation, type SolverRunResponse } from "@/api/generated/models";
 import { http } from "@/api/http";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { SetupChecklist } from "@/components/setup-checklist";
@@ -14,27 +14,17 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { asArray, errorMessage, formatRoom, formatSlot } from "@/lib/format";
+import { type Interpretation, streamInterpretInstruction } from "@/lib/interpret-stream";
 import { diffKindLabel, modelStatusLabel, statusLabel } from "@/lib/labels";
 import { preferredSchedule, scheduleForRun } from "@/lib/schedule";
 import { modelStatusTone, statusTone } from "@/lib/status";
-
-/** thinking 由后端 PR1 新增，orval 尚未重跑，这里按约定就地扩展类型；后端契约里列表字段必返。 */
-type Interpretation = AssistantInterpretResponse & {
-  thinking?: string | null;
-  business_lines: string[];
-  product_types: string[];
-  class_business_ids: string[];
-  recognized_rules: string[];
-  solver_rules: string[];
-  date_window_days: number;
-};
 
 /** 解析过程状态机：thinking=请求在途，parsed=成功（参数面板门控），failed=页内错误条。 */
 type InterpretPhase = "idle" | "thinking" | "parsed" | "failed";
 
 /**
- * 解析阶段文案按时间顺序推进；键值与二期 SSE interpret 事件一一同名，
- * 升级流式时只需把数据源换成事件，这里不用再动。
+ * 解析阶段文案：流式回退（或事件空窗期）按 2.5s 顺序轮播；流式通道的 stage
+ * 事件键值与这里一一对应，事件到达即跳到对应阶段并锁定轮播。
  */
 const INTERPRET_STAGES = [
   { key: "connect", text: "正在连接 AI 模型…" },
@@ -98,6 +88,8 @@ export function SolverPage() {
   const [interpretation, setInterpretation] = useState<Interpretation | null>(null);
   const [phase, setPhase] = useState<InterpretPhase>("idle");
   const [stageIndex, setStageIndex] = useState(0);
+  // 流式解析期间实时追加的思考文本；完成后的回看仍以 result 里的 thinking 全文为准。
+  const [liveThinking, setLiveThinking] = useState("");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [parsedSeconds, setParsedSeconds] = useState(0);
   const [interpretError, setInterpretError] = useState("");
@@ -105,6 +97,8 @@ export function SolverPage() {
   const [aiWindowFilled, setAiWindowFilled] = useState(false);
   const interpretAbort = useRef<AbortController | null>(null);
   const interpretStartedAt = useRef(0);
+  // 收到后端 stage 事件后锁定轮播（事件即真实进度），避免计时器把阶段倒拨回去。
+  const stageLocked = useRef(false);
   // D6 只预填日期三元组，且用户手动改过的字段不再被下一次解析覆盖。
   const manuallyEdited = useRef({ date_from: false, date_to: false, date_window_days: false });
   const [publishing, setPublishing] = useState<"dry-run" | "publish" | null>(null);
@@ -136,6 +130,7 @@ export function SolverPage() {
   useEffect(probeAssistant, [probeAssistant]);
   const interpreting = phase === "thinking";
   // thinking 阶段的阶段文案（每 2.5s 顺延）与已用时计时器；离开 thinking 即清理。
+  // 收到流式 stage 事件后 stageLocked=true，计时器只更新用时不再轮播阶段。
   useEffect(() => {
     if (phase !== "thinking") return;
     const startedAt = interpretStartedAt.current || Date.now();
@@ -144,7 +139,7 @@ export function SolverPage() {
     const timer = window.setInterval(() => {
       const seconds = (Date.now() - startedAt) / 1000;
       setElapsedSeconds(seconds);
-      setStageIndex(Math.min(Math.floor(seconds / 2.5), INTERPRET_STAGES.length - 1));
+      if (!stageLocked.current) setStageIndex(Math.min(Math.floor(seconds / 2.5), INTERPRET_STAGES.length - 1));
     }, 100);
     return () => window.clearInterval(timer);
   }, [phase]);
@@ -184,38 +179,66 @@ export function SolverPage() {
   const schedule = activeRun ? draftSchedule : preferredSchedule(scheduleList);
   if (rules.isPending || runs.isPending || schedules.isPending) return <LoadingState />;
   if (rules.isError || runs.isError || schedules.isError) return <ErrorState retry={() => { void rules.refetch(); void runs.refetch(); void schedules.refetch(); }} />;
+  /** 解析成功后的统一收尾：回填、徽标与阶段推进，流式与回退两条路共用。 */
+  const applyInterpretation = (data: Interpretation) => {
+    setParsedSeconds((Date.now() - interpretStartedAt.current) / 1000);
+    setInterpretation(data);
+    setAssistantEngine(data.source === "feishu_aily" ? "Aily（可选通道）" : "通用 AI 模型");
+    // P1 回填：解析成功后把日期三元组预填进手动参数面板（仅一次，手动改过的不覆盖）。
+    setParams((current) => ({
+      ...current,
+      date_from: manuallyEdited.current.date_from ? current.date_from : data.date_from ?? null,
+      date_to: manuallyEdited.current.date_to ? current.date_to : data.date_to ?? null,
+      date_window_days: manuallyEdited.current.date_window_days ? current.date_window_days : data.date_window_days ?? current.date_window_days,
+    }));
+    setAiWindowFilled(!manuallyEdited.current.date_window_days);
+    setPhase("parsed");
+    toast.success(data.source === "feishu_aily" ? "Aily（可选通道） 已完成解析" : "AI 模型已完成解析");
+  };
+  const handleInterpretFailure = (message: string) => {
+    setInterpretError(message);
+    setPhase("failed");
+    toast.error(message);
+    if (message.includes("配置一句话排课 AI")) setAssistantReady(false);
+  };
   const interpret = async () => {
     const controller = new AbortController();
     interpretAbort.current = controller;
     interpretStartedAt.current = Date.now();
     setInterpretError("");
+    setLiveThinking("");
+    stageLocked.current = false;
     setPhase("thinking");
     try {
-      const { data } = await http.post<Interpretation>("/api/v1/assistant/interpret", { instruction }, { signal: controller.signal });
-      setParsedSeconds((Date.now() - interpretStartedAt.current) / 1000);
-      setInterpretation(data);
-      setAssistantEngine(data.source === "feishu_aily" ? "Aily（可选通道）" : "通用 AI 模型");
-      // P1 回填：解析成功后把日期三元组预填进手动参数面板（仅一次，手动改过的不覆盖）。
-      setParams((current) => ({
-        ...current,
-        date_from: manuallyEdited.current.date_from ? current.date_from : data.date_from ?? null,
-        date_to: manuallyEdited.current.date_to ? current.date_to : data.date_to ?? null,
-        date_window_days: manuallyEdited.current.date_window_days ? current.date_window_days : data.date_window_days ?? current.date_window_days,
-      }));
-      setAiWindowFilled(!manuallyEdited.current.date_window_days);
-      setPhase("parsed");
-      toast.success(data.source === "feishu_aily" ? "Aily（可选通道） 已完成解析" : "AI 模型已完成解析");
-    } catch (error) {
+      // 优先走 SSE 流式接口：thinking 增量实时上屏，result 与同步接口同构。
+      const data = await streamInterpretInstruction(instruction, controller.signal, {
+        onThinking: (delta) => setLiveThinking((current) => current + delta),
+        onStage: (stage) => {
+          const index = INTERPRET_STAGES.findIndex((item) => item.key === stage);
+          if (index >= 0) {
+            stageLocked.current = true;
+            setStageIndex(index);
+          }
+        },
+      });
+      applyInterpretation(data);
+    } catch (streamError) {
       // 用户主动取消不算失败，安静回到初始态等下一次解析。
       if (controller.signal.aborted) {
         setPhase("idle");
         return;
       }
-      const message = errorMessage(error);
-      setInterpretError(message);
-      setPhase("failed");
-      toast.error(message);
-      if (message.includes("配置一句话排课 AI")) setAssistantReady(false);
+      try {
+        // 流式通道不可用（网络/网关缓冲/协议中断）时回退老接口，降级路径必须保留。
+        const { data } = await http.post<Interpretation>("/api/v1/assistant/interpret", { instruction }, { signal: controller.signal });
+        applyInterpretation(data);
+      } catch (error) {
+        if (controller.signal.aborted) {
+          setPhase("idle");
+          return;
+        }
+        handleInterpretFailure(errorMessage(error));
+      }
     } finally {
       if (interpretAbort.current === controller) interpretAbort.current = null;
     }
@@ -248,7 +271,7 @@ export function SolverPage() {
       aiConfigured={assistantReady}
       publishedScheduleCount={scheduleList.filter((item) => item.status === "published").length}
     />
-    <section className="border border-blue-200 bg-blue-50/40 p-5"><div className="flex flex-wrap items-center gap-2"><Bot className="size-4 text-blue-600" /><h2 className="font-semibold">一句话排课</h2><Badge tone={assistantReady === true ? "green" : "yellow"}>{assistantReady === true ? `${assistantEngine} 已接入` : assistantReady === false ? "AI 模型待配置" : assistantProbeError ? "AI 配置读取失败" : "正在读取 AI 配置"}</Badge>{assistantProbeError ? <Button size="sm" variant="outline" onClick={probeAssistant}>重试</Button> : null}</div><p className="mt-2 text-xs text-zinc-500">自然语言 → AI 解析业务范围与规则 → 教务确认 → CP-SAT 确定性求解 → 课表与日历下发</p><textarea aria-label="一句话排课指令" className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500 disabled:bg-zinc-50 disabled:text-zinc-400" value={instruction} disabled={phase === "thinking"} onChange={(event) => { setInstruction(event.target.value); setInterpretation(null); if (phase === "failed") { setPhase("idle"); setInterpretError(""); } }} /><div className="mt-3 flex flex-wrap gap-2"><Button onClick={interpret} disabled={assistantReady !== true || interpreting || instruction.trim().length < 2}><Sparkles className="size-4" />{interpreting ? "AI 正在理解指令" : "让 AI 解析排课指令"}</Button>{interpreting ? <Button variant="outline" onClick={cancelInterpret}>取消解析</Button> : null}{interpretation ? <Button variant="outline" onClick={solveFromInterpretation} disabled={Boolean(interpretation.unsupported_requirements?.length)}><Play className="size-4" />确认并开始求解</Button> : null}</div>{assistantReady === false ? <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><div>普通集成应用继续负责外部表格和日历；一句话理解改由独立 AI 模型接口完成，不再要求 Aily 应用标识和技能标识。</div><Button className="mt-3" size="sm" variant="outline" onClick={() => navigate("/integrations?section=ai")}><Settings2 className="size-4" />配置一句话排课 AI</Button></div> : null}{phase === "thinking" ? <InterpretProgress stageIndex={stageIndex} elapsedSeconds={elapsedSeconds} /> : null}{phase === "failed" ? <div role="alert" className="mt-4 border-l-2 border-red-500 bg-red-50 px-4 py-3 text-sm text-red-800"><div>AI 解析失败：{interpretError}</div>{elapsedSeconds > 30 ? <p className="mt-1 text-xs text-amber-800">本次解析超过 30 秒仍未返回，可稍后重试，或改用手动参数求解。</p> : null}<Button className="mt-2" size="sm" variant="outline" onClick={() => void interpret()} disabled={assistantReady !== true || instruction.trim().length < 2}><RefreshCw className="size-3.5" />重试解析</Button></div> : null}{interpretation ? <><p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-xs text-zinc-600">{interpretation.summary}；解析来源：{interpretation.source === "feishu_aily" ? "Aily（可选通道）" : assistantEngine}。</p><InterpretThought thinking={interpretation.thinking ?? ""} seconds={parsedSeconds} /><div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3"><Scope label="业务线" values={interpretation.business_lines} /><Scope label="产品班型" values={interpretation.product_types} /><Scope label="班级范围" values={interpretation.class_business_ids} /><Scope label="日期范围" values={[interpretation.date_from, interpretation.date_to].filter(Boolean) as string[]} /><Scope label="日期调整窗口" values={[`${interpretation.date_window_days} 天`]} /><Scope label="识别规则" values={interpretation.recognized_rules} /></div><div className="mt-3 space-y-2 text-xs text-amber-900">{interpretation.coverage_warnings?.map((warning) => <p key={warning}>{warning}</p>)}{interpretation.unsupported_requirements?.length ? <div role="alert" className="border-l-2 border-amber-500 bg-amber-50 p-3"><strong>以下要求尚未进入求解：</strong><ul>{interpretation.unsupported_requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul><p>请先在规则管理中补充已支持的结构化规则，并修订指令后重新解析。</p></div> : null}</div></> : null}</section>
+    <section className="border border-blue-200 bg-blue-50/40 p-5"><div className="flex flex-wrap items-center gap-2"><Bot className="size-4 text-blue-600" /><h2 className="font-semibold">一句话排课</h2><Badge tone={assistantReady === true ? "green" : "yellow"}>{assistantReady === true ? `${assistantEngine} 已接入` : assistantReady === false ? "AI 模型待配置" : assistantProbeError ? "AI 配置读取失败" : "正在读取 AI 配置"}</Badge>{assistantProbeError ? <Button size="sm" variant="outline" onClick={probeAssistant}>重试</Button> : null}</div><p className="mt-2 text-xs text-zinc-500">自然语言 → AI 解析业务范围与规则 → 教务确认 → CP-SAT 确定性求解 → 课表与日历下发</p><textarea aria-label="一句话排课指令" className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500 disabled:bg-zinc-50 disabled:text-zinc-400" value={instruction} disabled={phase === "thinking"} onChange={(event) => { setInstruction(event.target.value); setInterpretation(null); if (phase === "failed") { setPhase("idle"); setInterpretError(""); } }} /><div className="mt-3 flex flex-wrap gap-2"><Button onClick={interpret} disabled={assistantReady !== true || interpreting || instruction.trim().length < 2}><Sparkles className="size-4" />{interpreting ? "AI 正在理解指令" : "让 AI 解析排课指令"}</Button>{interpreting ? <Button variant="outline" onClick={cancelInterpret}>取消解析</Button> : null}{interpretation ? <Button variant="outline" onClick={solveFromInterpretation} disabled={Boolean(interpretation.unsupported_requirements?.length)}><Play className="size-4" />确认并开始求解</Button> : null}</div>{assistantReady === false ? <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><div>普通集成应用继续负责外部表格和日历；一句话理解改由独立 AI 模型接口完成，不再要求 Aily 应用标识和技能标识。</div><Button className="mt-3" size="sm" variant="outline" onClick={() => navigate("/integrations?section=ai")}><Settings2 className="size-4" />配置一句话排课 AI</Button></div> : null}{phase === "thinking" ? <InterpretProgress stageIndex={stageIndex} elapsedSeconds={elapsedSeconds} liveText={liveThinking} /> : null}{phase === "failed" ? <div role="alert" className="mt-4 border-l-2 border-red-500 bg-red-50 px-4 py-3 text-sm text-red-800"><div>AI 解析失败：{interpretError}</div>{elapsedSeconds > 30 ? <p className="mt-1 text-xs text-amber-800">本次解析超过 30 秒仍未返回，可稍后重试，或改用手动参数求解。</p> : null}<Button className="mt-2" size="sm" variant="outline" onClick={() => void interpret()} disabled={assistantReady !== true || instruction.trim().length < 2}><RefreshCw className="size-3.5" />重试解析</Button></div> : null}{interpretation ? <><p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-xs text-zinc-600">{interpretation.summary}；解析来源：{interpretation.source === "feishu_aily" ? "Aily（可选通道）" : assistantEngine}。</p><InterpretThought thinking={interpretation.thinking ?? ""} seconds={parsedSeconds} /><div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3"><Scope label="业务线" values={interpretation.business_lines} /><Scope label="产品班型" values={interpretation.product_types} /><Scope label="班级范围" values={interpretation.class_business_ids} /><Scope label="日期范围" values={[interpretation.date_from, interpretation.date_to].filter(Boolean) as string[]} /><Scope label="日期调整窗口" values={[`${interpretation.date_window_days} 天`]} /><Scope label="识别规则" values={interpretation.recognized_rules} /></div><div className="mt-3 space-y-2 text-xs text-amber-900">{interpretation.coverage_warnings?.map((warning) => <p key={warning}>{warning}</p>)}{interpretation.unsupported_requirements?.length ? <div role="alert" className="border-l-2 border-amber-500 bg-amber-50 p-3"><strong>以下要求尚未进入求解：</strong><ul>{interpretation.unsupported_requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul><p>请先在规则管理中补充已支持的结构化规则，并修订指令后重新解析。</p></div> : null}</div></> : null}</section>
     <div className="grid gap-2 xl:grid-cols-[360px_minmax(0,1fr)]">
       {showParams ? <div className="animate-fade-in"><SolverParams
         params={params}
@@ -325,7 +348,10 @@ function NumberField({ label, hint, labelExtra, value, min, max, step, onChange 
 }
 
 /** 解析进行中的阶段进度区：左侧竖线 + 浅色斜体，当前阶段用现有 animate-pulse 呼吸。 */
-function InterpretProgress({ stageIndex, elapsedSeconds }: { stageIndex: number; elapsedSeconds: number }) {
+function InterpretProgress({ stageIndex, elapsedSeconds, liveText }: { stageIndex: number; elapsedSeconds: number; liveText: string }) {
+  // 思考增量持续到达时跟随滚动到底部，最新的推理始终可见（jsdom 无 scrollTo，须容错）。
+  const liveRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { liveRef.current?.scrollTo?.({ top: liveRef.current.scrollHeight }); }, [liveText]);
   return (
     <div className="mt-4 border-l-2 border-zinc-200 pl-3">
       <ol className="space-y-1 text-xs italic">
@@ -340,6 +366,11 @@ function InterpretProgress({ stageIndex, elapsedSeconds }: { stageIndex: number;
           );
         })}
       </ol>
+      {liveText ? (
+        <div ref={liveRef} className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap border-l-2 border-zinc-200 pl-3 text-xs italic leading-5 text-zinc-500">
+          {liveText}
+        </div>
+      ) : null}
       <div className="mt-2 flex flex-wrap items-center gap-3 text-xs not-italic text-zinc-500">
         <span className="tabular-nums">已用时 {elapsedSeconds.toFixed(1)} 秒</span>
         {elapsedSeconds > 30 ? <span className="text-amber-700">解析耗时较长，可取消后重试</span> : null}

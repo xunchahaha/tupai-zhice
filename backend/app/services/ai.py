@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -260,6 +260,22 @@ class AIService:
         preview = re.sub(r"\s+", " ", text)[:240]
         raise AIServiceError(f"AI 模型输出不是合法 JSON，收到内容：{preview}")
 
+    @staticmethod
+    def _upstream_error_detail(raw: bytes | str | dict[str, Any]) -> str:
+        """提取 OpenAI-compatible 错误响应体里的 error.message，流式与非流式共用。"""
+        try:
+            payload = raw if isinstance(raw, dict) else json.loads(raw)
+        except (TypeError, ValueError):
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        error = payload.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or "")
+        if error:
+            return str(error)
+        return ""
+
     def _chat_json(
         self, system_prompt: str, user_content: str
     ) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
@@ -292,17 +308,7 @@ class AIService:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            detail = ""
-            try:
-                payload = exc.response.json()
-                if isinstance(payload, dict):
-                    error = payload.get("error")
-                    if isinstance(error, dict):
-                        detail = str(error.get("message") or "")
-                    elif error:
-                        detail = str(error)
-            except (ValueError, TypeError):
-                pass
+            detail = self._upstream_error_detail(exc.response.content)
             suffix = f"：{detail[:300]}" if detail else ""
             raise AIServiceError(f"AI 模型请求返回 {exc.response.status_code}{suffix}") from exc
         except httpx.HTTPError as exc:
@@ -346,6 +352,153 @@ class AIService:
             thinking_parts.append(think_text)
         thinking = "\n\n".join(thinking_parts) if thinking_parts else None
         return parsed, thinking, usage
+
+    @staticmethod
+    def _partial_tag_length(text: str, tag: str) -> int:
+        """text 末尾可能是 tag 前缀的最长长度，供流式 <think> 标签跨 chunk 拼接。"""
+        for size in range(min(len(text), len(tag) - 1), 0, -1):
+            if text.endswith(tag[:size]):
+                return size
+        return 0
+
+    async def _chat_stream_json(
+        self, system_prompt: str, user_content: str
+    ) -> AsyncIterator[tuple[str, Any]]:
+        """流式版本的 _chat_json：边读边产出思考增量，结束时给一个解析结果。
+
+        事件序列：若干 ``("thinking", delta)``，最后恰好一条
+        ``("result", {"parsed", "usage", "thinking"})``。思考增量来自
+        reasoning_content 与 content 里的 <think> 块（标签可能被 chunk 截断），
+        content 原文整体累积，结束后仍走 _parse_json_object 清洗校验，
+        与同步通道共享同一套解析语义。基于 httpx.AsyncClient 实现，
+        供 async 端点直接 await，不允许退化为事件循环内的阻塞请求。
+        """
+        credentials = self.credentials()
+        if credentials.provider != "openai_compatible":
+            raise AIServiceError(f"暂不支持 AI 提供商：{credentials.provider}")
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
+        usage: dict[str, Any] | None = None
+        # <think> 块拆分器状态：是否处于块内，以及可能被截断的半个标签。
+        inside_think = False
+        tag_buffer = ""
+
+        def feed_content(delta: str) -> str:
+            nonlocal inside_think, tag_buffer
+            tag_buffer += delta
+            thinking = ""
+            while tag_buffer:
+                if inside_think:
+                    end = tag_buffer.find("</think>")
+                    if end >= 0:
+                        thinking += tag_buffer[:end]
+                        tag_buffer = tag_buffer[end + len("</think>"):]
+                        inside_think = False
+                        continue
+                    keep = self._partial_tag_length(tag_buffer, "</think>")
+                    thinking += tag_buffer[: len(tag_buffer) - keep]
+                    tag_buffer = tag_buffer[len(tag_buffer) - keep:]
+                    break
+                start = tag_buffer.find("<think>")
+                if start >= 0:
+                    tag_buffer = tag_buffer[start + len("<think>"):]
+                    inside_think = True
+                    continue
+                keep = self._partial_tag_length(tag_buffer, "<think>")
+                tag_buffer = tag_buffer[len(tag_buffer) - keep:]
+                break
+            return thinking
+
+        try:
+            timeout = self.settings.ai_request_timeout_seconds
+            async with (
+                httpx.AsyncClient(timeout=timeout) as client,
+                client.stream(
+                    "POST",
+                    self._chat_completions_url(credentials.base_url),
+                    headers={
+                        "Authorization": f"Bearer {credentials.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": credentials.model,
+                        "temperature": 0,
+                        "response_format": {"type": "json_object"},
+                        "stream": True,
+                        "stream_options": {"include_usage": True},
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_content},
+                        ],
+                    },
+                ) as response,
+            ):
+                if response.status_code >= 400:
+                    body = await response.aread()
+                    detail = self._upstream_error_detail(body)
+                    suffix = f"：{detail[:300]}" if detail else ""
+                    raise AIServiceError(f"AI 模型请求返回 {response.status_code}{suffix}")
+                async for line in response.aiter_lines():
+                    data = line[5:].strip() if line.startswith("data:") else ""
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(data)
+                    except ValueError:
+                        continue
+                    if not isinstance(chunk, dict):
+                        continue
+                    raw_usage = chunk.get("usage")
+                    if isinstance(raw_usage, dict):
+                        usage = raw_usage
+                    choices = chunk.get("choices")
+                    delta = (
+                        choices[0].get("delta")
+                        if isinstance(choices, list)
+                        and choices
+                        and isinstance(choices[0], dict)
+                        else None
+                    )
+                    if not isinstance(delta, dict):
+                        continue
+                    reasoning = delta.get("reasoning_content")
+                    if isinstance(reasoning, str) and reasoning:
+                        reasoning_parts.append(reasoning)
+                        yield "thinking", reasoning
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        content_parts.append(content)
+                        piece = feed_content(content)
+                        if piece:
+                            yield "thinking", piece
+        except httpx.HTTPError as exc:
+            raise AIServiceError(f"AI 模型请求失败：{exc}") from exc
+
+        raw_content = "".join(content_parts).strip()
+        reasoning_text = "".join(reasoning_parts).strip()
+        if not raw_content:
+            # 兜底保持兼容：个别推理模型把最终答案放进 reasoning_content（同 _chat_json）。
+            raw_content = reasoning_text
+            reasoning_thinking = None
+        else:
+            reasoning_thinking = reasoning_text or None
+        parsed, think_text = self._parse_json_object(raw_content)
+        thinking_parts: list[str] = []
+        if reasoning_thinking:
+            thinking_parts.append(reasoning_thinking)
+        if think_text:
+            thinking_parts.append(think_text)
+        thinking = "\n\n".join(thinking_parts) if thinking_parts else None
+        yield "result", {
+            "parsed": parsed,
+            "usage": {
+                "model": credentials.model,
+                "prompt_tokens": (usage or {}).get("prompt_tokens"),
+                "completion_tokens": (usage or {}).get("completion_tokens"),
+                "total_tokens": (usage or {}).get("total_tokens"),
+            },
+            "thinking": thinking,
+        }
 
     def explain_solver_run(self, facts: dict[str, Any]) -> dict[str, Any]:
         """把确定性事实包翻译成教务能读的解释，并做一次意图核对。
@@ -456,14 +609,9 @@ class AIService:
                 accepted[column_index] = target
         return accepted
 
-    def interpret_instruction(
-        self,
-        instruction: str,
-        *,
-        context: dict[str, Any],
-    ) -> tuple[dict[str, Any], str | None]:
-        """解析排课指令，返回 (结构化结果, 模型思考文本)。"""
-        system_prompt = (
+    @staticmethod
+    def _interpret_system_prompt(context: dict[str, Any]) -> str:
+        return (
             "你是高途线下校区的排课指令解析 AI。根据业务候选值和固定约束，把用户指令转换为 JSON。"
             "只输出一个 JSON 对象，不要输出 Markdown、解释或额外字段。"
             "业务线、产品班型、班级标识只能使用候选值；未指定的范围输出空数组。"
@@ -482,8 +630,30 @@ class AIService:
             '"date_from":null,"date_to":null,"date_window_days":7,'
             '"recognized_rules":[],"unsupported_requirements":[]}'
         )
-        parsed, thinking, _usage = self._chat_json(system_prompt, instruction)
+
+    def interpret_instruction(
+        self,
+        instruction: str,
+        *,
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        """解析排课指令，返回 (结构化结果, 模型思考文本)。"""
+        parsed, thinking, _usage = self._chat_json(
+            self._interpret_system_prompt(context), instruction
+        )
         return parsed, thinking
+
+    async def stream_interpret_instruction(
+        self,
+        instruction: str,
+        *,
+        context: dict[str, Any],
+    ) -> AsyncIterator[tuple[str, Any]]:
+        """interpret_instruction 的流式版本，事件序列见 _chat_stream_json。"""
+        async for event in self._chat_stream_json(
+            self._interpret_system_prompt(context), instruction
+        ):
+            yield event
 
     def mine_preferences(
         self, events: list[dict[str, Any]]

@@ -122,14 +122,33 @@ OpenAI-compatible `/chat/completions` 接口解析指令，并对 API Key 加密
 `AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL` 和 `AI_TOKEN_ENCRYPTION_KEY`。Aily 的
 `spring_...__c` 与 `skill_...` 已调整为可选高级接入项。
 
+一句话解析默认走 SSE 流式接口 `POST /api/v1/assistant/interpret/stream`（事件：
+`stage` → `thinking` 增量 → `result`/`error`，响应头带 `X-Accel-Buffering: no`）。模型思考
+增量（`reasoning_content` 与 `<think>` 块）逐段下行，最终 `result` 与同步接口
+`POST /api/v1/assistant/interpret` 响应同构；Aily 无流式时退化为单条 `result`（伪流式）。
+流式失败由前端自动回退同步接口，同步端点保留不动；事件协议详见
+`docs/对接资料/04_接口与数据字典/后端接口与运行约定.md` 的「一句话解析流式接口」。
+
 ## 集成抽象层
 
-`app/integrations/` 把飞书从「前提」降级为「适配器」：`Integration` Protocol +
-`IntegrationManifest` 清单 + 显式 `@register` 注册表（`registry.py`）。内置
-LocalAdapter（默认可用）与 FeishuAdapter（纯委托 `services/feishu.py`，不搬移内部
-逻辑），钉钉/企微/Google Workspace 以仅 manifest 的 planned 形式占位。清单经
-`GET /api/v1/integrations`（管理员/排课员）暴露，返回 id、能力、
-`configured/available/planned` 状态与文档入口，不触发连接探测。
+`app/integrations/` 把外部平台从「前提」降级为「适配器」：`Integration` Protocol +
+`IntegrationManifest` 清单 + 显式 `@register` 注册表（`registry.py`）。内置四类适配器：
+
+- **LocalAdapter**：本地模式，默认可用（零平台凭据全功能可用）。
+- **FeishuAdapter**：纯委托 `services/feishu.py`，不搬移其内部逻辑。
+- **DingTalkAdapter**（v1）：钉钉 AI 表格记录读写、日程、工作通知（≤100 人/次自动分批）
+  与 OA 审批发起（需企业预建模板 `process_code`，未配置时运行时不声明审批能力）。
+- **WeComAdapter**（v1）：企业微信智能表格读写、日程创建（仅应用自建日历）与应用消息
+  （≤1000 人/次自动分批）；平台服务端 API 无审批代发起，审批不支持。
+
+钉钉/企业微信凭据在设置页按 manifest 的 config schema 直填，经通用端点
+`GET/PUT /api/v1/integrations/{id}/configuration` 读写：密钥字段 Fernet 加密落
+`integration_credentials` 表，`GET` 只回脱敏配置（是否已配置布尔），保存即失效该
+平台 access_token 缓存。两适配器的 HTTP 层按官方文档实现并经 MockTransport 全量
+单测覆盖（`tests/test_integrations_cn.py`，全程无真实网络），**未经生产凭据联调**；
+「测试连接」为各自平台的轻量 access_token 探测。Google Workspace 以仅 manifest 的
+planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课员）暴露，返回 id、
+能力、`configured/available/planned` 状态与文档入口。
 
 消费接缝按 strangler 方式逐个迁移：日历下发（`calendar-publish`）已先经
 `registry.has_capability(Capability.CALENDAR)` 做运行时能力协商，无可用的日历
@@ -211,7 +230,9 @@ RBAC 正交：链接的签发/轮换/停用复用 `admin/scheduler` 角色，撤
 - 智能导入提交：`POST /api/v1/imports/commit`（`mapping_json` + `mode=insert|upsert`）
 - AI 配置：`GET/POST /api/v1/integrations/ai/configuration`
 - 集成清单：`GET /api/v1/integrations`（管理员/排课员；manifest + 运行时状态，不触发探测）
+- 集成凭据配置：`GET/PUT /api/v1/integrations/{id}/configuration`（钉钉/企业微信；GET 管理员/排课员脱敏回读，PUT 管理员加密落库）
 - 一句话解析：`POST /api/v1/assistant/interpret`
+- 一句话解析（流式）：`POST /api/v1/assistant/interpret/stream`（SSE：`stage`/`thinking`/`result`/`error`）
 - 求解进度：`GET /api/v1/solver-runs/{id}/events`
 - 版本差异：`GET /api/v1/schedules/{base_id}/diff/{target_id}`，逐课次返回 `added`、`removed`、`moved`、`unchanged` 及调整前后日期/时段/教室
 - 发布/回滚：`POST /api/v1/schedules/{id}/publish`、`POST /api/v1/schedules/{id}/rollback`（审批人权限）

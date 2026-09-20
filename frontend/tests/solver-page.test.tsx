@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { act } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,9 +13,15 @@ const mocks = vi.hoisted(() => ({
   diff: vi.fn<(...args: unknown[]) => { data: undefined }>(() => ({ data: undefined })),
   get: vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => ({ data: { configured: false, app_configuration: { aily_configured: false } } })),
   post: vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => ({ data: {} })),
+  stream: vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => {
+    throw new Error("stream unavailable");
+  }),
 }));
 
 vi.mock("@/api/http", () => ({ http: { get: mocks.get, post: mocks.post } }));
+
+// 流式通道单独 mock：页面默认走 stream，失败时才回退 http.post。
+vi.mock("@/lib/interpret-stream", () => ({ streamInterpretInstruction: mocks.stream }));
 
 vi.mock("@/api/generated/client", () => ({
   getListSchedulesApiV1SchedulesGetQueryKey: () => ["schedules"],
@@ -91,11 +98,12 @@ describe("SolverPage interpret phases", () => {
     mocks.schedules = [];
     mocks.get.mockReset().mockResolvedValue({ data: { configured: false, app_configuration: { aily_configured: false } } });
     mocks.post.mockReset().mockResolvedValue({ data: {} });
+    mocks.stream.mockReset().mockRejectedValue(new Error("stream unavailable"));
   });
 
   it("keeps manual params hidden before a parse and reveals them with backfill after success", async () => {
     mockAiConfigured();
-    mocks.post.mockResolvedValue({ data: mockInterpretation() });
+    mocks.stream.mockResolvedValue(mockInterpretation());
     renderPage();
     // D5：解析成功前只有 RunPanel 常驻，手动参数不渲染。
     expect(await screen.findByText("实时状态")).toBeInTheDocument();
@@ -103,6 +111,8 @@ describe("SolverPage interpret phases", () => {
     await user.click(screen.getByRole("button", { name: "让 AI 解析排课指令" }));
     // 思考区完成后折叠为「已解析完成（用时 N 秒）」，可展开回看。
     expect(await screen.findByText(/已解析完成（用时/)).toBeInTheDocument();
+    // 流式成功不应触发同步回退。
+    expect(mocks.post).not.toHaveBeenCalled();
     // D6：日期三元组回填进参数面板，窗口 ≠ 默认 7 时带「来自 AI 解析」徽标。
     expect(screen.getByText("手动求解参数")).toBeInTheDocument();
     expect(screen.getByDisplayValue("3")).toBeInTheDocument();
@@ -112,11 +122,30 @@ describe("SolverPage interpret phases", () => {
     expect(screen.getByText("用户要求 3 天窗口，先核对候选业务线。")).toBeInTheDocument();
   });
 
+  it("appends streaming thinking deltas live and keeps the stage list as fallback", async () => {
+    mockAiConfigured();
+    let handlers: { onThinking?: (delta: string, elapsed: number) => void } | null = null;
+    mocks.stream.mockImplementation((...args: unknown[]) => {
+      handlers = (args[2] as { onThinking?: (delta: string, elapsed: number) => void } | undefined) ?? null;
+      return new Promise(() => { /* 挂起，模拟流式在途 */ });
+    });
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    expect(await screen.findByText("正在连接 AI 模型…")).toBeInTheDocument();
+    // 无增量的空窗期：只有阶段文案，没有实时思考块。
+    expect(screen.queryByText(/先核对候选业务线/)).not.toBeInTheDocument();
+    await act(async () => {
+      handlers?.onThinking?.("先核对候选业务线。", 0.4);
+      handlers?.onThinking?.("再把三天换算成窗口。", 0.8);
+    });
+    expect(await screen.findByText(/先核对候选业务线。再把三天换算成窗口。/)).toBeInTheDocument();
+    expect(screen.getByText("正在连接 AI 模型…")).toBeInTheDocument();
+  });
+
   it("shows stage progress and cancel while parsing, and returns to idle on cancel", async () => {
     mockAiConfigured();
-    mocks.post.mockImplementation((...args: unknown[]) => new Promise((_resolve, reject) => {
-      const config = args[2] as { signal?: AbortSignal } | undefined;
-      config?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+    mocks.stream.mockImplementation((...args: unknown[]) => new Promise((_resolve, reject) => {
+      (args[1] as AbortSignal).addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
     }));
     renderPage();
     await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
@@ -129,14 +158,28 @@ describe("SolverPage interpret phases", () => {
     expect(screen.queryByText("正在连接 AI 模型…")).not.toBeInTheDocument();
   });
 
-  it("renders a persistent error bar with retry when the parse fails", async () => {
+  it("renders a persistent error bar with retry when stream and fallback both fail", async () => {
     mockAiConfigured();
+    mocks.stream.mockRejectedValue(new Error("stream unavailable"));
     mocks.post.mockRejectedValue(new Error("AI 模型请求失败：连接超时"));
     renderPage();
     await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
     expect(await screen.findByText(/AI 解析失败：AI 模型请求失败：连接超时/)).toBeInTheDocument();
+    // 流式失败后必须先尝试同步回退，再展示最终错误。
+    expect(mocks.post).toHaveBeenCalledWith("/api/v1/assistant/interpret", { instruction: expect.any(String) }, expect.anything());
     expect(screen.getByRole("button", { name: /重试解析/ })).toBeInTheDocument();
     expect(screen.queryByText("手动求解参数")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the sync endpoint and completes the parse when streaming fails", async () => {
+    mockAiConfigured();
+    mocks.stream.mockRejectedValue(new Error("网关不支持流式响应"));
+    mocks.post.mockResolvedValue({ data: mockInterpretation() });
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    expect(await screen.findByText(/已解析完成（用时/)).toBeInTheDocument();
+    expect(screen.getByText("手动求解参数")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("3")).toBeInTheDocument();
   });
 
   it("promotes manual params to the primary entry when AI is not configured", async () => {

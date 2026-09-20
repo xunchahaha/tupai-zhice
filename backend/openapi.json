@@ -4912,6 +4912,110 @@
         ]
       }
     },
+    "/api/v1/integrations/{integration_id}/configuration": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Get Integration Configuration",
+        "description": "集成凭据配置回读（脱敏）：密钥字段只给「是否已配置」布尔。",
+        "operationId": "get_integration_configuration_api_v1_integrations__integration_id__configuration_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "integration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Integration Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationConfigurationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Put Integration Configuration",
+        "description": "按 manifest config schema 直填并加密保存集成凭据（v1 无 OAuth 安装流）。\n\n保存语义为合并（见 IntegrationConfigurationInput）；保存后清空对应平台\n的 access_token 内存缓存，避免旧凭据的令牌继续生效。",
+        "operationId": "put_integration_configuration_api_v1_integrations__integration_id__configuration_put",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "integration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Integration Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrationConfigurationInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationConfigurationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/integrations/feishu/connection": {
       "get": {
         "tags": [
@@ -5626,6 +5730,70 @@
                 "schema": {
                   "$ref": "#/components/schemas/AssistantInterpretResponse"
                 }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assistant/interpret/stream": {
+      "post": {
+        "tags": [
+          "aily",
+          "assistant"
+        ],
+        "summary": "Assistant Interpret Stream",
+        "description": "一句话排课的 SSE 流式解析，事件协议见 docs/对接资料 的「后端接口与运行约定」。\n\n事件序列：`stage`（connect/read/validate）→ 若干 `thinking` 增量 → `result`\n（完整 AssistantInterpretResponse JSON，与同步接口同构）→ 出错时 `error`。\n首包立即下行，既作连接确认也让反代尽早开始转发；客户端断开时\nStreamingResponse 会取消本生成器，httpx 上游流随之关闭。Aily 无流式，\n退化为单条 result 事件（伪流式）。AI 未配置且无 Aily 时仍返回 409 JSON。",
+        "operationId": "assistant_interpret_stream_api_v1_assistant_interpret_stream_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistantInterpretRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           },
@@ -8849,6 +9017,63 @@
         ],
         "title": "ImportSheetOverview",
         "description": "导入向导：单个工作表的概览。"
+      },
+      "IntegrationConfigurationInput": {
+        "properties": {
+          "config": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Config"
+          }
+        },
+        "type": "object",
+        "title": "IntegrationConfigurationInput",
+        "description": "PUT /integrations/{id}/configuration：按 manifest config schema 平铺填写。\n\n语义为合并：密钥字段传非空值才覆盖（留空 = 保持已存密钥）；非密钥字段\n传值覆盖、传 null 清除、未传保持不变。"
+      },
+      "IntegrationConfigurationResponse": {
+        "properties": {
+          "integration_id": {
+            "type": "string",
+            "title": "Integration Id"
+          },
+          "configured": {
+            "type": "boolean",
+            "title": "Configured"
+          },
+          "config": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Config"
+          },
+          "secrets_configured": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "title": "Secrets Configured"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "integration_id",
+          "configured",
+          "config",
+          "secrets_configured"
+        ],
+        "title": "IntegrationConfigurationResponse",
+        "description": "凭据配置回读（脱敏）：密钥字段只给「是否已配置」布尔，永不明文回传。"
       },
       "IntegrationManifestResponse": {
         "properties": {

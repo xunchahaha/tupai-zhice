@@ -9,7 +9,7 @@ import secrets
 import tempfile
 import time as time_module
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
@@ -49,8 +49,10 @@ from sqlalchemy.orm import Session
 from .config import PROJECT_ROOT, get_settings
 from .db import get_db
 from .integrations import registry as integration_registry
-from .integrations.base import Capability
+from .integrations.base import Capability, Integration
+from .integrations.credentials import CredentialStore, IntegrationCredentialError
 from .integrations.feishu.adapter import UNCONFIGURED_DETAIL as FEISHU_UNCONFIGURED_DETAIL
+from .integrations.platform_api import clear_token_cache
 from .models import (
     DEFAULT_SCHEDULE_SET_ID,
     AuditLog,
@@ -118,6 +120,8 @@ from .schemas import (
     ImportPreviewStats,
     ImportResult,
     ImportSheetOverview,
+    IntegrationConfigurationInput,
+    IntegrationConfigurationResponse,
     IntegrationManifestResponse,
     IntegrationSyncResponse,
     MasterDataBatchDelete,
@@ -4505,6 +4509,85 @@ def configure_ai_provider(
     return service.configuration_view()
 
 
+def _configurable_integration_or_404(integration_id: str, db: Session) -> Integration:
+    """凭据配置端点只服务声明了 config schema 的适配器（钉钉/企业微信）。
+
+    未知 id 与 planned 集成（无适配器实例）统一 404；本地模式、飞书等未声明
+    config schema 的集成沿用各自专用通道，不经本端点。
+    """
+
+    integration = integration_registry.get_integration(integration_id, settings=settings, db=db)
+    if integration is None or integration.manifest.config_schema is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="该集成不存在或暂不支持凭据配置",
+        )
+    return integration
+
+
+def _integration_configuration_response(
+    integration_id: str, db: Session
+) -> IntegrationConfigurationResponse:
+    store = CredentialStore(settings, db)
+    try:
+        masked = store.view(integration_id)
+    except IntegrationCredentialError as exc:
+        # 主密钥轮换/损坏时保持「测试连接」风格的软失败，指引重新配置。
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    integration = integration_registry.get_integration(integration_id, settings=settings, db=db)
+    configured = bool(integration.capabilities()) if integration is not None else False
+    return IntegrationConfigurationResponse(
+        integration_id=integration_id,
+        configured=configured,
+        config=masked["config"],
+        secrets_configured=masked["secrets_configured"],
+        updated_at=masked["updated_at"],
+    )
+
+
+@router.get(
+    "/integrations/{integration_id}/configuration",
+    response_model=IntegrationConfigurationResponse,
+    tags=["integrations"],
+)
+def get_integration_configuration(
+    integration_id: str, db: Db, user: AdminOrScheduler
+) -> IntegrationConfigurationResponse:
+    """集成凭据配置回读（脱敏）：密钥字段只给「是否已配置」布尔。"""
+
+    _configurable_integration_or_404(integration_id, db)
+    return _integration_configuration_response(integration_id, db)
+
+
+@router.put(
+    "/integrations/{integration_id}/configuration",
+    response_model=IntegrationConfigurationResponse,
+    tags=["integrations"],
+)
+def put_integration_configuration(
+    integration_id: str, request: IntegrationConfigurationInput, db: Db, user: Admin
+) -> IntegrationConfigurationResponse:
+    """按 manifest config schema 直填并加密保存集成凭据（v1 无 OAuth 安装流）。
+
+    保存语义为合并（见 IntegrationConfigurationInput）；保存后清空对应平台
+    的 access_token 内存缓存，避免旧凭据的令牌继续生效。
+    """
+
+    _configurable_integration_or_404(integration_id, db)
+    CredentialStore(settings, db).save(integration_id, request.config, configured_by=user.id)
+    clear_token_cache()
+    audit(
+        db,
+        user,
+        "configure",
+        "integration_credential",
+        integration_id,
+        {"fields": sorted(request.config)},
+    )
+    db.commit()
+    return _integration_configuration_response(integration_id, db)
+
+
 @router.get(
     "/integrations/feishu/connection",
     response_model=FeishuConnectionResponse,
@@ -5707,90 +5790,51 @@ def _validated_assistant_scope(
     return parsed
 
 
-@router.post(
-    "/assistant/interpret",
-    response_model=AssistantInterpretResponse,
-    tags=["aily", "assistant"],
-)
-def assistant_interpret(
+def _interpret_context(db: Session, schedule_set_id: str) -> dict[str, Any]:
+    """AI 解析用的业务候选值上下文，同步与流式两条 interpret 通道共用。"""
+    return {
+        "business_lines": sorted(
+            {
+                item
+                for item in db.scalars(
+                    select(CourseSession.business_line).where(
+                        CourseSession.schedule_set_id == schedule_set_id,
+                        CourseSession.is_active.is_(True)
+                    )
+                ).all()
+                if item
+            }
+        ),
+        "product_types": sorted(_all_course_product_types(db, schedule_set_id)),
+        "class_business_ids": sorted(
+            set(
+                db.scalars(
+                    select(CourseSession.class_business_id).where(
+                        CourseSession.schedule_set_id == schedule_set_id,
+                        CourseSession.is_active.is_(True)
+                    )
+                ).all()
+            )
+        ),
+        "fixed_rule_labels": list(SOLVER_RULE_LABELS.values()),
+    }
+
+
+def _finalize_assistant_interpret(
+    db: Session,
     request: AssistantInterpretRequest,
-    db: Db,
-    user: AdminOrScheduler,
-    schedule_scope: SchedulerScope,
+    output: dict[str, Any],
+    schedule_set_id: str,
+    *,
+    source: Literal["openai_compatible", "feishu_aily"],
+    ai_configured: bool,
+    aily_configured: bool,
+    thinking: str | None,
 ) -> AssistantInterpretResponse:
-    ai_service = AIService(settings, db)
-    ai_configuration = ai_service.configuration_view()
-    configuration = FeishuService(settings, db).configuration_view()
-    aily_app_id = settings.aily_app_id or configuration.get("aily_app_id")
-    aily_skill_id = settings.aily_skill_id or configuration.get("aily_skill_id")
-    aily_configured = bool(aily_app_id and aily_skill_id)
-    source: Literal["openai_compatible", "feishu_aily"]
-    output: dict[str, Any]
-    thinking: str | None = None
-    if ai_configuration["configured"]:
-        context = {
-            "business_lines": sorted(
-                {
-                    item
-                    for item in db.scalars(
-                        select(CourseSession.business_line).where(
-                            CourseSession.schedule_set_id == schedule_scope.id,
-                            CourseSession.is_active.is_(True)
-                        )
-                    ).all()
-                    if item
-                }
-            ),
-            "product_types": sorted(_all_course_product_types(db, schedule_scope.id)),
-            "class_business_ids": sorted(
-                set(
-                    db.scalars(
-                        select(CourseSession.class_business_id).where(
-                            CourseSession.schedule_set_id == schedule_scope.id,
-                            CourseSession.is_active.is_(True)
-                        )
-                    ).all()
-                )
-            ),
-            "fixed_rule_labels": list(SOLVER_RULE_LABELS.values()),
-        }
-        try:
-            output, thinking = ai_service.interpret_instruction(
-                request.instruction, context=context
-            )
-        except AIServiceError as exc:
-            raise HTTPException(status_code=502, detail=f"AI 指令解析失败：{exc}") from exc
-        source = "openai_compatible"
-    elif aily_configured:
-        try:
-            output = FeishuService(settings, db).start_aily_skill(
-                user.id,
-                app_id=str(aily_app_id),
-                skill_id=str(aily_skill_id),
-                query=request.instruction,
-                input_payload={
-                    "contract": {
-                        "business_lines": "string[]",
-                        "product_types": "string[]",
-                        "class_business_ids": "string[]",
-                        "date_from": "YYYY-MM-DD|null",
-                        "date_to": "YYYY-MM-DD|null",
-                        "date_window_days": "integer",
-                        "recognized_rules": "string[]",
-                        "solver_rules": (
-                            "fixed_time|room_no_overlap|calendar_no_overlap|minimize_changes[]"
-                        ),
-                    }
-                },
-            )
-        except (FeishuServiceError, httpx.HTTPError) as exc:
-            raise HTTPException(status_code=502, detail=f"飞书 Aily 解析失败：{exc}") from exc
-        source = "feishu_aily"
-    else:
-        raise HTTPException(
-            status_code=409,
-            detail="尚未配置一句话排课 AI，请先前往“飞书集成”填写模型接口配置。",
-        )
+    """把模型输出规范化为 AssistantInterpretResponse，同步与流式 interpret 共用。
+
+    字段缺失/未知实体/结构不合法沿用同步接口的状态码与文案（502/422）。
+    """
     required_fields = {
         "business_lines",
         "product_types",
@@ -5837,11 +5881,11 @@ def assistant_interpret(
         parsed["coverage_warnings"].append("模型未返回逐项需求覆盖检查，请逐项核对原指令。")
     parsed["solver_rules"] = _solver_rules_from_labels(parsed["recognized_rules"])
     try:
-        parsed = _validated_assistant_scope(db, parsed, schedule_scope.id)
-        normalized = AssistantInterpretResponse(
+        parsed = _validated_assistant_scope(db, parsed, schedule_set_id)
+        return AssistantInterpretResponse(
             instruction=request.instruction,
             source=source,
-            ai_configured=bool(ai_configuration["configured"]),
+            ai_configured=ai_configured,
             aily_configured=aily_configured,
             **parsed,
             thinking=thinking,
@@ -5854,6 +5898,84 @@ def assistant_interpret(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"AI 返回结构不合法：{exc}") from exc
+
+
+def _sse_event(event: str, data: Any) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+# Aily 解析通道的输出契约说明，同步与流式 interpret 共用同一份。
+AILY_INTERPRET_CONTRACT = {
+    "contract": {
+        "business_lines": "string[]",
+        "product_types": "string[]",
+        "class_business_ids": "string[]",
+        "date_from": "YYYY-MM-DD|null",
+        "date_to": "YYYY-MM-DD|null",
+        "date_window_days": "integer",
+        "recognized_rules": "string[]",
+        "solver_rules": (
+            "fixed_time|room_no_overlap|calendar_no_overlap|minimize_changes[]"
+        ),
+    }
+}
+
+
+@router.post(
+    "/assistant/interpret",
+    response_model=AssistantInterpretResponse,
+    tags=["aily", "assistant"],
+)
+def assistant_interpret(
+    request: AssistantInterpretRequest,
+    db: Db,
+    user: AdminOrScheduler,
+    schedule_scope: SchedulerScope,
+) -> AssistantInterpretResponse:
+    ai_service = AIService(settings, db)
+    ai_configuration = ai_service.configuration_view()
+    configuration = FeishuService(settings, db).configuration_view()
+    aily_app_id = settings.aily_app_id or configuration.get("aily_app_id")
+    aily_skill_id = settings.aily_skill_id or configuration.get("aily_skill_id")
+    aily_configured = bool(aily_app_id and aily_skill_id)
+    source: Literal["openai_compatible", "feishu_aily"]
+    output: dict[str, Any]
+    thinking: str | None = None
+    if ai_configuration["configured"]:
+        try:
+            output, thinking = ai_service.interpret_instruction(
+                request.instruction, context=_interpret_context(db, schedule_scope.id)
+            )
+        except AIServiceError as exc:
+            raise HTTPException(status_code=502, detail=f"AI 指令解析失败：{exc}") from exc
+        source = "openai_compatible"
+    elif aily_configured:
+        try:
+            output = FeishuService(settings, db).start_aily_skill(
+                user.id,
+                app_id=str(aily_app_id),
+                skill_id=str(aily_skill_id),
+                query=request.instruction,
+                input_payload=dict(AILY_INTERPRET_CONTRACT),
+            )
+        except (FeishuServiceError, httpx.HTTPError) as exc:
+            raise HTTPException(status_code=502, detail=f"飞书 Aily 解析失败：{exc}") from exc
+        source = "feishu_aily"
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail="尚未配置一句话排课 AI，请先前往“飞书集成”填写模型接口配置。",
+        )
+    normalized = _finalize_assistant_interpret(
+        db,
+        request,
+        output,
+        schedule_scope.id,
+        source=source,
+        ai_configured=bool(ai_configuration["configured"]),
+        aily_configured=aily_configured,
+        thinking=thinking,
+    )
     audit(
         db,
         user,
@@ -5864,6 +5986,133 @@ def assistant_interpret(
     )
     db.commit()
     return normalized
+
+
+@router.post(
+    "/assistant/interpret/stream",
+    tags=["aily", "assistant"],
+)
+async def assistant_interpret_stream(
+    request: AssistantInterpretRequest,
+    db: Db,
+    user: AdminOrScheduler,
+    schedule_scope: SchedulerScope,
+) -> StreamingResponse:
+    """一句话排课的 SSE 流式解析，事件协议见 docs/对接资料 的「后端接口与运行约定」。
+
+    事件序列：`stage`（connect/read/validate）→ 若干 `thinking` 增量 → `result`
+    （完整 AssistantInterpretResponse JSON，与同步接口同构）→ 出错时 `error`。
+    首包立即下行，既作连接确认也让反代尽早开始转发；客户端断开时
+    StreamingResponse 会取消本生成器，httpx 上游流随之关闭。Aily 无流式，
+    退化为单条 result 事件（伪流式）。AI 未配置且无 Aily 时仍返回 409 JSON。
+    """
+    ai_service = AIService(settings, db)
+    ai_configuration = ai_service.configuration_view()
+    configuration = FeishuService(settings, db).configuration_view()
+    aily_app_id = settings.aily_app_id or configuration.get("aily_app_id")
+    aily_skill_id = settings.aily_skill_id or configuration.get("aily_skill_id")
+    aily_configured = bool(aily_app_id and aily_skill_id)
+    if not ai_configuration["configured"] and not aily_configured:
+        raise HTTPException(
+            status_code=409,
+            detail="尚未配置一句话排课 AI，请先前往“飞书集成”填写模型接口配置。",
+        )
+    started = time_module.perf_counter()
+
+    async def event_stream() -> AsyncIterator[str]:
+        def elapsed() -> float:
+            return time_module.perf_counter() - started
+
+        # 首包立即发送：客户端据此确认连接，不会被反代缓冲卡到请求结束。
+        yield _sse_event("stage", {"stage": "connect"})
+        if ai_configuration["configured"]:
+            try:
+                yield _sse_event("stage", {"stage": "read"})
+                async for kind, payload in ai_service.stream_interpret_instruction(
+                    request.instruction,
+                    context=_interpret_context(db, schedule_scope.id),
+                ):
+                    if kind == "thinking":
+                        yield _sse_event(
+                            "thinking", {"delta": payload, "elapsed": elapsed()}
+                        )
+                        continue
+                    yield _sse_event("stage", {"stage": "validate"})
+                    normalized = _finalize_assistant_interpret(
+                        db,
+                        request,
+                        payload["parsed"],
+                        schedule_scope.id,
+                        source="openai_compatible",
+                        ai_configured=True,
+                        aily_configured=aily_configured,
+                        thinking=payload["thinking"],
+                    )
+                    audit(
+                        db,
+                        user,
+                        "assistant_interpret",
+                        "instruction",
+                        None,
+                        {
+                            "source": normalized.source,
+                            "instruction": request.instruction,
+                            "stream": True,
+                        },
+                    )
+                    db.commit()
+                    yield _sse_event("result", normalized.model_dump(mode="json"))
+            except AIServiceError as exc:
+                yield _sse_event("error", {"detail": f"AI 指令解析失败：{exc}"})
+            except HTTPException as exc:
+                yield _sse_event("error", {"detail": exc.detail})
+        else:
+            try:
+                yield _sse_event("stage", {"stage": "read"})
+                # Aily 是阻塞 httpx 调用，放线程池执行，不阻塞事件循环。
+                output = await asyncio.to_thread(
+                    FeishuService(settings, db).start_aily_skill,
+                    user.id,
+                    app_id=str(aily_app_id),
+                    skill_id=str(aily_skill_id),
+                    query=request.instruction,
+                    input_payload=dict(AILY_INTERPRET_CONTRACT),
+                )
+                yield _sse_event("stage", {"stage": "validate"})
+                normalized = _finalize_assistant_interpret(
+                    db,
+                    request,
+                    output,
+                    schedule_scope.id,
+                    source="feishu_aily",
+                    ai_configured=False,
+                    aily_configured=True,
+                    thinking=None,
+                )
+                audit(
+                    db,
+                    user,
+                    "assistant_interpret",
+                    "instruction",
+                    None,
+                    {
+                        "source": normalized.source,
+                        "instruction": request.instruction,
+                        "stream": True,
+                    },
+                )
+                db.commit()
+                yield _sse_event("result", normalized.model_dump(mode="json"))
+            except (FeishuServiceError, httpx.HTTPError) as exc:
+                yield _sse_event("error", {"detail": f"飞书 Aily 解析失败：{exc}"})
+            except HTTPException as exc:
+                yield _sse_event("error", {"detail": exc.detail})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post(
