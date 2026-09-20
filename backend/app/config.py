@@ -126,6 +126,10 @@ class Settings(BaseSettings):
     )
     frontend_url: str = "http://127.0.0.1:5173"
 
+    # 钉钉/企业微信等集成凭据的加密主密钥（integrations/credentials.py）。
+    integration_token_encryption_key: str = ""
+    integration_token_key_file: Path = PROJECT_ROOT / "data" / "secrets" / "integrations.key"
+
     # 公开课表层（docs/roadmap/06 §3 A6）：False 时全部公开端点按 404 处理。
     public_links_enabled: bool = True
     # 创建链接不显式传 expires_at 时的默认有效期。

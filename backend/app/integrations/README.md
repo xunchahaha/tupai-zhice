@@ -1,8 +1,9 @@
 # 集成抽象层（app/integrations）
 
 > 设计依据：docs/roadmap/03-integrations.md §2（Protocol 能力接口 + manifest 清单）。
-> v1 边界：显式注册、只读清单端点；verify 触发端点、`integration_installations`
-> 安装表、entry point 插件机制均为**二期**。
+> v1 边界：显式注册、清单端点 + 通用凭据配置端点（钉钉/企业微信凭据按 config
+> schema 直填、Fernet 加密落库）；管理端 OAuth 安装流、`integration_installations`
+> 多实例安装表、verify 触发端点、entry point 插件机制均为**二期**。
 
 ## 包结构
 
@@ -12,21 +13,31 @@
 | `registry.py` | `@register` 显式注册 + `get_integrations()` / `get_integration(id)` / `has_capability()` |
 | `local.py` | LocalAdapter：内置 SQLite + 站内通知，默认可用（status 恒 configured） |
 | `feishu/adapter.py` | FeishuAdapter：**纯委托** `services/feishu.py`，不搬移其内部逻辑 |
+| `dingtalk/` | DingTalkAdapter + client：AI 表格 / 日历 / 工作通知（≤100 人/次）/ OA 审批（需 process_code） |
+| `wecom/` | WeComAdapter + client：智能表格 / 日程（仅应用自建日历）/ 应用消息（≤1000 人/次）；审批平台不支持 |
+| `credentials.py` | `IntegrationCredential` 存取：config 明文 JSON + 密钥字段 Fernet 加密 JSON，每集成一行 |
+| `platform_api.py` | 国内平台共享件：access_token 内存缓存（互斥 + 过期余量）与批量分片 |
 
 registry 同时保存两类条目：实现了 `Integration` 协议的适配器，以及仅有 manifest 的
-planned 集成（dingtalk / wecom / google_workspace，社区共建占位，无适配器实例）。
+planned 集成（google_workspace，社区共建占位，无适配器实例）。钉钉/企业微信已从
+planned 占位升级为真实适配器（v1：HTTP 层按官方文档实现并 MockTransport 单测覆盖，
+未经生产凭据联调——见 docs/integrations/{dingtalk,wecom}.md）。
 
 ## 语义约定
 
 - `manifest.capabilities` 是该集成**能力上限**的静态声明；`capabilities()` 是
-  **运行时协商**结果——未就绪的集成返回空集（如飞书未配置应用时）。
+  **运行时协商**结果——未就绪的集成返回空集（如飞书未配置应用时）。协商可以
+  比 manifest 更细：钉钉未配置 `process_code` 时不声明 `APPROVAL`。
 - 端点 `GET /api/v1/integrations` 返回的 `status`：planned 集成为 `planned`；
   适配器集成运行时能提供任一能力即 `configured`，否则回落到 manifest 的
-  `status_class`（飞书未配置应用时为 `available`）。
+  `status_class`（飞书/钉钉/企微未配置凭据时为 `available`）。
 - `verify()` 是统一「测试连接」（≈ Airbyte Check）：不得抛异常，失败用
-  `VerifyResult(ok=False, detail=...)` 表达；v1 只读本地配置，不发外部网络请求。
+  `VerifyResult(ok=False, detail=...)` 表达。飞书/本地模式只读本地配置不发网络
+  请求；钉钉/企业微信 v1 没有等价的本地探测点，用获取 access_token 做**轻量
+  探测**（带缓存，不产生频控压力）。
 - 适配器构造契约统一为 `(settings, db)`，由 registry 在请求现场实例化，因此适配器
-  可以安全持有请求级 Session。
+  可以安全持有请求级 Session；客户端（client.py）另收可选 `transport` 关键字参数，
+  供测试注入 `httpx.MockTransport`（全链路无真实网络）。
 
 ## 如何新增一个集成
 

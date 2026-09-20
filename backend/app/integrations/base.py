@@ -39,7 +39,9 @@ class IntegrationManifest:
     capabilities: frozenset[Capability]
     status_class: IntegrationStatus
     docs_url: str = ""
-    # 二期：JSON Schema 声明配置 → 前端动态渲染表单（Airbyte spec / n8n properties）。
+    # 配置 JSON Schema：钉钉/企业微信 v1 已用于设置页凭据直填（凭据端点按它
+    # 校验与拆分密钥字段）；飞书沿用专用端点，前端动态渲染表单二期铺开
+    # （Airbyte spec / n8n properties 模式）。
     config_schema: dict[str, Any] | None = None
 
 

@@ -15,8 +15,10 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.integrations import registry
 from app.integrations.base import Capability
+from app.integrations.dingtalk import DingTalkAdapter
 from app.integrations.feishu.adapter import UNCONFIGURED_DETAIL, FeishuAdapter
 from app.integrations.local import LocalAdapter
+from app.integrations.wecom import WeComAdapter
 from app.models import (
     Campus,
     CourseSession,
@@ -31,8 +33,8 @@ from app.models import (
 )
 from app.services.feishu import FeishuServiceError
 
-ADAPTER_IDS = {"local", "feishu"}
-PLANNED_IDS = {"dingtalk", "wecom", "google_workspace"}
+ADAPTER_IDS = {"local", "feishu", "dingtalk", "wecom"}
+PLANNED_IDS = {"google_workspace"}
 
 
 def _clear_feishu_app_configuration() -> None:
@@ -84,6 +86,8 @@ def test_registry_lists_builtin_integrations() -> None:
         settings = get_settings()
         assert isinstance(registry.get_integration("local", settings, db), LocalAdapter)
         assert isinstance(registry.get_integration("feishu", settings, db), FeishuAdapter)
+        assert isinstance(registry.get_integration("dingtalk", settings, db), DingTalkAdapter)
+        assert isinstance(registry.get_integration("wecom", settings, db), WeComAdapter)
         assert registry.get_integration("missing", settings, db) is None
 
 
@@ -186,6 +190,11 @@ def test_list_integrations_content(
         assert items[planned]["status"] == "planned"
         assert items[planned]["capabilities"]
         assert items[planned]["docs_url"]
+    # 钉钉/企业微信已是适配器：未配置凭据时清单回落到 manifest 的 available。
+    assert items["dingtalk"]["status"] == "available"
+    assert items["dingtalk"]["capabilities"] == ["approval", "calendar", "notifier", "table_store"]
+    assert items["wecom"]["status"] == "available"
+    assert items["wecom"]["capabilities"] == ["calendar", "notifier", "table_store"]
 
 
 def _calendar_scoped_schedule(

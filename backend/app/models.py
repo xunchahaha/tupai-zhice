@@ -541,6 +541,21 @@ class IntegrationSync(TimestampMixin, Base):
     detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class IntegrationCredential(TimestampMixin, Base):
+    """第三方集成凭据（钉钉/企业微信等）：每集成一行，密钥 Fernet 加密 JSON。
+
+    v1 凭据经设置页按 manifest 的 config schema 直填（无管理端 OAuth 安装流，
+    roadmap §2.3 的多实例安装表留二期）；存取见 integrations/credentials.py。
+    """
+
+    __tablename__ = "integration_credentials"
+
+    integration_type: Mapped[str] = mapped_column(String(30), primary_key=True)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    secrets_encrypted: Mapped[str] = mapped_column(Text, default="")
+    configured_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

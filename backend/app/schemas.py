@@ -1023,6 +1023,26 @@ class IntegrationManifestResponse(BaseModel):
     docs_url: str
 
 
+class IntegrationConfigurationInput(BaseModel):
+    """PUT /integrations/{id}/configuration：按 manifest config schema 平铺填写。
+
+    语义为合并：密钥字段传非空值才覆盖（留空 = 保持已存密钥）；非密钥字段
+    传值覆盖、传 null 清除、未传保持不变。
+    """
+
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class IntegrationConfigurationResponse(BaseModel):
+    """凭据配置回读（脱敏）：密钥字段只给「是否已配置」布尔，永不明文回传。"""
+
+    integration_id: str
+    configured: bool
+    config: dict[str, Any]
+    secrets_configured: dict[str, bool]
+    updated_at: datetime | None = None
+
+
 class FeishuAppConfigurationInput(BaseModel):
     app_id: str = Field(min_length=4, max_length=100)
     app_secret: str | None = Field(default=None, max_length=200)

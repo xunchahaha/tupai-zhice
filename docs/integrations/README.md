@@ -22,11 +22,11 @@
 | --- | --- | --- | --- |
 | 飞书（Lark / 妙搭） | 已支持 | 表格存储 ✔ · 日历 ✔ · 通知 ✔ · 审批 ✔ · 自然语言 ✔ | [feishu.md](feishu.md) |
 | 本地模式 | 默认可用（已启用） | 表格存储 ✔ · 通知 ✔（审批与 NL 由系统内置组件承担） | [local.md](local.md) |
-| 钉钉（DingTalk） | 规划中 · 社区共建 | 目标：AI 表格 / 日历 / 工作通知 / OA 审批 | [dingtalk.md](dingtalk.md) |
-| 企业微信（WeCom） | 规划中 · 社区共建 | 目标：智能表格 / 日程 / 通知（审批仅支持模板代发） | 待社区补充（manifest 指向 `wecom.md`） |
+| 钉钉（DingTalk） | v1 已实现（未经生产凭据实测） | AI 表格 ✔ · 日历 ✔ · 工作通知 ✔（≤100 人/次）· OA 审批 ✔（需预建模板 process_code）· 忙闲查询 ✘ | [dingtalk.md](dingtalk.md) |
+| 企业微信（WeCom） | v1 已实现（未经生产凭据实测） | 智能表格 ✔ · 日程 ✔（仅应用自建日历）· 通知 ✔（≤1000 人/次）· 审批 ✘（平台无代发起 API） | [wecom.md](wecom.md) |
 | Google Workspace | 规划中 · 社区共建 | 目标：Sheets / Calendar（无原生审批） | 待社区补充（manifest 指向 `google-workspace.md`） |
 
-> 说明：状态与能力声明以 `backend/app/integrations/registry.py` 的 manifest 为准。已注册适配器的集成在设置页显示实时连接状态；规划中的集成为纯 manifest 占位（`status: planned`），能力为目标预期而非现状。
+> 说明：状态与能力声明以 `backend/app/integrations/registry.py` 的 manifest 为准。已注册适配器的集成在设置页显示实时连接状态；规划中的集成为纯 manifest 占位（`status: planned`），能力为目标预期而非现状。钉钉/企业微信凭据在设置页按 manifest 的 config schema 直填（密钥 Fernet 加密落库），测试连接为各自平台的轻量 access_token 探测。
 
 ## 如何使用
 
