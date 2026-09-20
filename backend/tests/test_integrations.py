@@ -22,6 +22,7 @@ from app.models import (
     CourseSession,
     DataSnapshot,
     FeishuAppConfiguration,
+    FeishuConnection,
     Room,
     ScheduleAssignment,
     ScheduleVersion,
@@ -35,10 +36,17 @@ PLANNED_IDS = {"dingtalk", "wecom", "google_workspace"}
 
 
 def _clear_feishu_app_configuration() -> None:
-    """测试自管飞书配置状态（与 test_feishu.py 同一约定：自建自清理）。"""
+    """测试自管飞书配置状态（与 test_feishu.py 同一约定：自建自清理）。
+
+    除应用配置外一并清理用户授权连接：test_feishu.py 的 OAuth 用例会以种子
+    管理员身份留下 status="active" 的连接，其令牌密文由该用例经 monkeypatch
+    注入的一次性随机 Fernet 主密钥加密（用例结束即失效）。若不清理，日历
+    下发会命中该连接并解密失败，而非走到本文件断言的「尚未授权」分支。
+    """
 
     with SessionLocal() as db:
         db.execute(delete(FeishuAppConfiguration))
+        db.execute(delete(FeishuConnection))
         db.commit()
 
 
