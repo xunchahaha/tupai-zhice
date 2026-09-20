@@ -28,6 +28,8 @@
 - [02-agent-memory.md](02-agent-memory.md) — 记忆与自进化架构设计
 - [03-integrations.md](03-integrations.md) — 集成抽象层设计与平台接入指南
 - [04-implementation-plan.md](04-implementation-plan.md) — 分阶段实施计划与进度
+- [05-ux-sop.md](05-ux-sop.md) — 求解页交互闭环与全局 SOP 重排
+- [06-public-showcase.md](06-public-showcase.md) — 公开展示层设计（免登录课表门户）
 
 ## 决策记录（ADR 摘要）
 
