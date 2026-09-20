@@ -17,6 +17,8 @@
 
 ## 快速启动
 
+Windows 一键启动（前后端 + 自动打开浏览器）：双击根目录 `start.bat`；macOS/Linux 运行 `bash scripts/start.sh`。下面的手动步骤等价。
+
 后端（[uv](https://docs.astral.sh/uv/)）：
 
 ```bash
