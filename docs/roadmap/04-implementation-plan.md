@@ -27,7 +27,7 @@
 | PUB-A | 后端公开课表 API（匿名 token 链接、ICS 订阅端点、调课通知；复用 public_* 数据资产与权限体系） | 待 PUB-0 简报 | — |
 | PUB-B | 前端公开课表页（移动优先只读视图、二维码/链接分发、复用课表渲染组件） | 待 PUB-A | — |
 | IMP-B | 前端导入向导（上传→映射→校验→提交，复用现有组件与动效；原地修复属 IMP-4 二期） | ✅ 完成（10 文件 53 用例全绿，86227a2） | 86227a2 |
-| MEM-A | 后端记忆层（PreferenceEntry + 一键归因 + 挖掘循环 + 求解权重编译器） | 🔄 实现中 | — |
+| MEM-A | 后端记忆层（PreferenceEntry + 一键归因 + 挖掘循环 + 求解权重编译器） | ✅ 完成（红线内建、求解零侵入注入软规则，83 定向全绿，f65eb16） | f65eb16 |
 | MEM-B | 前端记忆 UI（待确认收件箱 + 详情页偏好区块 + 解释引用） | 排队（等 MEM-A） | — |
 | OSS-A | 开源文档套件（架构文档、README 重写、接入指南 feishu/local/dingtalk、LICENSE 建议） | 🔄 接入指南已完成（44f7c16，含 5 项文档/代码不一致发现：Lark base_url 未实现、LocalAdapter 实为 2 能力等，代码对齐留 VER-1 清理）；架构文档与 README 重写待 MEM-A/PUB-A 定形 | 44f7c16 |
 | VER-1 | 里程碑统一验证：后端全量 pytest + ruff/mypy + 前端 vitest + build + orval 再生成 | 里程碑 | — |
