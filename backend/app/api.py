@@ -124,6 +124,7 @@ from .schemas import (
     IntegrationConfigurationResponse,
     IntegrationManifestResponse,
     IntegrationSyncResponse,
+    IntegrationVerifyResponse,
     MasterDataBatchDelete,
     MiningRunResponse,
     OverviewAnalyticsResponse,
@@ -133,6 +134,7 @@ from .schemas import (
     PreferenceResponse,
     PreferenceTransition,
     PreferenceUpdate,
+    PublicLinkBatchResponse,
     PublicLinkCreate,
     PublicLinkDirectoryPayload,
     PublicLinkResponse,
@@ -232,6 +234,7 @@ from .services.public_projection import (
     _current_published_schedule,
     _public_adjustment_notice_rows,
     _public_class_identity,
+    _public_class_index_rows,
     _public_class_links_rows,
     _public_class_schedule_rows,
     _public_projection_key,  # noqa: F401  re-export：公开投影回归测试仍从 app.api 引用
@@ -997,6 +1000,88 @@ def create_public_link(
     response["token"] = token
     response["public_url"] = _public_link_url(token)
     return response
+
+
+@router.post(
+    "/schedule-sets/{schedule_set_id}/public-links/batch",
+    response_model=PublicLinkBatchResponse,
+    tags=["public-links"],
+)
+def create_public_links_batch(
+    db: Db, user: PublicLinkManager, scope: PublicLinkScope
+) -> dict[str, Any]:
+    """按当前发布版本（public_class_index）为全部班级批量创建 class 链接。
+
+    校验、默认有效期与审计沿用单条创建（06 §3 B5）；明文 token 只在本响应
+    出现一次，库内只存哈希；单个班级目标校验不过不中断其余班级。
+    """
+
+    expires_at = shanghai_now() + timedelta(days=settings.public_default_ttl_days)
+    created: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for row in _public_class_index_rows(db, scope.id):
+        # 班级标识形如 "<campus_id>:<business_id>"（public_projection 口径）。
+        identity = str(row.get("班级标识") or "")
+        campus_id, _, class_business_id = identity.rpartition(":")
+        class_name = str(row.get("班级名称") or "未分班")
+        try:
+            # 与单条创建同一份目标校验（class 查 ClassGroup、campus 归属）。
+            display_name = _resolve_public_link_target(
+                db,
+                PublicLinkCreate(
+                    scope="class",
+                    campus_id=campus_id,
+                    resource_business_id=class_business_id,
+                ),
+                scope,
+            )
+        except HTTPException as exc:
+            failed.append(
+                {
+                    "campus_id": campus_id,
+                    "class_business_id": class_business_id,
+                    "class_name": class_name,
+                    "detail": str(exc.detail),
+                }
+            )
+            continue
+        token = secrets.token_urlsafe(32)
+        link = PublicLinkToken(
+            schedule_set_id=scope.id,
+            token_hash=_public_link_hash(token),
+            token_hint=_public_link_hint(token),
+            scope="class",
+            campus_id=campus_id,
+            resource_business_id=class_business_id,
+            display_name=display_name,
+            show_teacher_names=True,
+            created_by=user.id,
+            expires_at=expires_at,
+            note="按发布版本批量生成",
+        )
+        db.add(link)
+        audit(
+            db,
+            user,
+            "create",
+            "public_link",
+            link.id,
+            {
+                "schedule_set_id": scope.id,
+                "scope": "class",
+                "resource_business_id": class_business_id,
+                "token_hint": link.token_hint,
+            },
+        )
+        created.append(
+            {
+                "display_name": link.display_name,
+                "url": _public_link_url(token),
+                "token": token,
+            }
+        )
+    db.commit()
+    return {"created": created, "failed": failed}
 
 
 @router.post(
@@ -4438,10 +4523,10 @@ def list_audit_logs(
 def list_integrations(db: Db, user: AdminOrScheduler) -> list[IntegrationManifestResponse]:
     """集成清单：manifest 元数据 + 运行时状态，供「设置 → 集成」卡片渲染。
 
-    v1 为只读清单，不触发 verify 探测（verify 端点与 integration_installations
-    安装表留待二期）。status 规则：仅声明 manifest 的 planned 集成为 planned；
-    适配器集成运行时能提供任一能力即 configured，否则回落到 manifest 的
-    status_class（如飞书未配置应用时为 available）。
+    清单本身不触发网络探测；「测试连接」经 POST /integrations/{id}/verify
+    显式发起。status 规则：仅声明 manifest 的 planned 集成为 planned；适配器
+    集成运行时能提供任一能力即 configured，否则回落到 manifest 的 status_class
+    （如飞书未配置应用时为 available）。
     """
     runtime_capabilities = {
         item.manifest.id: item.capabilities()
@@ -4463,6 +4548,32 @@ def list_integrations(db: Db, user: AdminOrScheduler) -> list[IntegrationManifes
             )
         )
     return items
+
+
+@router.post(
+    "/integrations/{integration_id}/verify",
+    response_model=IntegrationVerifyResponse,
+    tags=["integrations"],
+)
+async def verify_integration(
+    integration_id: str, db: Db, user: AdminOrScheduler
+) -> dict[str, Any]:
+    """统一「测试连接」（≈ Airbyte Check / Grafana testDatasource）。
+
+    registry 在请求现场实例化适配器后执行其轻量探测：local 恒 ok；飞书只读
+    本地配置状态；钉钉/企业微信用一次 access_token 请求探测（带缓存）。适配器
+    契约（integrations/base.py）：verify() 不抛异常，失败以 VerifyResult 表达；
+    planned 集成（无适配器实例）与未知 id 同形 404。
+    """
+
+    integration = integration_registry.get_integration(integration_id, settings=settings, db=db)
+    if integration is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="该集成不存在或尚未提供适配器",
+        )
+    result = await integration.verify()
+    return {"ok": result.ok, "detail": result.detail}
 
 
 @router.get(
@@ -6310,6 +6421,34 @@ def public_link_schedule(token: str, db: Db) -> dict[str, Any]:
             link.resource_business_id or "",
             show_teacher_names=link.show_teacher_names,
         )
+    _touch_public_link(db, link)
+    return payload
+
+
+@router.get(
+    "/public/links/{token}/class/{campus_id}/{class_business_id}/schedule.json",
+    response_model=PublicLinkSchedulePayload,
+    tags=["public"],
+)
+def public_link_class_schedule(
+    token: str, campus_id: str, class_business_id: str, db: Db
+) -> dict[str, Any]:
+    """school 目录链接下钻到单个班级的公开 payload（06 §3 B6 督导公示）。
+
+    仅 school scope token 有效：class/teacher 链接本就绑定单一资源，无需下钻。
+    scope 不符与伪造/过期/停用一样同形 404；节流计数沿用现有公开端点模式。
+    """
+
+    link = _resolve_active_public_link(db, token)
+    if link.scope != "school":
+        raise HTTPException(status_code=404, detail="资源不存在")
+    payload = public_class_payload(
+        db,
+        link.schedule_set_id,
+        campus_id,
+        class_business_id,
+        show_teacher_names=link.show_teacher_names,
+    )
     _touch_public_link(db, link)
     return payload
 

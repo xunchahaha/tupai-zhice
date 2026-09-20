@@ -474,6 +474,54 @@
         }
       }
     },
+    "/api/v1/schedule-sets/{schedule_set_id}/public-links/batch": {
+      "post": {
+        "tags": [
+          "public-links"
+        ],
+        "summary": "Create Public Links Batch",
+        "description": "按当前发布版本（public_class_index）为全部班级批量创建 class 链接。\n\n校验、默认有效期与审计沿用单条创建（06 §3 B5）；明文 token 只在本响应\n出现一次，库内只存哈希；单个班级目标校验不过不中断其余班级。",
+        "operationId": "create_public_links_batch_api_v1_schedule_sets__schedule_set_id__public_links_batch_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "schedule_set_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Set Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicLinkBatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/public-links/{link_id}/rotate": {
       "post": {
         "tags": [
@@ -4815,7 +4863,7 @@
           "integrations"
         ],
         "summary": "List Integrations",
-        "description": "集成清单：manifest 元数据 + 运行时状态，供「设置 → 集成」卡片渲染。\n\nv1 为只读清单，不触发 verify 探测（verify 端点与 integration_installations\n安装表留待二期）。status 规则：仅声明 manifest 的 planned 集成为 planned；\n适配器集成运行时能提供任一能力即 configured，否则回落到 manifest 的\nstatus_class（如飞书未配置应用时为 available）。",
+        "description": "集成清单：manifest 元数据 + 运行时状态，供「设置 → 集成」卡片渲染。\n\n清单本身不触发网络探测；「测试连接」经 POST /integrations/{id}/verify\n显式发起。status 规则：仅声明 manifest 的 planned 集成为 planned；适配器\n集成运行时能提供任一能力即 configured，否则回落到 manifest 的 status_class\n（如飞书未配置应用时为 available）。",
         "operationId": "list_integrations_api_v1_integrations_get",
         "responses": {
           "200": {
@@ -4838,6 +4886,54 @@
             "OAuth2PasswordBearer": []
           }
         ]
+      }
+    },
+    "/api/v1/integrations/{integration_id}/verify": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Verify Integration",
+        "description": "统一「测试连接」（≈ Airbyte Check / Grafana testDatasource）。\n\nregistry 在请求现场实例化适配器后执行其轻量探测：local 恒 ok；飞书只读\n本地配置状态；钉钉/企业微信用一次 access_token 请求探测（带缓存）。适配器\n契约（integrations/base.py）：verify() 不抛异常，失败以 VerifyResult 表达；\nplanned 集成（无适配器实例）与未知 id 同形 404。",
+        "operationId": "verify_integration_api_v1_integrations__integration_id__verify_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "integration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Integration Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationVerifyResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/integrations/ai/configuration": {
@@ -5909,6 +6005,67 @@
                     }
                   ],
                   "title": "Response Public Link Schedule Api V1 Public Links  Token  Schedule Json Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public/links/{token}/class/{campus_id}/{class_business_id}/schedule.json": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Public Link Class Schedule",
+        "description": "school 目录链接下钻到单个班级的公开 payload（06 §3 B6 督导公示）。\n\n仅 school scope token 有效：class/teacher 链接本就绑定单一资源，无需下钻。\nscope 不符与伪造/过期/停用一样同形 404；节流计数沿用现有公开端点模式。",
+        "operationId": "public_link_class_schedule_api_v1_public_links__token__class__campus_id___class_business_id__schedule_json_get",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token"
+            }
+          },
+          {
+            "name": "campus_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campus Id"
+            }
+          },
+          {
+            "name": "class_business_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Class Business Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicLinkSchedulePayload"
                 }
               }
             }
@@ -9182,6 +9339,25 @@
         ],
         "title": "IntegrationSyncResponse"
       },
+      "IntegrationVerifyResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "detail"
+        ],
+        "title": "IntegrationVerifyResponse",
+        "description": "POST /integrations/{id}/verify：统一「测试连接」结果（≈ VerifyResult）。"
+      },
       "IntentReview": {
         "properties": {
           "verdict": {
@@ -9981,6 +10157,83 @@
           "after_location"
         ],
         "title": "PublicLinkAdjustment"
+      },
+      "PublicLinkBatchFailure": {
+        "properties": {
+          "campus_id": {
+            "type": "string",
+            "title": "Campus Id"
+          },
+          "class_business_id": {
+            "type": "string",
+            "title": "Class Business Id"
+          },
+          "class_name": {
+            "type": "string",
+            "title": "Class Name"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "campus_id",
+          "class_business_id",
+          "class_name",
+          "detail"
+        ],
+        "title": "PublicLinkBatchFailure",
+        "description": "批量创建的失败项：单个班级目标校验不过不中断其余班级。"
+      },
+      "PublicLinkBatchItem": {
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "token": {
+            "type": "string",
+            "title": "Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "display_name",
+          "url",
+          "token"
+        ],
+        "title": "PublicLinkBatchItem",
+        "description": "按发布版本批量创建的成功项：明文 token 仅在本响应出现一次（06 §3 B5）。"
+      },
+      "PublicLinkBatchResponse": {
+        "properties": {
+          "created": {
+            "items": {
+              "$ref": "#/components/schemas/PublicLinkBatchItem"
+            },
+            "type": "array",
+            "title": "Created"
+          },
+          "failed": {
+            "items": {
+              "$ref": "#/components/schemas/PublicLinkBatchFailure"
+            },
+            "type": "array",
+            "title": "Failed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "created",
+          "failed"
+        ],
+        "title": "PublicLinkBatchResponse"
       },
       "PublicLinkCreate": {
         "properties": {

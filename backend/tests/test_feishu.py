@@ -34,7 +34,10 @@ from app.services.feishu import (
     FeishuService,
     FeishuServiceError,
     TokenCipher,
+    authorization_url,
     normalize_business_key,
+    open_api_url,
+    token_url,
 )
 
 
@@ -1995,3 +1998,26 @@ def test_batch_freebusy_rejects_oversized_user_and_time_windows(monkeypatch: Any
             time_min="2026-08-01T00:00:00+08:00",
             time_max="2026-08-16T00:00:00+08:00",
         )
+
+
+def test_open_api_urls_follow_base_url_setting(monkeypatch: Any) -> None:
+    """Lark 国际版切换：URL 工厂按调用时 settings.feishu_base_url 取值。
+
+    开放 API 与控制台走配置域名；OAuth 授权/令牌端点在飞书与 Lark 两侧都在
+    accounts.* 域名，按 open.→accounts. 前缀规则推导。
+    """
+
+    monkeypatch.setattr(settings, "feishu_base_url", "https://open.larksuite.com")
+    assert open_api_url() == "https://open.larksuite.com/open-apis"
+    assert (
+        authorization_url()
+        == "https://accounts.larksuite.com/open-apis/authen/v1/authorize"
+    )
+    assert token_url() == "https://accounts.larksuite.com/oauth/v3/token"
+
+    monkeypatch.setattr(settings, "feishu_base_url", "https://open.feishu.cn")
+    assert open_api_url() == "https://open.feishu.cn/open-apis"
+    assert (
+        authorization_url() == "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
+    )
+    assert token_url() == "https://accounts.feishu.cn/oauth/v3/token"

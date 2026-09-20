@@ -1043,6 +1043,13 @@ class IntegrationConfigurationResponse(BaseModel):
     updated_at: datetime | None = None
 
 
+class IntegrationVerifyResponse(BaseModel):
+    """POST /integrations/{id}/verify：统一「测试连接」结果（≈ VerifyResult）。"""
+
+    ok: bool
+    detail: str
+
+
 class FeishuAppConfigurationInput(BaseModel):
     app_id: str = Field(min_length=4, max_length=100)
     app_secret: str | None = Field(default=None, max_length=200)
@@ -1344,6 +1351,28 @@ class PublicLinkResponse(BaseModel):
 class PublicLinkSecretResponse(PublicLinkResponse):
     token: str
     public_url: str
+
+
+class PublicLinkBatchItem(BaseModel):
+    """按发布版本批量创建的成功项：明文 token 仅在本响应出现一次（06 §3 B5）。"""
+
+    display_name: str
+    url: str
+    token: str
+
+
+class PublicLinkBatchFailure(BaseModel):
+    """批量创建的失败项：单个班级目标校验不过不中断其余班级。"""
+
+    campus_id: str
+    class_business_id: str
+    class_name: str
+    detail: str
+
+
+class PublicLinkBatchResponse(BaseModel):
+    created: list[PublicLinkBatchItem]
+    failed: list[PublicLinkBatchFailure]
 
 
 class PublicLinkScheduleRow(BaseModel):

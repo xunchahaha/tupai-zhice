@@ -319,3 +319,38 @@ def test_calendar_publish_with_configured_app_reaches_service_layer(
             )
     finally:
         _clear_feishu_app_configuration()
+
+
+def test_verify_endpoint_reports_local_and_unconfigured_feishu(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """统一「测试连接」端点：local 恒 ok；未配置飞书 ok=False 软失败。"""
+
+    local = client.post("/api/v1/integrations/local/verify", headers=auth_headers)
+    assert local.status_code == 200
+    assert local.json()["ok"] is True
+    assert local.json()["detail"]
+
+    _clear_feishu_app_configuration()
+    feishu = client.post("/api/v1/integrations/feishu/verify", headers=auth_headers)
+    assert feishu.status_code == 200
+    body = feishu.json()
+    assert body["ok"] is False
+    assert body["detail"] == UNCONFIGURED_DETAIL
+
+
+def test_verify_endpoint_404s_planned_and_unknown_ids(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """planned 集成（无适配器实例）与未知 id 同形 404。"""
+
+    forged_detail = None
+    for integration_id in ("google_workspace", "nope"):
+        response = client.post(
+            f"/api/v1/integrations/{integration_id}/verify", headers=auth_headers
+        )
+        assert response.status_code == 404
+        if forged_detail is None:
+            forged_detail = response.json()
+        else:
+            assert response.json() == forged_detail

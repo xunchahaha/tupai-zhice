@@ -97,6 +97,10 @@ uv run python scripts/export_openapi.py
 `FEISHU_TOKEN_ENCRYPTION_KEY`、`FEISHU_OAUTH_REDIRECT_URI` 和 `FRONTEND_URL`
 覆盖前端配置。该模式面向部署平台或 KMS，不属于管理员首次接入步骤。
 
+Lark 国际版部署额外配置 `FEISHU_BASE_URL=https://open.larksuite.com`：开放 API、
+OAuth 授权/令牌（按 `open.`→`accounts.` 前缀推导）与控制台链接随之切换；该切换未经
+Lark 实测，见 `docs/integrations/feishu.md` 的「已知限制」。
+
 ### 飞书授权与重新授权
 
 新授权至少需要 `base:field:read`、`base:field:create`、`bitable:app:readonly`（或完整

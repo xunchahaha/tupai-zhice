@@ -28,6 +28,7 @@ from app.integrations.dingtalk import (
     UNCONFIGURED_DETAIL as DINGTALK_UNCONFIGURED_DETAIL,
 )
 from app.integrations.dingtalk import DingTalkAdapter
+from app.integrations.dingtalk import adapter as dingtalk_adapter
 from app.integrations.dingtalk.client import (
     RECORD_BATCH_SIZE,
     DingTalkClient,
@@ -534,3 +535,37 @@ def test_wecom_verify_probe_softly_reports_failures(cipher_key: str) -> None:
         success = asyncio.run(ok_adapter.verify())
         assert success.ok is True
         assert "access_token" in success.detail
+
+
+def test_verify_endpoint_soft_fails_on_bad_dingtalk_credentials(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    cipher_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """verify 端点经真实 registry 实例化适配器：凭据错误 200 + ok=False 软失败。"""
+
+    with SessionLocal() as db:
+        CredentialStore(get_settings(), db).save(
+            "dingtalk", {"app_key": "dk-endpoint", "app_secret": "sv"}
+        )
+        db.commit()
+
+    real_client = DingTalkClient
+
+    def patched_client(config: DingTalkConfig, transport: Any = None) -> DingTalkClient:
+        def bad_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={"code": "InvalidAuthentication", "message": "appSecret 不正确"},
+            )
+
+        return real_client(config, transport=httpx.MockTransport(bad_handler))
+
+    monkeypatch.setattr(dingtalk_adapter, "DingTalkClient", patched_client)
+
+    response = client.post("/api/v1/integrations/dingtalk/verify", headers=auth_headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert "InvalidAuthentication" in body["detail"]

@@ -182,7 +182,7 @@ v1 的「测试连接」为**只读本地配置检查**（`FeishuAdapter.verify(
 | 分批与限频 | 记录搜索每页 500 条；批量新增/更新每批 1,000 条；公开投影删除每批 500 条。读取/更新/删除网络临时错误最多重试 2 次，新增在响应丢失时先对账再重试 |
 | 视图 | 「课表」表按班级维护筛选视图（每班一个、按排序键升序），视图数量随班级数线性增长；缺少 `base:view:write_only` 时视图同步自动跳过，不影响数据同步 |
 | 妙搭公开链接 | 公开分享 URL 无法由 API 直接生成：管理员需首次在多维表格开启独立分享（或发布妙搭公开应用）后，把最终 URL **回填**到「班级链接索引」；后续同步保留这些手工字段。普通视图入口 ≠ 互联网公开分享，务必以未登录身份实测 |
-| Lark 国际版 | manifest 已预留「base_url 切换 Lark 国际版」的描述，但当前代码中 `open.feishu.cn` / `accounts.feishu.cn` 域名为常量（`services/feishu.py` 头部 `OPEN_API_URL` / `AUTHORIZATION_URL` / `TOKEN_URL`），国际版切换尚需代码适配，暂未开放 |
+| Lark 国际版 | 在部署环境配置 `FEISHU_BASE_URL=https://open.larksuite.com` 即可切换：开放 API 与控制台链接改走 Lark 域名，OAuth 授权/令牌域名按 `open.`→`accounts.` 前缀规则推导为 `accounts.larksuite.com`（`services/feishu.py`）。注意该切换未经 Lark 实测，Lark 侧应用权限/妙搭可用性需自行验证 |
 | 时区 | 业务日期时间与飞书日历字段统一按 `Asia/Shanghai`（UTC+8）处理；令牌过期检查内部使用 UTC 瞬间 |
 | 数据归属 | 默认资源归属授权管理员个人。组织要求应用统一持有中央资源时，需另行实现基于 `tenant_access_token` 的组织级模式，两模式不混用 |
 | 同步记录 | 设置页展示最近 50 次同步；日志含批次、读写量、耗时、重试次数、飞书请求日志 ID 与失败原因，不含任何完整令牌 |

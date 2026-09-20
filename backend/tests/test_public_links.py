@@ -7,6 +7,7 @@ show_teacher_names 开关、访问计数节流；ICS 用 icalendar 反解析断�
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -26,6 +27,7 @@ from app.models import (
     ScheduleVersion,
     SolverRun,
 )
+from app.timezone import SHANGHAI_TZ
 
 CLASS_BUSINESS_ID = "B01"
 TEACHER_BUSINESS_ID = "T01"
@@ -262,17 +264,17 @@ def test_calendar_ics_parses_with_events_and_timezone(
 
     calendar = Calendar.from_ical(response.content)
     events = [component for component in calendar.walk("VEVENT")]
-    # 两节课里只有一节有 lesson_date；循环课次 RRULE 属 P1，P0 跳过。
-    assert len(events) == 1
-    event = events[0]
-    assert str(event["UID"]).startswith(f"tupai-class-{CLASS_BUSINESS_ID}-")
-    assert str(event["UID"]).endswith("@public.tupai")
-    assert str(event["DTSTART"].dt.tzinfo.utcoffset(event["DTSTART"].dt)) == "8:00:00"
+    # 一节有 lesson_date 的普通课次 + 一节循环课次（WEEKLY RRULE，专项用例断言）。
+    assert len(events) == 2
+    dated = next(event for event in events if "RRULE" not in event)
+    assert str(dated["UID"]).startswith(f"tupai-class-{CLASS_BUSINESS_ID}-")
+    assert str(dated["UID"]).endswith("@public.tupai")
+    assert str(dated["DTSTART"].dt.tzinfo.utcoffset(dated["DTSTART"].dt)) == "8:00:00"
     assert "TZID=Asia/Shanghai" in response.content.decode("utf-8")
     assert "X-WR-TIMEZONE:Asia/Shanghai" in response.content.decode("utf-8")
     assert "BEGIN:VTIMEZONE" in response.content.decode("utf-8")
-    assert str(event["SUMMARY"]) == "数学·示范课节1"
-    assert TEACHER_NAME in str(event["DESCRIPTION"])
+    assert str(dated["SUMMARY"]) == "数学·示范课节1"
+    assert TEACHER_NAME in str(dated["DESCRIPTION"])
 
     # ETag 命中返回 304。
     conditional = client.get(
@@ -280,6 +282,35 @@ def test_calendar_ics_parses_with_events_and_timezone(
         headers={"If-None-Match": etag},
     )
     assert conditional.status_code == 304
+
+
+def test_recurring_lesson_expands_to_weekly_rrule(
+    client: TestClient, auth_headers: dict[str, str], published: dict[str, Any]
+) -> None:
+    """循环课次（无 lesson_date，仅 TimeSlot.weekday）生成 WEEKLY RRULE。
+
+    展开窗口 = 当前发布版本有日期课次的 min/max（夹具内只有 2026-11-09 一天）；
+    S02 时段为「周一」20:10-21:40，DTSTART 取窗口内首个周一 + 时段；
+    UNTIL = 窗口末整天换算 UTC（23:59:59+08:00 → 15:59:59Z）。
+    """
+
+    link = _create_link(client, auth_headers, published)
+    response = client.get(f"/api/v1/public/links/{link['token']}/calendar.ics")
+    assert response.status_code == 200
+    events = [component for component in Calendar.from_ical(response.content).walk("VEVENT")]
+    recurring = next(event for event in events if "RRULE" in event)
+
+    rrule = recurring["RRULE"]
+    assert str(rrule["FREQ"][0]) == "WEEKLY"
+    assert str(rrule["BYDAY"][0]) == "MO"
+    assert rrule["UNTIL"][0] == datetime(2026, 11, 9, 15, 59, 59, tzinfo=UTC)
+    assert recurring["DTSTART"].dt == datetime(2026, 11, 9, 20, 10, tzinfo=SHANGHAI_TZ)
+    assert recurring["DTEND"].dt == datetime(2026, 11, 9, 21, 40, tzinfo=SHANGHAI_TZ)
+    # RRULE 课次的 UID 同样跨版本稳定（assignment 段为该循环课次的 assignment）。
+    assert str(recurring["UID"]).startswith(f"tupai-class-{CLASS_BUSINESS_ID}-")
+    assert str(recurring["UID"]) != str(
+        next(event for event in events if "RRULE" not in event)["UID"]
+    )
 
 
 def test_invalid_expired_revoked_tokens_all_404(
@@ -446,6 +477,56 @@ def test_school_scope_returns_directory_index(
     assert all(str(event["UID"]).startswith("tupai-school-all-") for event in events)
 
 
+def test_school_link_drills_down_to_single_class(
+    client: TestClient, auth_headers: dict[str, str], published: dict[str, Any]
+) -> None:
+    """school 目录链接下钻到单个班级：数据 = public_class_payload 同一口径。"""
+
+    school = _create_link(
+        client,
+        auth_headers,
+        published,
+        scope="school",
+        campus_id=None,
+        resource_business_id=None,
+    )
+    drill_url = (
+        f"/api/v1/public/links/{school['token']}/class/"
+        f"{published['campus_id']}/{CLASS_BUSINESS_ID}/schedule.json"
+    )
+    response = client.get(drill_url)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == "class"
+    assert body["display_name"]
+    assert body["version_no"] == published["current_version_no"]
+    assert len(body["rows"]) == 2
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert "T01" not in serialized  # 教师工号不因下钻外泄
+
+    # 仅 school scope 有效：class/teacher 链接本就绑定单一资源，scope 不符
+    # 与伪造 token 一样同形 404。
+    class_link = _create_link(client, auth_headers, published)
+    wrong_scope = (
+        f"/api/v1/public/links/{class_link['token']}/class/"
+        f"{published['campus_id']}/{CLASS_BUSINESS_ID}/schedule.json"
+    )
+    forged = (
+        f"/api/v1/public/links/{'a' * 43}/class/"
+        f"{published['campus_id']}/{CLASS_BUSINESS_ID}/schedule.json"
+    )
+    assert client.get(wrong_scope).status_code == 404
+    assert client.get(forged).status_code == 404
+    assert client.get(wrong_scope).json() == client.get(forged).json()
+
+    # 节流计数沿用现有公开端点模式：10 分钟内重复拉取只记一次。
+    client.get(drill_url)
+    with SessionLocal() as db:
+        row = db.get(PublicLinkToken, school["id"])
+        assert row is not None
+        assert row.access_count == 1
+
+
 def test_teacher_scope_payload_only_exposes_names(
     client: TestClient, auth_headers: dict[str, str], published: dict[str, Any]
 ) -> None:
@@ -463,3 +544,136 @@ def test_teacher_scope_payload_only_exposes_names(
     assert all(row["teacher_names"] == [TEACHER_NAME] for row in body["rows"])
     serialized = json.dumps(body, ensure_ascii=False)
     assert TEACHER_BUSINESS_ID not in serialized
+
+
+def _make_three_class_version() -> dict[str, Any]:
+    """播种覆盖 3 个班级的当前发布版本，供批量生成链接用例使用。
+
+    必须是本文件的最后一个播种动作（用例置于文件末尾）：它会把该方案的
+    「当前发布版本」切换为只覆盖 B01/B02/B03 的新版本。
+    """
+
+    with SessionLocal() as db:
+        picked: list[tuple[str, str]] = []
+        campus_id = ""
+        schedule_set_id = ""
+        for class_business_id in ("B01", "B02", "B03"):
+            course = db.scalar(
+                select(CourseSession)
+                .where(
+                    CourseSession.class_business_id == class_business_id,
+                    CourseSession.is_active.is_(True),
+                )
+                .order_by(CourseSession.business_id)
+            )
+            assert course is not None, f"种子主数据缺少 {class_business_id} 课次"
+            picked.append((course.id, class_business_id))
+            campus_id = course.campus_id
+            schedule_set_id = course.schedule_set_id
+
+        next_version_no = int(
+            db.scalar(
+                select(func.max(ScheduleVersion.version_no)).where(
+                    ScheduleVersion.schedule_set_id == schedule_set_id
+                )
+            )
+            or 0
+        )
+        snapshot = DataSnapshot(
+            schedule_set_id=schedule_set_id,
+            revision=20_000 + next_version_no,
+            checksum=f"public-link-batch-fixture-{next_version_no}",
+            payload={},
+        )
+        db.add(snapshot)
+        db.flush()
+        solver_run = SolverRun(
+            schedule_set_id=schedule_set_id,
+            snapshot_id=snapshot.id,
+            status="completed",
+            request_payload={},
+            result_payload={},
+        )
+        db.add(solver_run)
+        db.flush()
+        version = ScheduleVersion(
+            schedule_set_id=schedule_set_id,
+            version_no=next_version_no + 1,
+            name=f"公开链接批量夹具 V{next_version_no + 1}",
+            status="published",
+            solver_run_id=solver_run.id,
+            metrics={},
+            published_at=datetime.now(UTC),
+        )
+        db.add(version)
+        db.flush()
+        for course_id, _class_business_id in picked:
+            db.add(
+                ScheduleAssignment(
+                    schedule_version_id=version.id,
+                    course_session_id=course_id,
+                    lesson_date=date(2026, 12, 1),
+                    slot_business_id="S01",
+                    room_business_id="R01",
+                    change_kind="assigned",
+                )
+            )
+        db.commit()
+        return {
+            "schedule_set_id": schedule_set_id,
+            "campus_id": campus_id,
+            "version_no": version.version_no,
+        }
+
+
+def test_batch_creates_links_for_every_class_in_published_version(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """按发布版本批量生成：3 班级 → 3 条成功，明文各出现一次，库内只有哈希。"""
+
+    info = _make_three_class_version()
+    response = client.post(
+        f"/api/v1/schedule-sets/{info['schedule_set_id']}/public-links/batch",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["failed"] == []
+
+    created = body["created"]
+    assert len(created) == 3
+    tokens = [item["token"] for item in created]
+    assert len(set(tokens)) == 3
+    assert {item["display_name"] for item in created} == {
+        "初一数学A",
+        "初一英语A",
+        "初二物理A",
+    }
+    # 明文只在本响应出现：每个 token 仅出现在自己的 url 与 token 字段里
+    # （各 1 次，共 2 次），库内此后只有哈希（下方断言）。
+    raw = response.text
+    for item in created:
+        assert raw.count(item["token"]) == 2
+        assert item["url"].endswith(f"/public/t/{item['token']}")
+
+    # 数据库只有哈希：token_hash = sha256(明文)，token_hint = 末 4 位。
+    with SessionLocal() as db:
+        for token in tokens:
+            row = db.scalar(
+                select(PublicLinkToken).where(
+                    PublicLinkToken.token_hash
+                    == hashlib.sha256(token.encode("utf-8")).hexdigest()
+                )
+            )
+            assert row is not None
+            assert row.scope == "class"
+            assert row.token_hint == token[-4:]
+            assert token != row.token_hash
+            assert token not in repr(row.__dict__)
+
+    # 每个明文链接立即可用，且绑定对应班级。
+    for item in created:
+        payload = client.get(f"/api/v1/public/links/{item['token']}/schedule.json")
+        assert payload.status_code == 200
+        assert payload.json()["scope"] == "class"
+        assert payload.json()["display_name"] == item["display_name"]

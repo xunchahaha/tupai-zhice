@@ -27,6 +27,7 @@ from ..config import (
     FEISHU_REQUIRED_SCOPES,
     FEISHU_RESOURCES,
     Settings,
+    get_settings,
 )
 from ..models import (
     FeishuAppConfiguration,
@@ -38,9 +39,41 @@ from ..models import (
 )
 from ..timezone import as_shanghai
 
-AUTHORIZATION_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
-TOKEN_URL = "https://accounts.feishu.cn/oauth/v3/token"
-OPEN_API_URL = "https://open.feishu.cn/open-apis"
+# 开放平台域名不再硬编码常量：按调用时配置取值（``settings.feishu_base_url``），
+# Lark 国际版配置 https://open.larksuite.com 即可切换。OAuth 授权页与令牌端点
+# 在飞书/Lark 两侧历史上都位于 accounts.* 域名，由 open. 前缀推导，不单独配置。
+FEISHU_DEFAULT_BASE_URL = "https://open.feishu.cn"
+
+
+def _base_url() -> str:
+    return (get_settings().feishu_base_url or FEISHU_DEFAULT_BASE_URL).rstrip("/")
+
+
+def _accounts_base_url() -> str:
+    base = _base_url()
+    if base.startswith("https://open."):
+        return f"https://accounts.{base[len('https://open.'):]}"
+    return base
+
+
+def authorization_url() -> str:
+    """OAuth 授权页（管理员发起授权的跳转目标）。"""
+
+    return f"{_accounts_base_url()}/open-apis/authen/v1/authorize"
+
+
+def token_url() -> str:
+    """OAuth 令牌端点（授权码换 token / 刷新 token）。"""
+
+    return f"{_accounts_base_url()}/oauth/v3/token"
+
+
+def open_api_url() -> str:
+    """开放 API 根（open-apis 前缀）。"""
+
+    return f"{_base_url()}/open-apis"
+
+
 BUSINESS_KEY_FIELD = "业务标识"
 # These projections are generated entirely from the local schedule state.  A
 # sync therefore owns the complete remote row-set: rows from an older release
@@ -815,7 +848,7 @@ class FeishuService:
                 "state": state,
             }
         )
-        return {"authorization_url": f"{AUTHORIZATION_URL}?{query}", "expires_at": expires_at}
+        return {"authorization_url": f"{authorization_url()}?{query}", "expires_at": expires_at}
 
     def complete_oauth(self, code: str, state: str) -> FeishuConnection:
         app = self._app_configuration()
@@ -832,7 +865,7 @@ class FeishuService:
         self.db.commit()
         data, _ = self._request(
             "POST",
-            TOKEN_URL,
+            token_url(),
             json_body={
                 "grant_type": "authorization_code",
                 "client_id": app.app_id,
@@ -919,7 +952,7 @@ class FeishuService:
             try:
                 data, _ = self._request(
                     "POST",
-                    TOKEN_URL,
+                    token_url(),
                     json_body={
                         "grant_type": "refresh_token",
                         "client_id": app.app_id,
@@ -1076,7 +1109,7 @@ class FeishuService:
                 as_shanghai(_aware(connection.access_expires_at)) if connection else None
             ),
             "message": message,
-            "console_url": "https://open.feishu.cn/app/",
+            "console_url": f"{_base_url()}/app/",
             "docs_url": (
                 "https://open.feishu.cn/document/authentication-management/"
                 "access-token/obtain-oauth-code"
@@ -1144,7 +1177,7 @@ class FeishuService:
         for target_user_id in normalized_user_ids:
             data, _ = self._request(
                 "POST",
-                f"{OPEN_API_URL}/calendar/v4/freebusy/list",
+                f"{open_api_url()}/calendar/v4/freebusy/list",
                 token=token,
                 params={"user_id_type": user_id_type},
                 json_body={
@@ -1192,7 +1225,8 @@ class FeishuService:
         self._require_scopes(connection, {"calendar:calendar.event:create"})
         data, _ = self._request(
             "POST",
-            f"{OPEN_API_URL}/calendar/v4/calendars/{quote(normalized_calendar_id, safe='')}/events",
+            f"{open_api_url()}/calendar/v4/calendars/"
+            f"{quote(normalized_calendar_id, safe='')}/events",
             token=token,
             params=params,
             json_body=dict(event),
@@ -1224,7 +1258,7 @@ class FeishuService:
         data, _ = self._request(
             "POST",
             (
-                f"{OPEN_API_URL}/calendar/v4/calendars/"
+                f"{open_api_url()}/calendar/v4/calendars/"
                 f"{quote(normalized_calendar_id, safe='')}/events/"
                 f"{quote(normalized_event_id, safe='')}/attendees"
             ),
@@ -1267,7 +1301,7 @@ class FeishuService:
         data, _ = self._request(
             "POST",
             (
-                f"{OPEN_API_URL}/aily/v1/apps/{quote(normalized_app_id, safe='')}"
+                f"{open_api_url()}/aily/v1/apps/{quote(normalized_app_id, safe='')}"
                 f"/skills/{quote(normalized_skill_id, safe='')}/start"
             ),
             token=token,
@@ -1311,7 +1345,7 @@ class FeishuService:
             if workspace is None:
                 data, _ = self._request(
                     "POST",
-                    f"{OPEN_API_URL}/bitable/v1/apps",
+                    f"{open_api_url()}/bitable/v1/apps",
                     token=token,
                     json_body={"name": name},
                 )
@@ -1342,7 +1376,7 @@ class FeishuService:
 
             self._request(
                 "PATCH",
-                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
                 f"{workspace.default_table_id}",
                 token=token,
                 json_body={"name": "接入说明"},
@@ -1422,7 +1456,7 @@ class FeishuService:
                 params["page_token"] = page_token
             data, log_id = self._request(
                 "GET",
-                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables",
+                f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables",
                 token=token,
                 params=params,
                 timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
@@ -1452,7 +1486,7 @@ class FeishuService:
                 params["page_token"] = page_token
             data, log_id = self._request(
                 "GET",
-                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/{table_id}/fields",
+                f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/{table_id}/fields",
                 token=token,
                 params=params,
                 timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
@@ -1482,7 +1516,7 @@ class FeishuService:
                 params["page_token"] = page_token
             data, log_id = self._request(
                 "GET",
-                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
                 f"{table_id}/views",
                 token=token,
                 params=params,
@@ -1510,7 +1544,7 @@ class FeishuService:
     ) -> tuple[dict[str, Any], str | None]:
         data, log_id = self._request(
             "GET",
-            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+            f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
             f"{table_id}/views/{view_id}",
             token=token,
             timeout=SYNC_REQUEST_TIMEOUT_SECONDS,
@@ -1530,7 +1564,7 @@ class FeishuService:
     ) -> tuple[str, str | None]:
         data, log_id = self._request(
             "POST",
-            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+            f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
             f"{table_id}/views",
             token=token,
             json_body={"view_name": view_name, "view_type": "grid"},
@@ -1568,7 +1602,7 @@ class FeishuService:
             property_payload["hidden_fields"] = hidden_field_ids
         _, log_id = self._request(
             "PATCH",
-            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+            f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
             f"{table_id}/views/{view_id}",
             token=token,
             json_body={
@@ -1636,7 +1670,7 @@ class FeishuService:
     ) -> str | None:
         _, log_id = self._request(
             "DELETE",
-            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+            f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
             f"{table_id}/views/{view_id}",
             token=token,
             timeout=SYNC_MUTATION_TIMEOUT_SECONDS,
@@ -1864,7 +1898,7 @@ class FeishuService:
     ) -> str:
         data, _ = self._request(
             "POST",
-            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables",
+            f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables",
             token=token,
             json_body={
                 "table": {
@@ -1892,7 +1926,7 @@ class FeishuService:
     ) -> None:
         self._request(
             "POST",
-            f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/{table_id}/fields",
+            f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/{table_id}/fields",
             token=token,
             json_body={"field_name": field_name, "type": field_type},
         )
@@ -2101,7 +2135,7 @@ class FeishuService:
                 params["page_token"] = page_token
             data, log_id = self._request(
                 "POST",
-                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
                 f"{table_id}/records/search",
                 token=token,
                 params=params,
@@ -2139,7 +2173,7 @@ class FeishuService:
                 try:
                     data, log_id = self._request(
                         "POST",
-                        f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                        f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
                         f"{table_id}/records/batch_create",
                         token=token,
                         json_body={"records": [{"fields": item} for item in pending]},
@@ -2172,7 +2206,7 @@ class FeishuService:
                     retry_count += 1
                     self._retry_request(
                         "POST",
-                        f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                        f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
                         f"{table_id}/records/batch_create",
                         retry_count,
                         SYNC_RETRY_ATTEMPTS,
@@ -2228,7 +2262,7 @@ class FeishuService:
                 retry_count += 1
                 self._retry_request(
                     "POST",
-                    f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                    f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
                     f"{table_id}/records/batch_create",
                     retry_count,
                     SYNC_RETRY_ATTEMPTS,
@@ -2288,7 +2322,7 @@ class FeishuService:
             batch = rows[start : start + SYNC_BATCH_SIZE]
             _, log_id = self._request(
                 "POST",
-                f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
                 f"{table_id}/records/batch_update",
                 token=token,
                 json_body={
@@ -2327,7 +2361,7 @@ class FeishuService:
             try:
                 data, log_id = self._request(
                     "POST",
-                    f"{OPEN_API_URL}/bitable/v1/apps/{workspace.app_token}/tables/"
+                    f"{open_api_url()}/bitable/v1/apps/{workspace.app_token}/tables/"
                     f"{table_id}/records/batch_delete",
                     token=token,
                     json_body={"records": batch},

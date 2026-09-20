@@ -124,6 +124,10 @@ class Settings(BaseSettings):
     feishu_oauth_redirect_uri: str = (
         "http://127.0.0.1:8000/api/v1/integrations/feishu/oauth/callback"
     )
+    # 飞书开放平台域名；Lark 国际版改为 https://open.larksuite.com 即可切换
+    # （OAuth 授权/令牌域名按 open.→accounts. 前缀规则推导，见 services/feishu.py；
+    # 未经 Lark 实测）。
+    feishu_base_url: str = "https://open.feishu.cn"
     frontend_url: str = "http://127.0.0.1:5173"
 
     # 钉钉/企业微信等集成凭据的加密主密钥（integrations/credentials.py）。
