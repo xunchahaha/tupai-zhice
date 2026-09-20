@@ -5,6 +5,7 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { RescheduleResponseDeclaredReason } from './rescheduleResponseDeclaredReason';
 import type { RescheduleResponsePayload } from './rescheduleResponsePayload';
 import type { RescheduleResponseSolverRunId } from './rescheduleResponseSolverRunId';
 import type { RescheduleResponseCandidateScheduleId } from './rescheduleResponseCandidateScheduleId';
@@ -13,6 +14,7 @@ export interface RescheduleResponse {
   id: string;
   event_type: string;
   description: string;
+  declared_reason?: RescheduleResponseDeclaredReason;
   payload: RescheduleResponsePayload;
   status: string;
   parent_schedule_id: string;

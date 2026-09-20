@@ -8,6 +8,7 @@ import { AccountsPage } from "@/pages/accounts-page";
 import { DiagnosticsPage } from "@/pages/diagnostics-page";
 import { LoginPage } from "@/pages/login-page";
 import { MasterDataPage } from "@/pages/master-data-page";
+import { MemoryPage } from "@/pages/memory-page";
 import { OverviewPage } from "@/pages/overview-page";
 import { ReschedulePage } from "@/pages/reschedule-page";
 import { RulesPage } from "@/pages/rules-page";
@@ -35,6 +36,7 @@ export const router = createBrowserRouter([
     { path: "/schedule", element: <SchedulePage /> },
     { path: "/diagnostics", element: <DiagnosticsPage /> },
     { path: "/reschedule", element: <RoleRoute roles={["admin", "scheduler"]}><ReschedulePage /></RoleRoute> },
+    { path: "/memory", element: <RoleRoute roles={["admin", "scheduler"]}><MemoryPage /></RoleRoute> },
     { path: "/versions", element: <VersionsPage /> },
     { path: "/settings", element: <RoleRoute roles={["admin", "scheduler"]}><SettingsPage /></RoleRoute> },
     { path: "/integrations", element: <IntegrationsRedirect /> },

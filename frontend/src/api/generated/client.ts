@@ -71,14 +71,21 @@ import type {
   ImportPreviewResponse,
   ImportResult,
   ImportXlsxApiV1ImportsXlsxPostParams,
+  IntegrationManifestResponse,
   IntegrationSyncResponse,
   ListAuditLogsApiV1AuditLogsGetParams,
+  ListPreferencesApiV1MemoryPreferencesGetParams,
   ListRulesApiV1RulesGetParams,
   MasterDataBatchDelete,
+  MiningRunResponse,
   OverviewAnalyticsApiV1OverviewAnalyticsGetParams,
   OverviewAnalyticsResponse,
   OverviewResponse,
   PasswordChange,
+  PreferenceCreate,
+  PreferenceResponse,
+  PreferenceTransition,
+  PreferenceUpdate,
   RescheduleCreate,
   RescheduleResponse,
   RoomBatchUpdate,
@@ -4146,6 +4153,363 @@ export const useTransitionRuleApiV1RulesRuleIdTransitionPost = <TError = HTTPVal
     }
     
 /**
+ * @summary List Preferences
+ */
+export const listPreferencesApiV1MemoryPreferencesGet = (
+    params?: ListPreferencesApiV1MemoryPreferencesGetParams,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<PreferenceResponse[]>(
+      {url: `/api/v1/memory/preferences`, method: 'GET',
+        params, signal
+    },
+      );
+    }
+  
+
+
+
+export const getListPreferencesApiV1MemoryPreferencesGetQueryKey = (params?: ListPreferencesApiV1MemoryPreferencesGetParams,) => {
+    return [
+    `/api/v1/memory/preferences`, ...(params ? [params]: [])
+    ] as const;
+    }
+
+    
+export const getListPreferencesApiV1MemoryPreferencesGetQueryOptions = <TData = Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>, TError = HTTPValidationError>(params?: ListPreferencesApiV1MemoryPreferencesGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListPreferencesApiV1MemoryPreferencesGetQueryKey(params);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>> = ({ signal }) => listPreferencesApiV1MemoryPreferencesGet(params, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ListPreferencesApiV1MemoryPreferencesGetQueryResult = NonNullable<Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>>
+export type ListPreferencesApiV1MemoryPreferencesGetQueryError = HTTPValidationError
+
+
+export function useListPreferencesApiV1MemoryPreferencesGet<TData = Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>, TError = HTTPValidationError>(
+ params: undefined |  ListPreferencesApiV1MemoryPreferencesGetParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>,
+          TError,
+          Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListPreferencesApiV1MemoryPreferencesGet<TData = Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>, TError = HTTPValidationError>(
+ params?: ListPreferencesApiV1MemoryPreferencesGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>,
+          TError,
+          Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListPreferencesApiV1MemoryPreferencesGet<TData = Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>, TError = HTTPValidationError>(
+ params?: ListPreferencesApiV1MemoryPreferencesGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List Preferences
+ */
+
+export function useListPreferencesApiV1MemoryPreferencesGet<TData = Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>, TError = HTTPValidationError>(
+ params?: ListPreferencesApiV1MemoryPreferencesGetParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPreferencesApiV1MemoryPreferencesGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getListPreferencesApiV1MemoryPreferencesGetQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * @summary Create Preference
+ */
+export const createPreferenceApiV1MemoryPreferencesPost = (
+    preferenceCreate: PreferenceCreate,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<PreferenceResponse>(
+      {url: `/api/v1/memory/preferences`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: preferenceCreate, signal
+    },
+      );
+    }
+  
+
+
+export const getCreatePreferenceApiV1MemoryPreferencesPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createPreferenceApiV1MemoryPreferencesPost>>, TError,{data: PreferenceCreate}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof createPreferenceApiV1MemoryPreferencesPost>>, TError,{data: PreferenceCreate}, TContext> => {
+
+const mutationKey = ['createPreferenceApiV1MemoryPreferencesPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createPreferenceApiV1MemoryPreferencesPost>>, {data: PreferenceCreate}> = (props) => {
+          const {data} = props ?? {};
+
+          return  createPreferenceApiV1MemoryPreferencesPost(data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreatePreferenceApiV1MemoryPreferencesPostMutationResult = NonNullable<Awaited<ReturnType<typeof createPreferenceApiV1MemoryPreferencesPost>>>
+    export type CreatePreferenceApiV1MemoryPreferencesPostMutationBody = PreferenceCreate
+    export type CreatePreferenceApiV1MemoryPreferencesPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Create Preference
+ */
+export const useCreatePreferenceApiV1MemoryPreferencesPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createPreferenceApiV1MemoryPreferencesPost>>, TError,{data: PreferenceCreate}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof createPreferenceApiV1MemoryPreferencesPost>>,
+        TError,
+        {data: PreferenceCreate},
+        TContext
+      > => {
+
+      const mutationOptions = getCreatePreferenceApiV1MemoryPreferencesPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * @summary Update Preference
+ */
+export const updatePreferenceApiV1MemoryPreferencesEntryIdPatch = (
+    entryId: string,
+    preferenceUpdate: PreferenceUpdate,
+ ) => {
+      
+      
+      return customInstance<PreferenceResponse>(
+      {url: `/api/v1/memory/preferences/${entryId}`, method: 'PATCH',
+      headers: {'Content-Type': 'application/json', },
+      data: preferenceUpdate
+    },
+      );
+    }
+  
+
+
+export const getUpdatePreferenceApiV1MemoryPreferencesEntryIdPatchMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updatePreferenceApiV1MemoryPreferencesEntryIdPatch>>, TError,{entryId: string;data: PreferenceUpdate}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof updatePreferenceApiV1MemoryPreferencesEntryIdPatch>>, TError,{entryId: string;data: PreferenceUpdate}, TContext> => {
+
+const mutationKey = ['updatePreferenceApiV1MemoryPreferencesEntryIdPatch'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updatePreferenceApiV1MemoryPreferencesEntryIdPatch>>, {entryId: string;data: PreferenceUpdate}> = (props) => {
+          const {entryId,data} = props ?? {};
+
+          return  updatePreferenceApiV1MemoryPreferencesEntryIdPatch(entryId,data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdatePreferenceApiV1MemoryPreferencesEntryIdPatchMutationResult = NonNullable<Awaited<ReturnType<typeof updatePreferenceApiV1MemoryPreferencesEntryIdPatch>>>
+    export type UpdatePreferenceApiV1MemoryPreferencesEntryIdPatchMutationBody = PreferenceUpdate
+    export type UpdatePreferenceApiV1MemoryPreferencesEntryIdPatchMutationError = HTTPValidationError
+
+    /**
+ * @summary Update Preference
+ */
+export const useUpdatePreferenceApiV1MemoryPreferencesEntryIdPatch = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updatePreferenceApiV1MemoryPreferencesEntryIdPatch>>, TError,{entryId: string;data: PreferenceUpdate}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof updatePreferenceApiV1MemoryPreferencesEntryIdPatch>>,
+        TError,
+        {entryId: string;data: PreferenceUpdate},
+        TContext
+      > => {
+
+      const mutationOptions = getUpdatePreferenceApiV1MemoryPreferencesEntryIdPatchMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * @summary Transition Preference
+ */
+export const transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost = (
+    entryId: string,
+    preferenceTransition: PreferenceTransition,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<PreferenceResponse>(
+      {url: `/api/v1/memory/preferences/${entryId}/transition`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: preferenceTransition, signal
+    },
+      );
+    }
+  
+
+
+export const getTransitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost>>, TError,{entryId: string;data: PreferenceTransition}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost>>, TError,{entryId: string;data: PreferenceTransition}, TContext> => {
+
+const mutationKey = ['transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost>>, {entryId: string;data: PreferenceTransition}> = (props) => {
+          const {entryId,data} = props ?? {};
+
+          return  transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost(entryId,data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type TransitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPostMutationResult = NonNullable<Awaited<ReturnType<typeof transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost>>>
+    export type TransitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPostMutationBody = PreferenceTransition
+    export type TransitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Transition Preference
+ */
+export const useTransitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost>>, TError,{entryId: string;data: PreferenceTransition}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost>>,
+        TError,
+        {entryId: string;data: PreferenceTransition},
+        TContext
+      > => {
+
+      const mutationOptions = getTransitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * 回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。
+
+配置了 AI 走模型归纳（模型只提名，代码按白名单裁决）；未配置或调用失败
+优雅降级为确定性统计：同主体+同类型调课 ≥2 次即产生候选。
+ * @summary Create Memory Mining Run
+ */
+export const createMemoryMiningRunApiV1MemoryMiningRunsPost = (
+    
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<MiningRunResponse>(
+      {url: `/api/v1/memory/mining-runs`, method: 'POST', signal
+    },
+      );
+    }
+  
+
+
+export const getCreateMemoryMiningRunApiV1MemoryMiningRunsPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createMemoryMiningRunApiV1MemoryMiningRunsPost>>, TError,void, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof createMemoryMiningRunApiV1MemoryMiningRunsPost>>, TError,void, TContext> => {
+
+const mutationKey = ['createMemoryMiningRunApiV1MemoryMiningRunsPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createMemoryMiningRunApiV1MemoryMiningRunsPost>>, void> = () => {
+          
+
+          return  createMemoryMiningRunApiV1MemoryMiningRunsPost()
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateMemoryMiningRunApiV1MemoryMiningRunsPostMutationResult = NonNullable<Awaited<ReturnType<typeof createMemoryMiningRunApiV1MemoryMiningRunsPost>>>
+    
+    export type CreateMemoryMiningRunApiV1MemoryMiningRunsPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Create Memory Mining Run
+ */
+export const useCreateMemoryMiningRunApiV1MemoryMiningRunsPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createMemoryMiningRunApiV1MemoryMiningRunsPost>>, TError,void, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof createMemoryMiningRunApiV1MemoryMiningRunsPost>>,
+        TError,
+        void,
+        TContext
+      > => {
+
+      const mutationOptions = getCreateMemoryMiningRunApiV1MemoryMiningRunsPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
  * @summary Submit Solver Run
  */
 export const submitSolverRunApiV1SolverRunsPost = (
@@ -5527,6 +5891,105 @@ export function useListAuditLogsApiV1AuditLogsGet<TData = Awaited<ReturnType<typ
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getListAuditLogsApiV1AuditLogsGetQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * 集成清单：manifest 元数据 + 运行时状态，供「设置 → 集成」卡片渲染。
+
+v1 为只读清单，不触发 verify 探测（verify 端点与 integration_installations
+安装表留待二期）。status 规则：仅声明 manifest 的 planned 集成为 planned；
+适配器集成运行时能提供任一能力即 configured，否则回落到 manifest 的
+status_class（如飞书未配置应用时为 available）。
+ * @summary List Integrations
+ */
+export const listIntegrationsApiV1IntegrationsGet = (
+    
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<IntegrationManifestResponse[]>(
+      {url: `/api/v1/integrations`, method: 'GET', signal
+    },
+      );
+    }
+  
+
+
+
+export const getListIntegrationsApiV1IntegrationsGetQueryKey = () => {
+    return [
+    `/api/v1/integrations`
+    ] as const;
+    }
+
+    
+export const getListIntegrationsApiV1IntegrationsGetQueryOptions = <TData = Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListIntegrationsApiV1IntegrationsGetQueryKey();
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>> = ({ signal }) => listIntegrationsApiV1IntegrationsGet(signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ListIntegrationsApiV1IntegrationsGetQueryResult = NonNullable<Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>>
+export type ListIntegrationsApiV1IntegrationsGetQueryError = unknown
+
+
+export function useListIntegrationsApiV1IntegrationsGet<TData = Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>,
+          TError,
+          Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListIntegrationsApiV1IntegrationsGet<TData = Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>,
+          TError,
+          Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListIntegrationsApiV1IntegrationsGet<TData = Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List Integrations
+ */
+
+export function useListIntegrationsApiV1IntegrationsGet<TData = Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listIntegrationsApiV1IntegrationsGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getListIntegrationsApiV1IntegrationsGetQueryOptions(options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

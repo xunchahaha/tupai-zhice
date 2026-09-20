@@ -9,6 +9,7 @@ import type { AssistantInterpretResponseSource } from './assistantInterpretRespo
 import type { AssistantInterpretResponseDateFrom } from './assistantInterpretResponseDateFrom';
 import type { AssistantInterpretResponseDateTo } from './assistantInterpretResponseDateTo';
 import type { AssistantInterpretResponseSolverRulesItem } from './assistantInterpretResponseSolverRulesItem';
+import type { AssistantInterpretResponseThinking } from './assistantInterpretResponseThinking';
 
 export interface AssistantInterpretResponse {
   instruction: string;
@@ -30,4 +31,5 @@ export interface AssistantInterpretResponse {
   unsupported_requirements?: string[];
   coverage_warnings?: string[];
   summary: string;
+  thinking?: AssistantInterpretResponseThinking;
 }

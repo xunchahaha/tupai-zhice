@@ -24,6 +24,7 @@ const navigation = [
   { to: "/schedule", label: "课表视图", group: "排课流程", memberVisible: true },
   { to: "/diagnostics", label: "无解诊断", group: "排课流程", memberVisible: true },
   { to: "/reschedule", label: "局部调课", group: "变更", memberVisible: false, roles: ["admin", "scheduler"] },
+  { to: "/memory", label: "记忆与偏好", group: "变更", memberVisible: false, roles: ["admin", "scheduler"] },
   { to: "/versions", label: "版本与回滚", group: "变更", memberVisible: true },
   { to: "/settings", label: "设置", group: "设置", memberVisible: false, roles: ["admin", "scheduler"], icon: Settings },
   { to: "/accounts", label: "账号管理", group: "设置", memberVisible: false, adminOnly: true },

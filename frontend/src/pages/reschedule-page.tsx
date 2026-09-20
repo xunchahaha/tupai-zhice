@@ -17,14 +17,25 @@ import { statusTone } from "@/lib/status";
 
 type EventType = "teacher_leave" | "room_outage" | "extra_class";
 
+// 一键归因 chips（02 文档 §3.3）：区分「想换」与「被迫换」，是偏好挖掘的消噪关键。
+// declared_reason 是自由文本（≤80 字），其他选项直接落教务输入的原话。
+const REASON_CHIPS: { value: string; label: string }[] = [
+  { value: "教师要求", label: "教师要求" },
+  { value: "教室冲突", label: "教室冲突" },
+  { value: "临时公差", label: "临时公差" },
+  { value: "other", label: "其他" },
+];
+
 export function ReschedulePage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient(); const events = useListRescheduleEventsApiV1RescheduleEventsGet(); const schedules = useListSchedulesApiV1SchedulesGet(); const teachers = useListTeachersApiV1TeachersGet(); const rooms = useListRoomsApiV1RoomsGet(); const slots = useListTimeSlotsApiV1TimeSlotsGet();
   const [eventType, setEventType] = useState<EventType>("teacher_leave"); const [parent, setParent] = useState(""); const [teacher, setTeacher] = useState(""); const [room, setRoom] = useState(""); const [slot, setSlot] = useState(""); const [description, setDescription] = useState("");
+  const [reasonChoice, setReasonChoice] = useState<string | null>(null); const [reasonText, setReasonText] = useState("");
+  const declaredReason = reasonChoice === null ? null : reasonChoice === "other" ? (reasonText.trim() || null) : reasonChoice;
   useEffect(() => { const initialSchedule = preferredSchedule(schedules.data); if (!parent && initialSchedule) setParent(initialSchedule.id); if (!teacher && teachers.data?.[0]) setTeacher(teachers.data[0].business_id); if (!room && rooms.data?.[0]) setRoom(rooms.data[0].business_id); if (!slot && slots.data?.[0]) setSlot(slots.data[0].business_id); }, [parent, room, rooms.data, slot, slots.data, schedules.data, teacher, teachers.data]);
-  const create = useCreateRescheduleEventApiV1RescheduleEventsPost({ mutation: { onSuccess: () => { toast.success("局部调课任务已创建"); void queryClient.invalidateQueries({ queryKey: getListRescheduleEventsApiV1RescheduleEventsGetQueryKey() }); setDescription(""); }, onError: (error) => toast.error(errorMessage(error)) } });
+  const create = useCreateRescheduleEventApiV1RescheduleEventsPost({ mutation: { onSuccess: () => { toast.success("局部调课任务已创建"); void queryClient.invalidateQueries({ queryKey: getListRescheduleEventsApiV1RescheduleEventsGetQueryKey() }); setDescription(""); setReasonChoice(null); setReasonText(""); }, onError: (error) => toast.error(errorMessage(error)) } });
   const all = [events, schedules, teachers, rooms, slots]; if (all.some((item) => item.isPending)) return <LoadingState />; if (all.some((item) => item.isError)) return <ErrorState retry={() => all.forEach((item) => void item.refetch())} />;
-  const submit = () => create.mutate({ data: { event_type: eventType, description: description || typeLabel(eventType), parent_schedule_id: parent, teacher_business_id: eventType === "teacher_leave" ? teacher : null, room_business_id: eventType === "room_outage" ? room : null, slot_business_ids: slot ? [slot] : [], course_business_id: null, time_limit_seconds: 30 } });
+  const submit = () => create.mutate({ data: { event_type: eventType, description: description || typeLabel(eventType), parent_schedule_id: parent, declared_reason: declaredReason, teacher_business_id: eventType === "teacher_leave" ? teacher : null, room_business_id: eventType === "room_outage" ? room : null, slot_business_ids: slot ? [slot] : [], course_business_id: null, time_limit_seconds: 30 } });
   const scheduleList = Array.isArray(schedules.data) ? schedules.data : [];
   const teacherList = Array.isArray(teachers.data) ? teachers.data : [];
   const roomList = Array.isArray(rooms.data) ? rooms.data : [];
@@ -130,6 +141,39 @@ export function ReschedulePage() {
               onChange={(event) => setDescription(event.target.value)}
             />
           </label>
+          <div className="mt-4">
+            <span className="block text-sm">
+              调课原因
+              <span className="ml-1.5 text-xs text-zinc-400">选填，帮助系统学习</span>
+            </span>
+            <div className="mt-1.5 flex flex-wrap gap-1.5" role="group" aria-label="调课原因">
+              {REASON_CHIPS.map((chip) => (
+                <button
+                  key={chip.value}
+                  type="button"
+                  aria-pressed={reasonChoice === chip.value}
+                  className={`inline-flex h-7 items-center rounded-full border px-2.5 text-xs transition-all duration-150 active:scale-[0.97] ${
+                    reasonChoice === chip.value
+                      ? "border-blue-600 bg-blue-50 font-medium text-blue-700"
+                      : "border-zinc-300 bg-white text-zinc-600 hover:border-zinc-400 hover:bg-zinc-50"
+                  }`}
+                  onClick={() => setReasonChoice((current) => (current === chip.value ? null : chip.value))}
+                >
+                  {chip.label}
+                </button>
+              ))}
+            </div>
+            {reasonChoice === "other" ? (
+              <input
+                aria-label="其他调课原因"
+                className="mt-1.5 h-8 w-full rounded-md border border-zinc-300 px-2 text-sm"
+                placeholder="一句话描述原因（选填）"
+                maxLength={80}
+                value={reasonText}
+                onChange={(event) => setReasonText(event.target.value)}
+              />
+            ) : null}
+          </div>
           <Button className="mt-5 w-full" onClick={submit} disabled={!parent || create.isPending}>
             生成候选方案
           </Button>
@@ -157,6 +201,7 @@ export function ReschedulePage() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="text-sm font-medium">{eventTypeLabel(event.event_type)}</span>
                       <Badge tone={statusTone(event.status)}>{statusLabel(event.status)}</Badge>
+                      {event.declared_reason ? <Badge>{event.declared_reason}</Badge> : null}
                     </div>
                     <p className="mt-1 text-sm text-zinc-600">{event.description}</p>
                     <div className="mt-2 font-mono text-[11px] text-zinc-400">

@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { RescheduleCreateEventType } from './rescheduleCreateEventType';
+import type { RescheduleCreateDeclaredReason } from './rescheduleCreateDeclaredReason';
 import type { RescheduleCreateTeacherBusinessId } from './rescheduleCreateTeacherBusinessId';
 import type { RescheduleCreateRoomBusinessId } from './rescheduleCreateRoomBusinessId';
 import type { RescheduleCreateDateFrom } from './rescheduleCreateDateFrom';
@@ -16,6 +17,7 @@ export interface RescheduleCreate {
   event_type: RescheduleCreateEventType;
   description: string;
   parent_schedule_id: string;
+  declared_reason?: RescheduleCreateDeclaredReason;
   teacher_business_id?: RescheduleCreateTeacherBusinessId;
   room_business_id?: RescheduleCreateRoomBusinessId;
   slot_business_ids?: string[];
