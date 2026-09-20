@@ -548,10 +548,36 @@ class PreferenceUpdate(BaseModel):
 
 
 class PreferenceTransition(BaseModel):
-    target_status: Literal["confirmed", "rejected", "expired"]
+    """状态迁移（action=transition，默认）或授权试用（action=authorize_trial）。
+
+    三态拆分（MEM-C1）：授权试用只对 probation 条目可用，条目保持 probation，
+    以 trial_authorized + trial_until 参与小权重试用；采纳（confirmed）仍是正式生效路径。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["transition", "authorize_trial"] = "transition"
+    target_status: Literal["confirmed", "rejected", "expired"] | None = None
     # 红线①：induced_from_adjustment 条目传 hard 一律 422。
     target_modality: Literal["hard", "soft"] | None = None
+    trial_days: int = Field(default=30, ge=1, le=365)
     reason: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_action(self) -> PreferenceTransition:
+        if self.action == "transition" and self.target_status is None:
+            raise ValueError("target_status 不能为空")
+        if self.action == "authorize_trial" and self.target_status is not None:
+            raise ValueError("授权试用不改变状态，请勿传 target_status")
+        return self
+
+
+class PreferenceConvertRequest(BaseModel):
+    """把 hard 条目转成正式规则。induced 来源必须显式勾选确认（红线①的兜底）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed_conversion: bool = False
 
 
 class PreferenceResponse(ORMModel):
@@ -569,6 +595,8 @@ class PreferenceResponse(ORMModel):
     status: str
     valid_from: date | None = None
     valid_until: date | None = None
+    trial_authorized: bool = False
+    trial_until: date | None = None
     provenance: dict[str, Any]
     created_at: datetime
     updated_at: datetime
@@ -639,6 +667,8 @@ class SolverRunResponse(ORMModel):
     priority_rule_ids: list[str]
     priority_explanations: list[str]
     explanation: SolverRunExplanation | None = None
+    # 创建任务时冻结的偏好记忆使用情况（结构同 snapshot.payload["memory"]）。
+    memory_usage: dict[str, Any] | None = None
     error_message: str | None
     created_at: datetime
     updated_at: datetime

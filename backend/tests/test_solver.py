@@ -1049,7 +1049,52 @@ def test_date_solver_applies_soft_preferred_room_rule() -> None:
     assert result["assignments"][0]["room_business_id"] == "R2"
 
 
-def test_date_solver_applies_soft_preferred_date_rule() -> None:
+def test_date_solver_soft_room_rule_respects_scope_date_window() -> None:
+    """记忆偏好的生效期必须同样约束教室类软规则（MEM-C1 修正 5）。
+
+    时段类软惩罚早就按 scope 日期窗口过滤，教室类漏了这一层：一条 9/30 失效的
+    avoid_room 偏好会继续把 10 月的课次推离原教室。
+    """
+    session = _course("C1", class_id="B1", room="R1", lesson_date="2026-09-07")
+    # 窗口只覆盖 9/15 之后：搜索范围（±3 天）全在窗口外，房间选择不受影响。
+    outside = solve_problem(
+        _date_payload(
+            [session],
+            teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+            date_window_days=3,
+            rules=[
+                _rule(
+                    "preferred_room",
+                    {"room_ids": ["R2"], "date_from": "2026-09-15", "date_to": "2026-09-30"},
+                    hardness="soft",
+                    weight=5,
+                )
+            ],
+        )
+    )
+    assert outside["model_status"] == "OPTIMAL"
+    assert outside["assignments"][0]["room_business_id"] == "R1"
+
+    # 窗口覆盖上课日期：同样的权重立刻把课次换到偏好教室。
+    inside = solve_problem(
+        _date_payload(
+            [session],
+            teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],
+            date_window_days=3,
+            rules=[
+                _rule(
+                    "preferred_room",
+                    {"room_ids": ["R2"], "date_from": "2026-09-01", "date_to": "2026-09-30"},
+                    hardness="soft",
+                    weight=5,
+                )
+            ],
+        )
+    )
+    assert inside["model_status"] == "OPTIMAL"
+    assert inside["assignments"][0]["room_business_id"] == "R2"
+
+
     payload = _date_payload(
         [_course("C1", class_id="B1", room="R1")],
         teachers=[{"business_id": "郑州考研英语教研组", "is_group": True}],

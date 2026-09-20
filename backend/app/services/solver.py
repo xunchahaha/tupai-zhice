@@ -140,17 +140,40 @@ def _calendar_user_ids(session: dict[str, Any], teachers: dict[str, dict[str, An
     )
 
 
+# 教室以外的主体必须「actor_type 与主体类型一致 AND 标识相等」才匹配（MEM-C1）：
+# 教师 001 与班级 001 是两个实体，不能因为 business_id 字符串相同互相吃掉约束。
+_ACTOR_MATCHERS: dict[str, str] = {
+    "teacher": "teacher",
+    "教师": "teacher",
+    "class": "class",
+    "cohort": "class",
+    "班级": "class",
+    "course": "course",
+    "course_session": "course",
+    "课程": "course",
+}
+
+
 def _session_matches_rule(session: dict[str, Any], room_id: str, rule: dict[str, Any]) -> bool:
     actor_ids = set(rule.get("actor_ids") or [])
     actor_type = str(rule.get("actor_type") or "").lower()
     if actor_type in {"room", "classroom", "教室"}:
         return not actor_ids or not room_id or room_id in actor_ids
+    if not actor_ids:
+        return True
+    kind = _ACTOR_MATCHERS.get(actor_type)
+    if kind == "teacher":
+        return bool(actor_ids.intersection(_session_teacher_ids(session)))
+    if kind == "class":
+        return session["class_business_id"] in actor_ids
+    if kind == "course":
+        return session["business_id"] in actor_ids
+    # actor_type 缺失/未知的存量规则（如自然语言解析产物）没有类型可对齐，退回
+    # 按课程/教师/班级标识匹配；类型明确的规则不再跨类型按 ID 字符串误配。
     return (
-        not actor_ids
-        or session["business_id"] in actor_ids
+        session["business_id"] in actor_ids
         or bool(actor_ids.intersection(_session_teacher_ids(session)))
         or session["class_business_id"] in actor_ids
-        or room_id in actor_ids
     )
 
 
@@ -884,15 +907,25 @@ def _solve_date_aware_grid(payload: dict[str, Any]) -> dict[str, Any]:
                         "forbidden_slot",
                         "unavailable_slot",
                     }:
-                        rule_slots = {str(item) for item in scope.get("slot_ids") or [] if item}
-                        if scope.get("slot_id"):
-                            rule_slots.add(str(scope["slot_id"]))
-                        matches = slot_id in rule_slots
-                        penalized = (
-                            not matches
-                            if constraint_type in {"fixed_slot", "preferred_slot"}
-                            else matches
+                        # scope 带日期窗口时（如记忆偏好的生效期），窗口外的课次日期
+                        # 不吃这条软惩罚——过期偏好不得约束窗口外的课次。
+                        rule_from = _parse_date(scope.get("date_from"))
+                        rule_to = _parse_date(scope.get("date_to"))
+                        in_window = (not rule_from or candidate_date >= rule_from) and (
+                            not rule_to or candidate_date <= rule_to
                         )
+                        if in_window:
+                            rule_slots = {
+                                str(item) for item in scope.get("slot_ids") or [] if item
+                            }
+                            if scope.get("slot_id"):
+                                rule_slots.add(str(scope["slot_id"]))
+                            matches = slot_id in rule_slots
+                            penalized = (
+                                not matches
+                                if constraint_type in {"fixed_slot", "preferred_slot"}
+                                else matches
+                            )
                     if penalized:
                         objective_terms.append(max(1, int(rule.get("weight") or 1)) * variable)
         if own_choices:
@@ -1287,8 +1320,16 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
                 if scope.get("slot_id"):
                     rule_slot_ids.add(str(scope["slot_id"]))
                 prefer_match = constraint_type in {"fixed_slot", "preferred_slot"}
+                rule_from = _parse_date(scope.get("date_from"))
+                rule_to = _parse_date(scope.get("date_to"))
                 penalties = [
-                    int((str(item["slot_business_id"]) in rule_slot_ids) != prefer_match)
+                    (
+                        0
+                        # scope 日期窗口之外的候选日期不吃惩罚（记忆偏好生效期语义）。
+                        if (rule_from and item["lesson_date"] < rule_from)
+                        or (rule_to and item["lesson_date"] > rule_to)
+                        else int((str(item["slot_business_id"]) in rule_slot_ids) != prefer_match)
+                    )
                     for item in options
                 ]
             if penalties is None:
@@ -1309,6 +1350,36 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
             original_room = str(session.get("original_room_business_id") or "")
             if original_room:
                 source_rooms.add(original_room)
+            # scope 带日期窗口的软规则（如记忆偏好的生效期）先把「选中的课次是否落在
+            # 窗口内」固定成一个布尔量，房间惩罚只在窗口内计入——过期偏好不得把求解
+            # 推离原房间。同一条规则对所有教室共用这一个量，模型体积只随规则数增长。
+            # 用规则在 matching_rules 里的下标做键，避免 business_id 意外重复时串味。
+            room_window_literals: dict[int, cp_model.IntVar] = {}
+            for rule_index, rule in enumerate(matching_rules):
+                if rule.get("hardness") != "soft":
+                    continue
+                if rule.get("constraint_type") not in {
+                    "fixed_room",
+                    "preferred_room",
+                    "forbidden_room",
+                    "unavailable_room",
+                }:
+                    continue
+                scope = rule.get("scope") or {}
+                rule_from = _parse_date(scope.get("date_from"))
+                rule_to = _parse_date(scope.get("date_to"))
+                if not rule_from and not rule_to:
+                    continue
+                flags = [
+                    int(
+                        (not rule_from or option["lesson_date"] >= rule_from)
+                        and (not rule_to or option["lesson_date"] <= rule_to)
+                    )
+                    for option in options
+                ]
+                literal = model.new_bool_var(f"in_window_{course_id}_{rule_index}")
+                model.add_element(choice_var, flags, literal)
+                room_window_literals[rule_index] = literal
             fixed_room_ids: set[str] | None = None
             forbidden_room_ids: set[str] = set()
             for rule in matching_rules:
@@ -1377,7 +1448,7 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
                         if outage_slots and option["slot_business_id"] not in outage_slots:
                             continue
                         model.add(choice_var != option_index).only_enforce_if(selected)
-                for rule in matching_rules:
+                for rule_index, rule in enumerate(matching_rules):
                     if rule.get("hardness") != "soft":
                         continue
                     constraint_type = rule.get("constraint_type")
@@ -1391,7 +1462,16 @@ def _solve_date_aware(payload: dict[str, Any]) -> dict[str, Any]:
                     )
                     if penalized:
                         weight = max(1, int(rule.get("weight") or 1))
-                        objective_terms.append(weight * selected)
+                        window_literal = room_window_literals.get(rule_index)
+                        if window_literal is None:
+                            objective_terms.append(weight * selected)
+                        else:
+                            # 只在窗口内的课次上计惩罚：selected ∧ in_window。
+                            gated = model.new_bool_var(
+                                f"room_penalty_{course_id}_{room_id}_{rule_index}"
+                            )
+                            model.add_multiplication_equality(gated, [selected, window_literal])
+                            objective_terms.append(weight * gated)
                         secondary_upper_bound += weight
             if valid_room_choices:
                 model.add_exactly_one(valid_room_choices)

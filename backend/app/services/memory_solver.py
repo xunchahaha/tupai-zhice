@@ -1,10 +1,15 @@
 """记忆层（L1 偏好库）的纯逻辑：偏好编译进求解器 + 调课偏好挖掘候选。
 
-设计边界见 docs/roadmap/02-agent-memory.md §3。v1 只做两件事：
+设计边界见 docs/roadmap/02-agent-memory.md §3 与 §6（MEM-C1 修正）。职责：
 
-1. ``compile_preferences`` 把 confirmed/probation 且未过期的偏好条目翻译成
-   内部软规则对象，注入 solver 现有软约束管线（不新造求解项）。
-2. 挖掘候选的确定性统计与 AI 输出校验：同主体同类型调课 ≥2 次即产生候选，
+1. ``compile_memory_state`` 把偏好条目编译成可冻结的完整状态节点（条目快照、
+   编译后的内部软规则、逐条使用结果），创建求解任务时整体写入快照与
+   SolverRun.memory_usage——改记忆不影响在途求解的可复现性。
+2. 三态拆分（§6 修正 1）：只有 confirmed 条目与「教务授权试用且未到期」的
+   probation 条目进入求解输入；纯候选一律不进（无感采集，不无感改变排课）。
+3. 偏好库只管理软偏好（§6 修正 2）：modality=hard 的条目不再编译进求解，
+   逐条标记 hard_requires_conversion，由教务走 convert-to-rule 转正式 Rule。
+4. 挖掘候选的确定性统计与 AI 输出校验：同主体同类型调课 ≥2 次即产生候选，
    AI 未配置或失败时功能照常可用（优雅降级）。
 
 红线（与 API 层共同保证）：induced_from_adjustment 条目在本模块也只会以
@@ -17,10 +22,10 @@ import json
 from datetime import date, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import PreferenceEntry, RescheduleEvent
+from ..models import CourseSession, PreferenceEntry, RescheduleEvent
 from ..timezone import shanghai_now
 
 # 试用期条目在目标函数里的权重衰减系数（02 文档 §3.2：先观察，不打扰）。
@@ -30,8 +35,24 @@ MINED_DEFAULT_CONFIDENCE = 0.5
 MINED_DEFAULT_WEIGHT = 40
 # 挖掘扫描的近期调课事件上限：偏好量级是数百条，事件回看窗口不需要全量。
 MINING_EVENT_LIMIT = 200
-# 创建偏好未显式给有效期时的默认时长（红线②：可空但创建 API 默认 +180 天）。
+# 创建偏好未显式给有效期时的默认时长（红线②：可空但创建 API 默认 +180 天；
+# MEM-C1 起仅在方案内查不到任何上课日期时才回落到它）。
 DEFAULT_VALIDITY_DAYS = 180
+
+# 编译器版本：随冻结的 memory 节一起落快照，用于解释「这版课表是哪版编译器排的」。
+MEMORY_COMPILER_VERSION = 2
+
+# 逐条使用结果枚举（§6 修正 2/6）：随 memory 节冻结，解释层与前端按它展示
+# 「已应用 X / 未使用 Y 及原因」。
+MEMORY_OUTCOMES = (
+    "applied",
+    "not_authorized",
+    "expired",
+    "unsupported_predicate",
+    "converted_to_rule",
+    "hard_requires_conversion",
+    "compile_error",
+)
 
 SUBJECT_TYPES = ("teacher", "classroom", "cohort", "course")
 PREFERENCE_STATUSES = ("probation", "confirmed", "rejected", "expired")
@@ -47,6 +68,24 @@ PREDICATE_SOLVER_PATHS: dict[str, dict[str, Any]] = {
 }
 COMPILE_OPEN_PREDICATES = frozenset(PREDICATE_SOLVER_PATHS)
 ALL_PREDICATES = frozenset({*COMPILE_OPEN_PREDICATES, "max_daily_load"})
+
+# convert-to-rule（§6 修正 2）：hard 偏好转正式规则时谓词 → constraint_type 的对齐。
+# prefer_* 的「硬化」对应 fixed_*（必须落在其中）；forbidden 走原语义；
+# consecutive_sessions / max_daily_load 没有 hard 路径，不开放转换（API 层 422）。
+PREFERENCE_RULE_KINDS: dict[str, str] = {
+    "avoid_slot": "forbidden_slot",
+    "avoid_room": "forbidden_room",
+    "prefer_slot": "fixed_slot",
+    "prefer_room": "fixed_room",
+}
+
+# 正式规则的 actor_type 用 constraint-catalog 口径（cohort 记 class）。
+RULE_ACTOR_TYPES: dict[str, str] = {
+    "teacher": "teacher",
+    "classroom": "room",
+    "cohort": "class",
+    "course": "course",
+}
 
 SUBJECT_ACTOR_TYPES = {
     "teacher": "teacher",
@@ -76,6 +115,17 @@ def default_valid_until(today: date | None = None) -> date:
     return base + timedelta(days=DEFAULT_VALIDITY_DAYS)
 
 
+def default_valid_until_for_scope(db: Session, schedule_set_id: str) -> date:
+    """创建偏好的默认有效期（§6 修正 5）：优先取本方案主数据里最大的上课日期，
+    让「本学期偏好」天然随学期失效；方案内没有任何课次时回落 +180 天。"""
+    max_date = db.scalar(
+        select(func.max(CourseSession.lesson_date)).where(
+            CourseSession.schedule_set_id == schedule_set_id
+        )
+    )
+    return max_date or default_valid_until()
+
+
 def normalized_constraint(constraint: dict[str, Any] | None) -> str:
     return json.dumps(constraint or {}, ensure_ascii=False, sort_keys=True)
 
@@ -84,8 +134,15 @@ def _is_expired(entry: PreferenceEntry, today: date) -> bool:
     return entry.valid_until is not None and entry.valid_until < today
 
 
+def trial_active(entry: PreferenceEntry, today: date) -> bool:
+    """probation 条目是否处于「授权试用」有效期（三态中的「授权试用」态）。"""
+    if entry.status != "probation" or not entry.trial_authorized:
+        return False
+    return entry.trial_until is None or entry.trial_until >= today
+
+
 def effective_weight(entry: PreferenceEntry) -> float:
-    """entry.weight × 状态衰减 × 置信度；确认条目不打折。"""
+    """entry.weight × 状态衰减 × 置信度；确认条目不打折，授权试用按试用期衰减。"""
     decay = 1.0 if entry.status == "confirmed" else PROBATION_WEIGHT_DECAY
     return float(entry.weight) * decay * float(entry.confidence or 0.0)
 
@@ -103,6 +160,13 @@ def _entry_to_rule(entry: PreferenceEntry) -> dict[str, Any] | None:
     for key in ("date_from", "date_to", "minimum_consecutive"):
         if constraint.get(key) is not None:
             scope[key] = constraint[key]
+    # §6 修正 5：条目的生效日期窗口进入规则 scope——软惩罚只作用于 lesson_date
+    # 落在窗口内的课次（date-aware 求解路径按 scope 日期过滤）。登记状态的过期
+    # 判断仍按「今天 vs valid_until」，但作用范围由这个窗口决定。
+    if entry.valid_from is not None:
+        scope["date_from"] = entry.valid_from.isoformat()
+    if entry.valid_until is not None:
+        scope["date_to"] = entry.valid_until.isoformat()
     return {
         "business_id": f"MEMORY-{entry.id}",
         "actor_type": SUBJECT_ACTOR_TYPES.get(entry.subject_type, entry.subject_type),
@@ -120,8 +184,57 @@ def _entry_to_rule(entry: PreferenceEntry) -> dict[str, Any] | None:
     }
 
 
-def compile_preferences(db: Session, schedule_set_id: str) -> list[dict[str, Any]]:
-    """把活跃偏好编译为内部软规则对象（可直接并入 solver payload 的 rules）。"""
+def _entry_snapshot(entry: PreferenceEntry) -> dict[str, Any]:
+    """条目原文字段快照：冻结进 memory 节，事后改/停记忆不影响历史求解的复现。"""
+    return {
+        "id": entry.id,
+        "subject_type": entry.subject_type,
+        "subject_id": entry.subject_id,
+        "predicate": entry.predicate,
+        "constraint": dict(entry.constraint or {}),
+        "modality": entry.modality,
+        "confidence": float(entry.confidence or 0.0),
+        "source": entry.source,
+        "evidence": list(entry.evidence or []),
+        "weight": int(entry.weight),
+        "status": entry.status,
+        "valid_from": entry.valid_from.isoformat() if entry.valid_from else None,
+        "valid_until": entry.valid_until.isoformat() if entry.valid_until else None,
+        "trial_authorized": bool(entry.trial_authorized),
+        "trial_until": entry.trial_until.isoformat() if entry.trial_until else None,
+        "provenance": dict(entry.provenance or {}),
+    }
+
+
+def _entry_outcome(entry: PreferenceEntry, today: date) -> tuple[str, str]:
+    """逐条判定使用结果，返回 (outcome, detail)。判据顺序即优先级。"""
+    if entry.modality == "hard":
+        # §6 修正 2：偏好库只管理软偏好。已转正式规则的标记回链，未转的提示教务
+        # 走 convert-to-rule；两条路径都不再直接进求解。
+        rule_id = (entry.provenance or {}).get("rule_id")
+        if rule_id:
+            return "converted_to_rule", f"已转为正式规则 {rule_id}"
+        return "hard_requires_conversion", "硬偏好需经教务转为正式规则后才会参与求解"
+    if _is_expired(entry, today):
+        until = entry.valid_until
+        return "expired", f"有效期至 {until.isoformat() if until else '?'}，已过期作废"
+    if entry.status == "probation" and not trial_active(entry, today):
+        if entry.trial_authorized and entry.trial_until is not None:
+            return "expired", f"授权试用已于 {entry.trial_until.isoformat()} 到期"
+        return "not_authorized", "待确认候选未经采纳或授权试用，不进入求解输入"
+    if entry.predicate not in COMPILE_OPEN_PREDICATES:
+        return "unsupported_predicate", "当前版本没有该谓词的求解路径，仅登记不编译"
+    return "applied", ""
+
+
+def compile_memory_state(db: Session, schedule_set_id: str) -> dict[str, Any]:
+    """编译偏好记忆并产出可冻结的 memory 节点（§6 修正 6）。
+
+    创建求解任务时调用一次，整体写入 DataSnapshot.payload["memory"] 与
+    SolverRun.memory_usage；执行路径只从快照读已编译规则，不再现场读库。
+    本函数不做写库操作；单条编译异常降级为该条 compile_error，整体异常由
+    调用方兜底为 status=compile_failed（求解照常，解释层显式提示）。
+    """
     today = shanghai_now().date()
     entries = list(
         db.scalars(
@@ -130,17 +243,72 @@ def compile_preferences(db: Session, schedule_set_id: str) -> list[dict[str, Any
                 PreferenceEntry.schedule_set_id == schedule_set_id,
                 PreferenceEntry.status.in_(["confirmed", "probation"]),
             )
-            .order_by(PreferenceEntry.created_at)
+            .order_by(PreferenceEntry.created_at, PreferenceEntry.id)
         )
     )
     rules: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = []
     for entry in entries:
-        if _is_expired(entry, today):
-            continue
-        rule = _entry_to_rule(entry)
-        if rule is not None:
-            rules.append(rule)
-    return rules
+        outcome, detail = _entry_outcome(entry, today)
+        if outcome == "applied":
+            try:
+                rule = _entry_to_rule(entry)
+            except Exception as exc:  # noqa: BLE001 - 单条坏数据不拖垮整轮编译
+                outcome, detail = "compile_error", str(exc)
+            else:
+                if rule is None:
+                    outcome = "unsupported_predicate"
+                    detail = "当前版本没有该谓词的求解路径，仅登记不编译"
+                else:
+                    detail = f"以权重 {rule['weight']} 参与求解"
+                    rules.append(rule)
+        outcomes.append(
+            {
+                "entry_id": entry.id,
+                "subject_type": entry.subject_type,
+                "subject_id": entry.subject_id,
+                "predicate": entry.predicate,
+                "status": entry.status,
+                "outcome": outcome,
+                "detail": detail,
+            }
+        )
+    return {
+        "status": "ok",
+        "compiler_version": MEMORY_COMPILER_VERSION,
+        "compiled_at": shanghai_now().isoformat(),
+        "entries": [_entry_snapshot(entry) for entry in entries],
+        "compiled_rules": rules,
+        "outcomes": outcomes,
+        "summary": {
+            "considered": len(entries),
+            "applied": len(rules),
+            "unused": len(entries) - len(rules),
+        },
+    }
+
+
+def compile_failed_state(detail: str) -> dict[str, Any]:
+    """编译整体失败时的 memory 节点：求解照常进行，解释层必须显式提示。"""
+    return {
+        "status": "compile_failed",
+        "compiler_version": MEMORY_COMPILER_VERSION,
+        "compiled_at": shanghai_now().isoformat(),
+        "detail": detail,
+        "entries": [],
+        "compiled_rules": [],
+        "outcomes": [],
+        "summary": {"considered": 0, "applied": 0, "unused": 0},
+    }
+
+
+def compile_preferences(db: Session, schedule_set_id: str) -> list[dict[str, Any]]:
+    """把活跃偏好编译为内部软规则对象（可直接并入 solver payload 的 rules）。
+
+    只含 confirmed 与「授权试用且未到期」的 probation 条目；纯候选、已过期、
+    hard、暂无求解路径的谓词一律不出现（完整判定见 compile_memory_state）。
+    """
+    return list(compile_memory_state(db, schedule_set_id)["compiled_rules"])
 
 
 def mining_event_view(event: RescheduleEvent) -> dict[str, Any]:

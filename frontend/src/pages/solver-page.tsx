@@ -16,6 +16,7 @@ import { Select } from "@/components/ui/select";
 import { asArray, errorMessage, formatRoom, formatSlot } from "@/lib/format";
 import { type Interpretation, streamInterpretInstruction } from "@/lib/interpret-stream";
 import { diffKindLabel, modelStatusLabel, statusLabel } from "@/lib/labels";
+import { type MemoryOutcome, type MemoryUsageSnapshot, memoryHeadline, memoryOutcomeLabel } from "@/lib/memory-usage";
 import { preferredSchedule, scheduleForRun } from "@/lib/schedule";
 import { modelStatusTone, statusTone } from "@/lib/status";
 
@@ -222,7 +223,7 @@ export function SolverPage() {
         },
       });
       applyInterpretation(data);
-    } catch (streamError) {
+    } catch {
       // 用户主动取消不算失败，安静回到初始态等下一次解析。
       if (controller.signal.aborted) {
         setPhase("idle");
@@ -664,6 +665,42 @@ async function copyInstruction(value: string) {
   }
 }
 
+/** 偏好记忆使用情况（MEM-C1）：读创建任务时冻结的 memory_usage，不依赖解释生成。 */
+function MemoryUsageSection({ memory }: { memory: MemoryUsageSnapshot | null | undefined }) {
+  if (!memory?.status) return null;
+  const headline = memoryHeadline(memory);
+  if (!headline) return null;
+  const failed = memory.status === "compile_failed";
+  const unused = (Array.isArray(memory.outcomes) ? memory.outcomes : []).filter(
+    (item: MemoryOutcome) => item.outcome !== "applied",
+  );
+  return (
+    <section className="mt-3 rounded-md border border-zinc-200 bg-zinc-50/60 px-4 py-3 text-sm">
+      <div className="text-xs font-medium text-zinc-500">偏好记忆使用情况</div>
+      {failed ? (
+        <p className="mt-1.5 border-l-2 border-red-400 bg-red-50 px-3 py-2 text-red-900">
+          {headline}
+          {memory.detail ? `（${memory.detail}）` : ""}。本次求解照常完成，但未参考任何偏好记忆；修复记忆层后重新求解即可带上偏好。
+        </p>
+      ) : (
+        <div className="mt-1.5">
+          <p className="text-zinc-800">{headline}</p>
+          {unused.length ? (
+            <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-zinc-600">
+              {unused.map((item) => (
+                <li key={`${item.entry_id}-${item.outcome}`}>
+                  {item.subject_type} {item.subject_id} {item.predicate}：{memoryOutcomeLabel(item.outcome)}
+                  {item.detail ? `——${item.detail}` : ""}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ExplanationPanel({ run, onUseInstruction }: { run: SolverRunResponse | null; onUseInstruction?: (value: string) => void }) {
   const client = useQueryClient();
   const [explanation, setExplanation] = useState<SolverRunExplanationDetail | null>(null);
@@ -739,6 +776,7 @@ function ExplanationPanel({ run, onUseInstruction }: { run: SolverRunResponse | 
           求解已结束，AI 正在自动解读这次结果……
         </div>
       ) : null}
+      <MemoryUsageSection memory={run.memory_usage as MemoryUsageSnapshot | null | undefined} />
       {!explanation && !analyzing && failure ? (
         <div className="mt-3 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           自动解析没能完成：{failure}。求解结果本身不受影响，可点右上角「重新解析」重试。

@@ -3731,6 +3731,80 @@
         }
       }
     },
+    "/api/v1/memory/preferences/{entry_id}/convert-to-rule": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Convert Preference To Rule",
+        "description": "把 hard 偏好条目转成正式规则（MEM-C1 修正 2）：偏好库只管理软偏好。\n\n正式规则 hardness=hard、kind 对齐 constraint-catalog 类型；provenance 经\nsource_doc 回链 memory:<entry_id>。条目 transition 到 expired 并记录 rule_id，\n过期作废不删除，审计链保留。induced 来源必须显式传 confirmed_conversion=true\n（红线①的兜底：归纳出的偏好不得在无人确认时变成硬规则）。",
+        "operationId": "convert_preference_to_rule_api_v1_memory_preferences__entry_id__convert_to_rule_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Entry Id"
+            }
+          },
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreferenceConvertRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/memory/mining-runs": {
       "post": {
         "tags": [
@@ -9830,6 +9904,19 @@
         ],
         "title": "PasswordChange"
       },
+      "PreferenceConvertRequest": {
+        "properties": {
+          "confirmed_conversion": {
+            "type": "boolean",
+            "title": "Confirmed Conversion",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "PreferenceConvertRequest",
+        "description": "把 hard 条目转成正式规则。induced 来源必须显式勾选确认（红线①的兜底）。"
+      },
       "PreferenceCreate": {
         "properties": {
           "subject_type": {
@@ -10011,6 +10098,23 @@
             ],
             "title": "Valid Until"
           },
+          "trial_authorized": {
+            "type": "boolean",
+            "title": "Trial Authorized",
+            "default": false
+          },
+          "trial_until": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trial Until"
+          },
           "provenance": {
             "additionalProperties": true,
             "type": "object",
@@ -10049,12 +10153,28 @@
       },
       "PreferenceTransition": {
         "properties": {
-          "target_status": {
+          "action": {
             "type": "string",
             "enum": [
-              "confirmed",
-              "rejected",
-              "expired"
+              "transition",
+              "authorize_trial"
+            ],
+            "title": "Action",
+            "default": "transition"
+          },
+          "target_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "confirmed",
+                  "rejected",
+                  "expired"
+                ]
+              },
+              {
+                "type": "null"
+              }
             ],
             "title": "Target Status"
           },
@@ -10073,6 +10193,13 @@
             ],
             "title": "Target Modality"
           },
+          "trial_days": {
+            "type": "integer",
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "title": "Trial Days",
+            "default": 30
+          },
           "reason": {
             "anyOf": [
               {
@@ -10086,11 +10213,10 @@
             "title": "Reason"
           }
         },
+        "additionalProperties": false,
         "type": "object",
-        "required": [
-          "target_status"
-        ],
-        "title": "PreferenceTransition"
+        "title": "PreferenceTransition",
+        "description": "状态迁移（action=transition，默认）或授权试用（action=authorize_trial）。\n\n三态拆分（MEM-C1）：授权试用只对 probation 条目可用，条目保持 probation，\n以 trial_authorized + trial_until 参与小权重试用；采纳（confirmed）仍是正式生效路径。"
       },
       "PreferenceUpdate": {
         "properties": {
@@ -12341,6 +12467,18 @@
               }
             ]
           },
+          "memory_usage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Usage"
+          },
           "error_message": {
             "anyOf": [
               {
@@ -12630,6 +12768,18 @@
                 "type": "null"
               }
             ]
+          },
+          "memory_usage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Usage"
           },
           "error_message": {
             "anyOf": [

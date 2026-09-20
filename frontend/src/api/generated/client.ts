@@ -85,6 +85,7 @@ import type {
   OverviewAnalyticsResponse,
   OverviewResponse,
   PasswordChange,
+  PreferenceConvertRequest,
   PreferenceCreate,
   PreferenceResponse,
   PreferenceTransition,
@@ -4808,6 +4809,78 @@ export const useTransitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost 
       > => {
 
       const mutationOptions = getTransitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * 把 hard 偏好条目转成正式规则（MEM-C1 修正 2）：偏好库只管理软偏好。
+
+正式规则 hardness=hard、kind 对齐 constraint-catalog 类型；provenance 经
+source_doc 回链 memory:<entry_id>。条目 transition 到 expired 并记录 rule_id，
+过期作废不删除，审计链保留。induced 来源必须显式传 confirmed_conversion=true
+（红线①的兜底：归纳出的偏好不得在无人确认时变成硬规则）。
+ * @summary Convert Preference To Rule
+ */
+export const convertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost = (
+    entryId: string,
+    preferenceConvertRequest: PreferenceConvertRequest,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<RuleResponse>(
+      {url: `/api/v1/memory/preferences/${entryId}/convert-to-rule`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: preferenceConvertRequest, signal
+    },
+      );
+    }
+  
+
+
+export const getConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof convertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost>>, TError,{entryId: string;data: PreferenceConvertRequest}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof convertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost>>, TError,{entryId: string;data: PreferenceConvertRequest}, TContext> => {
+
+const mutationKey = ['convertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof convertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost>>, {entryId: string;data: PreferenceConvertRequest}> = (props) => {
+          const {entryId,data} = props ?? {};
+
+          return  convertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost(entryId,data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePostMutationResult = NonNullable<Awaited<ReturnType<typeof convertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost>>>
+    export type ConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePostMutationBody = PreferenceConvertRequest
+    export type ConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePostMutationError = HTTPValidationError
+
+    /**
+ * @summary Convert Preference To Rule
+ */
+export const useConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof convertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost>>, TError,{entryId: string;data: PreferenceConvertRequest}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof convertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost>>,
+        TError,
+        {entryId: string;data: PreferenceConvertRequest},
+        TContext
+      > => {
+
+      const mutationOptions = getConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePostMutationOptions(options);
 
       return useMutation(mutationOptions, queryClient);
     }

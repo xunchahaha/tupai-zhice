@@ -131,6 +131,7 @@ from .schemas import (
     OverviewAnalyticsResponse,
     OverviewResponse,
     PasswordChange,
+    PreferenceConvertRequest,
     PreferenceCreate,
     PreferenceResponse,
     PreferenceTransition,
@@ -225,8 +226,14 @@ from .services.memory_solver import (
     MINED_DEFAULT_CONFIDENCE,
     MINED_DEFAULT_WEIGHT,
     MINING_EVENT_LIMIT,
+    PREDICATE_SOLVER_PATHS,
+    PREFERENCE_RULE_KINDS,
     PREFERENCE_TRANSITIONS,
+    RULE_ACTOR_TYPES,
+    compile_failed_state,
+    compile_memory_state,
     default_valid_until,
+    default_valid_until_for_scope,
     deterministic_preference_candidates,
     mining_event_view,
     normalized_constraint,
@@ -3408,7 +3415,9 @@ def create_preference(
         # 显式声明的偏好无需再走确认队列；挖掘候选才从 probation 起步。
         status="confirmed",
         valid_from=today,
-        valid_until=payload.valid_until or default_valid_until(today),
+        # MEM-C1：默认有效期优先取本方案主数据最大上课日期（随学期失效），
+        # 方案内没有任何课次时回落「今天 + 180 天」。
+        valid_until=payload.valid_until or default_valid_until_for_scope(db, scope.id),
         provenance={
             "origin": "api",
             "created_by": user.id,
@@ -3468,6 +3477,35 @@ def transition_preference(
     scope: SchedulerScope,
 ) -> PreferenceEntry:
     entry = get_scoped_or_404(db, PreferenceEntry, entry_id, scope)
+    if payload.action == "authorize_trial":
+        # 三态拆分（MEM-C1）：授权试用只对 probation 条目可用；条目保持 probation，
+        # 以小权重参与求解，trial_until 到期自动退出。这是教务显式动作，不是自动行为。
+        if entry.status != "probation":
+            raise HTTPException(
+                status_code=409, detail=f"{entry.status} 状态的偏好无需授权试用"
+            )
+        today = shanghai_now().date()
+        entry.trial_authorized = True
+        entry.trial_until = today + timedelta(days=payload.trial_days)
+        entry.provenance = {
+            **(entry.provenance or {}),
+            "trial_authorized_by": user.id,
+            "trial_authorized_at": shanghai_now().isoformat(),
+            "trial_days": payload.trial_days,
+            "trial_reason": payload.reason,
+        }
+        audit(
+            db,
+            user,
+            "authorize_trial",
+            "preference_entry",
+            entry.id,
+            payload.model_dump(mode="json"),
+        )
+        db.commit()
+        db.refresh(entry)
+        return entry
+    assert payload.target_status is not None  # schema validator 已保证
     if payload.target_status not in PREFERENCE_TRANSITIONS.get(entry.status, set()):
         raise HTTPException(
             status_code=409,
@@ -3494,6 +3532,103 @@ def transition_preference(
     db.commit()
     db.refresh(entry)
     return entry
+
+
+@router.post(
+    "/memory/preferences/{entry_id}/convert-to-rule",
+    response_model=RuleResponse,
+    status_code=201,
+    tags=["memory"],
+)
+def convert_preference_to_rule(
+    entry_id: str,
+    payload: PreferenceConvertRequest,
+    db: Db,
+    user: Admin,
+    scope: SchedulerScope,
+) -> Rule:
+    """把 hard 偏好条目转成正式规则（MEM-C1 修正 2）：偏好库只管理软偏好。
+
+    正式规则 hardness=hard、kind 对齐 constraint-catalog 类型；provenance 经
+    source_doc 回链 memory:<entry_id>。条目 transition 到 expired 并记录 rule_id，
+    过期作废不删除，审计链保留。induced 来源必须显式传 confirmed_conversion=true
+    （红线①的兜底：归纳出的偏好不得在无人确认时变成硬规则）。
+    """
+    entry = get_scoped_or_404(db, PreferenceEntry, entry_id, scope)
+    if entry.modality != "hard":
+        raise HTTPException(status_code=409, detail="只有 modality=hard 的偏好需要转正式规则")
+    if entry.status not in {"probation", "confirmed"}:
+        raise HTTPException(status_code=409, detail=f"{entry.status} 状态的偏好不能转换")
+    if entry.source == "induced_from_adjustment" and not payload.confirmed_conversion:
+        raise HTTPException(
+            status_code=422,
+            detail="从调课归纳的偏好转硬规则必须显式确认：请传 confirmed_conversion=true",
+        )
+    path = PREDICATE_SOLVER_PATHS.get(entry.predicate)
+    kind = PREFERENCE_RULE_KINDS.get(entry.predicate)
+    if path is None or kind is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"谓词 {entry.predicate} 没有对齐的硬规则类型，不能转换为正式规则",
+        )
+    constraint = entry.constraint or {}
+    scope_key = path.get("scope_key")
+    raw_values = constraint.get(scope_key) if scope_key else None
+    values = [str(item) for item in raw_values or [] if item]
+    if kind in {"fixed_slot", "fixed_room"}:
+        # 「偏好」硬化为「固定」后语义是必须落在其中：只能有一个目标，scope
+        # 用目录的单数键（slot_id/room_id），与两条求解路径的读取口径一致。
+        if len(values) != 1:
+            raise HTTPException(
+                status_code=422,
+                detail="偏好转固定类型必须恰好指定一个时段/教室；请先在偏好里修订约束",
+            )
+        rule_scope: dict[str, Any] = {"slot_id" if kind == "fixed_slot" else "room_id": values[0]}
+    else:
+        if not values:
+            raise HTTPException(status_code=422, detail="偏好约束里没有可转换的时段/教室")
+        rule_scope = {scope_key: values} if scope_key else {}
+    # 生效日期窗口随转换保留（审计与未来硬规则日期窗的依据）；当前硬规则路径
+    # 暂不按日期过滤，求解范围仍由方案与规则范围决定。
+    if entry.valid_from is not None:
+        rule_scope["date_from"] = entry.valid_from.isoformat()
+    if entry.valid_until is not None:
+        rule_scope["date_to"] = entry.valid_until.isoformat()
+    rule = Rule(
+        schedule_set_id=scope.id,
+        business_id=f"MEMRULE-{entry.id}",
+        source_text=f"由记忆偏好转换：{entry.subject_type} {entry.subject_id} {entry.predicate}"
+        + (f"（{entry.provenance.get('note')}）" if (entry.provenance or {}).get("note") else ""),
+        actor_type=RULE_ACTOR_TYPES.get(entry.subject_type, entry.subject_type),
+        actor_ids=[entry.subject_id],
+        constraint_type=kind,
+        scope=rule_scope,
+        hardness="hard",
+        weight=None,
+        source_doc=f"memory:{entry.id}",
+        confidence=float(entry.confidence or 0.0),
+        status="active",
+        approved_by=user.id,
+    )
+    db.add(rule)
+    entry.status = "expired"
+    entry.provenance = {
+        **(entry.provenance or {}),
+        "converted_to_rule_by": user.id,
+        "converted_to_rule_at": shanghai_now().isoformat(),
+        "rule_id": rule.business_id,
+    }
+    audit(
+        db,
+        user,
+        "convert_to_rule",
+        "preference_entry",
+        entry.id,
+        {"rule_business_id": rule.business_id, **payload.model_dump(mode="json")},
+    )
+    db.commit()
+    db.refresh(rule)
+    return rule
 
 
 def _persist_mining_candidates(
@@ -3674,7 +3809,15 @@ def create_solver_run(
     run_type: str = "initial",
     extra: dict[str, Any] | None = None,
 ) -> SolverRun:
-    snapshot = create_snapshot(db, user_id, schedule_set_id)
+    # MEM-C1（§6 修正 6）：创建任务时即编译偏好记忆并冻结——快照带 memory 节，
+    # run 落 memory_usage；执行路径只读快照，改记忆不影响在途求解的可复现性。
+    # 编译整体失败不拦截排课主链路：memory 节标 compile_failed，解释层显式提示。
+    try:
+        memory_state = compile_memory_state(db, schedule_set_id)
+    except Exception as exc:  # noqa: BLE001 - 任何记忆层故障都不应拦下课表求解
+        logger.exception("偏好记忆编译失败，本次求解将不带偏好进行")
+        memory_state = compile_failed_state(str(exc))
+    snapshot = create_snapshot(db, user_id, schedule_set_id, memory=memory_state)
     payload: dict[str, Any] = {
         "time_limit_seconds": request.time_limit_seconds,
         "change_weight": getattr(request, "change_weight", 100000),
@@ -3723,6 +3866,7 @@ def create_solver_run(
         run_type=run_type,
         status="queued",
         request_payload=payload,
+        memory_usage=memory_state,
         created_by=user_id,
     )
     db.add(run)

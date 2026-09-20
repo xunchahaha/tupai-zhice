@@ -189,3 +189,43 @@ describe("SolverPage interpret phases", () => {
     expect(screen.getByRole("button", { name: "让 AI 解析排课指令" })).toBeDisabled();
   });
 });
+
+describe("SolverPage preference memory usage (MEM-C1)", () => {
+  afterEach(cleanup);
+  beforeEach(() => {
+    mocks.diff.mockClear();
+    mocks.runs = [];
+    mocks.schedules = [];
+  });
+
+  it("shows the frozen memory usage summary with per-entry outcomes", async () => {
+    mocks.runs = [{
+      id: "run-mem",
+      status: "completed",
+      model_status: "OPTIMAL",
+      memory_usage: {
+        status: "ok",
+        summary: { considered: 2, applied: 1, unused: 1 },
+        outcomes: [
+          { entry_id: "e1", subject_type: "teacher", subject_id: "T9", predicate: "avoid_slot", outcome: "applied", detail: "以权重 30 参与求解" },
+          { entry_id: "e2", subject_type: "teacher", subject_id: "T8", predicate: "prefer_slot", outcome: "not_authorized", detail: "待确认候选未经采纳或授权试用，不进入求解输入" },
+        ],
+      },
+    }];
+    renderPage();
+    expect(await screen.findByText("偏好记忆使用情况")).toBeInTheDocument();
+    expect(screen.getByText(/本次参考 2 条偏好记忆（已应用 1 \/ 未使用 1）/)).toBeInTheDocument();
+    expect(screen.getByText(/待确认候选未经采纳或授权试用，不进入求解输入/)).toBeInTheDocument();
+  });
+
+  it("states explicitly that preferences were not used when compilation failed", async () => {
+    mocks.runs = [{
+      id: "run-fail",
+      status: "completed",
+      model_status: "OPTIMAL",
+      memory_usage: { status: "compile_failed", detail: "模拟编译崩溃" },
+    }];
+    renderPage();
+    expect(await screen.findByText(/本次未使用偏好记忆：编译失败（模拟编译崩溃）/)).toBeInTheDocument();
+  });
+});

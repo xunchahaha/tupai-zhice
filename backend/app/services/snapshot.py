@@ -198,9 +198,20 @@ def build_snapshot_payload(db: Session, schedule_set_id: str) -> dict[str, objec
 
 
 def create_snapshot(
-    db: Session, created_by: str | None, schedule_set_id: str = "default"
+    db: Session,
+    created_by: str | None,
+    schedule_set_id: str = "default",
+    memory: dict[str, Any] | None = None,
 ) -> DataSnapshot:
+    """创建主数据快照。
+
+    ``memory`` 是编译好的偏好记忆节点（services.memory_solver.compile_memory_state
+    的产物，MEM-C1）：随主数据一起进 checksum——同一份数据 + 不同记忆 = 不同快照，
+    修改/停用记忆后重跑必然产生新快照，历史求解永远能复现当时的偏好输入。
+    """
     payload = build_snapshot_payload(db, schedule_set_id)
+    if memory is not None:
+        payload["memory"] = memory
     serialized = json.dumps(
         payload,
         ensure_ascii=False,

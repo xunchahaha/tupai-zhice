@@ -394,6 +394,9 @@ class SolverRun(TimestampMixin, Base):
     priority_explanations: Mapped[list[str]] = mapped_column(JSON, default=list)
     # 求解结果的人话解释：确定性事实包由代码算，措辞由 AI 写，生成后落库避免重复计费。
     explanation: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # 偏好记忆使用情况（MEM-C1）：创建任务时即编译并冻结，求解与解释只读这里，
+    # 改记忆不影响在途求解的可复现性。结构与 snapshot.payload["memory"] 一致。
+    memory_usage: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
@@ -488,9 +491,11 @@ class PreferenceEntry(TimestampMixin, Base):
     """L1 声明性记忆：老师/教室/班级/课程的需求与习惯（docs/roadmap/02 §3.1）。
 
     subject 是多态主体（teacher/classroom/cohort/course），存业务标识而非外键——
-    求解器与调课链路全部以 business_id 定位主体。两条红线写死在使用方：
-    ① induced_from_adjustment 条目永不升硬约束（transition 端点 422）；
-    ② induced 条目初始 status 恒为 probation（挖掘端点负责）。
+    求解器与调课链路全部以 business_id 定位主体。三条红线写死在使用方：
+    ① induced_from_adjustment 条目永不自动升硬约束（转正式 Rule 须显式确认）；
+    ② induced 条目初始 status 恒为 probation（挖掘端点负责）；
+    ③ 三态拆分（MEM-C1）：probation 且未授权试用（trial_authorized=False）的候选
+    一律不进求解输入——无感采集，不无感改变排课。
     """
 
     __tablename__ = "preference_entries"
@@ -519,6 +524,10 @@ class PreferenceEntry(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(20), default="probation", index=True)
     valid_from: Mapped[date | None] = mapped_column(Date, nullable=True)
     valid_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 三态拆分（MEM-C1）：教务显式「授权试用」后才允许 probation 条目以小权重
+    # 参与求解，trial_until 到期自动退出；纯候选永远不影响排课。
+    trial_authorized: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    trial_until: Mapped[date | None] = mapped_column(Date, nullable=True)
     provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 

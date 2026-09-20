@@ -8,6 +8,7 @@
 import type { PreferenceResponseConstraint } from './preferenceResponseConstraint';
 import type { PreferenceResponseValidFrom } from './preferenceResponseValidFrom';
 import type { PreferenceResponseValidUntil } from './preferenceResponseValidUntil';
+import type { PreferenceResponseTrialUntil } from './preferenceResponseTrialUntil';
 import type { PreferenceResponseProvenance } from './preferenceResponseProvenance';
 
 export interface PreferenceResponse {
@@ -25,6 +26,8 @@ export interface PreferenceResponse {
   status: string;
   valid_from?: PreferenceResponseValidFrom;
   valid_until?: PreferenceResponseValidUntil;
+  trial_authorized?: boolean;
+  trial_until?: PreferenceResponseTrialUntil;
   provenance: PreferenceResponseProvenance;
   created_at: string;
   updated_at: string;

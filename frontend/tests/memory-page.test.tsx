@@ -85,6 +85,26 @@ const entries = [
     created_at: "2026-08-30T01:00:00Z",
     updated_at: "2026-08-31T01:00:00Z",
   },
+  // MEM-C1：hard 条目走「转为硬规则」；偏好库只管软偏好。
+  {
+    id: "pref-hard",
+    schedule_set_id: "set-1",
+    subject_type: "classroom",
+    subject_id: "教室-301",
+    predicate: "avoid_room",
+    constraint: { room_ids: ["教室-301"] },
+    modality: "hard",
+    confidence: 0.9,
+    source: "admin_directive",
+    evidence: [],
+    weight: 60,
+    status: "confirmed",
+    valid_from: "2026-09-01",
+    valid_until: "2027-02-28",
+    provenance: { origin: "api" },
+    created_at: "2026-09-03T01:00:00Z",
+    updated_at: "2026-09-03T01:00:00Z",
+  },
 ];
 
 const miningResponse = { engine: "deterministic", events_scanned: 4, created: [{ ...entries[0] }, { ...entries[0], id: "pref-new" }], skipped_existing: 0 };
@@ -121,6 +141,17 @@ describe("MemoryPage", () => {
       if (config.url === "/api/v1/class-groups") return [];
       if (config.url === "/api/v1/course-sessions") return [];
       if (config.url === "/api/v1/time-slots") return [slot];
+      if (config.url === "/api/v1/solver-runs") {
+        return [{
+          id: "run-1",
+          status: "completed",
+          memory_usage: {
+            status: "ok",
+            summary: { considered: 1, applied: 1, unused: 0 },
+            outcomes: [{ entry_id: "pref-2", outcome: "applied", detail: "以权重 54 参与求解" }],
+          },
+        }];
+      }
       if (config.url === "/api/v1/memory/mining-runs") return miningResponse;
       if (config.url.startsWith("/api/v1/memory/preferences/")) return entries[0];
       return [];
@@ -140,9 +171,53 @@ describe("MemoryPage", () => {
     expect(screen.getByText("置信度 50%")).toBeVisible();
     expect(screen.getByText("来自 3 次调课")).toBeVisible();
     expect(screen.getByText("该教师多次在周三晚间调课")).toBeVisible();
-    // 全部偏好表同时渲染，已确认条目带「停用」操作。
-    expect(screen.getByText("301 教室")).toBeVisible();
-    expect(screen.getByRole("button", { name: "停用" })).toBeVisible();
+    // MEM-C1：候选在采纳或授权试用前不影响排课——页面文案必须如实承诺。
+    expect(screen.getByText(/待确认候选在您采纳或授权试用前不会影响排课/)).toBeVisible();
+    // 全部偏好表同时渲染：最近使用列来自最近求解任务的 memory_usage 反查。
+    expect(screen.getAllByText("301 教室").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByRole("button", { name: "停用" }).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("最近使用")).toBeVisible();
+    expect(screen.getByText("已应用")).toBeVisible();
+  });
+
+  it("authorizes a trial with the default 30 days and keeps the entry on probation", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "授权试用" }));
+    expect(screen.getByLabelText("试用天数")).toHaveValue(30);
+    await user.click(screen.getByRole("button", { name: "确认授权" }));
+
+    await waitFor(() =>
+      expect(mocks.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "/api/v1/memory/preferences/pref-1/transition",
+          method: "POST",
+          data: { action: "authorize_trial", trial_days: 30 },
+        }),
+      ),
+    );
+    expect(mocks.success).toHaveBeenCalledWith("已授权试用 30 天，试用期内以小权重参与排课");
+  });
+
+  it("converts a hard preference into a formal rule after explicit confirmation", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "转为硬规则" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("把这条硬偏好转成正式规则？");
+
+    await user.click(screen.getByRole("button", { name: "确认转换" }));
+    await waitFor(() =>
+      expect(mocks.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "/api/v1/memory/preferences/pref-hard/convert-to-rule",
+          method: "POST",
+          data: { confirmed_conversion: false },
+        }),
+      ),
+    );
+    expect(mocks.success).toHaveBeenCalledWith("已转为正式硬规则，原偏好条目归档为已失效");
   });
 
   it("adopts a candidate by calling the transition endpoint with confirmed", async () => {

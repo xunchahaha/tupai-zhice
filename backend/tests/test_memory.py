@@ -31,6 +31,7 @@ from app.models import (
 from app.services.ai import AIService
 from app.services.memory_solver import (
     DEFAULT_VALIDITY_DAYS,
+    compile_memory_state,
     compile_preferences,
     default_valid_until,
     deterministic_preference_candidates,
@@ -466,7 +467,10 @@ def test_declared_reason_round_trips_through_event_table(
 
 def test_compile_preferences_decay_expiry_and_unsupported_predicate() -> None:
     confirmed = _add_entry(subject_id="T-C1", weight=100, confidence=0.8)
-    probation = _add_entry(subject_id="T-P1", status="probation", weight=100, confidence=0.8)
+    unauthorized = _add_entry(subject_id="T-P1", status="probation", weight=100, confidence=0.8)
+    trial = _add_entry(
+        subject_id="T-P2", status="probation", trial_authorized=True, weight=100, confidence=0.8
+    )
     _add_entry(subject_id="T-X1", valid_until=shanghai_now().date() - timedelta(days=1))
     _add_entry(subject_id="T-R1", status="rejected")
     _add_entry(subject_id="T-M1", predicate="max_daily_load")
@@ -474,25 +478,28 @@ def test_compile_preferences_decay_expiry_and_unsupported_predicate() -> None:
     with SessionLocal() as db:
         rules = compile_preferences(db, "default")
     by_entry = {rule["memory_entry_id"]: rule for rule in rules}
+    subjects = {rule["actor_ids"][0] for rule in rules}
 
-    # weight × (confirmed?1.0:0.3) × confidence。
+    # weight × (confirmed?1.0:0.3) × confidence；确认条目全量权重。
     assert by_entry[confirmed.id]["weight"] == 80
     assert by_entry[confirmed.id]["memory_effective_weight"] == 80.0
-    assert effective_weight(probation) == pytest.approx(24.0)
-    assert by_entry[probation.id]["weight"] == 24
-    assert by_entry[probation.id]["hardness"] == "soft"
+    assert effective_weight(trial) == pytest.approx(24.0)
+    # 三态拆分（MEM-C1）：未授权试用不进求解输入；授权试用以试用期衰减权重进入。
+    assert unauthorized.id not in by_entry
+    assert by_entry[trial.id]["weight"] == 24
+    assert by_entry[trial.id]["hardness"] == "soft"
     assert by_entry[confirmed.id]["constraint_type"] == "forbidden_slot"
     assert by_entry[confirmed.id]["scope"] == {"slot_ids": ["S1"]}
     assert by_entry[confirmed.id]["business_id"] == f"MEMORY-{confirmed.id}"
 
     # 过期/拒绝/暂无求解路径的谓词不进目标函数。
-    subjects = {rule["actor_ids"][0] for rule in rules}
     assert "T-X1" not in subjects
     assert "T-R1" not in subjects
     assert "T-M1" not in subjects
 
     payload: dict[str, Any] = {"rules": [{"business_id": "RL-1"}]}
     with SessionLocal() as db:
+        payload["memory"] = compile_memory_state(db, "default")
         _attach_memory_preferences(payload, "default", db)
     assert payload["rules"][0]["business_id"] == "RL-1"
     assert any(rule.get("memory_entry_id") == confirmed.id for rule in payload["rules"])

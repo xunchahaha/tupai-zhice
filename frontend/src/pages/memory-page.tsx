@@ -1,16 +1,18 @@
 import { useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
-import { Check, Inbox, Pencil, Sparkles, X } from "lucide-react";
+import { Check, Inbox, Pencil, ShieldCheck, Sparkles, Timer, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import {
   getListPreferencesApiV1MemoryPreferencesGetQueryKey,
+  useConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost,
   useCreateMemoryMiningRunApiV1MemoryMiningRunsPost,
   useListClassGroupsApiV1ClassGroupsGet,
   useListCourseSessionsApiV1CourseSessionsGet,
   useListPreferencesApiV1MemoryPreferencesGet,
   useListRoomsApiV1RoomsGet,
+  useListSolverRunsApiV1SolverRunsGet,
   useListTeachersApiV1TeachersGet,
   useListTimeSlotsApiV1TimeSlotsGet,
   useTransitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost,
@@ -21,6 +23,7 @@ import {
   type CourseSessionResponse,
   type PreferenceResponse,
   type RoomResponse,
+  type SolverRunResponse,
   type TeacherResponse,
   type TimeSlotResponse,
 } from "@/api/generated/models";
@@ -31,6 +34,7 @@ import { DataTable } from "@/components/data-table";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Select } from "@/components/ui/select";
 import { asArray, datetime, errorMessage, formatRoom, formatSlot } from "@/lib/format";
+import { type MemoryOutcome, memoryOutcomeLabel } from "@/lib/memory-usage";
 
 // 记忆页的谓词/来源/状态文案只在记忆语境下使用，与规则页的 constraint_type
 // 空间不同，因此不进全局 labels 以免误伤其他页面的翻译。
@@ -103,6 +107,20 @@ function validityLabel(entry: PreferenceResponse): string {
   return `${from || "…"} ~ ${until || "长期"}`;
 }
 
+/** 最新一次求解里各偏好条目的使用结果：runs 按时间倒序，先见者为最新。 */
+function useLatestOutcomes(runs: SolverRunResponse[]): Map<string, MemoryOutcome> {
+  return useMemo(() => {
+    const map = new Map<string, MemoryOutcome>();
+    for (const run of runs) {
+      const memory = run.memory_usage as { outcomes?: MemoryOutcome[] } | null;
+      for (const item of Array.isArray(memory?.outcomes) ? memory.outcomes : []) {
+        if (!map.has(item.entry_id)) map.set(item.entry_id, item);
+      }
+    }
+    return map;
+  }, [runs]);
+}
+
 function statusOptions(): [string, string][] {
   return [
     ["all", "全部状态"],
@@ -125,13 +143,21 @@ export function MemoryPage() {
   const classes = useListClassGroupsApiV1ClassGroupsGet();
   const courses = useListCourseSessionsApiV1CourseSessionsGet();
   const slots = useListTimeSlotsApiV1TimeSlotsGet();
+  // 「最近使用」反查最近求解任务冻结的逐条结果；查不到就不显示，不编造。
+  const runs = useListSolverRunsApiV1SolverRunsGet();
+  // Hook 顺序敏感：所有 use* 必须在下面的 loading/error 早退之前调用。
+  const latestOutcomes = useLatestOutcomes(asArray<SolverRunResponse>(runs.data));
 
   const [statusFilter, setStatusFilter] = useState("all");
   const [subjectFilter, setSubjectFilter] = useState("all");
-  // adjustingId：正在「调整后采纳」的条目；rejecting/expiring 是两种危险操作的二次确认。
+  // adjustingId：正在「调整后采纳」的条目；trialingId：正在「授权试用」的条目；
+  // rejecting/expiring/converting 是三种需要二次确认的操作。
   const [adjustingId, setAdjustingId] = useState<string | null>(null);
+  // trialingId：正在「授权试用」的条目；天数由内联表单 TrialForm 自己持有。
+  const [trialingId, setTrialingId] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState<PreferenceResponse | null>(null);
   const [expiring, setExpiring] = useState<PreferenceResponse | null>(null);
+  const [converting, setConverting] = useState<PreferenceResponse | null>(null);
 
   const invalidate = () =>
     void queryClient.invalidateQueries({ queryKey: getListPreferencesApiV1MemoryPreferencesGetQueryKey() });
@@ -150,6 +176,11 @@ export function MemoryPage() {
     mutation: {
       onSuccess: (_data, vars) => {
         invalidate();
+        if (vars.data.action === "authorize_trial") {
+          setTrialingId(null);
+          toast.success(`已授权试用 ${vars.data.trial_days ?? 30} 天，试用期内以小权重参与排课`);
+          return;
+        }
         toast.success(
           vars.data.target_status === "confirmed"
             ? "已采纳该偏好，下次求解开始生效"
@@ -157,6 +188,16 @@ export function MemoryPage() {
               ? "已拒绝该候选，同类归纳将被降权"
               : "偏好已停用",
         );
+      },
+      onError: (error) => toast.error(errorMessage(error)),
+    },
+  });
+  const convert = useConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost({
+    mutation: {
+      onSuccess: () => {
+        invalidate();
+        setConverting(null);
+        toast.success("已转为正式硬规则，原偏好条目归档为已失效");
       },
       onError: (error) => toast.error(errorMessage(error)),
     },
@@ -241,8 +282,23 @@ export function MemoryPage() {
       cell: ({ row }) => SOURCE_LABELS[row.original.source] ?? row.original.source,
     },
     {
-      header: "有效期",
+      header: "生效日期范围",
       accessorFn: (row) => validityLabel(row),
+    },
+    {
+      header: "最近使用",
+      accessorFn: (row) => latestOutcomes.get(row.id)?.outcome ?? "",
+      cell: ({ row }) => {
+        const usage = latestOutcomes.get(row.original.id);
+        if (!usage) return <span className="text-zinc-300">—</span>;
+        return (
+          <span title={usage.detail ?? undefined}>
+            <Badge tone={usage.outcome === "applied" ? "green" : "neutral"}>
+              {memoryOutcomeLabel(usage.outcome)}
+            </Badge>
+          </span>
+        );
+      },
     },
     {
       header: "更新时间",
@@ -255,9 +311,16 @@ export function MemoryPage() {
       enableSorting: false,
       cell: ({ row }) =>
         row.original.status === "confirmed" ? (
-          <Button size="sm" variant="outline" onClick={() => setExpiring(row.original)}>
-            停用
-          </Button>
+          <span className="flex gap-2">
+            {row.original.modality === "hard" ? (
+              <Button size="sm" variant="outline" onClick={() => setConverting(row.original)}>
+                转为硬规则
+              </Button>
+            ) : null}
+            <Button size="sm" variant="outline" onClick={() => setExpiring(row.original)}>
+              停用
+            </Button>
+          </span>
         ) : null,
     },
   ];
@@ -273,7 +336,9 @@ export function MemoryPage() {
           </Button>
         }
       >
-        <p className="mt-1 text-sm text-zinc-500">系统从调课行为中学习偏好；试用期候选经教务确认后才会影响排课。</p>
+        <p className="mt-1 text-sm text-zinc-500">
+          系统从调课行为中学习偏好；待确认候选在您采纳或授权试用前不会影响排课，授权试用到期自动退出。
+        </p>
       </PageHeader>
 
       {entries.length === 0 ? (
@@ -318,20 +383,40 @@ export function MemoryPage() {
                         onCancel={() => setAdjustingId(null)}
                         onSave={(weight, constraint) => update.mutate({ entryId: entry.id, data: { weight, constraint } })}
                       />
+                    ) : trialingId === entry.id ? (
+                      <TrialForm
+                        pending={transition.isPending}
+                        onCancel={() => setTrialingId(null)}
+                        onConfirm={(days) => transition.mutate({ entryId: entry.id, data: { action: "authorize_trial", trial_days: days } })}
+                      />
                     ) : (
                       <div className="mt-3 flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setTrialingId(entry.id)}
+                        >
+                          <Timer className="size-3.5" />
+                          授权试用
+                        </Button>
                         <Button size="sm" onClick={() => transition.mutate({ entryId: entry.id, data: { target_status: "confirmed" } })}>
                           <Check className="size-3.5" />
                           采纳
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => setRejecting(entry)}>
-                          <X className="size-3.5" />
-                          拒绝
                         </Button>
                         <Button size="sm" variant="ghost" onClick={() => setAdjustingId(entry.id)}>
                           <Pencil className="size-3.5" />
                           调整后采纳
                         </Button>
+                        <Button size="sm" variant="outline" onClick={() => setRejecting(entry)}>
+                          <X className="size-3.5" />
+                          拒绝
+                        </Button>
+                        {entry.modality === "hard" ? (
+                          <Button size="sm" variant="outline" onClick={() => setConverting(entry)}>
+                            <ShieldCheck className="size-3.5" />
+                            转为硬规则
+                          </Button>
+                        ) : null}
                       </div>
                     )}
                   </div>
@@ -424,6 +509,31 @@ export function MemoryPage() {
           setExpiring(null);
         }}
       />
+      <ConfirmDialog
+        open={Boolean(converting)}
+        title="把这条硬偏好转成正式规则？"
+        description={
+          converting
+            ? `「${subjectName(converting)} · ${predicateLabel(converting.predicate)}」将作为硬规则（不得违反）进入规则库并立即生效，原偏好条目转为已失效归档。${
+                converting.source === "induced_from_adjustment"
+                  ? "注意：该条目来自调课归纳，确认转换即代表教务认可其作为硬约束。"
+                  : ""
+              }`
+            : ""
+        }
+        confirmLabel="确认转换"
+        pending={convert.isPending}
+        onOpenChange={(open) => {
+          if (!open) setConverting(null);
+        }}
+        onConfirm={() => {
+          if (!converting) return;
+          convert.mutate({
+            entryId: converting.id,
+            data: { confirmed_conversion: converting.source === "induced_from_adjustment" },
+          });
+        }}
+      />
     </div>
   );
 }
@@ -436,6 +546,55 @@ function ChipRemove({ label, onRemove }: { label: string; onRemove: () => void }
         <X className="size-3" />
       </button>
     </span>
+  );
+}
+
+/** 「授权试用」的内联小表单：只填试用天数，提交后条目保持 probation、小权重参与。 */
+function TrialForm({
+  pending,
+  onCancel,
+  onConfirm,
+}: {
+  pending?: boolean;
+  onCancel: () => void;
+  onConfirm: (days: number) => void;
+}) {
+  const [days, setDays] = useState(30);
+  return (
+    <form
+      className="mt-3 rounded-md border border-zinc-200 bg-zinc-50/60 p-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onConfirm(Math.min(365, Math.max(1, Math.round(days) || 30)));
+      }}
+    >
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="text-sm text-zinc-700">
+          试用天数
+          <input
+            aria-label="试用天数"
+            className="mt-1.5 h-9 w-24 rounded-md border border-zinc-300 bg-white px-2"
+            type="number"
+            min={1}
+            max={365}
+            value={days}
+            onChange={(event) => setDays(Number(event.target.value))}
+          />
+        </label>
+        <p className="max-w-md flex-1 text-xs text-zinc-500">
+          试用期内该候选以小权重参与排课（权重的 30%），到期自动退出；点「采纳」后才转为全量权重。候选在采纳或授权试用前不会影响排课。
+        </p>
+      </div>
+      <div className="mt-3 flex gap-2">
+        <Button type="submit" size="sm" disabled={pending}>
+          <Check className="size-3.5" />
+          确认授权
+        </Button>
+        <Button type="button" size="sm" variant="outline" onClick={onCancel} disabled={pending}>
+          取消
+        </Button>
+      </div>
+    </form>
   );
 }
 

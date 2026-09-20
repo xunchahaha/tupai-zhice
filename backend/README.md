@@ -187,21 +187,37 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
 - **来源与生命周期**：手工登记（`explicit_stated`/`admin_directive`）直接 `confirmed`；
   挖掘候选一律 `induced_from_adjustment` + `probation`，经
   `POST /api/v1/memory/preferences/{id}/transition` 确认或拒绝，过期作废不删除。
-- **三条红线（写死在代码与测试里）**：① `induced_from_adjustment` 条目升硬约束一律 422——
-  硬约束只能来自教务显式声明或管理员指令；② 创建 API 不传 `valid_until` 时默认
-  「当前日期 + 180 天」并回显；③ 挖掘条目初始 `status` 恒为 `probation`。
+- **三态拆分（MEM-C1）**：待确认候选（`probation` 且未授权试用）**完全不进求解输入**；
+  教务点「授权试用」（transition `action=authorize_trial`，默认 30 天）后条目保持
+  `probation`，以试用期衰减权重小步参与，`trial_until` 到期自动退出；`confirmed`
+  才是全量权重。无感采集，不无感改变排课。
+- **偏好库只管软偏好（MEM-C1）**：`modality=hard` 的条目不再直接编译进求解（编译
+  逐条标记 `hard_requires_conversion`），由管理员经
+  `POST /api/v1/memory/preferences/{id}/convert-to-rule` 转成 `hardness=hard` 的正式
+  Rule（kind 对齐 constraint-catalog，`source_doc=memory:<entry_id>` 回链；条目转
+  `expired` 并在 provenance 记 `rule_id`）。induced 来源转换必须显式传
+  `confirmed_conversion=true`。
+- **四条红线（写死在代码与测试里）**：① `induced_from_adjustment` 条目升硬约束一律 422
+  （转正式规则须显式确认）——硬约束只能来自教务显式声明或管理员指令；② 创建 API
+  不传 `valid_until` 时默认取本方案主数据最大上课日期（无课次回落「当前日期 + 180 天」）
+  并回显；③ 挖掘条目初始 `status` 恒为 `probation`；④ 偏好的生效日期窗口
+  （`valid_from`/`valid_until`）随编译进入规则 scope，只约束窗口内的课次。
 - **挖掘**：`POST /api/v1/memory/mining-runs` 回顾近期调课事件（含一键归因
   `declared_reason`）。配置 AI 时走 `services/ai.py::mine_preferences`（模型只提名，
   主体/谓词/证据按白名单校验，允许弃权）；未配置或失败时退化为确定性统计——
   同主体+同类型调课 ≥2 次即产生候选，无 LLM 也能用。重复候选（同主体+谓词+约束
   且已存在 `probation`/`confirmed`）自动跳过。
-- **求解联动**：`services/memory_solver.py::compile_preferences` 在每次求解前把
-  `confirmed`/`probation` 且未过期的偏好翻译为内部软规则对象，并入 solver 现有
-  软约束管线（`services/tasks.py::_attach_memory_preferences`），不新造求解项。
-  目标权重 = `weight × (confirmed?1.0:0.3 试用期衰减) × confidence`，v1 只映射
+- **求解联动（创建时冻结）**：`api.create_solver_run` 在创建任务时即调
+  `services/memory_solver.py::compile_memory_state`，把条目快照、编译后的内部软规则、
+  逐条使用结果（applied/not_authorized/expired/unsupported_predicate/converted_to_rule/
+  hard_requires_conversion/compile_error）冻结进 `DataSnapshot.payload["memory"]` 与
+  `SolverRun.memory_usage`；执行路径（`services/tasks.py::_attach_memory_preferences`）
+  只读快照，改记忆不影响在途求解的可复现性。目标权重 =
+  `weight × (confirmed?1.0:0.3 授权试用衰减) × confidence`，v1 只映射
   `avoid_slot/prefer_slot/avoid_room/prefer_room/consecutive_sessions` 五个与现有
   软约束术语对齐的谓词；`max_daily_load` 只登记不进目标函数。偏好永远是软约束，
-  不会把课表变成无解。
+  不会把课表变成无解。编译整体失败时 memory 节标 `compile_failed`，求解照常但
+  `services/explain.py` 与前端解释面板必须显式提示「本次未使用偏好记忆」，不无声降级。
 
 ## 公开课表层（capability-link）
 
@@ -262,7 +278,8 @@ RBAC 正交：链接的签发/轮换/停用复用 `admin/scheduler` 角色，撤
 - 总览基础数据：`GET /api/v1/overview`
 - 总览分析数据：`GET /api/v1/overview/analytics`（教师负荷、教室时段热力、软约束指标、飞书同步健康）
 - 记忆偏好：`GET/POST /api/v1/memory/preferences`、`PATCH /api/v1/memory/preferences/{id}`、
-  `POST /api/v1/memory/preferences/{id}/transition`
+  `POST /api/v1/memory/preferences/{id}/transition`（含 `action=authorize_trial` 授权试用）、
+  `POST /api/v1/memory/preferences/{id}/convert-to-rule`（hard 条目转正式规则，仅管理员）
 - 偏好挖掘：`POST /api/v1/memory/mining-runs`
 - 调课归因：`POST /api/v1/reschedule-events` 请求体可选 `declared_reason`
 - 课表方案：`GET/POST /api/v1/schedule-sets`、`PATCH /api/v1/schedule-sets/{id}`

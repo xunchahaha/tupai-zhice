@@ -222,6 +222,43 @@ def _scope_candidates(db: Session, scope: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _memory_usage_facts(memory: dict[str, Any]) -> dict[str, Any]:
+    """偏好记忆使用情况的事实化转述（MEM-C1 修正 6）。
+
+    status=compile_failed 时必须显式说「本次未使用偏好记忆」——求解照常成功
+    不代表偏好参与了，静默降级正是这轮修正要消灭的行为。
+    """
+    summary = dict(memory.get("summary") or {})
+    return {
+        "status": str(memory.get("status") or "not_recorded"),
+        "headline": memory_headline(memory),
+        "detail": memory.get("detail"),
+        "considered": int(summary.get("considered") or 0),
+        "applied": int(summary.get("applied") or 0),
+        "unused": int(summary.get("unused") or 0),
+        "outcomes": list(memory.get("outcomes") or []),
+    }
+
+
+def memory_headline(memory: dict[str, Any]) -> str:
+    """一句话说明本次求解对偏好记忆的使用。措辞由代码拼，模型只许复述。"""
+    if memory.get("status") == "compile_failed":
+        return "本次未使用偏好记忆：编译失败"
+    if memory.get("status") == "not_recorded":
+        # 早于「记忆冻结进快照」版本的历史任务：当时确实现读现用，只是没留痕，
+        # 不能反过来断言它没有偏好记忆。
+        return "该任务创建时尚未记录偏好记忆使用情况"
+    summary = memory.get("summary") or {}
+    considered = int(summary.get("considered") or 0)
+    if considered == 0:
+        return "本次没有可用的偏好记忆"
+    return (
+        f"本次参考 {considered} 条偏好记忆"
+        f"（已应用 {int(summary.get('applied') or 0)} / "
+        f"未使用 {int(summary.get('unused') or 0)} 及原因见逐条明细）"
+    )
+
+
 def build_explanation_facts(db: Session, run: SolverRun) -> dict[str, Any]:
     """整理一次求解的确定性事实包。这里出现的每个数字都来自代码，不来自模型。"""
     result = dict(run.result_payload or {})
@@ -263,6 +300,8 @@ def build_explanation_facts(db: Session, run: SolverRun) -> dict[str, Any]:
         # 本次范围内实际有哪些班级、产品班型和日期，既给模型当事实依据，
         # 也给 build_retry_instruction 拼「下一条指令」时提供合法实体。
         "scope_candidates": _scope_candidates(db, request_scope),
+        # 偏好记忆使用情况：编译失败必须原样传达，不许把「无声无偏好」说成正常。
+        "memory_usage": _memory_usage_facts(dict(run.memory_usage or {})),
         "conflicts": {
             "rule_ids": list(run.conflict_rule_ids or []),
             "rules": [
@@ -296,6 +335,7 @@ def deterministic_summary(facts: dict[str, Any]) -> dict[str, Any]:
     run = facts["run"]
     conflicts = facts["conflicts"]
     metrics = facts["schedule"].get("metrics") or {}
+    memory_usage = facts.get("memory_usage") or {}
     headline = f"{run['model_status']}：{run['model_status_meaning']}"
     explanation: list[str] = []
     if run["model_status"] in {"OPTIMAL", "FEASIBLE"}:
@@ -316,6 +356,21 @@ def deterministic_summary(facts: dict[str, Any]) -> dict[str, Any]:
             )
         if metrics.get("changed_assignments"):
             explanation.append(f"与上一版课表相比改动了 {metrics['changed_assignments']} 个课次。")
+    # 偏好记忆的使用情况永远要有一条：参与了几条、没用几条为什么，或者编译失败。
+    if memory_usage.get("status") == "compile_failed":
+        line = "本次未使用偏好记忆：编译失败"
+        detail = memory_usage.get("detail")
+        if detail:
+            line += f"（{detail}）"
+        explanation.append(line + "。求解本身未受影响，修复记忆后重新求解即可带上偏好。")
+    elif memory_usage.get("considered"):
+        explanation.append(memory_headline(memory_usage) + "。")
+        for item in memory_usage.get("outcomes") or []:
+            if item.get("outcome") != "applied":
+                explanation.append(
+                    f"未使用：{item.get('subject_type')} {item.get('subject_id')} "
+                    f"{item.get('predicate')}——{item.get('detail')}"
+                )
     for rule in conflicts["rules"]:
         prefix = "内建约束" if rule["origin"] == "solver_builtin" else "教务规则"
         explanation.append(f"{prefix} {rule['business_id']}：{rule['meaning']}")

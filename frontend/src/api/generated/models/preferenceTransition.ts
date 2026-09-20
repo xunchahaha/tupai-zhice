@@ -5,12 +5,25 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { PreferenceTransitionAction } from './preferenceTransitionAction';
 import type { PreferenceTransitionTargetStatus } from './preferenceTransitionTargetStatus';
 import type { PreferenceTransitionTargetModality } from './preferenceTransitionTargetModality';
 import type { PreferenceTransitionReason } from './preferenceTransitionReason';
 
+/**
+ * 状态迁移（action=transition，默认）或授权试用（action=authorize_trial）。
+
+三态拆分（MEM-C1）：授权试用只对 probation 条目可用，条目保持 probation，
+以 trial_authorized + trial_until 参与小权重试用；采纳（confirmed）仍是正式生效路径。
+ */
 export interface PreferenceTransition {
-  target_status: PreferenceTransitionTargetStatus;
+  action?: PreferenceTransitionAction;
+  target_status?: PreferenceTransitionTargetStatus;
   target_modality?: PreferenceTransitionTargetModality;
+  /**
+   * @minimum 1
+   * @maximum 365
+   */
+  trial_days?: number;
   reason?: PreferenceTransitionReason;
 }

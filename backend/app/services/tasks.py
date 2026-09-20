@@ -21,7 +21,9 @@ from ..models import (
     Teacher,
     TimeSlot,
 )
-from .memory_solver import compile_preferences
+
+# 偏好记忆已在创建任务时冻结进快照，执行路径只读 snapshot.payload["memory"]。
+# (见 _attach_memory_preferences；本模块不再现场编译偏好。)
 from .solver import solve_problem
 
 settings = get_settings()
@@ -412,17 +414,26 @@ def _persist_failure(run_id: str, message: str) -> None:
 
 
 def _attach_memory_preferences(payload: dict[str, Any], schedule_set_id: str, db: Any) -> None:
-    """求解前把记忆偏好编译为内部软规则，并入同一条规则管线。
+    """求解前把快照里冻结的偏好记忆规则并入同一条规则管线（MEM-C1）。
 
     偏好永远不会替换或覆盖显式规则：编译产物是 hardness=soft 的规则对象，
-    与快照里的规则一起走 _normalized_rules 的现有路径。编译失败不阻断求解
-    ——记忆是加分项，不能变成排课主链路的故障点。
+    与快照里的规则一起走 _normalized_rules 的现有路径。编译产物在创建任务时
+    就冻结进 snapshot.payload["memory"]——这里只读快照，不再现场读库，改记忆
+    不影响在途求解的可复现性。status=compile_failed 或旧快照没有 memory 节时
+    无偏好求解：记忆是加分项，不能变成排课主链路的故障点，但编译失败必须由
+    解释层显式提示（explain.py / 前端），不得无声出课表。
     """
-    try:
-        memory_rules = compile_preferences(db, schedule_set_id)
-        payload["rules"] = [*(payload.get("rules") or []), *memory_rules]
-    except Exception:  # noqa: BLE001 - 任何记忆层故障都不应拦下课表求解
-        logger.exception("编译记忆偏好失败，本次求解将在无偏好状态下进行")
+    memory = payload.get("memory") or {}
+    if memory.get("status") != "ok":
+        if memory.get("status") == "compile_failed":
+            logger.warning(
+                "偏好记忆编译失败，本次求解将在无偏好状态下进行：%s", memory.get("detail")
+            )
+        return
+    payload["rules"] = [
+        *(payload.get("rules") or []),
+        *(memory.get("compiled_rules") or []),
+    ]
 
 
 def execute_solver_run(run_id: str) -> dict[str, Any]:

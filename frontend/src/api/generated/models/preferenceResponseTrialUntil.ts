@@ -6,4 +6,4 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export type PreferenceTransitionTargetStatus = 'confirmed' | 'rejected' | 'expired' | null;
+export type PreferenceResponseTrialUntil = string | null;

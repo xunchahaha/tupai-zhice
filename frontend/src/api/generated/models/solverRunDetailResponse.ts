@@ -10,6 +10,7 @@ import type { SolverRunDetailResponseObjectiveValue } from './solverRunDetailRes
 import type { SolverRunDetailResponseBestBound } from './solverRunDetailResponseBestBound';
 import type { SolverRunDetailResponseWallTimeSeconds } from './solverRunDetailResponseWallTimeSeconds';
 import type { SolverRunDetailResponseExplanation } from './solverRunDetailResponseExplanation';
+import type { SolverRunDetailResponseMemoryUsage } from './solverRunDetailResponseMemoryUsage';
 import type { SolverRunDetailResponseErrorMessage } from './solverRunDetailResponseErrorMessage';
 
 /**
@@ -32,6 +33,7 @@ export interface SolverRunDetailResponse {
   priority_rule_ids: string[];
   priority_explanations: string[];
   explanation?: SolverRunDetailResponseExplanation;
+  memory_usage?: SolverRunDetailResponseMemoryUsage;
   error_message: SolverRunDetailResponseErrorMessage;
   created_at: string;
   updated_at: string;
