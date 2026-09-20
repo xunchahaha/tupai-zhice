@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Check, FileText, Pencil, Plus, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { z } from "zod";
 
@@ -26,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
+import { SopSteps } from "@/components/sop-steps";
 import { actorTypeLabel, constraintLabel, hardnessLabel, statusLabel } from "@/lib/labels";
 import { asArray, errorMessage } from "@/lib/format";
 import { statusTone } from "@/lib/status";
@@ -114,6 +116,7 @@ export function RulesPage() {
   const scheduleAccessRole = useScheduleAccessRole();
   const readOnly = !canScheduleCurrentSet(user, scheduleAccessRole);
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [filter, setFilter] = useState("all");
   const [selected, setSelected] = useState<RuleResponse | null>(null);
   const [editing, setEditing] = useState<RuleResponse | null>(null);
@@ -140,13 +143,18 @@ export function RulesPage() {
   );
   if (rules.isPending) return <LoadingState />;
   if (rules.isError) return <ErrorState retry={() => void rules.refetch()} />;
+  // D12 断头路：已有确认规则时下一步就是求解；只读成员进不了求解页，不展示。
+  const hasActiveRule = ruleList.some((rule) => rule.status === "active");
   return <div className="space-y-5 animate-fade-in">
     <PageHeader
       title="规则工作台"
-      actions={<div className="inline-flex h-8 items-center rounded-md border border-zinc-200 bg-white p-0.5">
-        {[["all", "全部"], ["awaiting_confirmation", "待确认"], ["active", "已生效"]].map(([value, label]) => <button key={value} className={`h-6 rounded px-2 text-xs ${filter === value ? "bg-zinc-900 text-white" : "text-zinc-500 hover:bg-zinc-100"}`} onClick={() => setFilter(value)}>{label}</button>)}
+      actions={<div className="flex items-center gap-2">
+        {hasActiveRule && !readOnly ? <Button size="sm" onClick={() => navigate("/solver")}>去求解</Button> : null}
+        <div className="inline-flex h-8 items-center rounded-md border border-zinc-200 bg-white p-0.5">
+          {[["all", "全部"], ["awaiting_confirmation", "待确认"], ["active", "已生效"]].map(([value, label]) => <button key={value} className={`h-6 rounded px-2 text-xs ${filter === value ? "bg-zinc-900 text-white" : "text-zinc-500 hover:bg-zinc-100"}`} onClick={() => setFilter(value)}>{label}</button>)}
+        </div>
       </div>}
-    />
+    ><SopSteps /></PageHeader>
     {readOnly ? <section className="border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">当前角色在这套课表中仅可查看规则及其生效状态。</section> : <RuleIntakeForm create={create} entries={entries} />}
     <div className="grid gap-2 xl:grid-cols-[minmax(340px,0.9fr)_minmax(0,1.6fr)]">
       <section className="border border-zinc-200 bg-white">

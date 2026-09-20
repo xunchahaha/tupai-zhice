@@ -15,6 +15,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
 import {
@@ -28,6 +29,7 @@ import {
 } from "@/api/generated/client";
 import type { AssignmentResponse, ClassGroupResponse, CourseSessionResponse, RoomResponse, TeacherResponse, TimeSlotResponse } from "@/api/generated/models";
 import { http } from "@/api/http";
+import { useAppUser } from "@/app/user-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
@@ -113,6 +115,9 @@ function formatWeekday(dateStr: string): string {
 }
 
 export function SchedulePage() {
+  const user = useAppUser();
+  const navigate = useNavigate();
+  const canReschedule = user.role === "admin" || user.role === "scheduler";
   const [scheduleId, setScheduleId] = useState("");
   const [mode, setMode] = useState<ViewMode>("class");
   const [layout, setLayout] = useState<LayoutStyle>("timeline");
@@ -315,6 +320,12 @@ export function SchedulePage() {
               <Download className="size-3.5" />
               导出 XLSX
             </Button>
+            {/* D12 断头路：课表发现问题后下一步是局部调课；仅排课角色可见。 */}
+            {canReschedule ? (
+              <Button size="sm" onClick={() => navigate("/reschedule")}>
+                去调课
+              </Button>
+            ) : null}
           </div>
         }
       />

@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeftRight,
   ArrowRight,
+  CalendarDays,
   FileSpreadsheet,
   Filter,
   History,
@@ -12,6 +13,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
 import {
@@ -31,6 +33,7 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
+import { SopSteps } from "@/components/sop-steps";
 import { useAppUser, useScheduleAccessRole } from "@/app/user-context";
 import { auditActionLabel, diffKindLabel, resourceLabel, statusLabel } from "@/lib/labels";
 import { asArray, datetime, errorMessage, formatRoom, formatSlot } from "@/lib/format";
@@ -48,6 +51,7 @@ const INCREMENT_CHUNK_SIZE = 150;
 export function VersionsPage() {
   const user = useAppUser();
   const scheduleAccessRole = useScheduleAccessRole();
+  const navigate = useNavigate();
   const canManageVersions = VERSION_WRITE_ROLES.includes(user.role) && scheduleAccessRole === "approver";
   const canViewAudit = user.role === UserResponseRole.admin;
 
@@ -213,14 +217,23 @@ export function VersionsPage() {
       <PageHeader
         title="版本与回滚"
         actions={
-          canManageVersions ? (
-            <Button size="sm" variant="outline" onClick={retryPublishedData} disabled={syncPublishedData.isPending}>
-              <Send className="size-3.5" />
-              {syncPublishedData.isPending ? "正在同步发布数据" : "重新同步发布数据"}
+          <div className="flex items-center gap-2">
+            {/* D12 断头路：发布或回滚后回课表视图确认效果。 */}
+            <Button size="sm" variant="outline" onClick={() => navigate("/schedule")}>
+              <CalendarDays className="size-3.5" />
+              查看课表
             </Button>
-          ) : null
+            {canManageVersions ? (
+              <Button size="sm" variant="outline" onClick={retryPublishedData} disabled={syncPublishedData.isPending}>
+                <Send className="size-3.5" />
+                {syncPublishedData.isPending ? "正在同步发布数据" : "重新同步发布数据"}
+              </Button>
+            ) : null}
+          </div>
         }
-      />
+      >
+        <SopSteps />
+      </PageHeader>
 
       <section
         className={

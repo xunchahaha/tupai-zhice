@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ColumnDef, type RowSelectionState } from "@tanstack/react-table";
 import { CalendarDays, Columns3, Download, Eraser, FileUp, ListChecks, Pencil, Plus, RefreshCw, Search, Sparkles, Trash2, X } from "lucide-react";
 import { type Dispatch, type FormEvent, type ReactNode, type SetStateAction, useEffect, useMemo, useRef, useState } from "react";
-import { useOutletContext } from "react-router-dom";
+import { useNavigate, useOutletContext } from "react-router-dom";
 import { toast } from "sonner";
 
 import {
@@ -48,6 +48,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DataTable } from "@/components/data-table";
 import { ImportWizard } from "@/components/import-wizard";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
+import { SopSteps } from "@/components/sop-steps";
 import { ColumnHeader, CopyableId, TableText, TagList } from "@/components/table-cell";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -251,6 +252,7 @@ export function MasterDataPage() {
   // only one plan cannot change another plan's future inputs.
   const readOnly = user.role !== "admin";
   const client = useQueryClient();
+  const navigate = useNavigate();
   const file = useRef<HTMLInputElement>(null);
   const [importReport, setImportReport] = useState<ImportResult | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -717,11 +719,13 @@ export function MasterDataPage() {
   const isCourseSaving = createCourse.isPending || updateCourse.isPending;
   const isBatchSaving = batchUpdateCourses.isPending || batchDeleteCourses.isPending;
   const entityLabel = entityDialog ? entityConfig(entityDialog.kind).label : "主数据";
+  // D12 断头路：主数据就绪后下一步是配规则，课程场次为空时配规则也无从生效。
+  const courseSessionCount = Array.isArray(courseQuery.data) ? courseQuery.data.length : 0;
 
   return (
     <div className="space-y-5">
       <input ref={file} className="hidden" type="file" accept=".xlsx" onChange={(event) => { const selected = event.target.files?.[0]; if (selected) upload.mutate({ data: { file: selected as unknown as string } }); event.target.value = ""; }} />
-      <PageHeader title="主数据" actions={<><Button size="sm" variant="outline" onClick={refresh}><RefreshCw className="size-3.5" />刷新</Button><Button size="sm" variant="outline" onClick={() => void downloadSample()}><Download className="size-3.5" />下载官方模板</Button>{!readOnly ? <><Button size="sm" variant="secondary" onClick={() => setWizardOpen(true)}><Sparkles className="size-3.5" />智能导入</Button><Button size="sm" variant="secondary" onClick={() => file.current?.click()} disabled={upload.isPending}><FileUp className="size-3.5" />导入 XLSX</Button></> : null}</>} />
+      <PageHeader title="主数据" actions={<><Button size="sm" variant="outline" onClick={refresh}><RefreshCw className="size-3.5" />刷新</Button><Button size="sm" variant="outline" onClick={() => void downloadSample()}><Download className="size-3.5" />下载官方模板</Button>{!readOnly ? <><Button size="sm" variant="secondary" onClick={() => setWizardOpen(true)}><Sparkles className="size-3.5" />智能导入</Button><Button size="sm" variant="secondary" onClick={() => file.current?.click()} disabled={upload.isPending}><FileUp className="size-3.5" />导入 XLSX</Button></> : null}{courseSessionCount > 0 ? <Button size="sm" onClick={() => navigate("/rules")}>去配规则</Button> : null}</>}><SopSteps /></PageHeader>
       {readOnly ? <section className="border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">教师、班级、教室和课程场次在所有课表方案中复用；为避免影响其他方案，只有管理员可以修改或导入。</section> : null}
       {importReport ? <ImportReportPanel report={importReport} onDismiss={() => setImportReport(null)} /> : null}
       {loading ? <LoadingState /> : failed ? <ErrorState retry={refresh} /> : (

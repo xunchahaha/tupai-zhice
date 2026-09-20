@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OverviewPage } from "@/pages/overview-page";
@@ -10,7 +10,10 @@ const mocks = vi.hoisted(() => ({
   analytics: { current: {} as Record<string, unknown> },
   analyticsRefetch: vi.fn(),
   overviewRefetch: vi.fn(),
+  httpGet: vi.fn(),
 }));
+
+vi.mock("@/api/http", () => ({ http: { get: mocks.httpGet } }));
 
 vi.mock("@/api/generated/client", () => ({
   useOverviewApiV1OverviewGet: () => ({
@@ -29,14 +32,21 @@ vi.mock("@/api/generated/client", () => ({
   useListSolverRunsApiV1SolverRunsGet: () => ({ data: [] }),
 }));
 
-function renderPage() {
+type RenderUser = { id: string; username: string; role: "admin" | "viewer" };
+
+function renderPage(user: RenderUser = { id: "admin-id", username: "admin", role: "admin" }) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  const scheduleAccessRole = user.role === "viewer" ? "viewer" : "approver";
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter>
-        <OverviewPage />
+      <MemoryRouter initialEntries={["/overview"]}>
+        <Routes>
+          <Route element={<Outlet context={{ user, scheduleAccessRole }} />}>
+            <Route path="/overview" element={<OverviewPage />} />
+          </Route>
+        </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -48,6 +58,8 @@ describe("OverviewPage analytics error handling", () => {
   beforeEach(() => {
     mocks.analyticsRefetch.mockReset();
     mocks.overviewRefetch.mockReset();
+    mocks.httpGet.mockReset();
+    mocks.httpGet.mockResolvedValue({ data: { configured: false, model: null } });
     mocks.analytics.current = {
       data: undefined,
       error: new Error("Request failed with status code 404"),
@@ -114,5 +126,29 @@ describe("OverviewPage analytics error handling", () => {
     expect(screen.getByText("暂无同步样本")).toBeInTheDocument();
     expect(screen.getByText("累计重试: 暂无样本")).toBeInTheDocument();
     expect(screen.queryByText("100%", { exact: true })).not.toBeInTheDocument();
+  });
+
+  it("呈现排课准备清单与快捷入口，只读成员看不到求解/调课入口", () => {
+    renderPage();
+
+    // 清单四项齐备；规则/发布/AI 均未就绪时保留去完成链接。
+    expect(screen.getByText("排课准备清单")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "去配规则" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "去配置" })).toBeInTheDocument();
+
+    // 管理员能看到全部快捷入口（含新增的主数据/诊断/调课）。
+    expect(screen.getByRole("link", { name: /智能求解排课/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /主数据管理/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /无解诊断/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /局部调课/ })).toBeInTheDocument();
+  });
+
+  it("只读成员的快捷入口不再有会落空的求解与调课卡", () => {
+    renderPage({ id: "viewer-id", username: "member_demo", role: "viewer" });
+
+    expect(screen.queryByRole("link", { name: /智能求解排课/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /局部调课/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /主数据管理/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /无解诊断/ })).toBeInTheDocument();
   });
 });

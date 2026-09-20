@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { CalendarPlus, DoorClosed, UserRoundX } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
 import { getListRescheduleEventsApiV1RescheduleEventsGetQueryKey, useCreateRescheduleEventApiV1RescheduleEventsPost, useListRescheduleEventsApiV1RescheduleEventsGet, useListRoomsApiV1RoomsGet, useListSchedulesApiV1SchedulesGet, useListTeachersApiV1TeachersGet, useListTimeSlotsApiV1TimeSlotsGet } from "@/api/generated/client";
@@ -8,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
+import { SopSteps } from "@/components/sop-steps";
 import { datetime, errorMessage } from "@/lib/format";
 import { eventTypeLabel, statusLabel } from "@/lib/labels";
 import { preferredSchedule } from "@/lib/schedule";
@@ -16,6 +18,7 @@ import { statusTone } from "@/lib/status";
 type EventType = "teacher_leave" | "room_outage" | "extra_class";
 
 export function ReschedulePage() {
+  const navigate = useNavigate();
   const queryClient = useQueryClient(); const events = useListRescheduleEventsApiV1RescheduleEventsGet(); const schedules = useListSchedulesApiV1SchedulesGet(); const teachers = useListTeachersApiV1TeachersGet(); const rooms = useListRoomsApiV1RoomsGet(); const slots = useListTimeSlotsApiV1TimeSlotsGet();
   const [eventType, setEventType] = useState<EventType>("teacher_leave"); const [parent, setParent] = useState(""); const [teacher, setTeacher] = useState(""); const [room, setRoom] = useState(""); const [slot, setSlot] = useState(""); const [description, setDescription] = useState("");
   useEffect(() => { const initialSchedule = preferredSchedule(schedules.data); if (!parent && initialSchedule) setParent(initialSchedule.id); if (!teacher && teachers.data?.[0]) setTeacher(teachers.data[0].business_id); if (!room && rooms.data?.[0]) setRoom(rooms.data[0].business_id); if (!slot && slots.data?.[0]) setSlot(slots.data[0].business_id); }, [parent, room, rooms.data, slot, slots.data, schedules.data, teacher, teachers.data]);
@@ -30,7 +33,7 @@ export function ReschedulePage() {
 
   return (
     <div className="space-y-5 animate-fade-in">
-      <PageHeader title="局部调课" />
+      <PageHeader title="局部调课"><SopSteps /></PageHeader>
       <div className="grid gap-2 xl:grid-cols-[390px_minmax(0,1fr)]">
         <section className="border border-zinc-200 bg-white p-5">
           <div className="flex items-center gap-2">
@@ -130,6 +133,12 @@ export function ReschedulePage() {
           <Button className="mt-5 w-full" onClick={submit} disabled={!parent || create.isPending}>
             生成候选方案
           </Button>
+          {/* D12 断头路：候选方案生成后去版本页核对并发布。 */}
+          {create.isSuccess ? (
+            <Button className="mt-3 w-full" variant="outline" onClick={() => navigate("/versions")}>
+              查看版本
+            </Button>
+          ) : null}
         </section>
         <section className="border border-zinc-200 bg-white">
           <div className="border-b border-zinc-200 px-4 py-3 text-sm font-semibold">调课事件</div>

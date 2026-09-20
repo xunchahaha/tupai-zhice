@@ -1,5 +1,6 @@
 import { AlertTriangle, CircleAlert, FileQuestion, HelpCircle, ShieldAlert, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { useListRulesApiV1RulesGet, useListSolverRunsApiV1SolverRunsGet } from "@/api/generated/client";
 import { type RuleResponse, type SolverRunResponse } from "@/api/generated/models";
@@ -144,7 +145,13 @@ export function DiagnosticsPage() {
                             <span className="font-mono text-xs font-medium text-zinc-600">
                               {rule.business_id}
                             </span>
-                            <Badge tone={statusTone(rule.status)}>{statusLabel(rule.status)}</Badge>
+                            {/* D12 断头路：规则页暂无深链定位，先直达规则列表。 */}
+                            <span className="flex shrink-0 items-center gap-2">
+                              <Link to="/rules" className="text-xs text-blue-600 transition-colors hover:text-blue-700 hover:underline">
+                                查看规则
+                              </Link>
+                              <Badge tone={statusTone(rule.status)}>{statusLabel(rule.status)}</Badge>
+                            </span>
                           </div>
                           <p className="mt-2 text-sm text-zinc-800 leading-6">{rule.source_text}</p>
                           <div className="mt-2 text-xs text-zinc-500">

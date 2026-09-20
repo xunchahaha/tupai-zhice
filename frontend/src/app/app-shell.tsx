@@ -1,5 +1,5 @@
 import { Menu, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { NavLink, Outlet, useNavigate, useOutletContext } from "react-router-dom";
 
@@ -15,17 +15,18 @@ import { errorMessage } from "@/lib/format";
 import { roleLabel } from "@/lib/labels";
 import { toast } from "sonner";
 
+// 分组顺序即 SOP 时序：工作台 → 排课流程 → 变更 → 设置（集成语义并入设置，账号管理同属管理域）。
 const navigation = [
   { to: "/overview", label: "总览", group: "工作台", memberVisible: true },
   { to: "/master-data", label: "主数据", group: "工作台", memberVisible: true },
-  { to: "/rules", label: "规则工作台", group: "排课", memberVisible: true },
-  { to: "/solver", label: "排课求解", group: "排课", memberVisible: false, roles: ["admin", "scheduler"] },
-  { to: "/schedule", label: "课表视图", group: "排课", memberVisible: true },
-  { to: "/diagnostics", label: "无解诊断", group: "排课", memberVisible: true },
+  { to: "/rules", label: "规则工作台", group: "排课流程", memberVisible: true },
+  { to: "/solver", label: "排课求解", group: "排课流程", memberVisible: false, roles: ["admin", "scheduler"] },
+  { to: "/schedule", label: "课表视图", group: "排课流程", memberVisible: true },
+  { to: "/diagnostics", label: "无解诊断", group: "排课流程", memberVisible: true },
   { to: "/reschedule", label: "局部调课", group: "变更", memberVisible: false, roles: ["admin", "scheduler"] },
   { to: "/versions", label: "版本与回滚", group: "变更", memberVisible: true },
-  { to: "/settings", label: "设置", group: "集成", memberVisible: false, roles: ["admin", "scheduler"], icon: Settings },
-  { to: "/accounts", label: "账号管理", group: "账号", memberVisible: false, adminOnly: true },
+  { to: "/settings", label: "设置", group: "设置", memberVisible: false, roles: ["admin", "scheduler"], icon: Settings },
+  { to: "/accounts", label: "账号管理", group: "设置", memberVisible: false, adminOnly: true },
 ];
 
 function Nav({ user, scheduleAccessRole, close, collapsed }: { user: UserResponse; scheduleAccessRole?: ScheduleAccessRole; close?: () => void; collapsed?: boolean }) {
@@ -89,6 +90,7 @@ export function AppShell() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
+  const identityRef = useRef<HTMLDivElement>(null);
   const [scheduleSets, setScheduleSets] = useState<ScheduleSet[]>([]);
   const [scheduleSetId, setScheduleSetId] = useState<string | null>(scheduleSetStore.get());
   const [scheduleSetsLoading, setScheduleSetsLoading] = useState(true);
@@ -149,6 +151,23 @@ export function AppShell() {
     return () => window.removeEventListener("tupai:schedule-set-changed", handleChange);
   }, []);
 
+  // 账户菜单点在菜单外（backdrop 语义）或按 Escape 都要关闭；不改菜单本身的视觉。
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAccountMenuOpen(false);
+    };
+    const handlePointerDown = (event: MouseEvent) => {
+      if (identityRef.current && !identityRef.current.contains(event.target as Node)) setAccountMenuOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, [accountMenuOpen]);
+
   const selectScheduleSet = (id: string) => {
     if (id === scheduleSetId) return;
     scheduleSetStore.set(id);
@@ -188,7 +207,7 @@ export function AppShell() {
 
   const validScheduleSets = Array.isArray(scheduleSets) ? scheduleSets : [];
   const selectedScheduleSet = validScheduleSets.find((item) => item && item.id === scheduleSetId);
-  const identity = <div className={cn("relative border-t border-zinc-200 pt-3", sidebarCollapsed ? "flex justify-center" : "flex items-center justify-between")}>
+  const identity = <div ref={identityRef} className={cn("relative border-t border-zinc-200 pt-3", sidebarCollapsed ? "flex justify-center" : "flex items-center justify-between")}>
     {!sidebarCollapsed ? <div className="min-w-0"><div className="truncate text-xs font-medium text-zinc-800">{user.username}</div><div className="text-[11px] text-zinc-400">{roleLabel(user.role)}</div></div> : null}
     <Button size="icon" variant="ghost" title="账户菜单" aria-label="账户菜单" onClick={() => setAccountMenuOpen((value) => !value)}><MoreHorizontal className="size-4" /></Button>
     {accountMenuOpen ? <div className={cn("absolute bottom-11 z-50 w-52 rounded-lg border border-zinc-200 bg-white p-1.5 text-sm shadow-lg animate-slide-up duration-150", sidebarCollapsed ? "left-0" : "right-0")}><div className="border-b border-zinc-100 px-2 py-2"><div className="truncate text-xs font-medium text-zinc-800">{user.username}</div><div className="mt-0.5 text-[11px] text-zinc-400">{roleLabel(user.role)}</div></div><button className="mt-1 w-full rounded px-2 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 transition-colors" onClick={() => { setAccountMenuOpen(false); setAccountDialogOpen(true); }}>账户信息</button><button className="w-full rounded px-2 py-1.5 text-left text-red-600 hover:bg-red-50 transition-colors" onClick={signOut}>退出登录</button></div> : null}
