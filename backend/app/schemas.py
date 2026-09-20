@@ -1145,6 +1145,8 @@ class AssistantInterpretResponse(BaseModel):
     unsupported_requirements: list[str] = Field(default_factory=list)
     coverage_warnings: list[str] = Field(default_factory=list)
     summary: str
+    # 模型思考过程（reasoning_content 与 <think> 块拼接）；Aily 通道与无思考模型为 None。
+    thinking: str | None = None
 
 
 class CalendarPublishRequest(BaseModel):

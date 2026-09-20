@@ -5607,6 +5607,17 @@
           "summary": {
             "type": "string",
             "title": "Summary"
+          },
+          "thinking": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thinking"
           }
         },
         "type": "object",

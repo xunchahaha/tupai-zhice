@@ -94,7 +94,7 @@ def test_ai_service_sends_business_context_and_parses_json(monkeypatch: Any) -> 
 
     monkeypatch.setattr("app.services.ai.httpx.post", fake_post)
     with SessionLocal() as db:
-        parsed = AIService(settings, db).interpret_instruction(
+        parsed, thinking = AIService(settings, db).interpret_instruction(
             "下周重排考研课程",
             context={
                 "business_lines": ["考研", "公职"],
@@ -105,6 +105,117 @@ def test_ai_service_sends_business_context_and_parses_json(monkeypatch: Any) -> 
         )
     assert parsed["business_lines"] == ["考研"]
     assert parsed["date_from"] == "2026-08-17"
+    assert thinking is None
+
+
+def test_ai_service_preserves_reasoning_content_as_thinking(monkeypatch: Any) -> None:
+    """推理模型的 reasoning_content 必须透出，供前端展示思考过程。"""
+    monkeypatch.setattr(settings, "ai_base_url", "https://model.example/v1")
+    monkeypatch.setattr(settings, "ai_api_key", "environment-ai-key")
+    monkeypatch.setattr(settings, "ai_model", "scheduling-model")
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "reasoning_content": "用户要求 3 天窗口，先核对候选业务线。",
+                            "content": json.dumps(
+                                {
+                                    "business_lines": ["考研"],
+                                    "product_types": [],
+                                    "class_business_ids": [],
+                                    "date_from": None,
+                                    "date_to": None,
+                                    "date_window_days": 3,
+                                    "recognized_rules": [],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    }
+                ]
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.services.ai.httpx.post", fake_post)
+    with SessionLocal() as db:
+        parsed, thinking = AIService(settings, db).interpret_instruction(
+            "三天内重排考研课程",
+            context={"business_lines": ["考研"]},
+        )
+    assert parsed["date_window_days"] == 3
+    assert thinking == "用户要求 3 天窗口，先核对候选业务线。"
+
+
+def test_ai_service_captures_stripped_think_block(monkeypatch: Any) -> None:
+    """content 里的 <think> 块要剥离出 JSON，同时不能被直接丢掉。"""
+    monkeypatch.setattr(settings, "ai_base_url", "https://model.example/v1")
+    monkeypatch.setattr(settings, "ai_api_key", "environment-ai-key")
+    monkeypatch.setattr(settings, "ai_model", "scheduling-model")
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "<think>第一步核对日期</think>"
+                                "<think>第二步核对规则</think>"
+                                '{"business_lines":["考研"],"date_window_days":2}'
+                            )
+                        }
+                    }
+                ]
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.services.ai.httpx.post", fake_post)
+    with SessionLocal() as db:
+        parsed, thinking = AIService(settings, db).interpret_instruction(
+            "两天内重排考研课程",
+            context={"business_lines": ["考研"]},
+        )
+    assert parsed == {"business_lines": ["考研"], "date_window_days": 2}
+    assert thinking == "第一步核对日期\n第二步核对规则"
+
+
+def test_ai_service_reasoning_fallback_does_not_duplicate_thinking(monkeypatch: Any) -> None:
+    """content 为空、答案在 reasoning_content 里的老兜底仍要能解析，且思考文本不重复。"""
+    monkeypatch.setattr(settings, "ai_base_url", "https://model.example/v1")
+    monkeypatch.setattr(settings, "ai_api_key", "environment-ai-key")
+    monkeypatch.setattr(settings, "ai_model", "scheduling-model")
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "reasoning_content": '{"business_lines":["考研"]}',
+                        }
+                    }
+                ]
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.services.ai.httpx.post", fake_post)
+    with SessionLocal() as db:
+        parsed, thinking = AIService(settings, db).interpret_instruction(
+            "解析考研课程",
+            context={"business_lines": ["考研"]},
+        )
+    assert parsed == {"business_lines": ["考研"]}
+    assert thinking is None
 
 
 def test_ai_service_parses_fenced_json_and_typed_content(monkeypatch: Any) -> None:
@@ -135,11 +246,12 @@ def test_ai_service_parses_fenced_json_and_typed_content(monkeypatch: Any) -> No
 
     monkeypatch.setattr("app.services.ai.httpx.post", fake_post)
     with SessionLocal() as db:
-        parsed = AIService(settings, db).interpret_instruction(
+        parsed, thinking = AIService(settings, db).interpret_instruction(
             "解析考研课程",
             context={"business_lines": ["考研"]},
         )
     assert parsed == {"business_lines": ["考研"]}
+    assert thinking == "先分析规则"
 
 
 def test_ai_service_explains_when_console_url_returns_html(monkeypatch: Any) -> None:
@@ -173,18 +285,21 @@ def test_assistant_interpret_uses_configured_ai_provider(
     monkeypatch.setattr(settings, "ai_model", "scheduling-model")
     monkeypatch.setattr(
         "app.api.AIService.interpret_instruction",
-        lambda *args, **kwargs: {
-            "business_lines": [],
-            "product_types": [],
-            "class_business_ids": [],
-            "date_from": None,
-            "date_to": None,
-            "date_window_days": 3,
-            "recognized_rules": [
-                "固定时段不可调整",
-                "同一教室真实时间区间不可重叠",
-            ],
-        },
+        lambda *args, **kwargs: (
+            {
+                "business_lines": [],
+                "product_types": [],
+                "class_business_ids": [],
+                "date_from": None,
+                "date_to": None,
+                "date_window_days": 3,
+                "recognized_rules": [
+                    "固定时段不可调整",
+                    "同一教室真实时间区间不可重叠",
+                ],
+            },
+            "先把「三天」换算成 date_window_days=3。",
+        ),
     )
     interpreted = client.post(
         "/api/v1/assistant/interpret",
@@ -197,6 +312,7 @@ def test_assistant_interpret_uses_configured_ai_provider(
     assert payload["ai_configured"] is True
     assert payload["date_window_days"] == 3
     assert "fixed_time" in payload["solver_rules"]
+    assert payload["thinking"] == "先把「三天」换算成 date_window_days=3。"
 
 
 def _solve_once(client: TestClient, headers: dict[str, str]) -> dict[str, Any]:

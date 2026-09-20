@@ -219,23 +219,27 @@ class AIService:
         return ""
 
     @staticmethod
-    def _parse_json_object(content: Any) -> dict[str, Any]:
+    def _parse_json_object(content: Any) -> tuple[dict[str, Any], str]:
         """Parse JSON even when a model adds reasoning or Markdown fences.
 
         ``response_format=json_object`` is advisory for several compatible
         gateways. The parser therefore removes common reasoning blocks and
         extracts the first valid JSON object from the response while still
-        rejecting genuinely malformed output.
+        rejecting genuinely malformed output. Stripped ``<think>`` blocks come
+        back as the second element so the interpret flow can show the model's
+        reasoning instead of silently discarding it.
         """
         if isinstance(content, dict):
-            return content
+            return content, ""
         text = AIService._content_text(content).strip()
         if not text:
             raise AIServiceError("AI 模型返回了空内容")
+        think_blocks = re.findall(r"<think>(.*?)</think>", text, flags=re.IGNORECASE | re.DOTALL)
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
         fenced = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
         candidates = [*fenced, text]
         decoder = json.JSONDecoder()
+        thinking = "\n".join(block.strip() for block in think_blocks if block.strip())
         for candidate in candidates:
             candidate = candidate.strip()
             try:
@@ -243,7 +247,7 @@ class AIService:
             except json.JSONDecodeError:
                 parsed = None
             if isinstance(parsed, dict):
-                return parsed
+                return parsed, thinking
             for index, char in enumerate(candidate):
                 if char != "{":
                     continue
@@ -252,17 +256,18 @@ class AIService:
                 except json.JSONDecodeError:
                     continue
                 if isinstance(parsed, dict):
-                    return parsed
+                    return parsed, thinking
         preview = re.sub(r"\s+", " ", text)[:240]
         raise AIServiceError(f"AI 模型输出不是合法 JSON，收到内容：{preview}")
 
     def _chat_json(
         self, system_prompt: str, user_content: str
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """向 OpenAI-compatible 接口要一个 JSON 对象，返回 (解析结果, token 用量)。
+    ) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
+        """向 OpenAI-compatible 接口要一个 JSON 对象，返回 (解析结果, 思考文本, token 用量)。
 
         解析指令与结果解释共用这一条通道：错误分支、think 块清洗、围栏 JSON
-        的处理只应该有一份实现。
+        的处理只应该有一份实现。思考文本由 reasoning_content 与被剥离的
+        <think> 块拼接而来，两者都没有时为 None，供解析链路透出展示。
         """
         credentials = self.credentials()
         if credentials.provider != "openai_compatible":
@@ -319,9 +324,11 @@ class AIService:
         try:
             choices = payload["choices"]
             message = choices[0]["message"]
+            reasoning = message.get("reasoning_content")
             content = message.get("content")
             if content in (None, ""):
-                content = message.get("reasoning_content")
+                # 兜底保持兼容：个别推理模型把最终答案放进 reasoning_content。
+                content = reasoning
         except (KeyError, IndexError, TypeError) as exc:
             raise AIServiceError("AI 模型响应缺少 choices[0].message.content") from exc
         raw_usage = payload.get("usage") if isinstance(payload, dict) else None
@@ -331,7 +338,14 @@ class AIService:
             "completion_tokens": (raw_usage or {}).get("completion_tokens"),
             "total_tokens": (raw_usage or {}).get("total_tokens"),
         }
-        return self._parse_json_object(content), usage
+        parsed, think_text = self._parse_json_object(content)
+        thinking_parts: list[str] = []
+        if isinstance(reasoning, str) and reasoning.strip() and content is not reasoning:
+            thinking_parts.append(reasoning.strip())
+        if think_text:
+            thinking_parts.append(think_text)
+        thinking = "\n\n".join(thinking_parts) if thinking_parts else None
+        return parsed, thinking, usage
 
     def explain_solver_run(self, facts: dict[str, Any]) -> dict[str, Any]:
         """把确定性事实包翻译成教务能读的解释，并做一次意图核对。
@@ -362,7 +376,8 @@ class AIService:
             '"next_actions":["教务下一步可以做什么"],'
             '"intent_review":{"verdict":"matched","concerns":[]}}'
         )
-        parsed, usage = self._chat_json(system_prompt, json.dumps(facts, ensure_ascii=False))
+        facts_json = json.dumps(facts, ensure_ascii=False)
+        parsed, _thinking, usage = self._chat_json(system_prompt, facts_json)
         return {
             "headline": str(parsed.get("headline") or ""),
             "explanation": [str(item) for item in (parsed.get("explanation") or [])],
@@ -420,7 +435,7 @@ class AIService:
             },
             ensure_ascii=False,
         )
-        parsed, _usage = self._chat_json(system_prompt, user_content)
+        parsed, _thinking, _usage = self._chat_json(system_prompt, user_content)
         known_indexes = {
             item.get("column_index")
             for item in columns
@@ -446,7 +461,8 @@ class AIService:
         instruction: str,
         *,
         context: dict[str, Any],
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], str | None]:
+        """解析排课指令，返回 (结构化结果, 模型思考文本)。"""
         system_prompt = (
             "你是高途线下校区的排课指令解析 AI。根据业务候选值和固定约束，把用户指令转换为 JSON。"
             "只输出一个 JSON 对象，不要输出 Markdown、解释或额外字段。"
@@ -466,5 +482,5 @@ class AIService:
             '"date_from":null,"date_to":null,"date_window_days":7,'
             '"recognized_rules":[],"unsupported_requirements":[]}'
         )
-        parsed, _usage = self._chat_json(system_prompt, instruction)
-        return parsed
+        parsed, thinking, _usage = self._chat_json(system_prompt, instruction)
+        return parsed, thinking

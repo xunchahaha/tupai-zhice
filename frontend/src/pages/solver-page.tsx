@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
 import { getListSchedulesApiV1SchedulesGetQueryKey, getListSolverRunsApiV1SolverRunsGetQueryKey, getOverviewApiV1OverviewGetQueryKey, useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet, useGetSolverRunApiV1SolverRunsRunIdGet, useGetScheduleApiV1SchedulesScheduleIdGet, useListCourseSessionsApiV1CourseSessionsGet, useListRulesApiV1RulesGet, useListSchedulesApiV1SchedulesGet, useListSolverRunsApiV1SolverRunsGet, useSubmitSolverRunApiV1SolverRunsPost } from "@/api/generated/client";
-import { type CourseSessionResponse, type ScheduleDiffResponse, type ScheduleSummaryResponse, type SolveRequest, type SolverRunExplanation, type SolverRunResponse } from "@/api/generated/models";
+import { type CourseSessionResponse, type AssistantInterpretResponse, type ScheduleDiffResponse, type ScheduleSummaryResponse, type SolveRequest, type SolverRunExplanation, type SolverRunResponse } from "@/api/generated/models";
 import { http } from "@/api/http";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
@@ -16,23 +16,30 @@ import { diffKindLabel, modelStatusLabel, statusLabel } from "@/lib/labels";
 import { preferredSchedule, scheduleForRun } from "@/lib/schedule";
 import { modelStatusTone, statusTone } from "@/lib/status";
 
-interface Interpretation {
-  instruction: string;
-  source: "openai_compatible" | "feishu_aily";
-  ai_configured: boolean;
-  aily_configured: boolean;
+/** thinking 由后端 PR1 新增，orval 尚未重跑，这里按约定就地扩展类型；后端契约里列表字段必返。 */
+type Interpretation = AssistantInterpretResponse & {
+  thinking?: string | null;
   business_lines: string[];
   product_types: string[];
   class_business_ids: string[];
-  date_from: string | null;
-  date_to: string | null;
-  date_window_days: number;
   recognized_rules: string[];
-  unsupported_requirements?: string[];
-  coverage_warnings?: string[];
   solver_rules: string[];
-  summary: string;
-}
+  date_window_days: number;
+};
+
+/** 解析过程状态机：thinking=请求在途，parsed=成功（参数面板门控），failed=页内错误条。 */
+type InterpretPhase = "idle" | "thinking" | "parsed" | "failed";
+
+/**
+ * 解析阶段文案按时间顺序推进；键值与二期 SSE interpret 事件一一同名，
+ * 升级流式时只需把数据源换成事件，这里不用再动。
+ */
+const INTERPRET_STAGES = [
+  { key: "connect", text: "正在连接 AI 模型…" },
+  { key: "read", text: "正在理解调整需求…" },
+  { key: "match", text: "正在匹配课程与日期…" },
+  { key: "validate", text: "正在校验解析结果…" },
+];
 
 type SolverRule = NonNullable<SolveRequest["solver_rules"]>[number];
 
@@ -87,7 +94,17 @@ export function SolverPage() {
   const [current, setCurrent] = useState<SolverRunResponse | null>(null);
   const [instruction, setInstruction] = useState("请在固定上课时段不变的前提下，重新安排日期和教室，优先最少变更，并检查教室与具体日程账号冲突");
   const [interpretation, setInterpretation] = useState<Interpretation | null>(null);
-  const [interpreting, setInterpreting] = useState(false);
+  const [phase, setPhase] = useState<InterpretPhase>("idle");
+  const [stageIndex, setStageIndex] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [parsedSeconds, setParsedSeconds] = useState(0);
+  const [interpretError, setInterpretError] = useState("");
+  // 解析出的日期窗口是否已回填手动参数面板（来源徽标用，用户手动改动后即失效）。
+  const [aiWindowFilled, setAiWindowFilled] = useState(false);
+  const interpretAbort = useRef<AbortController | null>(null);
+  const interpretStartedAt = useRef(0);
+  // D6 只预填日期三元组，且用户手动改过的字段不再被下一次解析覆盖。
+  const manuallyEdited = useRef({ date_from: false, date_to: false, date_window_days: false });
   const [publishing, setPublishing] = useState<"dry-run" | "publish" | null>(null);
   const [calendarResult, setCalendarResult] = useState<CalendarResult | null>(null);
   const [assistantReady, setAssistantReady] = useState<boolean | null>(null);
@@ -115,6 +132,20 @@ export function SolverPage() {
       });
   }, []);
   useEffect(probeAssistant, [probeAssistant]);
+  const interpreting = phase === "thinking";
+  // thinking 阶段的阶段文案（每 2.5s 顺延）与已用时计时器；离开 thinking 即清理。
+  useEffect(() => {
+    if (phase !== "thinking") return;
+    const startedAt = interpretStartedAt.current || Date.now();
+    setElapsedSeconds(0);
+    setStageIndex(0);
+    const timer = window.setInterval(() => {
+      const seconds = (Date.now() - startedAt) / 1000;
+      setElapsedSeconds(seconds);
+      setStageIndex(Math.min(Math.floor(seconds / 2.5), INTERPRET_STAGES.length - 1));
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [phase]);
   const progress = useGetSolverRunApiV1SolverRunsRunIdGet(runId, { query: { enabled: Boolean(runId), refetchInterval: (query) => query.state.data?.status === "completed" || query.state.data?.status === "failed" ? false : 700 } });
   const submit = useSubmitSolverRunApiV1SolverRunsPost({ mutation: { onSuccess: (result) => { setRunId(result.id); setCurrent(result); toast.success("求解任务已创建"); }, onError: (error) => toast.error(errorMessage(error)) } });
   useEffect(() => { if (progress.data) { setCurrent(progress.data); if (progress.data.status === "completed" || progress.data.status === "failed") { void Promise.all([client.invalidateQueries({ queryKey: getListSchedulesApiV1SchedulesGetQueryKey() }), client.invalidateQueries({ queryKey: getListSolverRunsApiV1SolverRunsGetQueryKey() }), client.invalidateQueries({ queryKey: getOverviewApiV1OverviewGetQueryKey() })]); } } }, [client, progress.data]);
@@ -152,42 +183,76 @@ export function SolverPage() {
   if (rules.isPending || runs.isPending || schedules.isPending) return <LoadingState />;
   if (rules.isError || runs.isError || schedules.isError) return <ErrorState retry={() => { void rules.refetch(); void runs.refetch(); void schedules.refetch(); }} />;
   const interpret = async () => {
-    setInterpreting(true);
+    const controller = new AbortController();
+    interpretAbort.current = controller;
+    interpretStartedAt.current = Date.now();
+    setInterpretError("");
+    setPhase("thinking");
     try {
-      const { data } = await http.post<Interpretation>("/api/v1/assistant/interpret", { instruction });
+      const { data } = await http.post<Interpretation>("/api/v1/assistant/interpret", { instruction }, { signal: controller.signal });
+      setParsedSeconds((Date.now() - interpretStartedAt.current) / 1000);
       setInterpretation(data);
       setAssistantEngine(data.source === "feishu_aily" ? "Aily（可选通道）" : "通用 AI 模型");
+      // P1 回填：解析成功后把日期三元组预填进手动参数面板（仅一次，手动改过的不覆盖）。
+      setParams((current) => ({
+        ...current,
+        date_from: manuallyEdited.current.date_from ? current.date_from : data.date_from ?? null,
+        date_to: manuallyEdited.current.date_to ? current.date_to : data.date_to ?? null,
+        date_window_days: manuallyEdited.current.date_window_days ? current.date_window_days : data.date_window_days ?? current.date_window_days,
+      }));
+      setAiWindowFilled(!manuallyEdited.current.date_window_days);
+      setPhase("parsed");
       toast.success(data.source === "feishu_aily" ? "Aily（可选通道） 已完成解析" : "AI 模型已完成解析");
     } catch (error) {
+      // 用户主动取消不算失败，安静回到初始态等下一次解析。
+      if (controller.signal.aborted) {
+        setPhase("idle");
+        return;
+      }
       const message = errorMessage(error);
+      setInterpretError(message);
+      setPhase("failed");
       toast.error(message);
       if (message.includes("配置一句话排课 AI")) setAssistantReady(false);
     } finally {
-      setInterpreting(false);
+      if (interpretAbort.current === controller) interpretAbort.current = null;
     }
+  };
+  const cancelInterpret = () => interpretAbort.current?.abort();
+  /** 手动参数面板字段被用户改过即打脏标记，之后的解析不再覆盖该字段。 */
+  const markManualEdit = (field: "date_from" | "date_to" | "date_window_days") => {
+    manuallyEdited.current[field] = true;
+    if (field === "date_window_days") setAiWindowFilled(false);
   };
   const solveFromInterpretation = async () => { if (!interpretation || interpretation.unsupported_requirements?.length) return; try { const { data } = await http.post<SolverRunResponse>("/api/v1/assistant/solve", { instruction: interpretation.instruction, business_lines: interpretation.business_lines, product_types: interpretation.product_types, class_business_ids: interpretation.class_business_ids, date_from: interpretation.date_from, date_to: interpretation.date_to, date_window_days: interpretation.date_window_days, solver_rules: interpretation.solver_rules, time_limit_seconds: 30, wait: false }); setRunId(data.id); setCurrent(data); toast.success("确认完成，CP-SAT 求解已启动"); } catch (error) { toast.error(errorMessage(error)); } };
   /** 把 AI 给出的建议指令填回输入框，省掉「复制—滚动—粘贴」三步。 */
   const applySuggestedInstruction = (value: string) => {
     setInstruction(value);
     setInterpretation(null);
+    setInterpretError("");
     window.scrollTo?.({ top: 0, behavior: "smooth" });
     toast.success("建议指令已填入「一句话排课」，确认无误后可直接解析并重跑");
   };
   const publishCalendar = async (dryRun: boolean) => { if (!schedule) return; setPublishing(dryRun ? "dry-run" : "publish"); try { const { data } = await http.post<CalendarResult>(`/api/v1/schedules/${schedule.id}/calendar-publish`, { calendar_id: "primary", need_notification: true, dry_run: dryRun }); setCalendarResult(data); toast.success(dryRun ? `预检完成：预计下发 ${data.would_publish} 个日程，发现 ${data.conflict_count} 个冲突` : `已下发 ${data.published} 个日程，发现 ${data.conflict_count} 个冲突`); } catch (error) { toast.error(errorMessage(error)); } finally { setPublishing(null); } };
+  // D5 渐进披露：解析成功后才展开手动参数面板；但 AI 未配置或探测失败时手动路径是唯一入口，直接展示（D8）。
+  const showParams = phase === "parsed" || assistantReady === false || Boolean(assistantProbeError);
   return <div className="space-y-5 animate-fade-in">
     <PageHeader title="排课求解" actions={<Badge tone="blue">AI + CP-SAT</Badge>} />
-    <section className="border border-blue-200 bg-blue-50/40 p-5"><div className="flex flex-wrap items-center gap-2"><Bot className="size-4 text-blue-600" /><h2 className="font-semibold">一句话排课</h2><Badge tone={assistantReady === true ? "green" : "yellow"}>{assistantReady === true ? `${assistantEngine} 已接入` : assistantReady === false ? "AI 模型待配置" : assistantProbeError ? "AI 配置读取失败" : "正在读取 AI 配置"}</Badge>{assistantProbeError ? <Button size="sm" variant="outline" onClick={probeAssistant}>重试</Button> : null}</div><p className="mt-2 text-xs text-zinc-500">自然语言 → AI 解析业务范围与规则 → 教务确认 → CP-SAT 确定性求解 → 课表与日历下发</p><textarea aria-label="一句话排课指令" className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500" value={instruction} onChange={(event) => { setInstruction(event.target.value); setInterpretation(null); }} /><div className="mt-3 flex flex-wrap gap-2"><Button onClick={interpret} disabled={assistantReady !== true || interpreting || instruction.trim().length < 2}><Sparkles className="size-4" />{interpreting ? "AI 正在理解指令" : "让 AI 解析排课指令"}</Button>{interpretation ? <Button variant="outline" onClick={solveFromInterpretation} disabled={Boolean(interpretation.unsupported_requirements?.length)}><Play className="size-4" />确认并开始求解</Button> : null}</div>{assistantReady === false ? <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><div>普通集成应用继续负责外部表格和日历；一句话理解改由独立 AI 模型接口完成，不再要求 Aily 应用标识和技能标识。</div><Button className="mt-3" size="sm" variant="outline" onClick={() => navigate("/integrations?section=ai")}><Settings2 className="size-4" />配置一句话排课 AI</Button></div> : null}{interpretation ? <><p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-xs text-zinc-600">{interpretation.summary}；解析来源：{interpretation.source === "feishu_aily" ? "Aily（可选通道）" : assistantEngine}。</p><div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3"><Scope label="业务线" values={interpretation.business_lines} /><Scope label="产品班型" values={interpretation.product_types} /><Scope label="班级范围" values={interpretation.class_business_ids} /><Scope label="日期范围" values={[interpretation.date_from, interpretation.date_to].filter(Boolean) as string[]} /><Scope label="日期调整窗口" values={[`${interpretation.date_window_days} 天`]} /><Scope label="识别规则" values={interpretation.recognized_rules} /></div><div className="mt-3 space-y-2 text-xs text-amber-900">{interpretation.coverage_warnings?.map((warning) => <p key={warning}>{warning}</p>)}{interpretation.unsupported_requirements?.length ? <div role="alert" className="border-l-2 border-amber-500 bg-amber-50 p-3"><strong>以下要求尚未进入求解：</strong><ul>{interpretation.unsupported_requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul><p>请先在规则管理中补充已支持的结构化规则，并修订指令后重新解析。</p></div> : null}</div></> : null}</section>
+    <section className="border border-blue-200 bg-blue-50/40 p-5"><div className="flex flex-wrap items-center gap-2"><Bot className="size-4 text-blue-600" /><h2 className="font-semibold">一句话排课</h2><Badge tone={assistantReady === true ? "green" : "yellow"}>{assistantReady === true ? `${assistantEngine} 已接入` : assistantReady === false ? "AI 模型待配置" : assistantProbeError ? "AI 配置读取失败" : "正在读取 AI 配置"}</Badge>{assistantProbeError ? <Button size="sm" variant="outline" onClick={probeAssistant}>重试</Button> : null}</div><p className="mt-2 text-xs text-zinc-500">自然语言 → AI 解析业务范围与规则 → 教务确认 → CP-SAT 确定性求解 → 课表与日历下发</p><textarea aria-label="一句话排课指令" className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500 disabled:bg-zinc-50 disabled:text-zinc-400" value={instruction} disabled={phase === "thinking"} onChange={(event) => { setInstruction(event.target.value); setInterpretation(null); if (phase === "failed") { setPhase("idle"); setInterpretError(""); } }} /><div className="mt-3 flex flex-wrap gap-2"><Button onClick={interpret} disabled={assistantReady !== true || interpreting || instruction.trim().length < 2}><Sparkles className="size-4" />{interpreting ? "AI 正在理解指令" : "让 AI 解析排课指令"}</Button>{interpreting ? <Button variant="outline" onClick={cancelInterpret}>取消解析</Button> : null}{interpretation ? <Button variant="outline" onClick={solveFromInterpretation} disabled={Boolean(interpretation.unsupported_requirements?.length)}><Play className="size-4" />确认并开始求解</Button> : null}</div>{assistantReady === false ? <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><div>普通集成应用继续负责外部表格和日历；一句话理解改由独立 AI 模型接口完成，不再要求 Aily 应用标识和技能标识。</div><Button className="mt-3" size="sm" variant="outline" onClick={() => navigate("/integrations?section=ai")}><Settings2 className="size-4" />配置一句话排课 AI</Button></div> : null}{phase === "thinking" ? <InterpretProgress stageIndex={stageIndex} elapsedSeconds={elapsedSeconds} /> : null}{phase === "failed" ? <div role="alert" className="mt-4 border-l-2 border-red-500 bg-red-50 px-4 py-3 text-sm text-red-800"><div>AI 解析失败：{interpretError}</div>{elapsedSeconds > 30 ? <p className="mt-1 text-xs text-amber-800">本次解析超过 30 秒仍未返回，可稍后重试，或改用手动参数求解。</p> : null}<Button className="mt-2" size="sm" variant="outline" onClick={() => void interpret()} disabled={assistantReady !== true || instruction.trim().length < 2}><RefreshCw className="size-3.5" />重试解析</Button></div> : null}{interpretation ? <><p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-xs text-zinc-600">{interpretation.summary}；解析来源：{interpretation.source === "feishu_aily" ? "Aily（可选通道）" : assistantEngine}。</p><InterpretThought thinking={interpretation.thinking ?? ""} seconds={parsedSeconds} /><div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3"><Scope label="业务线" values={interpretation.business_lines} /><Scope label="产品班型" values={interpretation.product_types} /><Scope label="班级范围" values={interpretation.class_business_ids} /><Scope label="日期范围" values={[interpretation.date_from, interpretation.date_to].filter(Boolean) as string[]} /><Scope label="日期调整窗口" values={[`${interpretation.date_window_days} 天`]} /><Scope label="识别规则" values={interpretation.recognized_rules} /></div><div className="mt-3 space-y-2 text-xs text-amber-900">{interpretation.coverage_warnings?.map((warning) => <p key={warning}>{warning}</p>)}{interpretation.unsupported_requirements?.length ? <div role="alert" className="border-l-2 border-amber-500 bg-amber-50 p-3"><strong>以下要求尚未进入求解：</strong><ul>{interpretation.unsupported_requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul><p>请先在规则管理中补充已支持的结构化规则，并修订指令后重新解析。</p></div> : null}</div></> : null}</section>
     <div className="grid gap-2 xl:grid-cols-[360px_minmax(0,1fr)]">
-      <SolverParams
+      {showParams ? <div className="animate-fade-in"><SolverParams
         params={params}
         setParams={setParams}
         scope={scopeOptions}
         selectedCount={selectedCount}
         pending={submit.isPending || activeRun?.status === "running"}
+        aiWindowBadge={aiWindowFilled && params.date_window_days !== defaultParams.date_window_days}
+        onManualEdit={markManualEdit}
         onSubmit={() => submit.mutate({ data: { ...params, solver_rules: [...new Set([...params.solver_rules, ...SYSTEM_RULE_KEYS])], wait: false } })}
-      />
-      <RunPanel run={activeRun} onUseInstruction={applySuggestedInstruction} />
+      /></div> : null}
+      <div className={showParams ? undefined : "xl:col-span-2"}>
+        <RunPanel run={activeRun} onUseInstruction={applySuggestedInstruction} />
+      </div>
     </div>
     <ScheduleChangePanel
       base={baseSchedule}
@@ -224,12 +289,15 @@ function InfoTooltip({ label, children }: { label: string; children: ReactNode }
   );
 }
 
-function NumberField({ label, hint, value, min, max, step, onChange }: { label: string; hint: string; value: number; min: number; max: number; step: number; onChange: (value: number) => void }) {
+function NumberField({ label, hint, labelExtra, value, min, max, step, onChange }: { label: string; hint: string; labelExtra?: ReactNode; value: number; min: number; max: number; step: number; onChange: (value: number) => void }) {
   const id = `solver-${label}`;
   return (
     <div className="block text-sm text-zinc-700">
       <span className="flex items-center justify-between">
-        <label htmlFor={id} className="cursor-pointer font-medium text-zinc-800">{label}</label>
+        <span className="inline-flex items-center gap-1.5">
+          <label htmlFor={id} className="cursor-pointer font-medium text-zinc-800">{label}</label>
+          {labelExtra}
+        </span>
         <InfoTooltip label={label}>{hint}</InfoTooltip>
       </span>
       <input
@@ -246,7 +314,52 @@ function NumberField({ label, hint, value, min, max, step, onChange }: { label: 
   );
 }
 
-function SolverParams({ params, setParams, scope, selectedCount, pending, onSubmit }: { params: SolverParamValues; setParams: React.Dispatch<React.SetStateAction<SolverParamValues>>; scope: { businessLines: string[]; classes: string[] }; selectedCount: number; pending: boolean; onSubmit: () => void }) {
+/** 解析进行中的阶段进度区：左侧竖线 + 浅色斜体，当前阶段用现有 animate-pulse 呼吸。 */
+function InterpretProgress({ stageIndex, elapsedSeconds }: { stageIndex: number; elapsedSeconds: number }) {
+  return (
+    <div className="mt-4 border-l-2 border-zinc-200 pl-3">
+      <ol className="space-y-1 text-xs italic">
+        {INTERPRET_STAGES.map((stage, index) => {
+          const done = index < stageIndex;
+          const current = index === stageIndex;
+          return (
+            <li key={stage.key} className={"flex items-center gap-1.5 " + (current ? "animate-pulse text-zinc-600" : done ? "text-zinc-400" : "text-zinc-300")}>
+              <span aria-hidden>{done ? "✓" : current ? "…" : "○"}</span>
+              {stage.text}
+            </li>
+          );
+        })}
+      </ol>
+      <div className="mt-2 flex flex-wrap items-center gap-3 text-xs not-italic text-zinc-500">
+        <span className="tabular-nums">已用时 {elapsedSeconds.toFixed(1)} 秒</span>
+        {elapsedSeconds > 30 ? <span className="text-amber-700">解析耗时较长，可取消后重试</span> : null}
+      </div>
+    </div>
+  );
+}
+
+/** 思考过程回看：完成后默认折叠为「已解析完成（用时 N 秒）」，正文限高防长思考撑爆页面。 */
+function InterpretThought({ thinking, seconds }: { thinking: string; seconds: number }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!thinking) {
+    // Aily 或无思考模型：只给阶段完成与用时，不放空折叠块。
+    return <p className="mt-3 border-l-2 border-zinc-200 pl-3 text-xs text-zinc-500">已解析完成 · 用时 {seconds.toFixed(1)} 秒 · 本次模型未输出思考过程</p>;
+  }
+  return (
+    <div className="mt-3">
+      <button type="button" className="text-xs text-zinc-500 transition-colors hover:text-zinc-700" onClick={() => setExpanded((value) => !value)}>
+        {expanded ? "收起思考过程" : `已解析完成（用时 ${seconds.toFixed(1)} 秒）· 展开回看思考过程`}
+      </button>
+      {expanded ? (
+        <div className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap border-l-2 border-zinc-200 pl-3 text-xs italic leading-5 text-zinc-500">
+          {thinking}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SolverParams({ params, setParams, scope, selectedCount, pending, aiWindowBadge, onManualEdit, onSubmit }: { params: SolverParamValues; setParams: React.Dispatch<React.SetStateAction<SolverParamValues>>; scope: { businessLines: string[]; classes: string[] }; selectedCount: number; pending: boolean; aiWindowBadge?: boolean; onManualEdit?: (field: "date_from" | "date_to" | "date_window_days") => void; onSubmit: () => void }) {
   const toggleRule = (key: SolverRule) =>
     setParams((current) => ({
       ...current,
@@ -312,9 +425,10 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
                   className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm"
                   type="date"
                   value={params[key] ?? ""}
-                  onChange={(event) =>
-                    setParams((current) => ({ ...current, [key]: event.target.value || null }))
-                  }
+                  onChange={(event) => {
+                    onManualEdit?.(key);
+                    setParams((current) => ({ ...current, [key]: event.target.value || null }));
+                  }}
                 />
               </div>
             );
@@ -327,7 +441,7 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, onSubm
       </fieldset>
       <div className="mt-4 grid gap-4">
         <NumberField label="求解时限（秒）" hint="CP-SAT 最多运行多久。超时可能返回已有可行解，或 UNKNOWN（尚未找到解，不代表无解）；课次范围越大，通常需要越长时间。" value={params.time_limit_seconds} min={1} max={900} step={5} onChange={(value) => setParams((current) => ({ ...current, time_limit_seconds: value }))} />
-        <NumberField label="日期调整窗口（天）" hint="每节课相对原日期最多可前后挪动几天。实际新日期还必须落在起始日期与结束日期设定的边界内；设为 0 表示不调日期。" value={params.date_window_days} min={0} max={31} step={1} onChange={(value) => setParams((current) => ({ ...current, date_window_days: value }))} />
+        <NumberField label="日期调整窗口（天）" hint="每节课相对原日期最多可前后挪动几天。实际新日期还必须落在起始日期与结束日期设定的边界内；设为 0 表示不调日期。" labelExtra={aiWindowBadge ? <Badge tone="blue">来自 AI 解析</Badge> : undefined} value={params.date_window_days} min={0} max={31} step={1} onChange={(value) => { onManualEdit?.("date_window_days"); setParams((current) => ({ ...current, date_window_days: value })); }} />
         <NumberField label="变更权重" hint="每挪动一天的代价。数值越大，求解器越倾向保持原课表。" value={params.change_weight} min={0} max={1000000} step={1000} onChange={(value) => setParams((current) => ({ ...current, change_weight: value }))} />
       </div>
       <fieldset className="mt-5 border-t border-zinc-100 pt-4">

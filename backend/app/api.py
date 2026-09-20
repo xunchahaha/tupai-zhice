@@ -5496,6 +5496,7 @@ def assistant_interpret(
     aily_configured = bool(aily_app_id and aily_skill_id)
     source: Literal["openai_compatible", "feishu_aily"]
     output: dict[str, Any]
+    thinking: str | None = None
     if ai_configuration["configured"]:
         context = {
             "business_lines": sorted(
@@ -5524,7 +5525,9 @@ def assistant_interpret(
             "fixed_rule_labels": list(SOLVER_RULE_LABELS.values()),
         }
         try:
-            output = ai_service.interpret_instruction(request.instruction, context=context)
+            output, thinking = ai_service.interpret_instruction(
+                request.instruction, context=context
+            )
         except AIServiceError as exc:
             raise HTTPException(status_code=502, detail=f"AI 指令解析失败：{exc}") from exc
         source = "openai_compatible"
@@ -5611,6 +5614,7 @@ def assistant_interpret(
             ai_configured=bool(ai_configuration["configured"]),
             aily_configured=aily_configured,
             **parsed,
+            thinking=thinking,
             summary=(
                 "通用 AI 模型已解析排课范围和固定业务规则"
                 if source == "openai_compatible"

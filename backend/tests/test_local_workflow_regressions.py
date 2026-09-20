@@ -232,16 +232,19 @@ def test_interpretation_exposes_unmodeled_requirements(client, scoped_schedule, 
     monkeypatch.setattr(
         api.AIService,
         "interpret_instruction",
-        lambda *args, **kwargs: {
-            "business_lines": [],
-            "product_types": [],
-            "class_business_ids": [],
-            "date_from": None,
-            "date_to": None,
-            "date_window_days": 7,
-            "recognized_rules": ["虚构标签"],
-            "unsupported_requirements": ["额外复杂要求"],
-        },
+        lambda *args, **kwargs: (
+            {
+                "business_lines": [],
+                "product_types": [],
+                "class_business_ids": [],
+                "date_from": None,
+                "date_to": None,
+                "date_window_days": 7,
+                "recognized_rules": ["虚构标签"],
+                "unsupported_requirements": ["额外复杂要求"],
+            },
+            None,
+        ),
     )
     response = client.post(
         "/api/v1/assistant/interpret",
@@ -291,16 +294,19 @@ def test_fixed_clock_instruction_is_not_misread_as_a_room(client, scoped_schedul
     monkeypatch.setattr(
         api.AIService,
         "interpret_instruction",
-        lambda *args, **kwargs: {
-            "business_lines": [],
-            "product_types": [],
-            "class_business_ids": [],
-            "date_from": None,
-            "date_to": None,
-            "date_window_days": 7,
-            "recognized_rules": [],
-            "unsupported_requirements": [],
-        },
+        lambda *args, **kwargs: (
+            {
+                "business_lines": [],
+                "product_types": [],
+                "class_business_ids": [],
+                "date_from": None,
+                "date_to": None,
+                "date_window_days": 7,
+                "recognized_rules": [],
+                "unsupported_requirements": [],
+            },
+            None,
+        ),
     )
     response = client.post(
         "/api/v1/assistant/interpret",
