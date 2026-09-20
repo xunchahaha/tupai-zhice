@@ -137,6 +137,34 @@ LocalAdapter（默认可用）与 FeishuAdapter（纯委托 `services/feishu.py`
 集成时返回 409，提示与未配置飞书时一致；其余接缝与新增集成步骤见
 `app/integrations/README.md`。
 
+## 记忆层（偏好库 v1）
+
+系统会记住老师/教室/班级/课程的需求与习惯，并从调课行为中学习。设计边界与红线见
+`docs/roadmap/02-agent-memory.md` §3，接口语义见
+`docs/对接资料/04_接口与数据字典/后端接口与运行约定.md` 的「记忆层」小节。
+
+- **存储**：`preference_entries` 表（`app/models.py::PreferenceEntry`），多态主体
+  `subject_type`（teacher/classroom/cohort/course）+ 业务标识定位，`constraint` JSON
+  承载时段/教室等结构化范围，按 `schedule_set_id` 隔离。
+- **来源与生命周期**：手工登记（`explicit_stated`/`admin_directive`）直接 `confirmed`；
+  挖掘候选一律 `induced_from_adjustment` + `probation`，经
+  `POST /api/v1/memory/preferences/{id}/transition` 确认或拒绝，过期作废不删除。
+- **三条红线（写死在代码与测试里）**：① `induced_from_adjustment` 条目升硬约束一律 422——
+  硬约束只能来自教务显式声明或管理员指令；② 创建 API 不传 `valid_until` 时默认
+  「当前日期 + 180 天」并回显；③ 挖掘条目初始 `status` 恒为 `probation`。
+- **挖掘**：`POST /api/v1/memory/mining-runs` 回顾近期调课事件（含一键归因
+  `declared_reason`）。配置 AI 时走 `services/ai.py::mine_preferences`（模型只提名，
+  主体/谓词/证据按白名单校验，允许弃权）；未配置或失败时退化为确定性统计——
+  同主体+同类型调课 ≥2 次即产生候选，无 LLM 也能用。重复候选（同主体+谓词+约束
+  且已存在 `probation`/`confirmed`）自动跳过。
+- **求解联动**：`services/memory_solver.py::compile_preferences` 在每次求解前把
+  `confirmed`/`probation` 且未过期的偏好翻译为内部软规则对象，并入 solver 现有
+  软约束管线（`services/tasks.py::_attach_memory_preferences`），不新造求解项。
+  目标权重 = `weight × (confirmed?1.0:0.3 试用期衰减) × confidence`，v1 只映射
+  `avoid_slot/prefer_slot/avoid_room/prefer_room/consecutive_sessions` 五个与现有
+  软约束术语对齐的谓词；`max_daily_load` 只登记不进目标函数。偏好永远是软约束，
+  不会把课表变成无解。
+
 ## API 约定
 
 - API 前缀：`/api/v1`
@@ -156,6 +184,10 @@ LocalAdapter（默认可用）与 FeishuAdapter（纯委托 `services/feishu.py`
 - Feishu 同步记录：`GET /api/v1/integrations/feishu/syncs`（当前课表方案最近 50 条）
 - 总览基础数据：`GET /api/v1/overview`
 - 总览分析数据：`GET /api/v1/overview/analytics`（教师负荷、教室时段热力、软约束指标、飞书同步健康）
+- 记忆偏好：`GET/POST /api/v1/memory/preferences`、`PATCH /api/v1/memory/preferences/{id}`、
+  `POST /api/v1/memory/preferences/{id}/transition`
+- 偏好挖掘：`POST /api/v1/memory/mining-runs`
+- 调课归因：`POST /api/v1/reschedule-events` 请求体可选 `declared_reason`
 - 课表方案：`GET/POST /api/v1/schedule-sets`、`PATCH /api/v1/schedule-sets/{id}`
 - 课表方案成员：`GET /api/v1/schedule-sets/{id}/members`，`PUT/DELETE /api/v1/schedule-sets/{id}/members/{user_id}`
 - 飞书连接诊断：`GET /api/v1/integrations/feishu/connection`

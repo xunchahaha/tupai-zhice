@@ -59,6 +59,7 @@ from .models import (
     ClassGroup,
     CourseSession,
     IntegrationSync,
+    PreferenceEntry,
     RescheduleEvent,
     Room,
     Rule,
@@ -119,9 +120,14 @@ from .schemas import (
     IntegrationManifestResponse,
     IntegrationSyncResponse,
     MasterDataBatchDelete,
+    MiningRunResponse,
     OverviewAnalyticsResponse,
     OverviewResponse,
     PasswordChange,
+    PreferenceCreate,
+    PreferenceResponse,
+    PreferenceTransition,
+    PreferenceUpdate,
     PublicScheduleShareItem,
     PublicScheduleSummary,
     RescheduleCreate,
@@ -196,6 +202,18 @@ from .services.import_mapping import (
     parse_uploaded_workbook,
     pick_default_sheet,
     suggest_mapping,
+)
+from .services.memory_solver import (
+    ALL_PREDICATES,
+    MINED_DEFAULT_CONFIDENCE,
+    MINED_DEFAULT_WEIGHT,
+    MINING_EVENT_LIMIT,
+    PREFERENCE_TRANSITIONS,
+    default_valid_until,
+    deterministic_preference_candidates,
+    mining_event_view,
+    normalized_constraint,
+    validate_ai_candidates,
 )
 from .services.overview_analytics import build_overview_analytics
 from .services.snapshot import build_snapshot_payload, create_snapshot, version_course_map
@@ -2785,6 +2803,319 @@ def transition_rule(
     return rule
 
 
+# ---------------------------------------------------------------- 记忆层（L1 偏好库）
+# 设计与红线见 docs/roadmap/02-agent-memory.md §3：induced 条目永不升硬约束、
+# 挖掘候选一律先观察（probation）、过期作废不删除。
+
+# 多态主体 → 主数据模型。dict 值标注为 type[Any]：四种模型的字段集合不同，
+# 统一走 business_id / schedule_set_id 两个共有列查询。
+_PREFERENCE_SUBJECT_MODELS: dict[str, type[Any]] = {
+    "teacher": Teacher,
+    "classroom": Room,
+    "cohort": ClassGroup,
+    "course": CourseSession,
+}
+
+
+def _validate_preference_subject(
+    db: Session, subject_type: str, subject_id: str, schedule_set_id: str
+) -> None:
+    model = _PREFERENCE_SUBJECT_MODELS.get(subject_type)
+    if model is None:
+        raise HTTPException(status_code=422, detail=f"未知的偏好主体类型：{subject_type}")
+    instance = db.scalar(
+        select(model).where(
+            model.schedule_set_id == schedule_set_id, model.business_id == subject_id
+        )
+    )
+    if instance is None:
+        raise HTTPException(
+            status_code=422, detail=f"偏好主体不存在：{subject_type} {subject_id}"
+        )
+
+
+@router.get("/memory/preferences", response_model=list[PreferenceResponse], tags=["memory"])
+def list_preferences(
+    db: Db,
+    user: CurrentUser,
+    scope: ViewerScope,
+    subject_type: str | None = None,
+    subject_id: str | None = None,
+    status: str | None = Query(default=None),
+) -> list[PreferenceEntry]:
+    statement = select(PreferenceEntry).where(PreferenceEntry.schedule_set_id == scope.id)
+    if subject_type:
+        statement = statement.where(PreferenceEntry.subject_type == subject_type)
+    if subject_id:
+        statement = statement.where(PreferenceEntry.subject_id == subject_id)
+    if status:
+        statement = statement.where(PreferenceEntry.status == status)
+    return list(
+        db.scalars(statement.order_by(PreferenceEntry.created_at.desc(), PreferenceEntry.id))
+    )
+
+
+@router.post(
+    "/memory/preferences",
+    response_model=PreferenceResponse,
+    status_code=201,
+    tags=["memory"],
+)
+def create_preference(
+    payload: PreferenceCreate, db: Db, user: AdminOrScheduler, scope: SchedulerScope
+) -> PreferenceEntry:
+    if payload.predicate not in ALL_PREDICATES:
+        raise HTTPException(status_code=422, detail=f"未知的偏好谓词：{payload.predicate}")
+    _validate_preference_subject(db, payload.subject_type, payload.subject_id, scope.id)
+    today = shanghai_now().date()
+    entry = PreferenceEntry(
+        schedule_set_id=scope.id,
+        subject_type=payload.subject_type,
+        subject_id=payload.subject_id,
+        predicate=payload.predicate,
+        constraint=payload.constraint,
+        modality=payload.modality,
+        confidence=payload.confidence,
+        source=payload.source,
+        evidence=payload.evidence,
+        weight=payload.weight,
+        # 显式声明的偏好无需再走确认队列；挖掘候选才从 probation 起步。
+        status="confirmed",
+        valid_from=today,
+        valid_until=payload.valid_until or default_valid_until(today),
+        provenance={
+            "origin": "api",
+            "created_by": user.id,
+            "note": payload.note,
+            "created_at": shanghai_now().isoformat(),
+        },
+    )
+    db.add(entry)
+    audit(db, user, "create", "preference_entry", entry.id, payload.model_dump(mode="json"))
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+@router.patch("/memory/preferences/{entry_id}", response_model=PreferenceResponse, tags=["memory"])
+def update_preference(
+    entry_id: str, payload: PreferenceUpdate, db: Db, user: AdminOrScheduler, scope: SchedulerScope
+) -> PreferenceEntry:
+    entry = get_scoped_or_404(db, PreferenceEntry, entry_id, scope)
+    if entry.status not in {"probation", "confirmed"}:
+        # rejected/expired 是历史审计记录，改内容会让记忆链不可信。
+        raise HTTPException(status_code=409, detail=f"{entry.status} 状态的偏好不能编辑")
+    data = payload.model_dump(exclude_unset=True)
+    if data.get("predicate") is not None and data["predicate"] not in ALL_PREDICATES:
+        raise HTTPException(status_code=422, detail=f"未知的偏好谓词：{data['predicate']}")
+    for key in ("weight", "predicate", "valid_until"):
+        if key in data:
+            setattr(entry, key, data[key])
+    if data.get("constraint") is not None:
+        entry.constraint = data["constraint"]
+    if data.get("scope"):
+        # scope 是 constraint 的便捷合并入口，不整体替换已有约束。
+        merged = dict(entry.constraint or {})
+        merged.update(data["scope"])
+        entry.constraint = merged
+    entry.provenance = {
+        **(entry.provenance or {}),
+        "last_edited_by": user.id,
+        "last_edited_at": shanghai_now().isoformat(),
+    }
+    audit(db, user, "update", "preference_entry", entry.id, payload.model_dump(mode="json"))
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+@router.post(
+    "/memory/preferences/{entry_id}/transition",
+    response_model=PreferenceResponse,
+    tags=["memory"],
+)
+def transition_preference(
+    entry_id: str,
+    payload: PreferenceTransition,
+    db: Db,
+    user: AdminOrScheduler,
+    scope: SchedulerScope,
+) -> PreferenceEntry:
+    entry = get_scoped_or_404(db, PreferenceEntry, entry_id, scope)
+    if payload.target_status not in PREFERENCE_TRANSITIONS.get(entry.status, set()):
+        raise HTTPException(
+            status_code=409,
+            detail=f"不允许从 {entry.status} 转为 {payload.target_status}",
+        )
+    # 红线①：从调课归纳的偏好永不自动升为硬约束——硬约束只能来自教务显式
+    # 声明（explicit_stated）或管理员指令（admin_directive），防止记忆漂移
+    # 演变成数据事故。
+    if payload.target_modality == "hard" and entry.source == "induced_from_adjustment":
+        raise HTTPException(
+            status_code=422,
+            detail="从调课归纳的偏好不能升级为硬约束；硬约束只能来自显式声明或管理员指令",
+        )
+    if payload.target_modality is not None:
+        entry.modality = payload.target_modality
+    entry.status = payload.target_status
+    entry.provenance = {
+        **(entry.provenance or {}),
+        "last_transition_by": user.id,
+        "last_transition_at": shanghai_now().isoformat(),
+        "last_transition_reason": payload.reason,
+    }
+    audit(db, user, "transition", "preference_entry", entry.id, payload.model_dump(mode="json"))
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+def _persist_mining_candidates(
+    db: Session,
+    schedule_set_id: str,
+    candidates: list[dict[str, Any]],
+    *,
+    provenance_base: dict[str, Any],
+) -> tuple[list[PreferenceEntry], int]:
+    """候选一律落库为 probation + induced_from_adjustment；重复候选去重。
+
+    「同 subject+predicate+constraint 已存在 active/probation 则跳过」：
+    与 probation/confirmed 条目的规范化约束比对，同一次挖掘内部也去重。
+    """
+    existing = db.scalars(
+        select(PreferenceEntry).where(
+            PreferenceEntry.schedule_set_id == schedule_set_id,
+            PreferenceEntry.status.in_(["probation", "confirmed"]),
+        )
+    )
+    existing_keys = {
+        (
+            item.subject_type,
+            item.subject_id,
+            item.predicate,
+            normalized_constraint(item.constraint),
+        )
+        for item in existing
+    }
+    today = shanghai_now().date()
+    created: list[PreferenceEntry] = []
+    skipped_existing = 0
+    seen: set[tuple[str, str, str, str]] = set()
+    for candidate in candidates:
+        key = (
+            str(candidate["subject_type"]),
+            str(candidate["subject_id"]),
+            str(candidate["predicate"]),
+            normalized_constraint(candidate.get("constraint")),
+        )
+        if key in existing_keys or key in seen:
+            skipped_existing += 1
+            continue
+        seen.add(key)
+        entry = PreferenceEntry(
+            schedule_set_id=schedule_set_id,
+            subject_type=key[0],
+            subject_id=key[1],
+            predicate=key[2],
+            constraint=candidate.get("constraint") or {},
+            modality="soft",
+            confidence=MINED_DEFAULT_CONFIDENCE,
+            # 红线③：挖掘产生的条目初始状态恒为 probation，权重与硬约束
+            # 资格都要等教务确认后才生效。
+            source="induced_from_adjustment",
+            status="probation",
+            evidence=[str(item) for item in candidate.get("evidence_ids") or []],
+            weight=MINED_DEFAULT_WEIGHT,
+            valid_from=today,
+            valid_until=default_valid_until(today),
+            provenance={
+                **provenance_base,
+                "rationale": candidate.get("rationale"),
+            },
+        )
+        db.add(entry)
+        created.append(entry)
+    return created, skipped_existing
+
+
+@router.post("/memory/mining-runs", response_model=MiningRunResponse, tags=["memory"])
+def create_memory_mining_run(
+    db: Db, user: AdminOrScheduler, scope: SchedulerScope
+) -> MiningRunResponse:
+    """回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。
+
+    配置了 AI 走模型归纳（模型只提名，代码按白名单裁决）；未配置或调用失败
+    优雅降级为确定性统计：同主体+同类型调课 ≥2 次即产生候选。
+    """
+    events = list(
+        db.scalars(
+            select(RescheduleEvent)
+            .where(RescheduleEvent.schedule_set_id == scope.id)
+            .order_by(RescheduleEvent.created_at.desc())
+            .limit(MINING_EVENT_LIMIT)
+        )
+    )
+    views = [mining_event_view(event) for event in events]
+    engine = "deterministic"
+    raw_candidates: list[dict[str, Any]] | None = None
+    skipped_invalid = 0
+    ai_error: str | None = None
+    model_name: str | None = None
+    usage: dict[str, Any] | None = None
+    service = AIService(settings, db)
+    if service.configuration_view()["configured"]:
+        try:
+            raw_candidates, usage = service.mine_preferences(views)
+            engine = "ai"
+            model_name = service.configuration_view().get("model")
+        except AIServiceError as exc:
+            ai_error = str(exc)
+            logger.warning("偏好挖掘 AI 调用失败，退化为确定性统计：%s", exc)
+    if raw_candidates is not None:
+        candidates, skipped_invalid = validate_ai_candidates(raw_candidates, views)
+    else:
+        candidates = deterministic_preference_candidates(views)
+    created, skipped_existing = _persist_mining_candidates(
+        db,
+        scope.id,
+        candidates,
+        provenance_base={
+            "origin": "mining",
+            "engine": engine,
+            "model": model_name,
+            "mined_at": shanghai_now().isoformat(),
+            "mined_by": user.id,
+            "events_scanned": len(views),
+            "usage": usage,
+        },
+    )
+    audit(
+        db,
+        user,
+        "create",
+        "memory_mining_run",
+        None,
+        {
+            "engine": engine,
+            "events_scanned": len(views),
+            "created": len(created),
+            "skipped_existing": skipped_existing,
+            "skipped_invalid": skipped_invalid,
+        },
+    )
+    db.commit()
+    for entry in created:
+        db.refresh(entry)
+    return MiningRunResponse(
+        engine=engine,
+        events_scanned=len(views),
+        created=[PreferenceResponse.model_validate(entry) for entry in created],
+        skipped_existing=skipped_existing,
+        skipped_invalid=skipped_invalid,
+        ai_error=ai_error,
+    )
+
+
 def _validate_rule_coverage(payload: dict[str, Any]) -> None:
     selected = _selected_sessions(payload)
     unsupported = []
@@ -3769,6 +4100,7 @@ def create_reschedule_event(
         schedule_set_id=scope.id,
         event_type=request.event_type,
         description=request.description,
+        declared_reason=request.declared_reason,
         payload=event_payload,
         status="pending",
         parent_schedule_id=parent.id,

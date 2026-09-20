@@ -10,6 +10,7 @@ from sqlalchemy import (
     Date,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -471,6 +472,8 @@ class RescheduleEvent(TimestampMixin, Base):
     )
     event_type: Mapped[str] = mapped_column(String(40))
     description: Mapped[str] = mapped_column(Text)
+    # 调课归因（一键理由）：区分「想换」与「被迫换」，是偏好挖掘的消噪关键。
+    declared_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(30), default="pending")
     parent_schedule_id: Mapped[str] = mapped_column(ForeignKey("schedule_versions.id"))
@@ -479,6 +482,44 @@ class RescheduleEvent(TimestampMixin, Base):
         ForeignKey("schedule_versions.id"), nullable=True
     )
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class PreferenceEntry(TimestampMixin, Base):
+    """L1 声明性记忆：老师/教室/班级/课程的需求与习惯（docs/roadmap/02 §3.1）。
+
+    subject 是多态主体（teacher/classroom/cohort/course），存业务标识而非外键——
+    求解器与调课链路全部以 business_id 定位主体。两条红线写死在使用方：
+    ① induced_from_adjustment 条目永不升硬约束（transition 端点 422）；
+    ② induced 条目初始 status 恒为 probation（挖掘端点负责）。
+    """
+
+    __tablename__ = "preference_entries"
+    __table_args__ = (
+        # 同一方案内的查询按「主体+状态」走；约束内容是 JSON，重复判定在写入方用
+        # 规范化 JSON 比对完成，数据库层不做 JSON 唯一约束（SQLite/MySQL 语义不一致）。
+        Index("ix_preference_entries_scope_status", "schedule_set_id", "status"),
+        Index("ix_preference_entries_subject", "schedule_set_id", "subject_type", "subject_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"),
+        default=DEFAULT_SCHEDULE_SET_ID,
+        index=True,
+    )
+    subject_type: Mapped[str] = mapped_column(String(20))
+    subject_id: Mapped[str] = mapped_column(String(50), index=True)
+    predicate: Mapped[str] = mapped_column(String(40))
+    constraint: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    modality: Mapped[str] = mapped_column(String(10), default="soft")
+    confidence: Mapped[float] = mapped_column(Float, default=0.8)
+    source: Mapped[str] = mapped_column(String(30))
+    evidence: Mapped[list[str]] = mapped_column(JSON, default=list)
+    weight: Mapped[int] = mapped_column(Integer, default=50)
+    status: Mapped[str] = mapped_column(String(20), default="probation", index=True)
+    valid_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    valid_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class IntegrationSync(TimestampMixin, Base):

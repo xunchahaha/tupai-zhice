@@ -484,3 +484,41 @@ class AIService:
         )
         parsed, thinking, _usage = self._chat_json(system_prompt, instruction)
         return parsed, thinking
+
+    def mine_preferences(
+        self, events: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """从近期调课事件中归纳偏好候选，返回 (候选数组, token 用量)。
+
+        模型只做归纳提名：允许整轮弃权（candidates 为空数组），逐条候选必须
+        引用输入事件 id 作为证据。主体白名单、证据引用与结构校验在调用方
+        ``validate_ai_candidates`` 完成——与列映射同一原则：模型提名，代码裁决。
+        """
+        system_prompt = (
+            "你是排课系统的偏好挖掘助手。输入是本学期的一批调课事件（JSON 数组），"
+            "每条包含事件类型、涉及主体（教师/教室/课程）的业务标识、时段、日期范围，"
+            "以及教务声明的原因 declared_reason（可能为空）。\n"
+            "任务：找出同一主体反复出现的调课模式，归纳为结构化偏好候选。\n"
+            "硬性要求：\n"
+            "1. 只输出一个 JSON 对象，不要输出 Markdown 或额外字段。\n"
+            "2. 结构：{\"candidates\":[...]}。没有把握就输出空数组（允许弃权），禁止硬凑。\n"
+            "3. 每条候选：{\"subject_type\":\"teacher|classroom|cohort|course\","
+            "\"subject_id\":\"输入事件里的业务标识原值\","
+            "\"predicate\":\"avoid_slot|prefer_slot|avoid_room|prefer_room|max_daily_load|consecutive_sessions\","
+            "\"constraint\":{...},\"evidence_ids\":[\"事件 id\"],\"rationale\":\"一句话依据\"}。\n"
+            "4. 只归纳有至少两条事件支撑的模式，禁止凭单条事件臆测；"
+            "declared_reason 表明是被迫调课（如教室冲突）时，不要把当事教师主观化。\n"
+            "5. evidence_ids 只能引用输入事件里存在的 id；constraint 里的时段/教室标识"
+            "必须原样来自输入事件。\n"
+            "输出结构："
+            '{"candidates":[{"subject_type":"teacher","subject_id":"郑州考研英语教研组",'
+            '"predicate":"avoid_slot","constraint":{"slot_ids":["S-周三-1800"]},'
+            '"evidence_ids":["evt-1","evt-2"],"rationale":"该教师多次周三晚调课"}]}'
+        )
+        parsed, _thinking, usage = self._chat_json(
+            system_prompt, json.dumps(events, ensure_ascii=False)
+        )
+        raw_candidates = parsed.get("candidates")
+        if not isinstance(raw_candidates, list):
+            raise AIServiceError("AI 偏好挖掘输出缺少 candidates 数组")
+        return [item for item in raw_candidates if isinstance(item, dict)], usage

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import date
 from typing import Any
@@ -20,9 +21,11 @@ from ..models import (
     Teacher,
     TimeSlot,
 )
+from .memory_solver import compile_preferences
 from .solver import solve_problem
 
 settings = get_settings()
+logger = logging.getLogger("tupai.memory")
 _executor: ProcessPoolExecutor | None = None
 
 
@@ -408,6 +411,20 @@ def _persist_failure(run_id: str, message: str) -> None:
             db.commit()
 
 
+def _attach_memory_preferences(payload: dict[str, Any], schedule_set_id: str, db: Any) -> None:
+    """求解前把记忆偏好编译为内部软规则，并入同一条规则管线。
+
+    偏好永远不会替换或覆盖显式规则：编译产物是 hardness=soft 的规则对象，
+    与快照里的规则一起走 _normalized_rules 的现有路径。编译失败不阻断求解
+    ——记忆是加分项，不能变成排课主链路的故障点。
+    """
+    try:
+        memory_rules = compile_preferences(db, schedule_set_id)
+        payload["rules"] = [*(payload.get("rules") or []), *memory_rules]
+    except Exception:  # noqa: BLE001 - 任何记忆层故障都不应拦下课表求解
+        logger.exception("编译记忆偏好失败，本次求解将在无偏好状态下进行")
+
+
 def execute_solver_run(run_id: str) -> dict[str, Any]:
     with SessionLocal() as db:
         run = db.get(SolverRun, run_id)
@@ -422,6 +439,7 @@ def execute_solver_run(run_id: str) -> dict[str, Any]:
         db.commit()
         payload = dict(snapshot.payload)
         payload.update(run.request_payload)
+        _attach_memory_preferences(payload, run.schedule_set_id, db)
     try:
         result = solve_problem(payload)
         _persist_result(run_id, result)
@@ -445,6 +463,7 @@ def enqueue_solver_run(run_id: str) -> None:
         db.commit()
         payload = dict(snapshot.payload)
         payload.update(run.request_payload)
+        _attach_memory_preferences(payload, run.schedule_set_id, db)
 
     future: Future[dict[str, Any]] = _get_executor().submit(solve_problem, payload)
 

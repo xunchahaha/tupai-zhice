@@ -1,6 +1,6 @@
 # 02 · 有记忆、自进化、有温度的排课系统
 
-> 状态：定稿 v2（Anthropic 方法论 / Hermes / Loop Engineering / 记忆系统四路调研全部合入）
+> 状态：定稿 v2（Anthropic 方法论 / Hermes / Loop Engineering / 记忆系统四路调研全部合入）；v1 已实现（MEM-A，2026-09-20：PreferenceEntry 表与迁移、memory 组 API、挖掘闭环（AI + 确定性降级）、求解软约束联动、调课归因 declared_reason）
 > 关联：[README](README.md) · [01-data-import.md](01-data-import.md) · [03-integrations.md](03-integrations.md)
 
 ## 1. 问题定义

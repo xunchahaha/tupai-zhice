@@ -3176,6 +3176,375 @@
         }
       }
     },
+    "/api/v1/memory/preferences": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "List Preferences",
+        "operationId": "list_preferences_api_v1_memory_preferences_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "subject_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject Type"
+            }
+          },
+          {
+            "name": "subject_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PreferenceResponse"
+                  },
+                  "title": "Response List Preferences Api V1 Memory Preferences Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Create Preference",
+        "operationId": "create_preference_api_v1_memory_preferences_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreferenceCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferenceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/preferences/{entry_id}": {
+      "patch": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Update Preference",
+        "operationId": "update_preference_api_v1_memory_preferences__entry_id__patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Entry Id"
+            }
+          },
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreferenceUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferenceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/preferences/{entry_id}/transition": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Transition Preference",
+        "operationId": "transition_preference_api_v1_memory_preferences__entry_id__transition_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Entry Id"
+            }
+          },
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreferenceTransition"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferenceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/mining-runs": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Create Memory Mining Run",
+        "description": "回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。\n\n配置了 AI 走模型归纳（模型只提名，代码按白名单裁决）；未配置或调用失败\n优雅降级为确定性统计：同主体+同类型调课 ≥2 次即产生候选。",
+        "operationId": "create_memory_mining_run_api_v1_memory_mining_runs_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MiningRunResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/solver-runs": {
       "post": {
         "tags": [
@@ -8334,6 +8703,58 @@
         ],
         "title": "MasterDataBatchDelete"
       },
+      "MiningRunResponse": {
+        "properties": {
+          "engine": {
+            "type": "string",
+            "enum": [
+              "ai",
+              "deterministic"
+            ],
+            "title": "Engine"
+          },
+          "events_scanned": {
+            "type": "integer",
+            "title": "Events Scanned"
+          },
+          "created": {
+            "items": {
+              "$ref": "#/components/schemas/PreferenceResponse"
+            },
+            "type": "array",
+            "title": "Created"
+          },
+          "skipped_existing": {
+            "type": "integer",
+            "title": "Skipped Existing",
+            "default": 0
+          },
+          "skipped_invalid": {
+            "type": "integer",
+            "title": "Skipped Invalid",
+            "default": 0
+          },
+          "ai_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ai Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "engine",
+          "events_scanned",
+          "created"
+        ],
+        "title": "MiningRunResponse",
+        "description": "一次偏好挖掘的结果。created 即落库后的候选清单（status=probation）。"
+      },
       "OptimizationPenaltyBreakdown": {
         "properties": {
           "schedule_set_id": {
@@ -8662,6 +9083,338 @@
         ],
         "title": "PasswordChange"
       },
+      "PreferenceCreate": {
+        "properties": {
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "teacher",
+              "classroom",
+              "cohort",
+              "course"
+            ],
+            "title": "Subject Type"
+          },
+          "subject_id": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Subject Id"
+          },
+          "predicate": {
+            "type": "string",
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Predicate"
+          },
+          "constraint": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Constraint"
+          },
+          "modality": {
+            "type": "string",
+            "enum": [
+              "hard",
+              "soft"
+            ],
+            "title": "Modality",
+            "default": "soft"
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "default": 0.8
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "explicit_stated",
+              "admin_directive"
+            ],
+            "title": "Source"
+          },
+          "evidence": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence"
+          },
+          "weight": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Weight",
+            "default": 50
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Until"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "subject_type",
+          "subject_id",
+          "predicate",
+          "source"
+        ],
+        "title": "PreferenceCreate",
+        "description": "手工登记一条偏好。source 只接受显式来源：挖掘产生的条目一律走\nPOST /memory/mining-runs，初始状态恒为 probation。"
+      },
+      "PreferenceResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "schedule_set_id": {
+            "type": "string",
+            "title": "Schedule Set Id"
+          },
+          "subject_type": {
+            "type": "string",
+            "title": "Subject Type"
+          },
+          "subject_id": {
+            "type": "string",
+            "title": "Subject Id"
+          },
+          "predicate": {
+            "type": "string",
+            "title": "Predicate"
+          },
+          "constraint": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Constraint"
+          },
+          "modality": {
+            "type": "string",
+            "title": "Modality"
+          },
+          "confidence": {
+            "type": "number",
+            "title": "Confidence"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "evidence": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence"
+          },
+          "weight": {
+            "type": "integer",
+            "title": "Weight"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid From"
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Until"
+          },
+          "provenance": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Provenance"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "schedule_set_id",
+          "subject_type",
+          "subject_id",
+          "predicate",
+          "constraint",
+          "modality",
+          "confidence",
+          "source",
+          "evidence",
+          "weight",
+          "status",
+          "provenance",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "PreferenceResponse"
+      },
+      "PreferenceTransition": {
+        "properties": {
+          "target_status": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "rejected",
+              "expired"
+            ],
+            "title": "Target Status"
+          },
+          "target_modality": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "hard",
+                  "soft"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Modality"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target_status"
+        ],
+        "title": "PreferenceTransition"
+      },
+      "PreferenceUpdate": {
+        "properties": {
+          "weight": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 100.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight"
+          },
+          "predicate": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 40,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predicate"
+          },
+          "constraint": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Constraint"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Until"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "PreferenceUpdate",
+        "description": "probation/confirmed 条目的内容修订；状态只能走 transition 端点。"
+      },
       "RescheduleCreate": {
         "properties": {
           "event_type": {
@@ -8680,6 +9433,18 @@
           "parent_schedule_id": {
             "type": "string",
             "title": "Parent Schedule Id"
+          },
+          "declared_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 80
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Reason"
           },
           "teacher_business_id": {
             "anyOf": [
@@ -8781,6 +9546,17 @@
           "description": {
             "type": "string",
             "title": "Description"
+          },
+          "declared_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Reason"
           },
           "payload": {
             "additionalProperties": true,

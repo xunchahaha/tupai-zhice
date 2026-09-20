@@ -509,6 +509,82 @@ class RuleTransition(BaseModel):
     reason: str | None = None
 
 
+PreferenceSubjectType = Literal["teacher", "classroom", "cohort", "course"]
+PreferenceSource = Literal["explicit_stated", "admin_directive", "induced_from_adjustment"]
+PreferenceStatus = Literal["probation", "confirmed", "rejected", "expired"]
+
+
+class PreferenceCreate(BaseModel):
+    """手工登记一条偏好。source 只接受显式来源：挖掘产生的条目一律走
+    POST /memory/mining-runs，初始状态恒为 probation。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject_type: PreferenceSubjectType
+    subject_id: str = Field(min_length=1, max_length=50)
+    predicate: str = Field(min_length=1, max_length=40)
+    constraint: dict[str, Any] = Field(default_factory=dict)
+    modality: Literal["hard", "soft"] = "soft"
+    confidence: float = Field(default=0.8, ge=0, le=1)
+    source: Literal["explicit_stated", "admin_directive"]
+    evidence: list[str] = Field(default_factory=list)
+    weight: int = Field(default=50, ge=0, le=100)
+    # 红线②：不传时由后端默认「当前日期 + 180 天」，并在响应中回显。
+    valid_until: date | None = None
+    note: str | None = Field(default=None, max_length=500)
+
+
+class PreferenceUpdate(BaseModel):
+    """ probation/confirmed 条目的内容修订；状态只能走 transition 端点。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    weight: int | None = Field(default=None, ge=0, le=100)
+    predicate: str | None = Field(default=None, min_length=1, max_length=40)
+    constraint: dict[str, Any] | None = None
+    # scope 是 constraint 的便捷写法：提供的键合并进现有 constraint，不做整体替换。
+    scope: dict[str, Any] | None = None
+    valid_until: date | None = None
+
+
+class PreferenceTransition(BaseModel):
+    target_status: Literal["confirmed", "rejected", "expired"]
+    # 红线①：induced_from_adjustment 条目传 hard 一律 422。
+    target_modality: Literal["hard", "soft"] | None = None
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class PreferenceResponse(ORMModel):
+    id: str
+    schedule_set_id: str
+    subject_type: str
+    subject_id: str
+    predicate: str
+    constraint: dict[str, Any]
+    modality: str
+    confidence: float
+    source: str
+    evidence: list[str]
+    weight: int
+    status: str
+    valid_from: date | None = None
+    valid_until: date | None = None
+    provenance: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+class MiningRunResponse(BaseModel):
+    """一次偏好挖掘的结果。created 即落库后的候选清单（status=probation）。"""
+
+    engine: Literal["ai", "deterministic"]
+    events_scanned: int
+    created: list[PreferenceResponse]
+    skipped_existing: int = 0
+    skipped_invalid: int = 0
+    ai_error: str | None = None
+
+
 class SolveRequest(BaseModel):
     time_limit_seconds: float = Field(default=30, ge=1, le=900)
     course_business_ids: list[str] = Field(default_factory=list)
@@ -634,6 +710,9 @@ class RescheduleCreate(BaseModel):
     event_type: Literal["teacher_leave", "room_outage", "extra_class"]
     description: str
     parent_schedule_id: str
+    # 一键归因理由（前端 chips 由 MEM-B 提供）：区分「想换」与「被迫换」，
+    # 供偏好挖掘消噪。可空，不填不影响调课流程。
+    declared_reason: str | None = Field(default=None, max_length=80)
     teacher_business_id: str | None = None
     room_business_id: str | None = None
     slot_business_ids: list[str] = Field(default_factory=list)
@@ -648,6 +727,7 @@ class RescheduleResponse(ORMModel):
     id: str
     event_type: str
     description: str
+    declared_reason: str | None = None
     payload: dict[str, Any]
     status: str
     parent_schedule_id: str
