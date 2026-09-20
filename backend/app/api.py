@@ -48,6 +48,9 @@ from sqlalchemy.orm import Session
 
 from .config import PROJECT_ROOT, get_settings
 from .db import get_db
+from .integrations import registry as integration_registry
+from .integrations.base import Capability
+from .integrations.feishu.adapter import UNCONFIGURED_DETAIL as FEISHU_UNCONFIGURED_DETAIL
 from .models import (
     DEFAULT_SCHEDULE_SET_ID,
     AuditLog,
@@ -113,6 +116,7 @@ from .schemas import (
     ImportPreviewStats,
     ImportResult,
     ImportSheetOverview,
+    IntegrationManifestResponse,
     IntegrationSyncResponse,
     MasterDataBatchDelete,
     OverviewAnalyticsResponse,
@@ -3468,6 +3472,16 @@ def publish_schedule_to_calendar(
     service = FeishuService(settings, db)
     busy_by_user: dict[str, list[tuple[datetime, datetime]]] = {}
     if publishable:
+        # 集成抽象层接缝（app/integrations/README.md）：日历能力经 registry 运行时
+        # 协商。无可用的日历集成（当前即飞书未配置应用）时保持原引导文案，状态码
+        # 按运行约定归入 409「配置未就绪」；无可下发课次时不过门控，与原实现一致。
+        if not integration_registry.has_capability(
+            Capability.CALENDAR, settings=settings, db=db
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=FEISHU_UNCONFIGURED_DETAIL,
+            )
         min_date = min(item[3].date() for item in publishable)
         max_date = max(item[4].date() for item in publishable)
         for chunk_start in (
@@ -3804,6 +3818,41 @@ def list_audit_logs(
         )
         for row in rows
     ]
+
+
+@router.get(
+    "/integrations",
+    response_model=list[IntegrationManifestResponse],
+    tags=["integrations"],
+)
+def list_integrations(db: Db, user: AdminOrScheduler) -> list[IntegrationManifestResponse]:
+    """集成清单：manifest 元数据 + 运行时状态，供「设置 → 集成」卡片渲染。
+
+    v1 为只读清单，不触发 verify 探测（verify 端点与 integration_installations
+    安装表留待二期）。status 规则：仅声明 manifest 的 planned 集成为 planned；
+    适配器集成运行时能提供任一能力即 configured，否则回落到 manifest 的
+    status_class（如飞书未配置应用时为 available）。
+    """
+    runtime_capabilities = {
+        item.manifest.id: item.capabilities()
+        for item in integration_registry.get_integrations(settings=settings, db=db)
+    }
+    items: list[IntegrationManifestResponse] = []
+    for manifest in integration_registry.manifests():
+        runtime_status: str = manifest.status_class
+        if runtime_capabilities.get(manifest.id):
+            runtime_status = "configured"
+        items.append(
+            IntegrationManifestResponse(
+                id=manifest.id,
+                name=manifest.name,
+                description=manifest.description,
+                capabilities=sorted(capability.value for capability in manifest.capabilities),
+                status=runtime_status,
+                docs_url=manifest.docs_url,
+            )
+        )
+    return items
 
 
 @router.get(

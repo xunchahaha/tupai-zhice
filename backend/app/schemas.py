@@ -932,6 +932,17 @@ class AIProviderConfigurationResponse(BaseModel):
     model: str | None
 
 
+class IntegrationManifestResponse(BaseModel):
+    """GET /integrations 清单项：集成元数据 + 运行时状态（不触发 verify 探测）。"""
+
+    id: str
+    name: str
+    description: str
+    capabilities: list[str]
+    status: Literal["available", "configured", "planned"]
+    docs_url: str
+
+
 class FeishuAppConfigurationInput(BaseModel):
     app_id: str = Field(min_length=4, max_length=100)
     app_secret: str | None = Field(default=None, max_length=200)

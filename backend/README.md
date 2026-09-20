@@ -123,6 +123,20 @@ OpenAI-compatible `/chat/completions` 接口解析指令，并对 API Key 加密
 `AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL` 和 `AI_TOKEN_ENCRYPTION_KEY`。Aily 的
 `spring_...__c` 与 `skill_...` 已调整为可选高级接入项。
 
+## 集成抽象层
+
+`app/integrations/` 把飞书从「前提」降级为「适配器」：`Integration` Protocol +
+`IntegrationManifest` 清单 + 显式 `@register` 注册表（`registry.py`）。内置
+LocalAdapter（默认可用）与 FeishuAdapter（纯委托 `services/feishu.py`，不搬移内部
+逻辑），钉钉/企微/Google Workspace 以仅 manifest 的 planned 形式占位。清单经
+`GET /api/v1/integrations`（管理员/排课员）暴露，返回 id、能力、
+`configured/available/planned` 状态与文档入口，不触发连接探测。
+
+消费接缝按 strangler 方式逐个迁移：日历下发（`calendar-publish`）已先经
+`registry.has_capability(Capability.CALENDAR)` 做运行时能力协商，无可用的日历
+集成时返回 409，提示与未配置飞书时一致；其余接缝与新增集成步骤见
+`app/integrations/README.md`。
+
 ## API 约定
 
 - API 前缀：`/api/v1`
@@ -132,6 +146,7 @@ OpenAI-compatible `/chat/completions` 接口解析指令，并对 API Key 加密
 - 智能导入预览：`POST /api/v1/imports/preview`（任意 XLSX/CSV，映射建议 + 行级校验，不落库）
 - 智能导入提交：`POST /api/v1/imports/commit`（`mapping_json` + `mode=insert|upsert`）
 - AI 配置：`GET/POST /api/v1/integrations/ai/configuration`
+- 集成清单：`GET /api/v1/integrations`（管理员/排课员；manifest + 运行时状态，不触发探测）
 - 一句话解析：`POST /api/v1/assistant/interpret`
 - 求解进度：`GET /api/v1/solver-runs/{id}/events`
 - 版本差异：`GET /api/v1/schedules/{base_id}/diff/{target_id}`，逐课次返回 `added`、`removed`、`moved`、`unchanged` 及调整前后日期/时段/教室

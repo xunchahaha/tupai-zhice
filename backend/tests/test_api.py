@@ -583,6 +583,11 @@ def test_product_loop_calendar_assistant_export_and_public_summary(
     monkeypatch.setattr(
         "app.api.FeishuService.add_event_attendee", lambda *args, **kwargs: {"attendees": []}
     )
+    # 集成抽象层：日历下发经 registry 能力协商，这里直接放行门控以聚焦下发
+    # 流程本身（能力协商行为见 tests/test_integrations.py）。
+    monkeypatch.setattr(
+        "app.integrations.registry.has_capability", lambda *args, **kwargs: True
+    )
     dry_run = client.post(
         f"/api/v1/schedules/{schedule['id']}/calendar-publish",
         headers=auth_headers,

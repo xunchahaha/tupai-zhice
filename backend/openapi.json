@@ -4247,6 +4247,37 @@
         }
       }
     },
+    "/api/v1/integrations": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "List Integrations",
+        "description": "集成清单：manifest 元数据 + 运行时状态，供「设置 → 集成」卡片渲染。\n\nv1 为只读清单，不触发 verify 探测（verify 端点与 integration_installations\n安装表留待二期）。status 规则：仅声明 manifest 的 planned 集成为 planned；\n适配器集成运行时能提供任一能力即 configured，否则回落到 manifest 的\nstatus_class（如飞书未配置应用时为 available）。",
+        "operationId": "list_integrations_api_v1_integrations_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/IntegrationManifestResponse"
+                  },
+                  "type": "array",
+                  "title": "Response List Integrations Api V1 Integrations Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/integrations/ai/configuration": {
       "get": {
         "tags": [
@@ -8139,6 +8170,53 @@
         ],
         "title": "ImportSheetOverview",
         "description": "导入向导：单个工作表的概览。"
+      },
+      "IntegrationManifestResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Capabilities"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "available",
+              "configured",
+              "planned"
+            ],
+            "title": "Status"
+          },
+          "docs_url": {
+            "type": "string",
+            "title": "Docs Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "capabilities",
+          "status",
+          "docs_url"
+        ],
+        "title": "IntegrationManifestResponse",
+        "description": "GET /integrations 清单项：集成元数据 + 运行时状态（不触发 verify 探测）。"
       },
       "IntegrationSyncResponse": {
         "properties": {
