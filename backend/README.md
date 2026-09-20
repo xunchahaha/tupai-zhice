@@ -165,6 +165,43 @@ LocalAdapter（默认可用）与 FeishuAdapter（纯委托 `services/feishu.py`
   软约束术语对齐的谓词；`max_daily_load` 只登记不进目标函数。偏好永远是软约束，
   不会把课表变成无解。
 
+## 公开课表层（capability-link）
+
+脱离飞书妙搭后，面向老师（对外）/学生/家长/督导的免登录课表门户由 capability-link
+（凭证链接）承载，设计定稿见 `docs/roadmap/06-public-showcase.md`。公开面与管理端
+RBAC 正交：链接的签发/轮换/停用复用 `admin/scheduler` 角色，撤回手段 =
+停用/轮换/过期，公开端点不声明 `CurrentUser`/`ViewerScope` 即绕过 JWT。
+
+- **存储**：`public_link_tokens` 表（`app/models.py::PublicLinkToken`），只存
+  SHA-256 哈希 + 末 4 位 `token_hint`；`scope`（class/teacher/school）+
+  `campus_id`/`resource_business_id` 定位目标，`expires_at`/`revoked_at`/
+  `last_seen_at`/`access_count` 管生命周期，按 `schedule_set_id` 隔离。
+- **管理端点**（JWT + admin/scheduler + 方案 viewer 作用域）：
+  `GET/POST /schedule-sets/{id}/public-links`、
+  `POST /public-links/{id}/rotate`、`DELETE /public-links/{id}`（置 revoked 软删）。
+  token 用 `secrets.token_urlsafe(32)` 生成，**明文仅在创建/轮换响应返回一次**
+  （拼 `frontend_url` 成 `/public/t/{token}` 完整 URL）；列表与审计日志只落
+  `token_hint`。创建不传 `expires_at` 时默认「当前时间 + `PUBLIC_DEFAULT_TTL_DAYS`（180）天」。
+- **公开端点**（免登录）：
+  `GET /public/links/{token}/schedule.json` 返回显式 Pydantic 白名单 payload
+  （班级名/科目/课节名/教师姓名/教室/时间/日期 + 调课通知 + 版本元信息），
+  **禁止整模型透传**——教师业务标识（工号）与校区内部主键任何分支不出现在序列化
+  结果里；`GET /public/links/{token}/calendar.ics` 返回订阅日历
+  （`Cache-Control: public, max-age=3600` + `ETag=sha256(version_id+published_at)`
+  支持 `If-None-Match` 304）。伪造/过期/停用 token 一律同形 404，不暴露存在性；
+  命中后节流更新 `last_seen_at`/`access_count`（10 分钟内只记一次）。
+- **投影复用**：`services/public_projection.py` 承载原 api.py 的 `_public_*`
+  内存投影纯函数（逐字节等价迁入，api.py 同名 re-import，飞书同步分发零改动），
+  公开 payload 与飞书公开表共用同一份口径；调课通知直接复用
+  `_public_adjustment_notice_rows` 按范围过滤。
+- **ICS**：`services/ics.py` 依赖 `icalendar`（BSD-2）与 `tzdata`（Apache-2.0）。
+  P0 只生成有 `lesson_date` 的课次（循环课次 RRULE 属 P1）；UID
+  `tupai-{scope}-{resource_business_id}-{assignment_id}@public.tupai` 跨版本稳定，
+  `DTSTART/DTEND;TZID=Asia/Shanghai`（静态 VTIMEZONE，+0800 无夏令时）、
+  `DTSTAMP=published_at(UTC)`、`SEQUENCE=version_no`，重新发布后客户端原位更新。
+- **总开关**：`PUBLIC_LINKS_ENABLED=false` 时全部公开端点按 404 处理。部署前提：
+  公网可达 + HTTPS；日志只落 token_hint。
+
 ## API 约定
 
 - API 前缀：`/api/v1`

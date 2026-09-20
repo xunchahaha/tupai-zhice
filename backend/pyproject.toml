@@ -8,6 +8,7 @@ dependencies = [
   "cryptography>=45,<47",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
+  "icalendar>=6.1,<7",
   "openpyxl>=3.1,<4",
   "ortools>=9.12,<10",
   "pydantic-settings>=2.10,<3",
@@ -15,6 +16,7 @@ dependencies = [
   "pyjwt>=2.10,<3",
   "python-multipart>=0.0.20,<1",
   "sqlalchemy>=2.0.41,<3",
+  "tzdata>=2024.1",
   "uvicorn[standard]>=0.35,<1",
 ]
 
@@ -52,6 +54,11 @@ warn_unused_ignores = true
 check_untyped_defs = true
 no_implicit_optional = true
 exclude = ["alembic/versions"]
+
+# icalendar 6.x 未内置 py.typed，PyPI 也没有官方 stubs（BSD-2，任务批准的唯一新依赖）。
+[[tool.mypy.overrides]]
+module = "icalendar.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

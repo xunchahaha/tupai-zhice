@@ -60,6 +60,7 @@ from .models import (
     CourseSession,
     IntegrationSync,
     PreferenceEntry,
+    PublicLinkToken,
     RescheduleEvent,
     Room,
     Rule,
@@ -128,6 +129,11 @@ from .schemas import (
     PreferenceResponse,
     PreferenceTransition,
     PreferenceUpdate,
+    PublicLinkCreate,
+    PublicLinkDirectoryPayload,
+    PublicLinkResponse,
+    PublicLinkSchedulePayload,
+    PublicLinkSecretResponse,
     PublicScheduleShareItem,
     PublicScheduleSummary,
     RescheduleCreate,
@@ -191,6 +197,7 @@ from .services.explain import (
     deterministic_summary,
 )
 from .services.feishu import FeishuService, FeishuServiceError, json_text
+from .services.ics import build_public_calendar_ics, calendar_etag
 from .services.import_mapping import (
     ColumnMapping,
     ImportMappingError,
@@ -216,11 +223,27 @@ from .services.memory_solver import (
     validate_ai_candidates,
 )
 from .services.overview_analytics import build_overview_analytics
+from .services.public_projection import (
+    _assignment_rows,
+    _current_published_schedule,
+    _public_adjustment_notice_rows,
+    _public_class_identity,
+    _public_class_links_rows,
+    _public_class_schedule_rows,
+    _public_projection_key,  # noqa: F401  re-export：公开投影回归测试仍从 app.api 引用
+    _public_projection_updated_at,
+    _public_schedule_sort_key,
+    _published_adjustment_count,
+    public_class_payload,
+    public_directory_payload,
+    public_schedule_entries,
+    public_teacher_payload,
+)
 from .services.snapshot import build_snapshot_payload, create_snapshot, version_course_map
 from .services.solver import _has_date_information, _selected_sessions, _session_matches_rule
 from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
 from .services.xlsx_io import export_schedule_xlsx
-from .timezone import SHANGHAI_TZ, as_shanghai, as_utc, shanghai_now
+from .timezone import SHANGHAI_TZ, as_utc, shanghai_now
 
 logger = logging.getLogger("tupai.feishu")
 
@@ -780,6 +803,257 @@ def revoke_schedule_set_member(schedule_set_id: str, user_id: str, db: Db, user:
         {"schedule_set_id": schedule_set_id, "user_id": user_id},
     )
     db.commit()
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# 公开课表层 · 管理端点（docs/roadmap/06 §3 A3）。
+# 与管理端 RBAC 正交的 capability-link：签发/轮换/停用 = admin/scheduler；
+# 明文 token 只在创建与轮换响应返回一次，列表与审计日志只落 token_hint。
+# ---------------------------------------------------------------------------
+
+PublicLinkManager = Annotated[User, Depends(require_roles("admin", "scheduler"))]
+PUBLIC_LINK_SEEN_THROTTLE = timedelta(minutes=10)
+
+
+def resolve_public_link_scope(
+    schedule_set_id: str, db: Db, user: PublicLinkManager
+) -> ScheduleSet:
+    """按路径参数定位课表方案，并要求 viewer 级访问（作用域语义同 ViewerScope）。"""
+
+    scope = get_or_404(db, ScheduleSet, schedule_set_id)
+    _require_schedule_access(db, user, scope.id, "viewer")
+    return scope
+
+
+PublicLinkScope = Annotated[ScheduleSet, Depends(resolve_public_link_scope)]
+
+
+def _public_link_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _public_link_hint(token: str) -> str:
+    return token[-4:]
+
+
+def _public_link_status(link: PublicLinkToken, now: datetime) -> str:
+    if link.revoked_at is not None:
+        return "revoked"
+    if link.expires_at is not None and _aware_utc(link.expires_at) <= now:
+        return "expired"
+    return "active"
+
+
+def _public_link_view(link: PublicLinkToken) -> dict[str, Any]:
+    """管理端链接视图；明文 token 永不进入任何列表/详情响应（06 §3 A3）。"""
+
+    return {
+        "id": link.id,
+        "schedule_set_id": link.schedule_set_id,
+        "scope": link.scope,
+        "campus_id": link.campus_id,
+        "resource_business_id": link.resource_business_id,
+        "display_name": link.display_name,
+        "show_teacher_names": link.show_teacher_names,
+        "token_hint": link.token_hint,
+        "status": _public_link_status(link, shanghai_now()),
+        "expires_at": link.expires_at,
+        "last_seen_at": link.last_seen_at,
+        "access_count": link.access_count,
+        "note": link.note,
+        "created_at": link.created_at,
+        "created_by": link.created_by,
+    }
+
+
+def _public_link_url(token: str) -> str:
+    return f"{settings.frontend_url.rstrip('/')}/public/t/{token}"
+
+
+def _resolve_public_link_target(
+    db: Session, payload: PublicLinkCreate, scope: ScheduleSet
+) -> str:
+    """创建时校验链接目标存在，并返回默认 display_name（06 §3 A3）。"""
+
+    if payload.scope == "school":
+        if payload.campus_id or payload.resource_business_id:
+            raise HTTPException(status_code=422, detail="school 范围不绑定校区或班级/教师")
+        return scope.name
+    if not payload.campus_id or not payload.resource_business_id:
+        raise HTTPException(
+            status_code=422,
+            detail="class/teacher 范围必须提供 campus_id 与 resource_business_id",
+        )
+    campus = db.scalar(
+        select(Campus).where(
+            Campus.schedule_set_id == scope.id,
+            Campus.id == payload.campus_id,
+        )
+    )
+    if campus is None:
+        raise HTTPException(status_code=422, detail="校区不存在或不属于当前课表方案")
+    if payload.scope == "class":
+        class_group = db.scalar(
+            select(ClassGroup).where(
+                ClassGroup.schedule_set_id == scope.id,
+                ClassGroup.campus_id == payload.campus_id,
+                ClassGroup.business_id == payload.resource_business_id,
+            )
+        )
+        if class_group is None:
+            raise HTTPException(status_code=422, detail="班级不存在")
+        return class_group.name
+    teacher = db.scalar(
+        select(Teacher).where(
+            Teacher.schedule_set_id == scope.id,
+            Teacher.campus_id == payload.campus_id,
+            Teacher.business_id == payload.resource_business_id,
+        )
+    )
+    if teacher is None:
+        raise HTTPException(status_code=422, detail="教师不存在")
+    return teacher.name
+
+
+def _get_managed_public_link(db: Session, user: User, link_id: str) -> PublicLinkToken:
+    link = db.get(PublicLinkToken, link_id)
+    if link is None:
+        raise HTTPException(status_code=404, detail="资源不存在")
+    # 链接管理入口同样要求对所属课表方案的 viewer 级访问。
+    _require_schedule_access(db, user, link.schedule_set_id, "viewer")
+    return link
+
+
+@router.get(
+    "/schedule-sets/{schedule_set_id}/public-links",
+    response_model=list[PublicLinkResponse],
+    tags=["public-links"],
+)
+def list_public_links(
+    db: Db, user: PublicLinkManager, scope: PublicLinkScope
+) -> list[dict[str, Any]]:
+    return [
+        _public_link_view(link)
+        for link in db.scalars(
+            select(PublicLinkToken)
+            .where(PublicLinkToken.schedule_set_id == scope.id)
+            .order_by(PublicLinkToken.created_at.desc(), PublicLinkToken.id)
+        )
+    ]
+
+
+@router.post(
+    "/schedule-sets/{schedule_set_id}/public-links",
+    response_model=PublicLinkSecretResponse,
+    status_code=201,
+    tags=["public-links"],
+)
+def create_public_link(
+    payload: PublicLinkCreate, db: Db, user: PublicLinkManager, scope: PublicLinkScope
+) -> dict[str, Any]:
+    default_name = _resolve_public_link_target(db, payload, scope)
+    display_name = (payload.display_name or default_name).strip() or default_name
+    expires_at = payload.expires_at or shanghai_now() + timedelta(
+        days=settings.public_default_ttl_days
+    )
+    if _aware_utc(expires_at) <= shanghai_now():
+        raise HTTPException(status_code=422, detail="expires_at 必须晚于当前时间")
+    token = secrets.token_urlsafe(32)
+    link = PublicLinkToken(
+        schedule_set_id=scope.id,
+        token_hash=_public_link_hash(token),
+        token_hint=_public_link_hint(token),
+        scope=payload.scope,
+        campus_id=payload.campus_id,
+        resource_business_id=payload.resource_business_id,
+        display_name=display_name,
+        show_teacher_names=payload.show_teacher_names,
+        created_by=user.id,
+        expires_at=expires_at,
+        note=payload.note,
+    )
+    db.add(link)
+    audit(
+        db,
+        user,
+        "create",
+        "public_link",
+        link.id,
+        {
+            "schedule_set_id": scope.id,
+            "scope": payload.scope,
+            "resource_business_id": payload.resource_business_id,
+            "token_hint": link.token_hint,
+        },
+    )
+    db.commit()
+    db.refresh(link)
+    response = _public_link_view(link)
+    response["token"] = token
+    response["public_url"] = _public_link_url(token)
+    return response
+
+
+@router.post(
+    "/public-links/{link_id}/rotate",
+    response_model=PublicLinkSecretResponse,
+    tags=["public-links"],
+)
+def rotate_public_link(link_id: str, db: Db, user: PublicLinkManager) -> dict[str, Any]:
+    link = _get_managed_public_link(db, user, link_id)
+    if link.revoked_at is not None:
+        raise HTTPException(status_code=409, detail="链接已停用，不能轮换")
+    link.revoked_at = shanghai_now()
+    token = secrets.token_urlsafe(32)
+    rotated = PublicLinkToken(
+        schedule_set_id=link.schedule_set_id,
+        token_hash=_public_link_hash(token),
+        token_hint=_public_link_hint(token),
+        scope=link.scope,
+        campus_id=link.campus_id,
+        resource_business_id=link.resource_business_id,
+        display_name=link.display_name,
+        show_teacher_names=link.show_teacher_names,
+        created_by=user.id,
+        expires_at=link.expires_at,
+        note=link.note,
+    )
+    db.add(rotated)
+    audit(
+        db,
+        user,
+        "rotate",
+        "public_link",
+        rotated.id,
+        {
+            "previous_link_id": link.id,
+            "schedule_set_id": link.schedule_set_id,
+            "token_hint": rotated.token_hint,
+        },
+    )
+    db.commit()
+    db.refresh(rotated)
+    response = _public_link_view(rotated)
+    response["token"] = token
+    response["public_url"] = _public_link_url(token)
+    return response
+
+
+@router.delete("/public-links/{link_id}", status_code=204, tags=["public-links"])
+def revoke_public_link(link_id: str, db: Db, user: PublicLinkManager) -> Response:
+    link = _get_managed_public_link(db, user, link_id)
+    if link.revoked_at is None:
+        link.revoked_at = shanghai_now()
+        audit(
+            db,
+            user,
+            "revoke",
+            "public_link",
+            link.id,
+            {"schedule_set_id": link.schedule_set_id, "token_hint": link.token_hint},
+        )
+        db.commit()
     return Response(status_code=204)
 
 
@@ -4359,382 +4633,6 @@ def disconnect_feishu(db: Db, user: Admin) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _public_projection_key(schedule_set_id: str, resource: str, source_id: str) -> str:
-    """Stable opaque record key for a public Bitable projection.
-
-    Public tables need a key so sync can update rather than append, but a
-    course UUID or business ID would become an unnecessary internal identifier
-    in the MiaoDa data source.  A namespaced digest is stable within one
-    timetable and opaque outside the service.
-    """
-
-    value = f"tupai-public|{schedule_set_id}|{resource}|{source_id}"
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
-
-
-def _current_published_schedule(
-    db: Session, schedule_set_id: str
-) -> ScheduleVersion | None:
-    return db.scalar(
-        select(ScheduleVersion)
-        .where(
-            ScheduleVersion.schedule_set_id == schedule_set_id,
-            ScheduleVersion.status == "published",
-        )
-        .order_by(ScheduleVersion.published_at.desc(), ScheduleVersion.version_no.desc())
-    )
-
-
-def _assignment_rows(db: Session, schedule_id: str | None) -> list[ScheduleAssignment]:
-    if not schedule_id:
-        return []
-    return list(
-        db.scalars(
-            select(ScheduleAssignment)
-            .where(ScheduleAssignment.schedule_version_id == schedule_id)
-            .order_by(ScheduleAssignment.lesson_date, ScheduleAssignment.course_session_id)
-        )
-    )
-
-
-def _public_release_baseline(
-    db: Session, schedule: ScheduleVersion | None
-) -> ScheduleVersion | None:
-    """Return the timetable that this published release actually replaced.
-
-    ``parent_id`` describes a solver lineage and can point to a draft or an
-    old ancestor.  The publish/rollback audit event records the version that
-    was publicly active immediately before this release, which is the only
-    valid baseline for a parent-facing adjustment notice.
-    """
-
-    if schedule is None:
-        return None
-    release = db.scalar(
-        select(AuditLog)
-        .where(
-            AuditLog.resource_type == "schedule",
-            AuditLog.resource_id == schedule.id,
-            AuditLog.action.in_(("publish", "rollback")),
-        )
-        .order_by(AuditLog.created_at.desc())
-    )
-    baseline_id = (
-        str((release.detail or {}).get("replaced_published_schedule_id") or "")
-        if release
-        else ""
-    )
-    if not baseline_id:
-        return None
-    baseline = db.get(ScheduleVersion, baseline_id)
-    if baseline is None or baseline.schedule_set_id != schedule.schedule_set_id:
-        return None
-    return baseline
-
-
-def _public_schedule_maps(
-    db: Session, schedule_set_id: str
-) -> tuple[
-    list[CourseSession],
-    dict[tuple[str, str], ClassGroup],
-    dict[tuple[str, str], Room],
-    dict[tuple[str, str], TimeSlot],
-]:
-    schedule = _current_published_schedule(db, schedule_set_id)
-    courses = list(version_course_map(db, schedule).values()) if schedule else []
-    classes = list(
-        db.scalars(
-            select(ClassGroup).where(ClassGroup.schedule_set_id == schedule_set_id)
-        )
-    )
-    rooms = list(db.scalars(select(Room).where(Room.schedule_set_id == schedule_set_id)))
-    slots = list(db.scalars(select(TimeSlot).where(TimeSlot.schedule_set_id == schedule_set_id)))
-    return (
-        courses,
-        {(item.campus_id, item.business_id): item for item in classes},
-        {(item.campus_id, item.business_id): item for item in rooms},
-        {(item.campus_id, item.business_id): item for item in slots},
-    )
-
-
-def _public_weekday(value: date | None, slot: TimeSlot | None) -> str:
-    if value is not None:
-        return ("周一", "周二", "周三", "周四", "周五", "周六", "周日")[value.weekday()]
-    return slot.weekday if slot else ""
-
-
-def _public_assignment_snapshot(
-    assignment: ScheduleAssignment | None,
-    course: CourseSession,
-    rooms: dict[tuple[str, str], Room],
-    slots: dict[tuple[str, str], TimeSlot],
-) -> dict[str, str]:
-    if assignment is None:
-        return {"date": "", "weekday": "", "start": "", "end": "", "location": ""}
-    slot = slots.get((course.campus_id, assignment.slot_business_id))
-    room = rooms.get((course.campus_id, assignment.room_business_id))
-    return {
-        "date": assignment.lesson_date.isoformat() if assignment.lesson_date else "",
-        "weekday": _public_weekday(assignment.lesson_date, slot),
-        "start": (slot.start_time if slot else course.fixed_start_time) or "",
-        "end": (slot.end_time if slot else course.fixed_end_time) or "",
-        # Never fall back to a business ID in a public-facing projection.
-        "location": room.name if room else "待定",
-    }
-
-
-def _public_time_text(snapshot: dict[str, str]) -> str:
-    date_text = snapshot["date"]
-    weekday = snapshot["weekday"]
-    clocks = "-".join(item for item in (snapshot["start"], snapshot["end"]) if item)
-    return " ".join(item for item in (date_text, weekday, clocks) if item)
-
-
-def _public_projection_updated_at(schedule: ScheduleVersion | None) -> str:
-    """Use the published release time instead of sync wall-clock time.
-
-    A manual retry must not make every public record look modified.  The
-    projection only changes when the published timetable changes, so its
-    visible update time should be stable for that release as well.
-    """
-
-    published_at = as_shanghai(schedule.published_at) if schedule else None
-    return published_at.isoformat() if published_at else ""
-
-
-def _public_class_identity(course: CourseSession) -> str:
-    """Return a stable class key that remains unique across campuses."""
-
-    return f"{course.campus_id}:{course.class_business_id}"
-
-
-def _public_schedule_sort_key(row: dict[str, Any]) -> tuple[str, ...]:
-    """Sort public timetable rows in display order, with deterministic ties."""
-
-    return (
-        str(row.get("上课日期") or ""),
-        str(row.get("开始时间") or ""),
-        str(row.get("结束时间") or ""),
-        str(row.get("班级标识") or ""),
-        str(row.get("业务标识") or ""),
-    )
-
-
-def _public_class_index_rows(
-    db: Session, schedule_set_id: str
-) -> list[dict[str, Any]]:
-    schedule = _current_published_schedule(db, schedule_set_id)
-    assignments = {
-        item.course_session_id: item
-        for item in _assignment_rows(db, schedule.id if schedule else None)
-    }
-    courses, classes, rooms, slots = _public_schedule_maps(db, schedule_set_id)
-    updated_at = _public_projection_updated_at(schedule)
-    # This is a class index, not the student-facing timetable itself.  The
-    # detailed assignment rows already live in the operational ``课表`` table;
-    # duplicating thousands of rows here made the public source unnecessarily
-    # large.  Aggregate one deterministic row per class for MiaoDa and view
-    # navigation.
-    grouped: dict[str, dict[str, Any]] = {}
-    for course in courses:
-        assignment = assignments.get(course.id)
-        if assignment is None:
-            # The public source is an actual timetable, not an internal audit
-            # table.  Empty/unpublished course rows neither help MiaoDa nor
-            # should be repeatedly synchronized just to say "不展示".
-            continue
-        snapshot = _public_assignment_snapshot(assignment, course, rooms, slots)
-        class_group = classes.get((course.campus_id, course.class_business_id))
-        class_identity = _public_class_identity(course)
-        entry = grouped.setdefault(
-            class_identity,
-            {
-                "班级标识": class_identity,
-                "班级名称": class_group.name if class_group else "未分班",
-                "items": [],
-                "subjects": set(),
-                "locations": set(),
-            },
-        )
-        entry["items"].append(snapshot)
-        if course.subject:
-            entry["subjects"].add(course.subject)
-        if snapshot["location"]:
-            entry["locations"].add(snapshot["location"])
-
-    rows: list[dict[str, Any]] = []
-    for class_identity, entry in grouped.items():
-        items = sorted(
-            entry["items"],
-            key=lambda item: (
-                item["date"],
-                item["start"],
-                item["end"],
-            ),
-        )
-        first = items[0] if items else {"date": "", "weekday": "", "start": "", "end": ""}
-        dates = [item["date"] for item in items if item["date"]]
-        rows.append(
-            {
-                "业务标识": _public_projection_key(
-                    schedule_set_id, "public_class_schedule", class_identity
-                ),
-                "是否展示": "是",
-                "班级标识": entry["班级标识"],
-                "班级名称": entry["班级名称"],
-                # Keep the first assignment in the legacy display columns so
-                # old views remain readable, while the aggregate columns make
-                # the row's purpose explicit.
-                "上课日期": first["date"],
-                "星期": first["weekday"],
-                "开始时间": first["start"],
-                "结束时间": first["end"],
-                "排序键": " ".join(
-                    item for item in (first["date"], first["start"], first["end"]) if item
-                ),
-                "课程名称": f"共{len(items)}节课",
-                "学科": " / ".join(sorted(entry["subjects"])),
-                "上课地点": " / ".join(sorted(entry["locations"])),
-                "课表版本": f"V{schedule.version_no}" if schedule else "",
-                "课次总数": len(items),
-                "首课日期": dates[0] if dates else "",
-                "末课日期": dates[-1] if dates else "",
-                "更新时间": updated_at,
-            }
-        )
-    return sorted(rows, key=_public_schedule_sort_key)
-
-
-def _public_class_schedule_rows(
-    db: Session, schedule_set_id: str
-) -> list[dict[str, Any]]:
-    """Return the retired class projection for compatibility exports only."""
-
-    return _public_class_index_rows(db, schedule_set_id)
-
-
-def _public_class_links_rows(
-    db: Session, schedule_set_id: str
-) -> list[dict[str, Any]]:
-    """Export one stable MiaoDa/public-view link row per published class.
-
-    MiaoDa links are intentionally blank on first export: an operator creates
-    the MiaoDa app/page and pastes its public URL into this index table.  The
-    sync layer preserves that hand-authored value on subsequent exports.
-    """
-
-    schedule = _current_published_schedule(db, schedule_set_id)
-    class_rows = _public_class_index_rows(db, schedule_set_id)
-    updated_at = _public_projection_updated_at(schedule)
-    version = f"V{schedule.version_no}" if schedule else ""
-    return [
-        {
-            "业务标识": _public_projection_key(
-                schedule_set_id, "public_class_links", str(row["班级标识"])
-            ),
-            "课表版本": version,
-            "班级标识": row["班级标识"],
-            "班级名称": row["班级名称"],
-            "学生/家长妙搭链接": "",
-            "公开视图链接": "",
-            "公开入口类型": "",
-            "访问模式": "",
-            "状态": "",
-            "更新时间": updated_at,
-            "失效时间": "",
-            "备注": "",
-        }
-        for row in class_rows
-    ]
-
-
-def _public_adjustment_notice_rows(
-    db: Session, schedule_set_id: str
-) -> list[dict[str, Any]]:
-    schedule = _current_published_schedule(db, schedule_set_id)
-    baseline = _public_release_baseline(db, schedule)
-    current_assignments = {
-        item.course_session_id: item
-        for item in _assignment_rows(db, schedule.id if schedule else None)
-    }
-    parent_assignments = {
-        item.course_session_id: item
-        for item in _assignment_rows(db, baseline.id if baseline else None)
-    }
-    courses, classes, rooms, slots = _public_schedule_maps(db, schedule_set_id)
-    updated_at = _public_projection_updated_at(schedule)
-    rows: list[dict[str, Any]] = []
-    for course in courses:
-        before_assignment = parent_assignments.get(course.id)
-        after_assignment = current_assignments.get(course.id)
-        before = _public_assignment_snapshot(before_assignment, course, rooms, slots)
-        after = _public_assignment_snapshot(after_assignment, course, rooms, slots)
-        visible = bool(baseline) and before != after
-        if visible and before_assignment is None and after_assignment is not None:
-            change_type = "新增课程"
-        elif visible and before_assignment is not None and after_assignment is None:
-            change_type = "取消课程"
-        elif visible and (
-            before["date"], before["start"], before["end"]
-        ) != (
-            after["date"], after["start"], after["end"]
-        ) and before["location"] != after["location"]:
-            change_type = "时间及地点调整"
-        elif visible and (
-            before["date"], before["start"], before["end"]
-        ) != (
-            after["date"], after["start"], after["end"]
-        ):
-            change_type = "时间调整"
-        elif visible:
-            change_type = "地点调整"
-        else:
-            # Only actual changes belong in the public notice source.  Keeping
-            # thousands of blank "不展示" records turns a retry into a full-table
-            # write and makes the public MiaoDa data source needlessly noisy.
-            continue
-        class_group = classes.get((course.campus_id, course.class_business_id))
-        rows.append(
-            {
-                "业务标识": _public_projection_key(
-                    schedule_set_id, "public_adjustment_notice", course.id
-                ),
-                "是否展示": "是",
-                "公告状态": "已生效",
-                "通用提示": "课程安排已更新，请以本表为准",
-                "调整类型": change_type,
-                "班级名称": class_group.name if class_group else "未分班",
-                "课程名称": course.lesson_name or "课程安排",
-                "原上课时间": _public_time_text(before),
-                "新上课时间": _public_time_text(after),
-                "原上课地点": before["location"],
-                "新上课地点": after["location"],
-                "生效版本": f"V{schedule.version_no}" if schedule else "",
-                "更新时间": updated_at,
-            }
-        )
-    return rows
-
-
-def _published_adjustment_count(db: Session, schedule_set_id: str) -> int:
-    schedule = _current_published_schedule(db, schedule_set_id)
-    baseline = _public_release_baseline(db, schedule)
-    if schedule is None or baseline is None:
-        return 0
-    before = {
-        item.course_session_id: (item.lesson_date, item.slot_business_id, item.room_business_id)
-        for item in _assignment_rows(db, baseline.id)
-    }
-    after = {
-        item.course_session_id: (item.lesson_date, item.slot_business_id, item.room_business_id)
-        for item in _assignment_rows(db, schedule.id)
-    }
-    return sum(
-        before.get(course_id) != after.get(course_id)
-        for course_id in set(before) | set(after)
-    )
-
-
 def export_resource_rows(
     db: Session, resource: str, schedule_set_id: str = DEFAULT_SCHEDULE_SET_ID
 ) -> list[dict[str, Any]]:
@@ -6090,4 +5988,129 @@ def _public_summary(
         monthly_sessions=dict(sorted(monthly_counts.items())),
         room_utilization=round(len(room_period_keys) / capacity, 4) if capacity else 0.0,
         preview=preview,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 公开课表层 · 公开端点（免登录，docs/roadmap/06 §3 A4）。
+# 端点不声明 CurrentUser/ViewerScope 即绕过 JWT（先例 require_aily_key）；
+# 伪造/过期/停用 token 一律 404，不暴露存在性；响应为显式 Pydantic 白名单，
+# 禁止整模型透传（06 §4）。
+# ---------------------------------------------------------------------------
+
+
+def _resolve_active_public_link(db: Session, token: str) -> PublicLinkToken:
+    """按明文 token 定位有效链接；无效/停用/过期与伪造同形 404。"""
+
+    if not settings.public_links_enabled:
+        raise HTTPException(status_code=404, detail="资源不存在")
+    link = db.scalar(
+        select(PublicLinkToken).where(
+            PublicLinkToken.token_hash == _public_link_hash(token)
+        )
+    )
+    schedule_set = db.get(ScheduleSet, link.schedule_set_id) if link else None
+    now = shanghai_now()
+    if (
+        link is None
+        or schedule_set is None
+        or not schedule_set.is_active
+        or link.revoked_at is not None
+        or (link.expires_at is not None and _aware_utc(link.expires_at) <= now)
+    ):
+        raise HTTPException(status_code=404, detail="资源不存在")
+    return link
+
+
+def _touch_public_link(db: Session, link: PublicLinkToken) -> None:
+    """命中后节流更新访问计数：10 分钟内的重复拉取只记一次（06 §3 A6）。"""
+
+    now = shanghai_now()
+    if (
+        link.last_seen_at is not None
+        and _aware_utc(link.last_seen_at) > now - PUBLIC_LINK_SEEN_THROTTLE
+    ):
+        return
+    link.last_seen_at = now
+    link.access_count += 1
+    db.commit()
+
+
+@router.get(
+    "/public/links/{token}/schedule.json",
+    response_model=PublicLinkSchedulePayload | PublicLinkDirectoryPayload,
+    tags=["public"],
+)
+def public_link_schedule(token: str, db: Db) -> dict[str, Any]:
+    link = _resolve_active_public_link(db, token)
+    if link.scope == "school":
+        payload: dict[str, Any] = public_directory_payload(db, link.schedule_set_id)
+    elif link.scope == "teacher":
+        payload = public_teacher_payload(
+            db,
+            link.schedule_set_id,
+            link.campus_id or "",
+            link.resource_business_id or "",
+            show_teacher_names=link.show_teacher_names,
+        )
+    else:
+        payload = public_class_payload(
+            db,
+            link.schedule_set_id,
+            link.campus_id or "",
+            link.resource_business_id or "",
+            show_teacher_names=link.show_teacher_names,
+        )
+    _touch_public_link(db, link)
+    return payload
+
+
+@router.get("/public/links/{token}/calendar.ics", tags=["public"])
+def public_link_calendar(
+    token: str,
+    db: Db,
+    if_none_match: Annotated[str | None, Header()] = None,
+) -> Response:
+    link = _resolve_active_public_link(db, token)
+    schedule = _current_published_schedule(db, link.schedule_set_id)
+    if link.scope == "teacher":
+        entries = public_schedule_entries(
+            db,
+            link.schedule_set_id,
+            campus_id=link.campus_id,
+            teacher_business_id=link.resource_business_id,
+        )
+    elif link.scope == "class":
+        entries = public_schedule_entries(
+            db,
+            link.schedule_set_id,
+            campus_id=link.campus_id,
+            class_business_id=link.resource_business_id,
+        )
+    else:
+        entries = public_schedule_entries(db, link.schedule_set_id)
+
+    etag_value = calendar_etag(
+        schedule.id if schedule else None,
+        schedule.published_at if schedule else None,
+    )
+    etag = f'"{etag_value}"'
+    headers = {"Cache-Control": "public, max-age=3600", "ETag": etag}
+    request_etag = if_none_match.strip() if if_none_match else ""
+    if request_etag in {etag, f"W/{etag}", etag_value}:
+        return Response(status_code=304, headers=headers)
+    ics_bytes = build_public_calendar_ics(
+        display_name=link.display_name,
+        scope=link.scope,
+        resource_business_id=link.resource_business_id,
+        show_teacher_names=link.show_teacher_names,
+        version_no=schedule.version_no if schedule else None,
+        published_at=schedule.published_at if schedule else None,
+        rows=entries,
+    )
+    _touch_public_link(db, link)
+    return Response(
+        content=ics_bytes,
+        media_type="text/calendar; charset=utf-8",
+        headers=headers,
     )

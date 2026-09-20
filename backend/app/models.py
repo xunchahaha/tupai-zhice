@@ -551,3 +551,34 @@ class AuditLog(Base):
     resource_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(ShanghaiDateTime(), default=shanghai_now)
+
+
+class PublicLinkToken(TimestampMixin, Base):
+    """公开课表层的 capability-link 凭证（docs/roadmap/06 §3 A1）。
+
+    库里只存 SHA-256 哈希，明文 token 仅在创建/轮换响应返回一次；token_hint
+    （末 4 位）用于管理端辨认。公开面与角色权限体系正交：签发/轮换/停用复用
+    管理端 admin/scheduler 角色，撤回手段 = 停用/轮换/过期。
+    """
+
+    __tablename__ = "public_link_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_hint: Mapped[str] = mapped_column(String(8))
+    scope: Mapped[str] = mapped_column(String(20))
+    campus_id: Mapped[str | None] = mapped_column(ForeignKey("campuses.id"), nullable=True)
+    resource_business_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    display_name: Mapped[str] = mapped_column(String(160))
+    show_teacher_names: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        ShanghaiDateTime(), nullable=True, index=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(ShanghaiDateTime(), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(ShanghaiDateTime(), nullable=True)
+    access_count: Mapped[int] = mapped_column(Integer, default=0)
+    note: Mapped[str] = mapped_column(String(255), default="")

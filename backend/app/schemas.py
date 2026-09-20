@@ -1284,3 +1284,99 @@ class PublicScheduleSummary(BaseModel):
     monthly_sessions: dict[str, int]
     room_utilization: float
     preview: list[PublicScheduleShareItem]
+
+
+PublicLinkScope = Literal["class", "teacher", "school"]
+
+
+class PublicLinkCreate(BaseModel):
+    """公开链接创建参数；明文 token 只在创建/轮换响应出现一次。"""
+
+    scope: PublicLinkScope
+    campus_id: str | None = None
+    resource_business_id: str | None = None
+    display_name: str | None = Field(default=None, max_length=160)
+    expires_at: datetime | None = None
+    show_teacher_names: bool = True
+    note: str = Field(default="", max_length=255)
+
+
+class PublicLinkResponse(BaseModel):
+    """管理端链接视图：只有 token_hint，任何响应都不回传明文 token。"""
+
+    id: str
+    schedule_set_id: str
+    scope: str
+    campus_id: str | None
+    resource_business_id: str | None
+    display_name: str
+    show_teacher_names: bool
+    token_hint: str
+    status: str
+    expires_at: datetime | None
+    last_seen_at: datetime | None
+    access_count: int
+    note: str
+    created_at: datetime
+    created_by: str | None
+
+
+class PublicLinkSecretResponse(PublicLinkResponse):
+    token: str
+    public_url: str
+
+
+class PublicLinkScheduleRow(BaseModel):
+    """公开课表白名单行：班级名/科目/课节名/教师姓名/教室/时间，无任何标识符。"""
+
+    date: str
+    weekday: str
+    start: str
+    end: str
+    class_name: str
+    subject: str
+    lesson_name: str
+    teacher_names: list[str]
+    location: str
+
+
+class PublicLinkAdjustment(BaseModel):
+    type: str
+    class_name: str
+    course_name: str
+    before_time: str
+    after_time: str
+    before_location: str
+    after_location: str
+
+
+class PublicLinkSchedulePayload(BaseModel):
+    """class/teacher 范围的 schedule.json 响应（显式白名单，06 §3 A4）。"""
+
+    scope: str
+    display_name: str
+    show_teacher_names: bool
+    version_no: int | None
+    published_at: str
+    first_date: str
+    last_date: str
+    rows: list[PublicLinkScheduleRow]
+    adjustments: list[PublicLinkAdjustment]
+
+
+class PublicLinkDirectoryClass(BaseModel):
+    class_business_id: str
+    class_name: str
+    session_count: int
+    first_date: str
+    last_date: str
+
+
+class PublicLinkDirectoryPayload(BaseModel):
+    """school 范围（督导公示）的班级索引响应。"""
+
+    scope: str
+    display_name: str
+    version_no: int | None
+    published_at: str
+    classes: list[PublicLinkDirectoryClass]

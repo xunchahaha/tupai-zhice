@@ -368,6 +368,199 @@
         }
       }
     },
+    "/api/v1/schedule-sets/{schedule_set_id}/public-links": {
+      "get": {
+        "tags": [
+          "public-links"
+        ],
+        "summary": "List Public Links",
+        "operationId": "list_public_links_api_v1_schedule_sets__schedule_set_id__public_links_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "schedule_set_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Set Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PublicLinkResponse"
+                  },
+                  "title": "Response List Public Links Api V1 Schedule Sets  Schedule Set Id  Public Links Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "public-links"
+        ],
+        "summary": "Create Public Link",
+        "operationId": "create_public_link_api_v1_schedule_sets__schedule_set_id__public_links_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "schedule_set_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Set Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicLinkCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicLinkSecretResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public-links/{link_id}/rotate": {
+      "post": {
+        "tags": [
+          "public-links"
+        ],
+        "summary": "Rotate Public Link",
+        "operationId": "rotate_public_link_api_v1_public_links__link_id__rotate_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "link_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Link Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicLinkSecretResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public-links/{link_id}": {
+      "delete": {
+        "tags": [
+          "public-links"
+        ],
+        "summary": "Revoke Public Link",
+        "operationId": "revoke_public_link_api_v1_public_links__link_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "link_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Link Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/users": {
       "get": {
         "tags": [
@@ -5514,6 +5707,112 @@
           }
         }
       }
+    },
+    "/api/v1/public/links/{token}/schedule.json": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Public Link Schedule",
+        "operationId": "public_link_schedule_api_v1_public_links__token__schedule_json_get",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/PublicLinkSchedulePayload"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PublicLinkDirectoryPayload"
+                    }
+                  ],
+                  "title": "Response Public Link Schedule Api V1 Public Links  Token  Schedule Json Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public/links/{token}/calendar.ics": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Public Link Calendar",
+        "operationId": "public_link_calendar_api_v1_public_links__token__calendar_ics_get",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token"
+            }
+          },
+          {
+            "name": "if-none-match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-None-Match"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -9414,6 +9713,579 @@
         "type": "object",
         "title": "PreferenceUpdate",
         "description": "probation/confirmed 条目的内容修订；状态只能走 transition 端点。"
+      },
+      "PublicLinkAdjustment": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "class_name": {
+            "type": "string",
+            "title": "Class Name"
+          },
+          "course_name": {
+            "type": "string",
+            "title": "Course Name"
+          },
+          "before_time": {
+            "type": "string",
+            "title": "Before Time"
+          },
+          "after_time": {
+            "type": "string",
+            "title": "After Time"
+          },
+          "before_location": {
+            "type": "string",
+            "title": "Before Location"
+          },
+          "after_location": {
+            "type": "string",
+            "title": "After Location"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type",
+          "class_name",
+          "course_name",
+          "before_time",
+          "after_time",
+          "before_location",
+          "after_location"
+        ],
+        "title": "PublicLinkAdjustment"
+      },
+      "PublicLinkCreate": {
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "class",
+              "teacher",
+              "school"
+            ],
+            "title": "Scope"
+          },
+          "campus_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campus Id"
+          },
+          "resource_business_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Business Id"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "show_teacher_names": {
+            "type": "boolean",
+            "title": "Show Teacher Names",
+            "default": true
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Note",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope"
+        ],
+        "title": "PublicLinkCreate",
+        "description": "公开链接创建参数；明文 token 只在创建/轮换响应出现一次。"
+      },
+      "PublicLinkDirectoryClass": {
+        "properties": {
+          "class_business_id": {
+            "type": "string",
+            "title": "Class Business Id"
+          },
+          "class_name": {
+            "type": "string",
+            "title": "Class Name"
+          },
+          "session_count": {
+            "type": "integer",
+            "title": "Session Count"
+          },
+          "first_date": {
+            "type": "string",
+            "title": "First Date"
+          },
+          "last_date": {
+            "type": "string",
+            "title": "Last Date"
+          }
+        },
+        "type": "object",
+        "required": [
+          "class_business_id",
+          "class_name",
+          "session_count",
+          "first_date",
+          "last_date"
+        ],
+        "title": "PublicLinkDirectoryClass"
+      },
+      "PublicLinkDirectoryPayload": {
+        "properties": {
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "version_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version No"
+          },
+          "published_at": {
+            "type": "string",
+            "title": "Published At"
+          },
+          "classes": {
+            "items": {
+              "$ref": "#/components/schemas/PublicLinkDirectoryClass"
+            },
+            "type": "array",
+            "title": "Classes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope",
+          "display_name",
+          "version_no",
+          "published_at",
+          "classes"
+        ],
+        "title": "PublicLinkDirectoryPayload",
+        "description": "school 范围（督导公示）的班级索引响应。"
+      },
+      "PublicLinkResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "schedule_set_id": {
+            "type": "string",
+            "title": "Schedule Set Id"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "campus_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campus Id"
+          },
+          "resource_business_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Business Id"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "show_teacher_names": {
+            "type": "boolean",
+            "title": "Show Teacher Names"
+          },
+          "token_hint": {
+            "type": "string",
+            "title": "Token Hint"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
+          "access_count": {
+            "type": "integer",
+            "title": "Access Count"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "schedule_set_id",
+          "scope",
+          "campus_id",
+          "resource_business_id",
+          "display_name",
+          "show_teacher_names",
+          "token_hint",
+          "status",
+          "expires_at",
+          "last_seen_at",
+          "access_count",
+          "note",
+          "created_at",
+          "created_by"
+        ],
+        "title": "PublicLinkResponse",
+        "description": "管理端链接视图：只有 token_hint，任何响应都不回传明文 token。"
+      },
+      "PublicLinkSchedulePayload": {
+        "properties": {
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "show_teacher_names": {
+            "type": "boolean",
+            "title": "Show Teacher Names"
+          },
+          "version_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version No"
+          },
+          "published_at": {
+            "type": "string",
+            "title": "Published At"
+          },
+          "first_date": {
+            "type": "string",
+            "title": "First Date"
+          },
+          "last_date": {
+            "type": "string",
+            "title": "Last Date"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/PublicLinkScheduleRow"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "adjustments": {
+            "items": {
+              "$ref": "#/components/schemas/PublicLinkAdjustment"
+            },
+            "type": "array",
+            "title": "Adjustments"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope",
+          "display_name",
+          "show_teacher_names",
+          "version_no",
+          "published_at",
+          "first_date",
+          "last_date",
+          "rows",
+          "adjustments"
+        ],
+        "title": "PublicLinkSchedulePayload",
+        "description": "class/teacher 范围的 schedule.json 响应（显式白名单，06 §3 A4）。"
+      },
+      "PublicLinkScheduleRow": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "title": "Date"
+          },
+          "weekday": {
+            "type": "string",
+            "title": "Weekday"
+          },
+          "start": {
+            "type": "string",
+            "title": "Start"
+          },
+          "end": {
+            "type": "string",
+            "title": "End"
+          },
+          "class_name": {
+            "type": "string",
+            "title": "Class Name"
+          },
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "lesson_name": {
+            "type": "string",
+            "title": "Lesson Name"
+          },
+          "teacher_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Teacher Names"
+          },
+          "location": {
+            "type": "string",
+            "title": "Location"
+          }
+        },
+        "type": "object",
+        "required": [
+          "date",
+          "weekday",
+          "start",
+          "end",
+          "class_name",
+          "subject",
+          "lesson_name",
+          "teacher_names",
+          "location"
+        ],
+        "title": "PublicLinkScheduleRow",
+        "description": "公开课表白名单行：班级名/科目/课节名/教师姓名/教室/时间，无任何标识符。"
+      },
+      "PublicLinkSecretResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "schedule_set_id": {
+            "type": "string",
+            "title": "Schedule Set Id"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "campus_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campus Id"
+          },
+          "resource_business_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Business Id"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "show_teacher_names": {
+            "type": "boolean",
+            "title": "Show Teacher Names"
+          },
+          "token_hint": {
+            "type": "string",
+            "title": "Token Hint"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
+          "access_count": {
+            "type": "integer",
+            "title": "Access Count"
+          },
+          "note": {
+            "type": "string",
+            "title": "Note"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "token": {
+            "type": "string",
+            "title": "Token"
+          },
+          "public_url": {
+            "type": "string",
+            "title": "Public Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "schedule_set_id",
+          "scope",
+          "campus_id",
+          "resource_business_id",
+          "display_name",
+          "show_teacher_names",
+          "token_hint",
+          "status",
+          "expires_at",
+          "last_seen_at",
+          "access_count",
+          "note",
+          "created_at",
+          "created_by",
+          "token",
+          "public_url"
+        ],
+        "title": "PublicLinkSecretResponse"
       },
       "RescheduleCreate": {
         "properties": {

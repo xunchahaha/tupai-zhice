@@ -126,6 +126,11 @@ class Settings(BaseSettings):
     )
     frontend_url: str = "http://127.0.0.1:5173"
 
+    # 公开课表层（docs/roadmap/06 §3 A6）：False 时全部公开端点按 404 处理。
+    public_links_enabled: bool = True
+    # 创建链接不显式传 expires_at 时的默认有效期。
+    public_default_ttl_days: int = 180
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_origins(cls, value: object) -> object:
