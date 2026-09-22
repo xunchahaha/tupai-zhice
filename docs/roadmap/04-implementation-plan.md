@@ -1,6 +1,6 @@
 # 04 · 实施计划与进度
 
-> 状态：✅ 三期正确性修复完成 · VER-3 通过（2026-09-22：后端 341 / 前端 127 / e2e 3 / orval 零 diff）
+> 状态：四期「第三轮复审残留修复」进行中（2026-09-22，依 02 文档 §8；D 波已修部分路径，E 波收尾）
 > 批次策略遵循工作区 AGENTS.md：按模块分批、实现代理自检 + 局部验证、里程碑统一全量验证、每批一个原子提交。
 
 ## 勘察修正（重要）
@@ -71,6 +71,15 @@ VER-1 收口
 | MEM-D2 | 目标验收正确性：三集合分离（目标课次/求解课次/合并交付）；无法验证≠通过；底线验收独立于自定义清单（有交付物/课次不重复/完整性）；禁排参数存在性验证；_decide 消费 UNKNOWN vs INFEASIBLE；验收状态 pending/completed/failed 可见 | ✅ 完成（11 新用例，全量 339 passed / 前端 117 passed，792f629） | 792f629 |
 | MEM-D3 | 目标连续性：re-parse 与手动求解均携带 goal_id；目标详情「继续处理」；禁排占位补参端点+UI；选基准自动生成 max_changes；清单修订版本化 + 记忆页裁决新语义适配 | ✅ 完成（前端 127 passed，92599f6） | 92599f6 |
 | VER-3 | 终验：全量 pytest + vitest + build + orval 零 diff + e2e + 新增 GitHub Actions CI | ✅（后端 ruff/mypy/341 passed；前端 tsc/127/build/orval 零 diff/e2e 3 passed；CI 已入库 f77ac9c，runner 因账户计费未启动，待修复后自动生效） | 92599f6, f77ac9c |
+
+## 四期「第三轮复审残留修复」批次（2026-09-22）
+
+| 批次 | 内容 | 状态 | 提交 |
+| --- | --- | --- | --- |
+| MEM-E1 | 记忆侧：冲突提出方按授权状态判定（较早候选被编辑不再波及较晚确认项）；学习集要求明确接受依据（pending/candidate_ready 不入）；窗口判断统一用实际生效交集函数 | 🔄 实现中 | — |
+| MEM-E2 | 目标侧：清单修订后 acceptance 回 pending、验收绑定 checklist_version 与参数快照；底线补全传完整范围；「交付课次不重复」独立底线项 | 🔄 实现中 | — |
+| MEM-E3 | 「以新替旧」后端原子裁决端点（同事务：旧 expired+supersedes、候选 confirmed、冲突重算、审计、幂等），前端改调 | 排队（等 E1/E2 释放共享文件） | — |
+| VER-4 | 终验：全量 pytest + vitest + build + orval 零 diff + e2e；CI 待 billing 修复后自动核验 | 排队 | — |
 
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 
