@@ -8,6 +8,7 @@
 import type { GoalResponseChecklistItem } from './goalResponseChecklistItem';
 import type { GoalResponseAcceptanceDetail } from './goalResponseAcceptanceDetail';
 import type { GoalResponseLatestRunId } from './goalResponseLatestRunId';
+import type { GoalResponseLatestReportMeta } from './goalResponseLatestReportMeta';
 import type { GoalResponseCreatedBy } from './goalResponseCreatedBy';
 
 export interface GoalResponse {
@@ -21,6 +22,7 @@ export interface GoalResponse {
   acceptance_detail?: GoalResponseAcceptanceDetail;
   latest_run_id?: GoalResponseLatestRunId;
   run_count?: number;
+  latest_report_meta?: GoalResponseLatestReportMeta;
   created_by?: GoalResponseCreatedBy;
   created_at: string;
   updated_at: string;

@@ -5379,8 +5379,10 @@ export function useSolverRunEventsApiV1SolverRunsRunIdEventsGet<TData = Awaited<
 checklist 缺省时按结构化范围字段确定性生成；显式传入则原样保存（kind 由
 schema 枚举把关）。基准版本必须属于当前方案，「尽量少改」的验收上限在这里
 一次定清，验收器绝不会把「尽量」升级为「绝不」。底线验收项（MEM-D2/D4c：
-deliverable_exists / no_hard_conflicts / 有明确目标集合时的 coverage）无论
-自定义还是自动生成都强制并入，不可删除。
+deliverable_exists / no_hard_conflicts / no_duplicate_lessons，以及有明确目标
+集合时的 coverage）无论自定义还是自动生成都强制并入，不可删除；MEM-E2/E2b：
+补全时传递**完整规范化范围**（而非 has_target_set 布尔），coverage 底线项
+携带可解析的范围参数。
  * @summary Create Goal
  */
 export const createGoalApiV1GoalsPost = (
@@ -5638,7 +5640,17 @@ export function useGetGoalApiV1GoalsGoalIdGet<TData = Awaited<ReturnType<typeof 
 底线项强制并入（`ensure_bottom_line_items`——底线不可删除，用户传什么都会
 被补回）。每次保存把旧清单快照进 `checklist_history`（含版本号/时间/操作人），
 当前版本号 = 历史长度 + 1；历史只追加不改写，正在验收的口径永远以
-`checklist` 为准。目标状态不由清单编辑改动——状态永远反映最近一次验收。
+`checklist` 为准。
+
+MEM-E2/E2a：清单修订使**既有验收结论失效**——原 acceptance_status 为
+completed/failed 时强制回 pending，detail 写「清单修订至 v{n}，等待新验收」；
+goal.status 为 achieved 时回退 open（状态必须由新版本的验收重新给出，不得
+停留在旧版结论上）。latest_run_id 与历史报告保留（审计链），但响应附
+`latest_report_meta`，前端据此把旧结论标注为「历史版本 v{n-1} 的结论」。
+
+MEM-E2/E2b：修订时底线补全传递完整规范化范围——优先保留旧 coverage 项的
+范围参数（`previous_checklist`），用户显式给出的新范围字段才覆盖，旧范围
+丢失会让「排好了」被判 unverifiable。
  * @summary Replace Goal Checklist
  */
 export const replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch = (

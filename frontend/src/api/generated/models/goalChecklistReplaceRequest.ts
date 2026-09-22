@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { GoalChecklistItem } from './goalChecklistItem';
+import type { GoalChecklistReplaceRequestScope } from './goalChecklistReplaceRequestScope';
 
 /**
  * 整体替换验收清单（MEM-D3 `PATCH /goals/{id}/checklist` 的 body）。
@@ -14,7 +15,12 @@ import type { GoalChecklistItem } from './goalChecklistItem';
 自洽的清单，增量合并会把「删了一项」表达成「没提这一项」。kind 白名单由
 `GoalChecklistItem` 的 Literal 把关；key 唯一与底线项强制并入在 API 层
 复用创建目标时的同一套校验（`ensure_bottom_line_items`）。
+
+MEM-E2/E2b：`scope` 可选——body 显式给出的范围字段（业务线/班型/班级/课次/
+日期端点）用于补全/更新底线 coverage 的参数；不传或传 None 的字段保留旧
+coverage 项的范围参数（修订不丢范围）。
  */
 export interface GoalChecklistReplaceRequest {
   checklist: GoalChecklistItem[];
+  scope?: GoalChecklistReplaceRequestScope;
 }

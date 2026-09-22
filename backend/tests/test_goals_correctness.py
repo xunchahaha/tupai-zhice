@@ -391,11 +391,18 @@ def test_draft_only_custom_checklist_cannot_pass_without_schedule(
     assert created.status_code == 201, created.text
     goal = created.json()
     kinds = [item["kind"] for item in goal["checklist"]]
-    # 底线强制并入：deliverable_exists / no_hard_conflicts；无范围字段 → 不补 coverage。
+    # 底线强制并入：deliverable_exists / no_hard_conflicts / no_duplicate_lessons
+    # （MEM-E2/E2b：不重复检查独立于范围）；无范围字段 → 不补 coverage。
     assert "deliverable_exists" in kinds
     assert "no_hard_conflicts" in kinds
+    assert "no_duplicate_lessons" in kinds
+    assert "coverage" not in kinds
     bottom = [item for item in goal["checklist"] if item["params"].get("bottom_line")]
-    assert {item["kind"] for item in bottom} == {"deliverable_exists", "no_hard_conflicts"}
+    assert {item["kind"] for item in bottom} == {
+        "deliverable_exists",
+        "no_hard_conflicts",
+        "no_duplicate_lessons",
+    }
 
     # 关联一次「成功但零课表」的求解（空范围 → OPTIMAL + 0 assignments）。
     solved = client.post(

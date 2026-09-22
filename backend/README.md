@@ -291,11 +291,26 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
   无法解析、无课表等情况 → `passed=false` 且 `verdict="unverifiable"`（detail
   说明缺什么），绝不因「没检测到越界」判通过；报告带 `unverifiable_count`，
   `all_passed` 要求所有项 passed=true 且无 unverifiable。
-- **底线验收（MEM-D2/D4c）**：创建目标时（`ensure_bottom_line_items`，无论清单
-  来自自动生成还是用户自定义）强制并入 `deliverable_exists`、`no_hard_conflicts`、
-  以及有明确目标集合（课次/班级/业务线/班型范围）时的 `coverage`；params 带
-  `bottom_line=true`，前端打「底线」徽标。底线不可删除，用户附加清单与底线并列
-  验收——仅 draft_only 的自定义清单在零课表上也达不成。
+- **底线验收（MEM-D2/D4c，MEM-E2/E2b 修订）**：创建/修订目标时
+  （`ensure_bottom_line_items`，无论清单来自自动生成还是用户自定义）强制并入
+  `deliverable_exists`、`no_hard_conflicts`、`no_duplicate_lessons`（交付课次
+  不重复——不依赖目标范围，永远并入；无范围清单的查重兜底），以及有明确目标
+  集合（课次/班级/业务线/班型范围）时的 `coverage`；params 带 `bottom_line=true`，
+  前端打「底线」徽标。底线不可删除，用户附加清单与底线并列验收——仅 draft_only
+  的自定义清单在零课表上也达不成。MEM-E2/E2b：补全传递**完整规范化范围**
+  （`normalize_goal_scope`，不再用 has_target_set 布尔）——补入的 coverage 携带
+  可解析的范围参数；修订时优先保留旧 coverage 项 params（`merge_coverage_scope`），
+  body.scope 显式字段才覆盖；补全后统一校验 key 唯一（重复 422）。
+- **清单版本绑定（MEM-E2/E2a）**：验收报告 `report.meta.checklist_version`
+  记录本次验收所用清单版本（= `checklist_history` 长度+1，与响应
+  `checklist_version` 同口径）+ `meta.checklist_snapshot`（当时 coverage 参数
+  快照）；`create_solver_run` 冻结 `request_payload.goal_checklist_version`，
+  验收时清单若又修订过，meta 注明「求解参数基于 v{m} 清单生成，验收按 v{n}」。
+  `PATCH /goals/{id}/checklist` 修订成功后 acceptance_status 为 completed/failed
+  强制回 pending（detail=「清单修订至 v{n}，等待新验收」），goal.status 为
+  achieved 回退 open；latest_run_id 与历史报告保留，PATCH 响应附
+  `latest_report_meta` 标注旧结论版本，前端据此区分「当前版本结论」与「历史
+  版本结论」（pending 时当前结论区显示「等待新验收（v{n}）」而非旧通过）。
 - **状态机**：`open → achieved`（全部通过；draft_only 目标在合格草稿交付即达成）；
   存在「必须由教务放宽或裁决」的缺口（硬冲突未消、求解未能安置、禁排仍被占、
   目标期间发生了发布）→ `awaiting_decision`；存在允许的补救动作（范围提取漏课次
@@ -316,14 +331,16 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
 - **关联求解**：`POST /api/v1/solver-runs` 与 `POST /api/v1/assistant/solve` 可选
   `goal_id`；自动验收钩子在 `services/tasks.py::_persist_result` 的事务之外单独
   提交——验收层任何异常都不影响求解结果落库。已放弃目标拒绝再关联新任务（409）。
-- **清单修订与历史（MEM-D3）**：`PATCH /api/v1/goals/{id}/checklist` 整体替换
-  验收清单——body 为完整 checklist 数组，校验复用创建口径（key 唯一、kind 白名单、
-  `ensure_bottom_line_items` 强制并入底线）；每次保存把旧清单快照进
+- **清单修订与历史（MEM-D3，MEM-E2/E2a 修订）**：`PATCH /api/v1/goals/{id}/checklist`
+  整体替换验收清单——body 为完整 checklist 数组，校验复用创建口径（key 唯一、
+  kind 白名单、`ensure_bottom_line_items` 强制并入底线；可选 `scope` 显式给新
+  范围字段，未给的维度保留旧 coverage 参数）；每次保存把旧清单快照进
   `solve_goals.checklist_history`（`[{version, saved_at, saved_by, items}]`，
   迁移 `d7f2a9c4b8e1`，down=e5c9a1d3f7b2），当前版本号 =
   `GoalResponse.checklist_version`（历史长度+1，初始 v1），历史只追加不改写。
-  典型用途：禁排占位项补参（量化 subject/slot 后从「恒不通过」恢复参与验收）。
-  已放弃目标 409、跨方案 404；目标状态不由清单编辑改动。
+  修订使既有验收结论失效：acceptance_status 回 pending、achieved 回退 open
+  （MEM-E2/E2a，见上）。典型用途：禁排占位项补参（量化 subject/slot 后从
+  「恒不通过」恢复参与验收）。已放弃目标 409、跨方案 404。
 - **目标连续性（MEM-D3）**：补救不脱离原目标——前端重新解析保留已绑定 goalId
   （口径不一致以提示条说明「清单可继续修订」）；手动求解携带会话持有的
   `goal_id`（无目标时 null，行为不变）；solver 页支持 `?goal=<id>` 深链绑定

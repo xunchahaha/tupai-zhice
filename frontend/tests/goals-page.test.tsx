@@ -270,3 +270,141 @@ describe("GoalsPage goal continuity (MEM-D3)", () => {
     expect(screen.getByText(/改口径：仍只出草稿/)).toBeInTheDocument();
   });
 });
+
+// MEM-E2：清单版本与验收结论对齐 + 底线项展示。
+describe("GoalsPage version alignment (MEM-E2)", () => {
+  const user = userEvent.setup();
+  afterEach(cleanup);
+  beforeEach(() => {
+    mocks.abandon.mockClear();
+    mocks.patch.mockClear();
+    mocks.detail = undefined;
+  });
+
+  it("shows 等待新验收（v{n}） in the current-conclusion area while pending after a revision", async () => {
+    // 清单修订到 v2、验收 pending：旧 v1 报告不得再当「当前结论」展示。
+    mocks.goals = [goalFixture({ acceptance_status: "pending", status: "open" })];
+    mocks.detail = {
+      ...goalFixture({ acceptance_status: "pending", status: "open" }),
+      acceptance_detail: "清单修订至 v2，等待新验收",
+      checklist_version: 2,
+      checklist_history: [{ version: 1, saved_at: "2026-09-20T08:00:00+08:00", saved_by: null, items: [] }],
+      runs: [
+        {
+          id: "run-1",
+          status: "completed",
+          model_status: "OPTIMAL",
+          created_at: "2026-09-20T09:00:00+08:00",
+          goal_report: {
+            goal_id: "goal-1",
+            all_passed: true,
+            passed_count: 2,
+            failed_count: 0,
+            meta: { checklist_version: 1 },
+            items: [
+              { key: "coverage", kind: "coverage", passed: true, detail: "命中 1/1" },
+            ],
+            gaps: [],
+            decision: { status: "achieved", reason: "全部通过" },
+          },
+        },
+      ],
+      // 修订后 latest_run 的旧报告仍在（GET 口径），但 acceptance_status=pending。
+      latest_report: {
+        goal_id: "goal-1",
+        all_passed: true,
+        passed_count: 2,
+        failed_count: 0,
+        meta: { checklist_version: 1 },
+        items: [{ key: "coverage", kind: "coverage", passed: true, detail: "命中 1/1" }],
+        gaps: [],
+        decision: { status: "achieved", reason: "全部通过" },
+      },
+    };
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "详情" }));
+    // 当前结论区显示「等待新验收（v2）」，旧报告不再当「最新验收」展示。
+    expect(await screen.findByText(/等待新验收（v2）/)).toBeInTheDocument();
+    expect(screen.getByText(/清单已修订至 v2/)).toBeInTheDocument();
+    expect(screen.queryByText("最新验收")).not.toBeInTheDocument();
+    // 旧结论在求解记录里按历史版本标注。
+    expect(screen.getByText("v1 结论")).toBeInTheDocument();
+  });
+
+  it("marks a non-current-version report as 历史版本结论 in the latest-acceptance area", async () => {
+    // acceptance_status=completed 但最新报告还是 v1（修订后又验收过一次之前的版本……
+    // 直接场景：report 版本 < goal 版本且已完成验收 → 徽标「历史版本 v1 的结论」。
+    mocks.goals = [goalFixture()];
+    mocks.detail = {
+      ...goalFixture(),
+      checklist_version: 2,
+      checklist_history: [{ version: 1, saved_at: "2026-09-20T08:00:00+08:00", saved_by: null, items: [] }],
+      runs: [],
+      latest_report: {
+        goal_id: "goal-1",
+        all_passed: false,
+        passed_count: 1,
+        failed_count: 1,
+        meta: { checklist_version: 1 },
+        items: [{ key: "coverage", kind: "coverage", passed: false, detail: "缺 C2" }],
+        gaps: [],
+        decision: { status: "open", reason: "1 项未通过" },
+      },
+    };
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "详情" }));
+    expect(await screen.findByText(/历史版本 v1 的结论/)).toBeInTheDocument();
+  });
+
+  it("shows bottom-line badges for both coverage and no_duplicate_lessons checklist items", async () => {
+    mocks.goals = [goalFixture()];
+    mocks.detail = {
+      ...goalFixture(),
+      checklist_version: 1,
+      checklist_history: [],
+      runs: [],
+      latest_report: null,
+      checklist: [
+        { key: "coverage", requirement: "覆盖目标课次", kind: "coverage", params: { bottom_line: true, class_business_ids: ["B1"] } },
+        { key: "no_duplicate_lessons", requirement: "交付课次不重复", kind: "no_duplicate_lessons", params: { bottom_line: true } },
+        { key: "draft_only", requirement: "只交付草稿", kind: "draft_only", params: {} },
+      ],
+    };
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "详情" }));
+    const badges = await screen.findAllByText("底线");
+    // coverage 与 no_duplicate_lessons 两项底线徽标都显示。
+    expect(badges).toHaveLength(2);
+    expect(screen.getByText("课次覆盖")).toBeInTheDocument();
+    expect(screen.getAllByText("课次不重复").length).toBeGreaterThan(0);
+  });
+
+  it("renders the version_note from report meta when solve and acceptance versions differ", async () => {
+    mocks.goals = [goalFixture()];
+    mocks.detail = {
+      ...goalFixture(),
+      checklist_version: 3,
+      checklist_history: [],
+      runs: [],
+      latest_report: {
+        goal_id: "goal-1",
+        all_passed: true,
+        passed_count: 1,
+        failed_count: 0,
+        meta: {
+          checklist_version: 3,
+          solve_checklist_version: 2,
+          version_note: "求解参数基于 v2 清单生成，验收按当前最新版 v3",
+        },
+        items: [{ key: "coverage", kind: "coverage", passed: true, detail: "命中" }],
+        gaps: [],
+        decision: { status: "achieved", reason: "全部通过" },
+      },
+    };
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "详情" }));
+    expect(
+      await screen.findByText(/求解参数基于 v2 清单生成，验收按当前最新版 v3/),
+    ).toBeInTheDocument();
+  });
+});

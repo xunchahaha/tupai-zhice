@@ -13,6 +13,7 @@ export type GoalChecklistItemKind = typeof GoalChecklistItemKind[keyof typeof Go
 export const GoalChecklistItemKind = {
   deliverable_exists: 'deliverable_exists',
   coverage: 'coverage',
+  no_duplicate_lessons: 'no_duplicate_lessons',
   forbidden_slot_free: 'forbidden_slot_free',
   no_hard_conflicts: 'no_hard_conflicts',
   max_changes: 'max_changes',

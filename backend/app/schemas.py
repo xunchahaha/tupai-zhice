@@ -646,6 +646,7 @@ class MiningRunResponse(BaseModel):
 GoalChecklistKind = Literal[
     "deliverable_exists",
     "coverage",
+    "no_duplicate_lessons",
     "forbidden_slot_free",
     "no_hard_conflicts",
     "max_changes",
@@ -685,9 +686,25 @@ class GoalChecklistReplaceRequest(BaseModel):
     自洽的清单，增量合并会把「删了一项」表达成「没提这一项」。kind 白名单由
     `GoalChecklistItem` 的 Literal 把关；key 唯一与底线项强制并入在 API 层
     复用创建目标时的同一套校验（`ensure_bottom_line_items`）。
+
+    MEM-E2/E2b：`scope` 可选——body 显式给出的范围字段（业务线/班型/班级/课次/
+    日期端点）用于补全/更新底线 coverage 的参数；不传或传 None 的字段保留旧
+    coverage 项的范围参数（修订不丢范围）。
     """
 
     checklist: list[GoalChecklistItem]
+    scope: GoalScopePatch | None = None
+
+
+class GoalScopePatch(BaseModel):
+    """修订清单时可选的范围字段（MEM-E2/E2b）：只显式给出要改的维度。"""
+
+    business_lines: list[str] | None = None
+    product_types: list[str] | None = None
+    class_business_ids: list[str] | None = None
+    course_business_ids: list[str] | None = None
+    date_from: date | None = None
+    date_to: date | None = None
 
 
 class GoalCreateRequest(BaseModel):
@@ -733,6 +750,10 @@ class GoalResponse(ORMModel):
     acceptance_detail: str | None = None
     latest_run_id: str | None = None
     run_count: int = 0
+    # MEM-E2/E2a：清单修订后旧报告保留但结论过期——PATCH 响应带该字段标注
+    # latest_run 报告所属的清单版本（is_current_version=False，前端展示
+    # 「历史版本 v{n} 的结论」而非当成当前口径）。
+    latest_report_meta: dict[str, Any] | None = None
     created_by: str | None = None
     created_at: datetime
     updated_at: datetime

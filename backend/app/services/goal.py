@@ -48,10 +48,11 @@ logger = logging.getLogger("tupai.memory")
 # checklist kind 与验收器一一对应：coverage=_check_coverage、
 # forbidden_slot_free=_check_forbidden_slots、no_hard_conflicts=_check_no_hard_conflicts、
 # max_changes=_check_max_changes、draft_only=_check_draft_only、date_range_match=_check_date_range、
-# deliverable_exists=_check_deliverable_exists。
+# deliverable_exists=_check_deliverable_exists、no_duplicate_lessons=_check_no_duplicate_lessons。
 GOAL_CHECKLIST_KINDS = (
     "deliverable_exists",
     "coverage",
+    "no_duplicate_lessons",
     "forbidden_slot_free",
     "no_hard_conflicts",
     "max_changes",
@@ -65,10 +66,16 @@ GOAL_STATUSES = ("open", "awaiting_decision", "achieved", "abandoned")
 # failed=验收执行本身异常（原因在 SolveGoal.acceptance_detail）。
 GOAL_ACCEPTANCE_STATUSES = ("pending", "completed", "failed")
 
-# 底线验收（MEM-D2/D4c）：无论清单来自自动生成还是用户自定义，这三类都必须在——
-# 有合格交付物、目标课次完整且不重复（有明确目标集合时）、硬冲突重算。前端给这些
-# 项打「底线」徽标，用户附加清单与底线并列验收。
-BOTTOM_LINE_KINDS = ("deliverable_exists", "coverage", "no_hard_conflicts")
+# 底线验收（MEM-D2/D4c，MEM-E2/E2b 收口）：无论清单来自自动生成还是用户自定义，
+# 这些都必须在——有合格交付物、硬冲突重算、交付课次不重复（不依赖目标范围，
+# 永远并入）；coverage 仅在解析出明确目标集合时并入，但范围参数必须完整传递。
+# 前端给这些项打「底线」徽标，用户附加清单与底线并列验收。
+BOTTOM_LINE_KINDS = (
+    "deliverable_exists",
+    "coverage",
+    "no_duplicate_lessons",
+    "no_hard_conflicts",
+)
 
 # draft_only 验收口径：审计日志里这些动作发生在该 run 创建之后即视为违规。
 PUBLISH_AUDIT_ACTIONS = ("publish", "calendar_publish")
@@ -87,6 +94,55 @@ _SUBJECT_TYPE_LABELS = {
 
 def _item(key: str, requirement: str, kind: str, params: dict[str, Any]) -> dict[str, Any]:
     return {"key": key, "requirement": requirement, "kind": kind, "params": params}
+
+
+def normalize_goal_scope(
+    *,
+    business_lines: list[str] | None = None,
+    product_types: list[str] | None = None,
+    class_business_ids: list[str] | None = None,
+    course_business_ids: list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, Any]:
+    """把创建/修订请求里的范围字段规范化为 coverage 参数包（MEM-E2/E2b）。
+
+    底线补全必须拿到**完整规范化范围**而不是「有没有范围」的布尔：补进来的
+    coverage 如果参数为空，验收时 `_expected_course_ids` 解析不出目标课次，
+    会把「明明排好了」判成 unverifiable。所有取值统一去空白、去空串。
+    """
+
+    def _clean(values: list[str] | None) -> list[str]:
+        return sorted({str(v).strip() for v in values or [] if str(v).strip()})
+
+    return {
+        "business_lines": _clean(business_lines),
+        "product_types": _clean(product_types),
+        "class_business_ids": _clean(class_business_ids),
+        "course_business_ids": _clean(course_business_ids),
+        "date_from": (str(date_from).strip() or None) if date_from else None,
+        "date_to": (str(date_to).strip() or None) if date_to else None,
+    }
+
+
+def _has_scope(scope: dict[str, Any]) -> bool:
+    """规范化范围包里是否存在可用于解析目标课次的字段。"""
+    return bool(
+        scope.get("business_lines")
+        or scope.get("product_types")
+        or scope.get("class_business_ids")
+        or scope.get("course_business_ids")
+    )
+
+
+def _scope_bits(scope: dict[str, Any]) -> list[str]:
+    labels = [
+        ("业务线", scope.get("business_lines")),
+        ("产品班型", scope.get("product_types")),
+        ("班级", scope.get("class_business_ids")),
+        ("课次", scope.get("course_business_ids")),
+    ]
+    return [f"{label}：{'、'.join(values)}" for label, values in labels if values]
 
 
 def _bottom_line_item(
@@ -140,20 +196,15 @@ def build_checklist(
     SolveGoal.instruction，清单只保存可核对的口径。
     """
     del instruction  # 生成口径只来自结构化字段；原文在 Goal.instruction 里留档。
-    lines = [v for v in (business_lines or []) if str(v).strip()]
-    types = [v for v in (product_types or []) if str(v).strip()]
-    classes = [v for v in (class_business_ids or []) if str(v).strip()]
-    courses = [v for v in (course_business_ids or []) if str(v).strip()]
-    scope_bits = [
-        label
-        for label, values in (
-            ("业务线", lines),
-            ("产品班型", types),
-            ("班级", classes),
-            ("课次", courses),
-        )
-        if values
-    ]
+    scope = normalize_goal_scope(
+        business_lines=business_lines,
+        product_types=product_types,
+        class_business_ids=class_business_ids,
+        course_business_ids=course_business_ids,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    scope_bits = _scope_bits(scope)
     coverage_requirement = (
         "求解结果覆盖全部目标课次（逐项比对，不允许漏排）"
         + (
@@ -171,14 +222,7 @@ def build_checklist(
         _bottom_line_item(
             "coverage",
             coverage_requirement,
-            {
-                "business_lines": lines,
-                "product_types": types,
-                "class_business_ids": classes,
-                "course_business_ids": courses,
-                "date_from": date_from,
-                "date_to": date_to,
-            },
+            {**scope},
         ),
     ]
     if date_from or date_to:
@@ -214,6 +258,15 @@ def build_checklist(
         _bottom_line_item(
             "no_hard_conflicts",
             "结果课表无硬冲突（按教室/班级/教师/日程独立重算，不信任求解器自报）",
+        )
+    )
+    # 底线之「交付课次不重复」（MEM-E2/E2b）：不依赖目标范围，永远并入——
+    # 自定义清单不带范围时旧实现没有查重防线；coverage 自身的重复检测保留
+    #（有范围时口径更精确），无范围时由本项兜底。
+    items.append(
+        _bottom_line_item(
+            "no_duplicate_lessons",
+            "交付课次不重复（同一课次在交付课表出现 ≥2 次即不通过）",
         )
     )
     if max_changes is not None:
@@ -283,18 +336,54 @@ def draft_checklist_from_interpretation(
     return items, warnings
 
 
+def merge_coverage_scope(
+    old_params: dict[str, Any] | None, new_scope: dict[str, Any] | None
+) -> dict[str, Any]:
+    """修订清单时合并 coverage 范围（MEM-E2/E2b）：旧参数优先保留。
+
+    修订只应改变用户显式给出的内容：用户没给新范围字段时，旧 coverage 的
+    范围参数必须原样保留（丢了范围参数 → 验收时解析不出目标课次 → 明明
+    排好了却判 unverifiable）。用户显式给了哪个字段，就用新值覆盖哪个字段。
+    date_from/date_to 只有显式传入（非 None）才覆盖。
+    """
+    merged: dict[str, Any] = dict(old_params or {})
+    for field in ("business_lines", "product_types", "class_business_ids", "course_business_ids"):
+        if new_scope is not None and new_scope.get(field):
+            merged[field] = list(new_scope[field])
+    for field in ("date_from", "date_to"):
+        if new_scope is not None and new_scope.get(field):
+            merged[field] = new_scope[field]
+    # 规范化去空白，保证快照与验收口径一致。
+    return normalize_goal_scope(
+        business_lines=merged.get("business_lines"),
+        product_types=merged.get("product_types"),
+        class_business_ids=merged.get("class_business_ids"),
+        course_business_ids=merged.get("course_business_ids"),
+        date_from=merged.get("date_from"),
+        date_to=merged.get("date_to"),
+    )
+
+
 def ensure_bottom_line_items(
-    checklist: list[dict[str, Any]], *, has_target_set: bool
+    checklist: list[dict[str, Any]],
+    *,
+    scope: dict[str, Any] | None = None,
+    previous_checklist: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """底线验收与自定义清单强制并列（MEM-D2/D4c），创建目标时由 API 层调用。
+    """底线验收与自定义清单强制并列（MEM-D2/D4c，MEM-E2/E2b 修订），API 层调用。
 
     底线项不可删除：用户传了自定义清单也必须并入——
     - `deliverable_exists`：run 必须存在非空课表产物，杜绝「仅 draft_only 的
       清单在零课表上也达成」；
     - `no_hard_conflicts`：交付课表硬冲突独立重算；
-    - `coverage`：仅当请求带明确目标集合（课次/班级/业务线/班型范围）时并入。
-    清单里已有同 kind 的项不重复追加（用户自己的口径优先），底线由
-    「缺失即补齐」保证，不由用户自觉保证。
+    - `no_duplicate_lessons`：交付课次不重复（不依赖范围，永远并入）；
+    - `coverage`：仅当能解析出明确目标集合时并入，且**必须携带完整规范化
+      范围参数**（MEM-E2/E2b：范围来自 `scope`；修订时优先保留
+      `previous_checklist` 旧 coverage 项的 params，`scope` 显式给出的字段才
+      覆盖——旧范围丢失会让「排好了」被判 unverifiable）。
+
+    补全后统一校验最终清单：key 唯一（重复直接 ValueError，调用方转 422），
+    coverage 类底线项的参数完整性由 `normalize_goal_scope` 保证。
     """
     merged = [dict(item) for item in checklist]
     present = {str(item.get("kind") or "") for item in merged}
@@ -312,13 +401,59 @@ def ensure_bottom_line_items(
                 "结果课表无硬冲突（按教室/班级/教师/日程独立重算，不信任求解器自报）",
             )
         )
-    if has_target_set and "coverage" not in present:
+    if "no_duplicate_lessons" not in present:
+        merged.append(
+            _bottom_line_item(
+                "no_duplicate_lessons",
+                "交付课次不重复（同一课次在交付课表出现 ≥2 次即不通过）",
+            )
+        )
+    # coverage 底线：清单里已有 coverage 项时，用户口径优先——只在其 params
+    # 缺范围字段时用合并范围补齐（显式 params 永不被静默改写）；没有 coverage
+    # 项但能解析出目标集合时，补一条带完整范围参数的底线 coverage。
+    old_params: dict[str, Any] | None = None
+    if previous_checklist:
+        for entry in previous_checklist:
+            if str(entry.get("kind")) == "coverage":
+                old_params = dict(entry.get("params") or {})
+                break
+    effective_scope = merge_coverage_scope(old_params, scope)
+    coverage_entries = [item for item in merged if str(item.get("kind")) == "coverage"]
+    if coverage_entries:
+        for entry in coverage_entries:
+            params = dict(entry.get("params") or {})
+            if not any(
+                params.get(field) for field in
+                ("business_lines", "product_types", "class_business_ids", "course_business_ids")
+            ) and _has_scope(effective_scope):
+                # 用户的 coverage 项没写范围（或只有 needs_params 类占位）：
+                # 补上解析出的范围，避免「无参数检查」恒 unverifiable。
+                for field in (
+                    "business_lines",
+                    "product_types",
+                    "class_business_ids",
+                    "course_business_ids",
+                    "date_from",
+                    "date_to",
+                ):
+                    if effective_scope.get(field) and not params.get(field):
+                        params[field] = effective_scope[field]
+                entry["params"] = params
+    elif _has_scope(effective_scope):
+        bits = _scope_bits(effective_scope)
         merged.append(
             _bottom_line_item(
                 "coverage",
-                "目标课次完整且不重复（逐项比对，不允许漏排或重复交付）",
+                "求解结果覆盖全部目标课次（逐项比对，不允许漏排）"
+                + (f"——范围：{'／'.join(bits)}" if bits else ""),
+                {**effective_scope},
             )
         )
+    # 补全后统一校验（MEM-E2/E2b）：key 必须唯一——重复 key 的报告无法对齐缺口。
+    keys = [str(item.get("key") or "") for item in merged]
+    duplicated = sorted({key for key in keys if keys.count(key) > 1})
+    if duplicated:
+        raise ValueError(f"验收清单的 key 不能重复：{'、'.join(duplicated)}")
     return merged
 
 
@@ -787,6 +922,65 @@ def _check_no_hard_conflicts(
     }
 
 
+def _check_no_duplicate_lessons(
+    db: Any, goal: SolveGoal, run: SolverRun, params: dict[str, Any], has_schedule: bool
+) -> dict[str, Any]:
+    """交付课次不重复（底线项，MEM-E2/E2b）：同一课次出现 ≥2 次即不通过。
+
+    这条底线**不依赖目标范围**：自定义清单没有范围字段时也必须在——重复交付
+    永远是数据事故。口径 = 合并交付课表（与 coverage 的重复检测同源；coverage
+    有范围时按目标集合查重更精确，本项在无范围时兜底，有范围时二者并存，
+    结论一致）。历史旧报告（无此底线项的版本）不受影响——验收只对当前清单。
+    """
+    del db, goal, params
+    requirement = "交付课次不重复"
+    item = {
+        "key": "no_duplicate_lessons",
+        "kind": "no_duplicate_lessons",
+        "requirement": requirement,
+    }
+    if not has_schedule:
+        return _unverifiable(
+            "no_duplicate_lessons",
+            requirement,
+            "no_duplicate_lessons",
+            "本次求解未产出课表，无法核对课次重复",
+        )
+    assignments = _deliverable_assignments(run)
+    occurrence = Counter(
+        str(a.get("course_business_id"))
+        for a in assignments
+        if a.get("course_business_id")
+    )
+    duplicates = sorted(
+        (course_id, count) for course_id, count in occurrence.items() if count >= 2
+    )
+    if duplicates:
+        duplicate_courses = sorted(course_id for course_id, _count in duplicates)
+        return {
+            **item,
+            "passed": False,
+            "detail": (
+                f"{len(duplicates)} 个课次在交付课表中重复出现（≥2 次）："
+                f"{_join(duplicate_courses)}"
+                "——请核对课次主数据是否重复导入"
+            ),
+            "evidence": {
+                "duplicates": [
+                    {"course_business_id": course_id, "count": count}
+                    for course_id, count in duplicates
+                ],
+                "assignment_count": len(assignments),
+            },
+        }
+    return {
+        **item,
+        "passed": True,
+        "detail": f"交付课表 {len(assignments)} 条，无重复课次（独立核对 result 载荷）",
+        "evidence": {"duplicates": [], "assignment_count": len(assignments)},
+    }
+
+
 def _check_max_changes(
     db: Any, goal: SolveGoal, run: SolverRun, params: dict[str, Any], has_schedule: bool
 ) -> dict[str, Any]:
@@ -1060,6 +1254,7 @@ def _check_date_range(
 _CHECKERS = {
     "deliverable_exists": _check_deliverable_exists,
     "coverage": _check_coverage,
+    "no_duplicate_lessons": _check_no_duplicate_lessons,
     "forbidden_slot_free": _check_forbidden_slots,
     "no_hard_conflicts": _check_no_hard_conflicts,
     "max_changes": _check_max_changes,
@@ -1194,6 +1389,17 @@ def _decide(
                 }
             )
             awaiting = True
+        elif kind == "no_duplicate_lessons":
+            gaps.append(
+                {
+                    "key": entry["key"],
+                    "kind": kind,
+                    "summary": entry["detail"],
+                    "next_step": "核对课次主数据是否重复导入（同一课次出现 ≥2 次），修正后重跑",
+                    "remedy": "await_admin",
+                }
+            )
+            awaiting = True
         elif kind == "forbidden_slot_free":
             unquantified = "未量化" in entry["detail"] or "不存在" in entry["detail"]
             gaps.append(
@@ -1273,13 +1479,41 @@ def _decide(
     }
 
 
+def _checklist_version(goal: SolveGoal) -> int:
+    """当前清单版本号（MEM-D3/E2a 口径）：初始 v1，每修订一次 +1。
+
+    与响应层 `GoalResponse.checklist_version`（历史长度+1）完全一致——验收
+    报告绑定版本号时必须用同一口径，前端才能对上「哪个结论是哪个版本的」。
+    """
+    return len(goal.checklist_history or []) + 1
+
+
+def _snapshot_coverage_params(checklist: list[dict[str, Any]]) -> dict[str, Any]:
+    """提取 coverage 参数快照（MEM-E2/E2a）：验收时点清单里每个 coverage 项的
+    完整参数包（范围/日期/底线标记），写入 report.meta.checklist_snapshot——
+    报告不依赖「清单以后还会怎么改」，任何版本都能按当时口径复现结论。"""
+    snapshot: dict[str, Any] = {}
+    for entry in checklist or []:
+        if str(entry.get("kind")) == "coverage":
+            snapshot[str(entry.get("key") or "coverage")] = dict(entry.get("params") or {})
+    return snapshot
+
+
 def evaluate_goal(db: Any, goal: SolveGoal, run: SolverRun) -> dict[str, Any]:
-    """对一次 completed 的 run 出具验收报告。纯代码，绝不触发新的求解。"""
+    """对一次 completed 的 run 出具验收报告。纯代码，绝不触发新的求解。
+
+    MEM-E2/E2a：验收**绑定清单版本**——`_decide` 与各验收器只依据当前
+    `goal.checklist`（版本号 = `_checklist_version`），并把版本号与 coverage
+    参数快照写进 report.meta。清单修订后目标验收状态回 pending（API 层），
+    旧报告保留各自的版本号与快照，页面据此区分「当前版本结论」与「历史
+    版本结论」。
+    """
     result = dict(run.result_payload or {})
     assignments = [a for a in result.get("assignments") or [] if isinstance(a, dict)]
     has_schedule = run.model_status in {"OPTIMAL", "FEASIBLE"} and bool(assignments)
+    checklist = list(goal.checklist or [])
     items: list[dict[str, Any]] = []
-    for entry in goal.checklist or []:
+    for entry in checklist:
         kind = str(entry.get("kind") or "")
         checker = _CHECKERS.get(kind)
         if checker is None:
@@ -1303,6 +1537,26 @@ def evaluate_goal(db: Any, goal: SolveGoal, run: SolverRun) -> dict[str, Any]:
     decision = _decide(items, has_schedule, run)
     passed_count = sum(1 for entry in items if entry["passed"])
     unverifiable_count = sum(1 for entry in items if entry["verdict"] == "unverifiable")
+    # MEM-E2/E2a：报告绑定本次验收所用清单版本与参数快照。
+    requested_goal_version = (run.request_payload or {}).get("goal_checklist_version")
+    meta: dict[str, Any] = {
+        "checklist_version": _checklist_version(goal),
+        "checklist_snapshot": _snapshot_coverage_params(checklist),
+    }
+    if requested_goal_version is not None:
+        try:
+            requested_version = int(requested_goal_version)
+        except (TypeError, ValueError):
+            requested_version = None
+        if requested_version is not None and requested_version != meta["checklist_version"]:
+            # 任务创建晚于清单修订但验收更晚（清单在途又改过）：照常按当前
+            # 最新版验收，但注明「求解参数基于 v{m} 清单生成，验收按 v{n}」，
+            # 保证可解释（MEM-E2/E2a）。
+            meta["solve_checklist_version"] = requested_version
+            current = meta["checklist_version"]
+            meta["version_note"] = (
+                f"求解参数基于 v{requested_version} 清单生成，验收按当前最新版 v{current}"
+            )
     return {
         "goal_id": goal.id,
         "instruction": goal.instruction,
@@ -1315,6 +1569,7 @@ def evaluate_goal(db: Any, goal: SolveGoal, run: SolverRun) -> dict[str, Any]:
         "passed_count": passed_count,
         "failed_count": len(items) - passed_count,
         "unverifiable_count": unverifiable_count,
+        "meta": meta,
         "items": items,
         "gaps": decision["gaps"],
         "decision": {"status": decision["status"], "reason": decision["reason"]},
@@ -1369,4 +1624,6 @@ __all__ = [
     "ensure_bottom_line_items",
     "evaluate_goal",
     "goal_run_counts",
+    "merge_coverage_scope",
+    "normalize_goal_scope",
 ]

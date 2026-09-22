@@ -218,6 +218,7 @@ from .services.goal import (
     draft_checklist_from_interpretation,
     ensure_bottom_line_items,
     goal_run_counts,
+    normalize_goal_scope,
 )
 from .services.ics import build_public_calendar_ics, calendar_etag
 from .services.import_mapping import (
@@ -4055,6 +4056,12 @@ def create_solver_run(
     if payload.get("assistant_entry") and not _selected_sessions({**snapshot.payload, **payload}):
         raise HTTPException(status_code=422, detail="确认的排课范围没有匹配到课次")
     _validate_rule_coverage({**snapshot.payload, **payload})
+    # MEM-E2/E2a：创建任务时冻结关联目标当时的清单版本——验收若晚于清单修订，
+    # 报告 meta 会注明「求解参数基于 v{m} 清单生成，验收按 v{n}」，可解释。
+    if goal_id:
+        goal_for_version = db.get(SolveGoal, goal_id)
+        if goal_for_version is not None:
+            payload["goal_checklist_version"] = len(goal_for_version.checklist_history or []) + 1
     run = SolverRun(
         schedule_set_id=schedule_set_id,
         snapshot_id=snapshot.id,
@@ -4253,9 +4260,21 @@ def create_goal(
     checklist 缺省时按结构化范围字段确定性生成；显式传入则原样保存（kind 由
     schema 枚举把关）。基准版本必须属于当前方案，「尽量少改」的验收上限在这里
     一次定清，验收器绝不会把「尽量」升级为「绝不」。底线验收项（MEM-D2/D4c：
-    deliverable_exists / no_hard_conflicts / 有明确目标集合时的 coverage）无论
-    自定义还是自动生成都强制并入，不可删除。
+    deliverable_exists / no_hard_conflicts / no_duplicate_lessons，以及有明确目标
+    集合时的 coverage）无论自定义还是自动生成都强制并入，不可删除；MEM-E2/E2b：
+    补全时传递**完整规范化范围**（而非 has_target_set 布尔），coverage 底线项
+    携带可解析的范围参数。
     """
+    # 底线补全用的规范化范围（MEM-E2/E2b）：从创建请求复用与 build_checklist
+    # 同一套解析——自定义清单也要带上这个范围参数包。
+    goal_scope = normalize_goal_scope(
+        business_lines=payload.business_lines,
+        product_types=payload.product_types,
+        class_business_ids=payload.class_business_ids,
+        course_business_ids=payload.course_business_ids,
+        date_from=payload.date_from.isoformat() if payload.date_from else None,
+        date_to=payload.date_to.isoformat() if payload.date_to else None,
+    )
     if payload.checklist is not None:
         if not payload.checklist:
             raise HTTPException(status_code=422, detail="验收清单不能为空")
@@ -4278,15 +4297,10 @@ def create_goal(
             forbid_publish=payload.forbid_publish,
         )
     # 底线验收与自定义清单并列（MEM-D2/D4c）：缺失即补齐，用户清单不可删除底线。
-    checklist = ensure_bottom_line_items(
-        checklist,
-        has_target_set=bool(
-            payload.course_business_ids
-            or payload.business_lines
-            or payload.product_types
-            or payload.class_business_ids
-        ),
-    )
+    try:
+        checklist = ensure_bottom_line_items(checklist, scope=goal_scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if payload.baseline_schedule_version_id:
         baseline = db.get(ScheduleVersion, payload.baseline_schedule_version_id)
         if baseline is None or baseline.schedule_set_id != scope.id:
@@ -4371,7 +4385,17 @@ def replace_goal_checklist(
     底线项强制并入（`ensure_bottom_line_items`——底线不可删除，用户传什么都会
     被补回）。每次保存把旧清单快照进 `checklist_history`（含版本号/时间/操作人），
     当前版本号 = 历史长度 + 1；历史只追加不改写，正在验收的口径永远以
-    `checklist` 为准。目标状态不由清单编辑改动——状态永远反映最近一次验收。
+    `checklist` 为准。
+
+    MEM-E2/E2a：清单修订使**既有验收结论失效**——原 acceptance_status 为
+    completed/failed 时强制回 pending，detail 写「清单修订至 v{n}，等待新验收」；
+    goal.status 为 achieved 时回退 open（状态必须由新版本的验收重新给出，不得
+    停留在旧版结论上）。latest_run_id 与历史报告保留（审计链），但响应附
+    `latest_report_meta`，前端据此把旧结论标注为「历史版本 v{n-1} 的结论」。
+
+    MEM-E2/E2b：修订时底线补全传递完整规范化范围——优先保留旧 coverage 项的
+    范围参数（`previous_checklist`），用户显式给出的新范围字段才覆盖，旧范围
+    丢失会让「排好了」被判 unverifiable。
     """
     goal = get_scoped_or_404(db, SolveGoal, goal_id, scope)
     if goal.status == "abandoned":
@@ -4383,13 +4407,31 @@ def replace_goal_checklist(
     if len(set(keys)) != len(keys):
         raise HTTPException(status_code=422, detail="验收清单的 key 不能重复")
     new_checklist = [item.model_dump() for item in new_items]
-    # 底线验收与自定义清单并列（MEM-D2/D4c，修订时同样强制）：旧清单或新清单
-    # 里出现过 coverage 口径，就视为「有明确目标集合」，底线 coverage 缺失即补回。
     old_checklist = list(goal.checklist or [])
-    has_target_set = any(
-        str(item.get("kind")) == "coverage" for item in [*old_checklist, *new_checklist]
+    # 底线补全（MEM-E2/E2b）：优先保留旧 coverage 的范围参数，body 里显式给出
+    # 的范围字段才覆盖——修订是「改口径」，不是「丢范围」。
+    explicit_scope = normalize_goal_scope(
+        business_lines=payload.scope.business_lines if payload.scope else None,
+        product_types=payload.scope.product_types if payload.scope else None,
+        class_business_ids=payload.scope.class_business_ids if payload.scope else None,
+        course_business_ids=payload.scope.course_business_ids if payload.scope else None,
+        date_from=(
+            payload.scope.date_from.isoformat()
+            if payload.scope and payload.scope.date_from
+            else None
+        ),
+        date_to=(
+            payload.scope.date_to.isoformat()
+            if payload.scope and payload.scope.date_to
+            else None
+        ),
     )
-    new_checklist = ensure_bottom_line_items(new_checklist, has_target_set=has_target_set)
+    try:
+        new_checklist = ensure_bottom_line_items(
+            new_checklist, scope=explicit_scope, previous_checklist=old_checklist
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     old_version = len(goal.checklist_history or []) + 1
     goal.checklist_history = [
         *(goal.checklist_history or []),
@@ -4401,6 +4443,17 @@ def replace_goal_checklist(
         },
     ]
     goal.checklist = new_checklist
+    # MEM-E2/E2a：修订使旧版验收结论失效——强制回 pending；achieved 的目标
+    # 状态回退 open（附原因），等待按新清单重新验收。failed 的执行状态同样
+    # 归位 pending（旧失败原因对应旧清单，不再有意义）。
+    if goal.acceptance_status in {"completed", "failed"}:
+        goal.acceptance_status = "pending"
+        goal.acceptance_detail = f"清单修订至 v{old_version + 1}，等待新验收"
+    if goal.status == "achieved":
+        goal.status = "open"
+        goal.acceptance_detail = (
+            f"清单修订至 v{old_version + 1}（原已达成结论基于 v{old_version}），等待新验收"
+        )
     audit(
         db,
         user,
@@ -4417,11 +4470,25 @@ def replace_goal_checklist(
                     if str(item.get("kind")) in GOAL_CHECKLIST_KINDS
                 }
             ),
+            "acceptance_reset": goal.acceptance_status == "pending",
         },
     )
     db.commit()
     db.refresh(goal)
-    return _goal_response(db, goal)
+    response = _goal_response(db, goal)
+    # MEM-E2/E2a：latest_run_id/历史报告保留，但响应标注旧结论所属版本——
+    # 前端据此区分「当前版本结论」与「历史版本结论」。
+    latest_run = db.get(SolverRun, goal.latest_run_id) if goal.latest_run_id else None
+    if latest_run is not None and latest_run.goal_report:
+        report_meta = dict(latest_run.goal_report.get("meta") or {})
+        report_version = int(report_meta.get("checklist_version") or 1)
+        response.latest_report_meta = {
+            "run_id": latest_run.id,
+            "checklist_version": report_version,
+            "is_current_version": False,
+            "note": f"历史版本 v{report_version} 的结论",
+        }
+    return response
 
 
 @router.post("/goals/{goal_id}/abandon", response_model=GoalResponse, tags=["goals"])

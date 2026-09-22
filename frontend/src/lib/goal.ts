@@ -39,6 +39,13 @@ export interface GoalReport {
   /** MEM-D2/D6：验收执行本身的状态；failed 时 acceptance_error 说明原因。 */
   acceptance_status?: "pending" | "completed" | "failed" | string;
   acceptance_error?: string | null;
+  /** MEM-E2/E2a：验收绑定的清单版本与 coverage 参数快照。 */
+  meta?: {
+    checklist_version?: number;
+    checklist_snapshot?: Record<string, Record<string, unknown>>;
+    solve_checklist_version?: number;
+    version_note?: string;
+  } | null;
 }
 
 /** SolverRun.goal_report 在生成模型里是宽松的 Record，这里收敛成可渲染结构。 */
@@ -63,6 +70,10 @@ export function parseGoalReport(value: unknown): GoalReport | null {
       typeof report.acceptance_status === "string" ? report.acceptance_status : undefined,
     acceptance_error:
       typeof report.acceptance_error === "string" ? report.acceptance_error : null,
+    meta:
+      report.meta && typeof report.meta === "object"
+        ? (report.meta as GoalReport["meta"])
+        : null,
   };
 }
 
@@ -96,6 +107,7 @@ export function goalAcceptanceLabel(status?: string | null): string {
 export const GOAL_KIND_LABELS: Record<string, string> = {
   deliverable_exists: "课表产物",
   coverage: "课次覆盖",
+  no_duplicate_lessons: "课次不重复",
   forbidden_slot_free: "禁排复核",
   no_hard_conflicts: "硬冲突重算",
   max_changes: "变更上限",

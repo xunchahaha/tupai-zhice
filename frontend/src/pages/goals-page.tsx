@@ -52,6 +52,14 @@ interface ChecklistHistorySnapshot {
   items?: ChecklistEntry[];
 }
 
+/** MEM-E2/E2a：PATCH 响应带的旧结论标注（latest_run 报告所属清单版本）。 */
+interface LatestReportMeta {
+  run_id?: string;
+  checklist_version?: number;
+  is_current_version?: boolean;
+  note?: string;
+}
+
 const GOAL_SUBJECT_TYPE_OPTIONS: Array<{ value: "teacher" | "cohort" | "classroom"; label: string }> = [
   { value: "teacher", label: "教师" },
   { value: "cohort", label: "班级" },
@@ -351,43 +359,74 @@ function GoalDetailDialog({
             </ul>
           </div>
             {report ? (
-              <div>
-                <div className="flex items-center gap-2 text-xs font-medium text-zinc-500">
-                  最新验收
-                  {report.acceptance_status === "failed" ? (
-                    <Badge tone="yellow">验收失败</Badge>
-                  ) : (
-                    <Badge tone={report.all_passed ? "green" : "yellow"}>
-                      {report.all_passed ? `全部 ${report.passed_count} 项通过` : `${report.failed_count} 项缺口`}
-                    </Badge>
-                  )}
-                </div>
-                {report.acceptance_status === "failed" ? (
-                  <p className="mt-1 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                    验收失败：{report.acceptance_error ?? "验收器执行时发生异常，未能生成报告"}
-                  </p>
-                ) : null}
-                <ul className="mt-2 space-y-1 text-xs">
-                  {report.items.map((item) => (
-                    <li key={item.key} className="flex gap-2">
-                      <span aria-hidden className={item.passed ? "text-emerald-600" : item.verdict === "unverifiable" ? "text-amber-600" : "text-red-600"}>{item.passed ? "✓" : item.verdict === "unverifiable" ? "?" : "✗"}</span>
-                      <span className="text-zinc-700">
-                        {goalKindLabel(item.kind)}
-                        {item.bottom_line ? <Badge tone="blue">底线</Badge> : null}
-                        {item.verdict === "unverifiable" ? <Badge tone="yellow">无法验证</Badge> : null}
-                        ——{item.detail}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-                {report.gaps.length ? (
-                  <div className="mt-2 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                    <ul className="list-disc space-y-0.5 pl-4">
-                      {report.gaps.map((gap) => <li key={gap.key}>{gap.next_step}</li>)}
+              (() => {
+                // MEM-E2/E2a：报告绑定清单版本。验收 pending（清单修订后未重新
+                // 验收）时，旧报告是「历史版本结论」，不得当成当前口径展示——
+                // 当前结论区显示「等待新验收（v{n}）」。
+                const goalVersion = Number(goal.checklist_version ?? 1);
+                const reportVersion = Number(report.meta?.checklist_version ?? 1);
+                const staleReport =
+                  goal.acceptance_status === "pending" && reportVersion < goalVersion;
+                if (staleReport) {
+                  return (
+                    <div>
+                      <div className="flex items-center gap-2 text-xs font-medium text-zinc-500">
+                        当前结论
+                        <Badge tone="blue">等待新验收（v{goalVersion}）</Badge>
+                      </div>
+                      <p className="mt-1 text-xs leading-5 text-zinc-600">
+                        清单已修订至 v{goalVersion}，旧验收结论按当时口径保留在下方求解记录中；
+                        重新关联求解后按 v{goalVersion} 出具新结论。
+                      </p>
+                    </div>
+                  );
+                }
+                return (
+                  <div>
+                    <div className="flex items-center gap-2 text-xs font-medium text-zinc-500">
+                      最新验收
+                      {report.acceptance_status === "failed" ? (
+                        <Badge tone="yellow">验收失败</Badge>
+                      ) : (
+                        <Badge tone={report.all_passed ? "green" : "yellow"}>
+                          {report.all_passed ? `全部 ${report.passed_count} 项通过` : `${report.failed_count} 项缺口`}
+                        </Badge>
+                      )}
+                      {reportVersion < goalVersion ? (
+                        <Badge tone="neutral">历史版本 v{reportVersion} 的结论</Badge>
+                      ) : null}
+                    </div>
+                    {report.meta?.version_note ? (
+                      <p className="mt-1 text-xs text-zinc-500">{report.meta.version_note}</p>
+                    ) : null}
+                    {report.acceptance_status === "failed" ? (
+                      <p className="mt-1 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                        验收失败：{report.acceptance_error ?? "验收器执行时发生异常，未能生成报告"}
+                      </p>
+                    ) : null}
+                    <ul className="mt-2 space-y-1 text-xs">
+                      {report.items.map((item) => (
+                        <li key={item.key} className="flex gap-2">
+                          <span aria-hidden className={item.passed ? "text-emerald-600" : item.verdict === "unverifiable" ? "text-amber-600" : "text-red-600"}>{item.passed ? "✓" : item.verdict === "unverifiable" ? "?" : "✗"}</span>
+                          <span className="text-zinc-700">
+                            {goalKindLabel(item.kind)}
+                            {item.bottom_line ? <Badge tone="blue">底线</Badge> : null}
+                            {item.verdict === "unverifiable" ? <Badge tone="yellow">无法验证</Badge> : null}
+                            ——{item.detail}
+                          </span>
+                        </li>
+                      ))}
                     </ul>
+                    {report.gaps.length ? (
+                      <div className="mt-2 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                        <ul className="list-disc space-y-0.5 pl-4">
+                          {report.gaps.map((gap) => <li key={gap.key}>{gap.next_step}</li>)}
+                        </ul>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
-              </div>
+                );
+              })()
             ) : null}
             <div>
               <div className="flex items-center gap-2 text-xs font-medium text-zinc-500">
@@ -412,9 +451,15 @@ function GoalDetailDialog({
                               <CircleAlert className="size-3" />验收失败：{runReport.acceptance_error ?? "原因未记录"}
                             </span>
                           ) : (
-                            <span className={runReport.all_passed ? "text-emerald-700" : "text-amber-700"}>
-                              验收 {runReport.passed_count}/{runReport.items.length} 项通过
-                            </span>
+                            <>
+                              <span className={runReport.all_passed ? "text-emerald-700" : "text-amber-700"}>
+                                验收 {runReport.passed_count}/{runReport.items.length} 项通过
+                              </span>
+                              {/* MEM-E2/E2a：按报告自身 checklist_version 展示历史版本结论。 */}
+                              {Number(runReport.meta?.checklist_version ?? 1) < Number(goal.checklist_version ?? 1) ? (
+                                <Badge tone="neutral">v{runReport.meta?.checklist_version ?? 1} 结论</Badge>
+                              ) : null}
+                            </>
                           )
                         ) : run.goal_id && run.status === "completed" ? (
                           <span className="text-zinc-400">验收中…</span>
