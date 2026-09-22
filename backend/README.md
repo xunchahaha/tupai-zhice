@@ -201,32 +201,55 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
   （转正式规则须显式确认）——硬约束只能来自教务显式声明或管理员指令；② 创建 API
   不传 `valid_until` 时默认取本方案主数据最大上课日期（无课次回落「当前日期 + 180 天」）
   并回显；③ 挖掘条目初始 `status` 恒为 `probation`；④ 偏好的生效日期窗口
-  （`valid_from`/`valid_until`）随编译进入规则 scope，只约束窗口内的课次。
+  （constraint 日期与 `valid_from`/`valid_until` 的**交集**，MEM-D1 D2）随编译进入
+  规则 scope，只约束窗口内的课次。
 - **挖掘**：`POST /api/v1/memory/mining-runs` 回顾近期调课事件（含一键归因
-  `declared_reason`；事件范围限当前方案内**最近 90 天**的滚动窗口，上限 200 条）。
-  配置 AI 时走 `services/ai.py::mine_preferences`（模型只提名，允许弃权并可输出
-  `reasons` 自述失败原因）；代码做**两道校验**（MEM-C2 修正 3）：结构校验（主体
+  `declared_reason`）。可学习事件先经**公共前置筛选**（MEM-D1 D3，
+  `services/memory_solver.py::learning_basis_events`，AI 与统计两条路径共用）：
+  当前方案内 + **最近 90 天**滚动窗口（上限 200 条）+ **候选未被取消或拒绝**
+  （事件模型里稳定的负向终态是 `candidate_discarded`——候选版本被删除即教务
+  放弃这次调课）+ `declared_reason` 非临时被迫类（临时公差/教师请假/教室故障
+  等一次性事件不进学习集）。配置 AI 时走 `services/ai.py::mine_preferences`
+  （模型只提名，允许弃权并可输出 `reasons` 自述失败原因；提示词注明输入已预筛，
+  不要求模型自行过滤）；代码做**两道校验**（MEM-C2 修正 3）：结构校验（主体
   在事件里出现过、约束的时段/教室/日期必须来自候选引用的证据事件——教室按事件
   payload `room_business_id` 口径，调课事件载荷没有 before/after 快照）+ 证据校验
   （至少 2 条不同证据，且每条证据事件的主体与候选主体一致，李老师的证据不能支持
   张老师的候选）。未配置或失败时退化为确定性统计——同主体+同类型+同归因类调课
-  ≥2 次即产生候选；**临时公差/教师请假等被迫类不出长期候选**，文案为「发现 N 次
-  相似调整，建议教务确认是否存在长期需求」。重复候选（同主体+谓词+约束且已存在
-  `probation`/`confirmed`）自动跳过。
-- **拒绝记忆与矛盾消解（MEM-C2 修正 4）**：transition 到 `rejected` 时按受控枚举
-  `rejection_reason`（临时请假/主体识别错误/归纳错误/确实有偏好但已改变/其他，
-  API 缺省「其他」）落 `preference_rejections` 表；再挖掘时同签名候选证据 ⊆ 已拒
-  证据则跳过（响应 `skipped_rejected`），含新证据允许重提并在 provenance 标
+  ≥2 次即产生候选，文案为「发现 N 次相似调整，建议教务确认是否存在长期需求」。
+  重复候选（同主体+谓词+约束且已存在 `probation`/`confirmed`）自动跳过。候选
+  constraint 自带日期窗口时，条目级默认有效期取**覆盖该窗口的最小范围**（不得比
+  constraint 窗口更宽；无日期维持「今天 +180 天」，MEM-D1 D2）。
+- **拒绝记忆与矛盾消解（MEM-C2 修正 4 + MEM-D1）**：transition 到 `rejected` 时按
+  受控枚举 `rejection_reason`（临时请假/主体识别错误/归纳错误/确实有偏好但已改变/
+  其他，API 缺省「其他」）落 `preference_rejections` 表；再挖掘时同签名候选证据 ⊆
+  已拒证据则跳过（响应 `skipped_rejected`），含新证据允许重提并在 provenance 标
   「此前被拒：<原因>」（前端 amber 徽标）。创建/挖掘落库时对同主体同谓词旧活跃
-  条目做三分支消解：窗口不重叠 → 旧条目 `expired`（provenance 记 `superseded_by`）；
-  相邻不重叠 → 时间切片并存；窗口重叠且约束互斥（`prefer_*` 目标集不相交或数值
-  谓词取值不同；`avoid_*` 取并集恒兼容）→ 旧条目打 `conflict` 标，编译期跳过
-  （outcome=`conflict_unresolved`），前端 amber 徽标 + 一键「保留旧弃新 / 以新替旧」
-  （复用 expire，一侧退出后互斥标记自动解除）。
+  条目做三分支消解：窗口不重叠 → 旧条目 `expired`（provenance 记 `superseded_by`，
+  **仅当新条目已获授权**——未授权候选与旧条目窗口错开时并存不动）；相邻不重叠 →
+  时间切片并存；窗口重叠且约束互斥（`prefer_*` 目标集不相交或数值谓词取值不同；
+  `avoid_*` 取并集恒兼容）→ **候选提出冲突**（MEM-D1 D1）。
+- **冲突只由候选提出，裁决是显式操作（MEM-D1 D1）**：`conflict` 标记是候选侧
+  `proposed_conflict`——只落在提出方（组内较新条目）上，被点名的旧 confirmed
+  条目**照常编译**（outcome=applied），其编译参与度永不因未授权候选而改变。
+  提出方本身已是 confirmed/授权试用时编译期跳过（outcome=conflict_unresolved）。
+  裁决三动作全部走既有 transition 端点：**保留旧弃新** = 候选 `rejected`；
+  **以新替旧** = 旧条目 transition `expired` 且带 `supersedes=<候选 id>`
+  （provenance 记 superseded_by）+ 候选 transition `confirmed`——切换只发生在
+  裁决之后；**授权试用** = `action=authorize_trial`（旧新并存：旧全权、候选
+  试用期小权重，provenance 记 `conflict_resolved_with` 不再重打标）。
+  `refresh_conflict_flags` 是创建/编辑/确认/失效/拒绝/授权试用共用的唯一冲突
+  重算入口：标记按「落提出方」重算，**日期窗口不相交不算冲突**（D2），对方
+  离开活跃集或已显式裁决共存时自动清标；`PATCH /memory/preferences/{id}` 编辑
+  约束/有效期/谓词后同样触发重算。
+- **两层日期取交集（MEM-D1 D2）**：编译窗口 = constraint 内 `date_from/date_to`
+  与条目级 `valid_from/valid_until` 的**交集**（旧实现是条目级覆盖 constraint），
+  交集为空 → outcome=`not_applicable`（明确不适用），条目不进编译。
 - **求解联动（创建时冻结）**：`api.create_solver_run` 在创建任务时即调
   `services/memory_solver.py::compile_memory_state`，把条目快照、编译后的内部软规则、
   逐条使用结果（applied/not_authorized/expired/unsupported_predicate/converted_to_rule/
-  hard_requires_conversion/conflict_unresolved/compile_error）冻结进 `DataSnapshot.payload["memory"]` 与
+  hard_requires_conversion/conflict_unresolved/not_applicable/compile_error）冻结进
+  `DataSnapshot.payload["memory"]` 与
   `SolverRun.memory_usage`；执行路径（`services/tasks.py::_attach_memory_preferences`）
   只读快照，改记忆不影响在途求解的可复现性。目标权重 =
   `weight × (confirmed?1.0:0.3 授权试用衰减) × confidence`，v1 只映射
@@ -243,23 +266,53 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
 `docs/roadmap/02-agent-memory.md` §6「目标闭环要点」。
 
 - **存储**：`solve_goals` 表（`app/models.py::SolveGoal`：原始指令原文、checklist
-  JSON、状态机）+ `solver_runs.goal_id` / `solver_runs.goal_report`（迁移
-  `b8a4d2e6f9c1`）。
-- **checklist kind 与验收器一一对应**（`app/services/goal.py`）：`coverage`
-  （目标课次集合与结果集合**逐项比对**，并借快照+请求范围把缺口拆成「没进求解
-  范围」与「进了范围没安置」两类）、`forbidden_slot_free`（独立复核指定主体+
-  时段是否仍被占用，不信任求解器自报；参数未量化永远不通过）、`no_hard_conflicts`
-  （复用 `count_hard_conflicts` 独立重算）、`max_changes`（与基准版本 diff 后只设
-  上限——「尽量少改」是优化目标，**绝不升级为「绝不改」**）、`draft_only`
-  （查审计日志：目标期间无 publish/calendar_publish 动作；发布永远不在目标自动
-  动作里）、`date_range_match`（范围端点核对）。没有可核对对象（无课表/缺参数）
-  一律不通过，绝不静默放行。
+  JSON、状态机、`acceptance_status`/`acceptance_detail` 验收执行状态）+
+  `solver_runs.goal_id` / `solver_runs.goal_report`（迁移 `b8a4d2e6f9c1`；
+  验收状态列为 MEM-D2 迁移 `e5c9a1d3f7b2`）。
+- **三个集合口径（MEM-D2/D4a）**：`_persist_result` 在把父版本保留行合并回
+  assignments **之前**先冻结 `solved_course_business_ids`（本次求解课次），
+  result 载荷里的 `assignments` 则是合并交付课表（含 change_kind=unchanged 的
+  保留行）。验收器据此区分：`date_range_match`/`coverage`/`forbidden_slot_free`
+  只核对 **目标课次 ∪ 本次求解课次**（`_acceptance_scope_assignments`，保留
+  原样的旧课次不算越界/违规），`no_hard_conflicts` 用**合并交付课表**（全局
+  资源冲突看全集）。
+- **checklist kind 与验收器一一对应**（`app/services/goal.py`）：`deliverable_exists`
+  （run 存在非空课表产物）、`coverage`（目标课次集合与结果集合**逐项比对**，并借
+  快照+请求范围把缺口拆成「没进求解范围」与「进了范围没安置」两类；**重复检测**：
+  同一课次在交付课表出现 ≥2 次直接 failed）、`forbidden_slot_free`（独立复核指定
+  主体+时段是否仍被占用，不信任求解器自报；执行前先按当前方案主数据核对
+  subject/slot 存在性，**不存在 → unverifiable「禁排对象不存在，请补齐参数」**，
+  配合 MEM-D3 补参 UI）、`no_hard_conflicts`（复用 `count_hard_conflicts`
+  独立重算）、`max_changes`（与基准版本 diff 后只设上限——「尽量少改」是优化
+  目标，**绝不升级为「绝不改」**）、`draft_only`（查审计日志：目标期间无
+  publish/calendar_publish 动作；发布永远不在目标自动动作里）、`date_range_match`
+  （范围端点核对）。
+- **无法验证 ≠ 通过（MEM-D2/D4b）**：验收项遇到日期缺失、课次无 slot、参数
+  无法解析、无课表等情况 → `passed=false` 且 `verdict="unverifiable"`（detail
+  说明缺什么），绝不因「没检测到越界」判通过；报告带 `unverifiable_count`，
+  `all_passed` 要求所有项 passed=true 且无 unverifiable。
+- **底线验收（MEM-D2/D4c）**：创建目标时（`ensure_bottom_line_items`，无论清单
+  来自自动生成还是用户自定义）强制并入 `deliverable_exists`、`no_hard_conflicts`、
+  以及有明确目标集合（课次/班级/业务线/班型范围）时的 `coverage`；params 带
+  `bottom_line=true`，前端打「底线」徽标。底线不可删除，用户附加清单与底线并列
+  验收——仅 draft_only 的自定义清单在零课表上也达不成。
 - **状态机**：`open → achieved`（全部通过；draft_only 目标在合格草稿交付即达成）；
   存在「必须由教务放宽或裁决」的缺口（硬冲突未消、求解未能安置、禁排仍被占、
   目标期间发生了发布）→ `awaiting_decision`；存在允许的补救动作（范围提取漏课次
-  → 修正范围重跑；超时/上限未达 → 加大预算重跑）→ 保持 `open` 并附建议；不存在
+  → 修正范围重跑；上限未达 → 加大预算重跑）→ 保持 `open` 并附建议；不存在
   允许动作同样保持 `open` 附终态报告。**验收器只出报告，绝不自动重跑**；状态
   永远反映最近一次验收，`abandoned` 是人工终态，验收器不越权改动。
+- **决策消费求解状态（MEM-D2/D6）**：`_decide` 的解释文案按三态分开——
+  `UNKNOWN`（含超时）→「求解未得出结论：预算与诊断决定是否继续」，目标保持
+  open，不进「约束放不下」叙事；`INFEASIBLE`（presolve 预检不算，CP-SAT 未运行
+  不能表述为已证明无解）→「当前模型已证明无解」，进 awaiting_decision 的规则/
+  数据调整流程；有可行解但有缺口 → 按缺口逐项处理。
+- **验收状态与可见性（MEM-D2/D6）**：`SolveGoal.acceptance_status`
+  （pending/completed/failed，与目标状态机正交）——run completed 的事务里先置
+  pending，验收成功 → completed，验收异常/求解失败 → failed 且原因同时落
+  `acceptance_detail` 与 `run.goal_report` 失败标记（不再只打日志）。前端对
+  带 goal 的 run 把轮询停止条件从「run completed」扩展为「报告就绪或验收失败」
+  （45s 截止保护）；pending 显示「验收中…」，failed 显示 amber「验收失败：原因」。
 - **关联求解**：`POST /api/v1/solver-runs` 与 `POST /api/v1/assistant/solve` 可选
   `goal_id`；自动验收钩子在 `services/tasks.py::_persist_result` 的事务之外单独
   提交——验收层任何异常都不影响求解结果落库。已放弃目标拒绝再关联新任务（409）。

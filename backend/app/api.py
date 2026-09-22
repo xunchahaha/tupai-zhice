@@ -215,6 +215,7 @@ from .services.goal import (
     GOAL_CHECKLIST_KINDS,
     build_checklist,
     draft_checklist_from_interpretation,
+    ensure_bottom_line_items,
     goal_run_counts,
 )
 from .services.ics import build_public_calendar_ics, calendar_etag
@@ -237,17 +238,16 @@ from .services.memory_solver import (
     ALL_PREDICATES,
     MINED_DEFAULT_CONFIDENCE,
     MINED_DEFAULT_WEIGHT,
-    MINING_EVENT_LIMIT,
-    MINING_EVENT_WINDOW_DAYS,
     PREDICATE_SOLVER_PATHS,
     PREFERENCE_RULE_KINDS,
     PREFERENCE_TRANSITIONS,
     RULE_ACTOR_TYPES,
+    candidate_entry_validity,
     compile_failed_state,
     compile_memory_state,
-    default_valid_until,
     default_valid_until_for_scope,
     deterministic_preference_candidates,
+    learning_basis_events,
     mining_event_view,
     normalized_constraint,
     refresh_conflict_flags,
@@ -3461,6 +3461,8 @@ def update_preference(
     data = payload.model_dump(exclude_unset=True)
     if data.get("predicate") is not None and data["predicate"] not in ALL_PREDICATES:
         raise HTTPException(status_code=422, detail=f"未知的偏好谓词：{data['predicate']}")
+    # 记下编辑前的同组键：改谓词时旧组也要重算冲突标。
+    original_group = (entry.subject_type, entry.subject_id, entry.predicate)
     for key in ("weight", "predicate", "valid_until"):
         if key in data:
             setattr(entry, key, data[key])
@@ -3477,6 +3479,18 @@ def update_preference(
         "last_edited_at": shanghai_now().isoformat(),
     }
     audit(db, user, "update", "preference_entry", entry.id, payload.model_dump(mode="json"))
+    # 唯一冲突重算入口（MEM-D1 D2）：编辑约束/有效期/谓词后重算 proposed_conflict
+    # 标——编辑把互斥改兼容（或窗口错开）时自动清标，改出互斥时标记落编辑一方
+    # （组内较新条目）。
+    refresh_conflict_flags(db, entry.schedule_set_id, *original_group)
+    if (entry.subject_type, entry.subject_id, entry.predicate) != original_group:
+        refresh_conflict_flags(
+            db,
+            entry.schedule_set_id,
+            entry.subject_type,
+            entry.subject_id,
+            entry.predicate,
+        )
     db.commit()
     db.refresh(entry)
     return entry
@@ -3505,13 +3519,29 @@ def transition_preference(
         today = shanghai_now().date()
         entry.trial_authorized = True
         entry.trial_until = today + timedelta(days=payload.trial_days)
-        entry.provenance = {
+        provenance = {
             **(entry.provenance or {}),
             "trial_authorized_by": user.id,
             "trial_authorized_at": shanghai_now().isoformat(),
             "trial_days": payload.trial_days,
             "trial_reason": payload.reason,
         }
+        if entry.conflict:
+            # 冲突裁决之一（MEM-D1）：授权试用即对候选提出的 proposed_conflict 做
+            # 出显式裁决——旧新并存（旧条目全权、本条以试用期小权重参与）。记录
+            # 已裁决共存的对方 id，refresh_conflict_flags 据此不再重打标记。
+            resolved = {
+                str(item) for item in provenance.get("conflict_resolved_with") or []
+            } | {str(item) for item in provenance.get("conflict_with") or []}
+            provenance["conflict_resolved_with"] = sorted(resolved)
+            provenance["conflict_resolved_at"] = shanghai_now().isoformat()
+            provenance["conflict_resolved_mode"] = "authorize_trial"
+            entry.conflict = False
+        entry.provenance = provenance
+        # 唯一冲突重算入口（MEM-D1）：授权试用后同组 proposed_conflict 标照常重算。
+        refresh_conflict_flags(
+            db, entry.schedule_set_id, entry.subject_type, entry.subject_id, entry.predicate
+        )
         audit(
             db,
             user,
@@ -3540,12 +3570,32 @@ def transition_preference(
     if payload.target_modality is not None:
         entry.modality = payload.target_modality
     entry.status = payload.target_status
-    entry.provenance = {
+    if payload.target_status in {"rejected", "expired"}:
+        # 离开活跃集：本条提出的 proposed_conflict 随本次裁决尘埃落定，不再挂在
+        # 历史卡片上（refresh 只重算仍活跃的条目）。
+        entry.conflict = False
+    provenance = {
         **(entry.provenance or {}),
         "last_transition_by": user.id,
         "last_transition_at": shanghai_now().isoformat(),
         "last_transition_reason": payload.reason,
     }
+    if payload.target_status == "expired" and payload.supersedes:
+        # 冲突裁决之一（MEM-D1）：「以新替旧」= 旧条目 transition 到 expired 时带
+        # supersedes=<候选 id>，审计链记 superseded_by；随后候选再走一次 transition
+        # 到 confirmed 即完成切换。切换只发生在显式裁决之后。
+        successor = db.scalar(
+            select(PreferenceEntry).where(
+                PreferenceEntry.id == payload.supersedes,
+                PreferenceEntry.schedule_set_id == entry.schedule_set_id,
+            )
+        )
+        if successor is None or successor.id == entry.id:
+            raise HTTPException(
+                status_code=422, detail="supersedes 指向的偏好条目不存在或不合法"
+            )
+        provenance["superseded_by"] = successor.id
+    entry.provenance = provenance
     if payload.target_status == "rejected":
         # 拒绝记忆（MEM-C2 修正 4）：拒绝原因按受控枚举落 preference_rejections，
         # 同签名同证据的候选不再复现；API 缺省「其他」，前端必填。同签名同证据
@@ -3557,8 +3607,8 @@ def transition_preference(
             note=payload.reason,
             rejected_by=user.id,
         )
-    # 矛盾消解（MEM-C2 修正 4）：条目离开活跃集（rejected/expired）后重算同组
-    # conflict 标，剩余条目不再互斥时自动清标。
+    # 矛盾消解（MEM-C2 修正 4 / MEM-D1）：条目状态变化（confirmed/rejected/expired）
+    # 后重算同组 proposed_conflict 标——提出方的对方离开活跃集即自动清标。
     refresh_conflict_flags(
         db, entry.schedule_set_id, entry.subject_type, entry.subject_id, entry.predicate
     )
@@ -3687,6 +3737,7 @@ def convert_preference_to_rule(
     )
     db.add(rule)
     entry.status = "expired"
+    entry.conflict = False  # 离开活跃集，提出的冲突裁决已了结（转正式规则）
     entry.provenance = {
         **(entry.provenance or {}),
         "converted_to_rule_by": user.id,
@@ -3780,12 +3831,17 @@ def _persist_mining_candidates(
         seen.add(key)
         # 带新证据重提：标注此前被拒原因（取最近一次拒绝记录），教务可见。
         latest_rejection = max(prior, key=lambda record: record.created_at) if prior else None
+        candidate_constraint = candidate.get("constraint") or {}
+        # MEM-D1（§7 D2）：候选 constraint 自带日期窗口时，条目级默认有效期取
+        # 「覆盖该窗口的最小合理范围」（不得比 constraint 窗口更宽）；无日期维持
+        # 原默认（今天起 +180 天）。
+        valid_from, valid_until = candidate_entry_validity(candidate_constraint, today)
         entry = PreferenceEntry(
             schedule_set_id=schedule_set_id,
             subject_type=key[0],
             subject_id=key[1],
             predicate=key[2],
-            constraint=candidate.get("constraint") or {},
+            constraint=candidate_constraint,
             modality="soft",
             confidence=MINED_DEFAULT_CONFIDENCE,
             # 红线③：挖掘产生的条目初始状态恒为 probation，权重与硬约束
@@ -3794,8 +3850,8 @@ def _persist_mining_candidates(
             status="probation",
             evidence=sorted(candidate_evidence),
             weight=MINED_DEFAULT_WEIGHT,
-            valid_from=today,
-            valid_until=default_valid_until(today),
+            valid_from=valid_from,
+            valid_until=valid_until,
             provenance={
                 **provenance_base,
                 "rationale": candidate.get("rationale"),
@@ -3825,23 +3881,14 @@ def create_memory_mining_run(
 ) -> MiningRunResponse:
     """回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。
 
-    事件范围（MEM-C2 修正 3）：当前方案内、最近 90 天的调课事件（按 created_at
-    滚动窗口，口径见 memory_solver.MINING_EVENT_WINDOW_DAYS）。配置了 AI 走模型
-    归纳（模型只提名，代码按白名单与证据支持性裁决）；未配置或调用失败优雅降级
-    为确定性统计：同主体+同类型+同归因类调课 ≥2 次即产生候选。
+    可学习事件经公共前置筛选（MEM-D1 §7 D3，口径见
+    memory_solver.learning_basis_events）：当前方案内、最近 90 天滚动窗口、
+    候选未被取消或拒绝、declared_reason 非临时被迫类。配置了 AI 走模型归纳
+    （模型只提名，代码按白名单与证据支持性裁决；输入已预筛，提示词不再要求
+    模型自行过滤）；未配置或调用失败优雅降级为确定性统计：同主体+同类型+
+    同归因类调课 ≥2 次即产生候选。
     """
-    cutoff = shanghai_now() - timedelta(days=MINING_EVENT_WINDOW_DAYS)
-    events = list(
-        db.scalars(
-            select(RescheduleEvent)
-            .where(
-                RescheduleEvent.schedule_set_id == scope.id,
-                RescheduleEvent.created_at >= cutoff,
-            )
-            .order_by(RescheduleEvent.created_at.desc())
-            .limit(MINING_EVENT_LIMIT)
-        )
-    )
+    events = learning_basis_events(db, scope.id)
     views = [mining_event_view(event) for event in events]
     engine = "deterministic"
     raw_candidates: list[dict[str, Any]] | None = None
@@ -4202,7 +4249,9 @@ def create_goal(
 
     checklist 缺省时按结构化范围字段确定性生成；显式传入则原样保存（kind 由
     schema 枚举把关）。基准版本必须属于当前方案，「尽量少改」的验收上限在这里
-    一次定清，验收器绝不会把「尽量」升级为「绝不」。
+    一次定清，验收器绝不会把「尽量」升级为「绝不」。底线验收项（MEM-D2/D4c：
+    deliverable_exists / no_hard_conflicts / 有明确目标集合时的 coverage）无论
+    自定义还是自动生成都强制并入，不可删除。
     """
     if payload.checklist is not None:
         if not payload.checklist:
@@ -4225,6 +4274,16 @@ def create_goal(
             baseline_schedule_version_id=payload.baseline_schedule_version_id,
             forbid_publish=payload.forbid_publish,
         )
+    # 底线验收与自定义清单并列（MEM-D2/D4c）：缺失即补齐，用户清单不可删除底线。
+    checklist = ensure_bottom_line_items(
+        checklist,
+        has_target_set=bool(
+            payload.course_business_ids
+            or payload.business_lines
+            or payload.product_types
+            or payload.class_business_ids
+        ),
+    )
     if payload.baseline_schedule_version_id:
         baseline = db.get(ScheduleVersion, payload.baseline_schedule_version_id)
         if baseline is None or baseline.schedule_set_id != scope.id:

@@ -3811,7 +3811,7 @@
           "memory"
         ],
         "summary": "Create Memory Mining Run",
-        "description": "回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。\n\n事件范围（MEM-C2 修正 3）：当前方案内、最近 90 天的调课事件（按 created_at\n滚动窗口，口径见 memory_solver.MINING_EVENT_WINDOW_DAYS）。配置了 AI 走模型\n归纳（模型只提名，代码按白名单与证据支持性裁决）；未配置或调用失败优雅降级\n为确定性统计：同主体+同类型+同归因类调课 ≥2 次即产生候选。",
+        "description": "回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。\n\n可学习事件经公共前置筛选（MEM-D1 §7 D3，口径见\nmemory_solver.learning_basis_events）：当前方案内、最近 90 天滚动窗口、\n候选未被取消或拒绝、declared_reason 非临时被迫类。配置了 AI 走模型归纳\n（模型只提名，代码按白名单与证据支持性裁决；输入已预筛，提示词不再要求\n模型自行过滤）；未配置或调用失败优雅降级为确定性统计：同主体+同类型+\n同归因类调课 ≥2 次即产生候选。",
         "operationId": "create_memory_mining_run_api_v1_memory_mining_runs_post",
         "security": [
           {
@@ -4186,7 +4186,7 @@
           "goals"
         ],
         "summary": "Create Goal",
-        "description": "把一句话目标登记为可逐项验收的持久目标（MEM-C3）。\n\nchecklist 缺省时按结构化范围字段确定性生成；显式传入则原样保存（kind 由\nschema 枚举把关）。基准版本必须属于当前方案，「尽量少改」的验收上限在这里\n一次定清，验收器绝不会把「尽量」升级为「绝不」。",
+        "description": "把一句话目标登记为可逐项验收的持久目标（MEM-C3）。\n\nchecklist 缺省时按结构化范围字段确定性生成；显式传入则原样保存（kind 由\nschema 枚举把关）。基准版本必须属于当前方案，「尽量少改」的验收上限在这里\n一次定清，验收器绝不会把「尽量」升级为「绝不」。底线验收项（MEM-D2/D4c：\ndeliverable_exists / no_hard_conflicts / 有明确目标集合时的 coverage）无论\n自定义还是自动生成都强制并入，不可删除。",
         "operationId": "create_goal_api_v1_goals_post",
         "security": [
           {
@@ -8984,6 +8984,7 @@
           "kind": {
             "type": "string",
             "enum": [
+              "deliverable_exists",
               "coverage",
               "forbidden_slot_free",
               "no_hard_conflicts",
@@ -9006,7 +9007,7 @@
           "kind"
         ],
         "title": "GoalChecklistItem",
-        "description": "逐项验收项（MEM-C3）。kind 与 services/goal.py 验收器一一对应。\n\nparams 是各验收器自己的参数包（coverage 的范围条件、forbidden_slot_free 的\n主体+时段、max_changes 的上限与基准版本、date_range_match 的日期端点）；\n结构由验收器解释，这里不做 cross-field 校验——未知参数在验收时按\n「无法核对=不通过」处理，绝不静默放行。"
+        "description": "逐项验收项（MEM-C3）。kind 与 services/goal.py 验收器一一对应。\n\nparams 是各验收器自己的参数包（coverage 的范围条件、forbidden_slot_free 的\n主体+时段、max_changes 的上限与基准版本、date_range_match 的日期端点）；\n结构由验收器解释，这里不做 cross-field 校验——未知参数在验收时按\n「无法核对=不通过」处理，绝不静默放行。params.bottom_line=True 标记底线\n验收项（MEM-D2/D4c：创建目标时强制并入，不可删除，前端打「底线」徽标）。"
       },
       "GoalCreateRequest": {
         "properties": {
@@ -9152,6 +9153,22 @@
             "type": "string",
             "title": "Status"
           },
+          "acceptance_status": {
+            "type": "string",
+            "title": "Acceptance Status",
+            "default": "pending"
+          },
+          "acceptance_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Acceptance Detail"
+          },
           "latest_run_id": {
             "anyOf": [
               {
@@ -9283,6 +9300,22 @@
           "status": {
             "type": "string",
             "title": "Status"
+          },
+          "acceptance_status": {
+            "type": "string",
+            "title": "Acceptance Status",
+            "default": "pending"
+          },
+          "acceptance_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Acceptance Detail"
           },
           "latest_run_id": {
             "anyOf": [
@@ -10843,6 +10876,19 @@
             ],
             "title": "Target Modality"
           },
+          "supersedes": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 36,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes"
+          },
           "trial_days": {
             "type": "integer",
             "maximum": 365.0,
@@ -10884,7 +10930,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "PreferenceTransition",
-        "description": "状态迁移（action=transition，默认）或授权试用（action=authorize_trial）。\n\n三态拆分（MEM-C1）：授权试用只对 probation 条目可用，条目保持 probation，\n以 trial_authorized + trial_until 参与小权重试用；采纳（confirmed）仍是正式生效路径。\nMEM-C2 修正 4：target_status=rejected 时建议带 rejection_reason（拒绝原因五选，\n落 preference_rejections 供去重）；缺省按「其他」处理。前端必填，API 兜底。"
+        "description": "状态迁移（action=transition，默认）或授权试用（action=authorize_trial）。\n\n三态拆分（MEM-C1）：授权试用只对 probation 条目可用，条目保持 probation，\n以 trial_authorized + trial_until 参与小权重试用；采纳（confirmed）仍是正式生效路径。\nMEM-C2 修正 4：target_status=rejected 时建议带 rejection_reason（拒绝原因五选，\n落 preference_rejections 供去重）；缺省按「其他」处理。前端必填，API 兜底。\nMEM-D1 冲突裁决三动作全部走本端点：保留旧弃新 = 候选 rejected；\n以新替旧 = 旧条目 expired 且带 supersedes=<候选 id>（provenance 记\nsuperseded_by）、候选再 confirmed；授权试用 = action=authorize_trial\n（旧新并存，旧全权、候选小权重）。"
       },
       "PreferenceUpdate": {
         "properties": {

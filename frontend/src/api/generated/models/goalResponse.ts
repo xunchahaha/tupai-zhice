@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { GoalResponseChecklistItem } from './goalResponseChecklistItem';
+import type { GoalResponseAcceptanceDetail } from './goalResponseAcceptanceDetail';
 import type { GoalResponseLatestRunId } from './goalResponseLatestRunId';
 import type { GoalResponseCreatedBy } from './goalResponseCreatedBy';
 
@@ -15,6 +16,8 @@ export interface GoalResponse {
   instruction: string;
   checklist: GoalResponseChecklistItem[];
   status: string;
+  acceptance_status?: string;
+  acceptance_detail?: GoalResponseAcceptanceDetail;
   latest_run_id?: GoalResponseLatestRunId;
   run_count?: number;
   created_by?: GoalResponseCreatedBy;

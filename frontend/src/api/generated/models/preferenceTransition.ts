@@ -8,6 +8,7 @@
 import type { PreferenceTransitionAction } from './preferenceTransitionAction';
 import type { PreferenceTransitionTargetStatus } from './preferenceTransitionTargetStatus';
 import type { PreferenceTransitionTargetModality } from './preferenceTransitionTargetModality';
+import type { PreferenceTransitionSupersedes } from './preferenceTransitionSupersedes';
 import type { PreferenceTransitionReason } from './preferenceTransitionReason';
 import type { PreferenceTransitionRejectionReason } from './preferenceTransitionRejectionReason';
 
@@ -18,11 +19,16 @@ import type { PreferenceTransitionRejectionReason } from './preferenceTransition
 以 trial_authorized + trial_until 参与小权重试用；采纳（confirmed）仍是正式生效路径。
 MEM-C2 修正 4：target_status=rejected 时建议带 rejection_reason（拒绝原因五选，
 落 preference_rejections 供去重）；缺省按「其他」处理。前端必填，API 兜底。
+MEM-D1 冲突裁决三动作全部走本端点：保留旧弃新 = 候选 rejected；
+以新替旧 = 旧条目 expired 且带 supersedes=<候选 id>（provenance 记
+superseded_by）、候选再 confirmed；授权试用 = action=authorize_trial
+（旧新并存，旧全权、候选小权重）。
  */
 export interface PreferenceTransition {
   action?: PreferenceTransitionAction;
   target_status?: PreferenceTransitionTargetStatus;
   target_modality?: PreferenceTransitionTargetModality;
+  supersedes?: PreferenceTransitionSupersedes;
   /**
    * @minimum 1
    * @maximum 365

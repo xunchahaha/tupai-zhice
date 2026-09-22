@@ -14,7 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { asArray, errorMessage, formatRoom, formatSlot } from "@/lib/format";
-import { type GoalReport, goalKindLabel, parseGoalReport } from "@/lib/goal";
+import { goalKindLabel, isBottomLineItem, parseGoalReport } from "@/lib/goal";
 import { type Interpretation, streamInterpretInstruction } from "@/lib/interpret-stream";
 import { diffKindLabel, modelStatusLabel, statusLabel } from "@/lib/labels";
 import { type MemoryOutcome, type MemoryUsageSnapshot, memoryHeadline, memoryOutcomeLabel } from "@/lib/memory-usage";
@@ -113,6 +113,10 @@ export function SolverPage() {
   const [baselineId, setBaselineId] = useState("");
   const [goalId, setGoalId] = useState("");
   const [goalBusy, setGoalBusy] = useState(false);
+  // MEM-D2/D6：验收报告在 run completed 之后于独立事务里异步落库。这里记录
+  // 「带 goal 的 run 已完成但报告未就绪」的轮询截止时刻，防止验收层挂掉时
+  // 前端永远轮询（上限约 45 秒）。
+  const acceptanceWatch = useRef<{ runId: string; deadline: number } | null>(null);
   const rules = useListRulesApiV1RulesGet({ status: "active" });
   const courses = useListCourseSessionsApiV1CourseSessionsGet();
   const runs = useListSolverRunsApiV1SolverRunsGet({ query: { refetchInterval: 5000 } });
@@ -151,7 +155,25 @@ export function SolverPage() {
     }, 100);
     return () => window.clearInterval(timer);
   }, [phase]);
-  const progress = useGetSolverRunApiV1SolverRunsRunIdGet(runId, { query: { enabled: Boolean(runId), refetchInterval: (query) => query.state.data?.status === "completed" || query.state.data?.status === "failed" ? false : 700 } });
+  // MEM-D2/D6：轮询停止条件从「run completed/failed」扩展为「验收报告就绪或验收
+  // 失败」——run completed 只说明求解落库，报告还会晚一步；带 goal_id 的 run 要
+  // 继续轮询到 goal_report 出现（成功报告或失败标记都会写这里），并有截止保护。
+  const progress = useGetSolverRunApiV1SolverRunsRunIdGet(runId, {
+    query: {
+      enabled: Boolean(runId),
+      refetchInterval: (query) => {
+        const data = query.state.data;
+        if (!data) return 700;
+        if (data.status === "failed") return false;
+        if (data.status !== "completed") return 700;
+        if (!data.goal_id || data.goal_report) return false;
+        const watch = acceptanceWatch.current;
+        const deadline = watch && watch.runId === data.id ? watch.deadline : Date.now() + 45000;
+        acceptanceWatch.current = { runId: data.id, deadline };
+        return Date.now() > deadline ? false : 1000;
+      },
+    },
+  });
   const submit = useSubmitSolverRunApiV1SolverRunsPost({ mutation: { onSuccess: (result) => { setRunId(result.id); setCurrent(result); toast.success("求解任务已创建"); }, onError: (error) => toast.error(errorMessage(error)) } });
   useEffect(() => { if (progress.data) { setCurrent(progress.data); if (progress.data.status === "completed" || progress.data.status === "failed") { void Promise.all([client.invalidateQueries({ queryKey: getListSchedulesApiV1SchedulesGetQueryKey() }), client.invalidateQueries({ queryKey: getListSolverRunsApiV1SolverRunsGetQueryKey() }), client.invalidateQueries({ queryKey: getOverviewApiV1OverviewGetQueryKey() })]); } } }, [client, progress.data]);
   const courseRows = asArray<CourseSessionResponse>(courses.data);
@@ -695,7 +717,7 @@ function RunPanel({ run, onUseInstruction }: { run: SolverRunResponse | null; on
         </div>
       ) : null}
       {run?.error_message ? <div className="mt-4 text-sm text-red-700">{run.error_message}</div> : null}
-      <GoalReportSection report={parseGoalReport(run?.goal_report)} />
+      <GoalReportSection run={run} />
       <ExplanationPanel run={run} onUseInstruction={onUseInstruction} />
     </section>
   );
@@ -905,12 +927,42 @@ function ExplanationPanel({ run, onUseInstruction }: { run: SolverRunResponse | 
 function Value({ label, value }: { label: string; value: string }) { return <div><div className="text-xs text-zinc-400">{label}</div><div className="mt-1 font-mono text-sm text-zinc-800">{value}</div></div>; }
 
 /**
- * 目标验收报告（MEM-C3）：读取 run.goal_report（后端代码验收器落库），
- * 逐项 ✓/✗ + 缺口与允许的下一步。有 ✗ 时给 amber 提示，绝不把「求解完成」
- * 混同成「目标完成」。
+ * 目标验收报告（MEM-C3，验收可见性 MEM-D2/D6）：读取 run.goal_report（后端
+ * 代码验收器落库），逐项 ✓/✗ + 缺口与允许的下一步。有 ✗ 时给 amber 提示，
+ * 绝不把「求解完成」混同成「目标完成」。三态可见：
+ * - 报告未就绪（run completed 但报告在异步事务里）→「验收中…」；
+ * - 验收执行失败（acceptance_status=failed 的失败标记）→ amber「验收失败：原因」；
+ * - 报告就绪 → 逐项结论，unverifiable（无法验证）单独标注，绝不与通过混同。
  */
-function GoalReportSection({ report }: { report: GoalReport | null }) {
-  if (!report) return null;
+function GoalReportSection({ run }: { run: SolverRunResponse | null }) {
+  const report = parseGoalReport(run?.goal_report);
+  if (!report) {
+    if (run?.goal_id && run.status === "completed") {
+      return (
+        <section aria-label="目标验收报告" className="mt-3 rounded-md border border-blue-200 bg-blue-50/40 px-4 py-3 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <Target className="size-4 text-blue-600" />
+            <div className="text-xs font-medium text-zinc-500">目标验收报告</div>
+            <Badge tone="blue">验收中…</Badge>
+          </div>
+          <p className="mt-1.5 text-xs text-zinc-500">求解已完成，验收器正在按目标清单逐项核对，报告稍后出现在这里。</p>
+        </section>
+      );
+    }
+    return null;
+  }
+  if (report.acceptance_status === "failed") {
+    return (
+      <section aria-label="目标验收报告" className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+        <div className="flex flex-wrap items-center gap-2">
+          <Target className="size-4 text-amber-600" />
+          <div className="text-xs font-medium text-zinc-500">目标验收报告</div>
+          <Badge tone="yellow">验收失败</Badge>
+        </div>
+        <p className="mt-1.5 text-xs leading-5">验收失败：{report.acceptance_error || "验收器执行时发生异常，未能生成报告"}。求解结果本身不受影响；请重试求解或联系管理员。</p>
+      </section>
+    );
+  }
   const failed = report.items.filter((item) => !item.passed);
   return (
     <section aria-label="目标验收报告" className="mt-3 rounded-md border border-zinc-200 bg-zinc-50/60 px-4 py-3 text-sm">
@@ -924,9 +976,11 @@ function GoalReportSection({ report }: { report: GoalReport | null }) {
       <ul className="mt-2 space-y-1.5">
         {report.items.map((item) => (
           <li key={item.key} className="flex gap-2 text-xs leading-5">
-            <span aria-hidden className={"shrink-0 " + (item.passed ? "text-emerald-600" : "text-red-600")}>{item.passed ? "✓" : "✗"}</span>
+            <span aria-hidden className={"shrink-0 " + (item.passed ? "text-emerald-600" : item.verdict === "unverifiable" ? "text-amber-600" : "text-red-600")}>{item.passed ? "✓" : item.verdict === "unverifiable" ? "?" : "✗"}</span>
             <span>
               <span className="font-medium text-zinc-700">{goalKindLabel(item.kind)}</span>
+              {isBottomLineItem(item) ? <Badge tone="blue">底线</Badge> : null}
+              {item.verdict === "unverifiable" ? <Badge tone="yellow">无法验证</Badge> : null}
               <span className="text-zinc-600"> · {item.requirement}</span>
               <span className="text-zinc-500">——{item.detail}</span>
             </span>

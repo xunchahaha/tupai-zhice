@@ -14,7 +14,8 @@ import type { GoalChecklistItemParams } from './goalChecklistItemParams';
 params 是各验收器自己的参数包（coverage 的范围条件、forbidden_slot_free 的
 主体+时段、max_changes 的上限与基准版本、date_range_match 的日期端点）；
 结构由验收器解释，这里不做 cross-field 校验——未知参数在验收时按
-「无法核对=不通过」处理，绝不静默放行。
+「无法核对=不通过」处理，绝不静默放行。params.bottom_line=True 标记底线
+验收项（MEM-D2/D4c：创建目标时强制并入，不可删除，前端打「底线」徽标）。
  */
 export interface GoalChecklistItem {
   /**

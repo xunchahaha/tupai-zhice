@@ -535,8 +535,11 @@ class PreferenceEntry(TimestampMixin, Base):
     # 参与求解，trial_until 到期自动退出；纯候选永远不影响排课。
     trial_authorized: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     trial_until: Mapped[date | None] = mapped_column(Date, nullable=True)
-    # 矛盾消解（MEM-C2 修正 4）：与同主体同谓词的另一活跃条目窗口重叠且约束互斥时
-    # 置位，编译期跳过该条目（outcome=conflict_unresolved），由教务一键裁决后清除。
+    # 矛盾消解（MEM-C2 修正 4 / MEM-D1 语义 = proposed_conflict）：与同主体同谓词
+    # 的另一活跃条目条目级窗口重叠且约束互斥时，标记落在提出方（较新条目）上；
+    # 被点名的旧条目不受影响、照常编译。提出方本身为授权试用或 confirmed 时
+    # 编译期跳过（outcome=conflict_unresolved），教务三动作裁决（保留旧弃新/
+    # 以新替旧/授权试用）后由 refresh_conflict_flags 重算清除。
     conflict: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -614,6 +617,15 @@ class SolveGoal(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(20), default="open", index=True)
     latest_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    # 验收状态（MEM-D2/D6）：goal.status 是目标状态机（open/achieved/…），
+    # 这里是「最近一次验收执行本身」的三态——run completed 时先置 pending
+    #（报告在独立事务里异步生成），验收成功 → completed，验收异常 → failed
+    # 并把原因写进 acceptance_detail（不再只打日志）。前端据此展示
+    # 「验收中…／验收失败」，避免 completed 后干等一份永远不会出现的报告。
+    acceptance_status: Mapped[str] = mapped_column(
+        String(20), default="pending", server_default="pending"
+    )
+    acceptance_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class IntegrationSync(TimestampMixin, Base):

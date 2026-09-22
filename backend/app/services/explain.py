@@ -287,6 +287,9 @@ def _goal_acceptance_facts(db: Session, run: SolverRun) -> dict[str, Any] | None
                 "kind": entry.get("kind"),
                 "requirement": entry.get("requirement"),
                 "passed": entry.get("passed"),
+                # MEM-D2/D4b：unverifiable（缺日期/缺参数/无课表）与普通失败分开转述，
+                # 解释层不得把「无法验证」说成「已达标」。
+                "verdict": entry.get("verdict"),
                 "detail": entry.get("detail"),
             }
             for entry in items

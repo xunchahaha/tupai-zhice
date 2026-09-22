@@ -198,7 +198,9 @@ def test_build_checklist_kinds_and_order() -> None:
         forbid_publish=True,
     )
     kinds = [item["kind"] for item in checklist]
+    # 底线项（MEM-D2/D4c）在最前：deliverable_exists、coverage、no_hard_conflicts。
     assert kinds == [
+        "deliverable_exists",
         "coverage",
         "date_range_match",
         "forbidden_slot_free",
@@ -206,20 +208,26 @@ def test_build_checklist_kinds_and_order() -> None:
         "max_changes",
         "draft_only",
     ]
-    coverage = checklist[0]
+    coverage = checklist[1]
     assert coverage["params"]["class_business_ids"] == ["B1"]
-    forbidden = checklist[2]
+    assert coverage["params"]["bottom_line"] is True
+    assert checklist[0]["params"]["bottom_line"] is True
+    forbidden = checklist[3]
     assert forbidden["params"] == {
         "subject_type": "teacher",
         "subject_ids": ["T9"],
         "slot_business_ids": ["S1"],
     }
     # 「尽量少改」只生成上限验收，绝不升级为「绝不改」。
-    assert checklist[4]["params"] == {"max_changes": 5, "baseline_schedule_version_id": "ver-1"}
-    assert "上限" in checklist[4]["requirement"]
+    assert checklist[5]["params"] == {"max_changes": 5, "baseline_schedule_version_id": "ver-1"}
+    assert "上限" in checklist[5]["requirement"]
 
     light = build_checklist("随便排一下", forbid_publish=False)
-    assert [item["kind"] for item in light] == ["coverage", "no_hard_conflicts"]
+    assert [item["kind"] for item in light] == [
+        "deliverable_exists",
+        "coverage",
+        "no_hard_conflicts",
+    ]
 
 
 def test_draft_checklist_flags_unquantified_forbidden() -> None:
@@ -232,8 +240,9 @@ def test_draft_checklist_flags_unquantified_forbidden() -> None:
     }
     draft, warnings = draft_checklist_from_interpretation("周三晚上不要安排考研课", parsed)
     kinds = [item["kind"] for item in draft]
-    # 占位项追加在生成器产物末尾（coverage/date/no_hard/draft_only 之后）。
+    # 占位项追加在生成器产物末尾（deliverable_exists/coverage/date/no_hard/draft_only 之后）。
     assert kinds == [
+        "deliverable_exists",
         "coverage",
         "date_range_match",
         "no_hard_conflicts",
@@ -247,6 +256,7 @@ def test_draft_checklist_flags_unquantified_forbidden() -> None:
 
     clean, warnings = draft_checklist_from_interpretation("重排 B1 班三天课", parsed)
     assert [item["kind"] for item in clean] == [
+        "deliverable_exists",
         "coverage",
         "date_range_match",
         "no_hard_conflicts",
@@ -716,8 +726,9 @@ def test_goal_api_create_solve_evaluate_abandon(
     assert created.status_code == 201, created.text
     goal = created.json()
     kinds = [item["kind"] for item in goal["checklist"]]
-    # 未传日期 → 不生成 date_range_match；forbid_publish → draft_only。
-    assert kinds == ["coverage", "no_hard_conflicts", "draft_only"]
+    # 未传日期 → 不生成 date_range_match；forbid_publish → draft_only；
+    # 底线（MEM-D2/D4c）强制在前：deliverable_exists + coverage + no_hard_conflicts。
+    assert kinds == ["deliverable_exists", "coverage", "no_hard_conflicts", "draft_only"]
     assert goal["status"] == "open"
 
     # 显式传入空清单必须被拒——恒真清单会把缺口洗成达标。
@@ -750,7 +761,11 @@ def test_goal_api_create_solve_evaluate_abandon(
     assert body["run_count"] == 1
     assert len(body["runs"]) == 1
     assert body["latest_report"] is not None
-    assert body["latest_report"]["decision"]["status"] in {"achieved", "open", "awaiting_decision"}
+    # MEM-D2 语义收紧：目标课次（B1 → C23）确已覆盖、课表产物非空且无冲突，
+    # 决策必须是确定的 achieved，不再是「任意终态皆可」。
+    assert body["latest_report"]["decision"]["status"] == "achieved"
+    assert body["status"] == "achieved"
+    assert body["acceptance_status"] == "completed"
 
     # 无效基准版本 / 跨方案 goal_id 防护。
     bad_baseline = client.post(

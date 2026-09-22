@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from datetime import date
 from typing import Any
 
@@ -27,12 +28,16 @@ from sqlalchemy import func, select
 
 from ..models import (
     AuditLog,
+    ClassGroup,
     CourseSession,
     DataSnapshot,
+    Room,
     ScheduleAssignment,
     ScheduleVersion,
     SolveGoal,
     SolverRun,
+    Teacher,
+    TimeSlot,
 )
 from ..timezone import shanghai_now
 from .solver import _selected_sessions
@@ -42,8 +47,10 @@ logger = logging.getLogger("tupai.memory")
 
 # checklist kind 与验收器一一对应：coverage=_check_coverage、
 # forbidden_slot_free=_check_forbidden_slots、no_hard_conflicts=_check_no_hard_conflicts、
-# max_changes=_check_max_changes、draft_only=_check_draft_only、date_range_match=_check_date_range。
+# max_changes=_check_max_changes、draft_only=_check_draft_only、date_range_match=_check_date_range、
+# deliverable_exists=_check_deliverable_exists。
 GOAL_CHECKLIST_KINDS = (
+    "deliverable_exists",
     "coverage",
     "forbidden_slot_free",
     "no_hard_conflicts",
@@ -52,6 +59,16 @@ GOAL_CHECKLIST_KINDS = (
     "date_range_match",
 )
 GOAL_STATUSES = ("open", "awaiting_decision", "achieved", "abandoned")
+
+# 验收状态三态（MEM-D2/D6）：这是「最近一次验收执行本身」的状态，与目标状态机
+# （GOAL_STATUSES）正交。pending=run 已完成但报告未生成；completed=报告已落库；
+# failed=验收执行本身异常（原因在 SolveGoal.acceptance_detail）。
+GOAL_ACCEPTANCE_STATUSES = ("pending", "completed", "failed")
+
+# 底线验收（MEM-D2/D4c）：无论清单来自自动生成还是用户自定义，这三类都必须在——
+# 有合格交付物、目标课次完整且不重复（有明确目标集合时）、硬冲突重算。前端给这些
+# 项打「底线」徽标，用户附加清单与底线并列验收。
+BOTTOM_LINE_KINDS = ("deliverable_exists", "coverage", "no_hard_conflicts")
 
 # draft_only 验收口径：审计日志里这些动作发生在该 run 创建之后即视为违规。
 PUBLISH_AUDIT_ACTIONS = ("publish", "calendar_publish")
@@ -70,6 +87,18 @@ _SUBJECT_TYPE_LABELS = {
 
 def _item(key: str, requirement: str, kind: str, params: dict[str, Any]) -> dict[str, Any]:
     return {"key": key, "requirement": requirement, "kind": kind, "params": params}
+
+
+def _bottom_line_item(
+    kind: str, requirement: str, params: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """底线验收项：params.bottom_line=True 是前端「底线」徽标的依据。"""
+    return _item(
+        kind,
+        requirement,
+        kind,
+        {"bottom_line": True, **(params or {})},
+    )
 
 
 def _parse_date(value: object) -> date | None:
@@ -133,11 +162,15 @@ def build_checklist(
             else "——未给范围时按本次求解已选课次核对"
         )
     )
+    # 底线在前（MEM-D2/D4c）：没有非空课表产物，其余一切核对无从谈起。
     items = [
-        _item(
+        _bottom_line_item(
+            "deliverable_exists",
+            "存在非空课表产物（本次求解至少安置 1 个课次）",
+        ),
+        _bottom_line_item(
             "coverage",
             coverage_requirement,
-            "coverage",
             {
                 "business_lines": lines,
                 "product_types": types,
@@ -146,7 +179,7 @@ def build_checklist(
                 "date_from": date_from,
                 "date_to": date_to,
             },
-        )
+        ),
     ]
     if date_from or date_to:
         items.append(
@@ -178,11 +211,9 @@ def build_checklist(
             )
         )
     items.append(
-        _item(
+        _bottom_line_item(
             "no_hard_conflicts",
             "结果课表无硬冲突（按教室/班级/教师/日程独立重算，不信任求解器自报）",
-            "no_hard_conflicts",
-            {},
         )
     )
     if max_changes is not None:
@@ -252,6 +283,45 @@ def draft_checklist_from_interpretation(
     return items, warnings
 
 
+def ensure_bottom_line_items(
+    checklist: list[dict[str, Any]], *, has_target_set: bool
+) -> list[dict[str, Any]]:
+    """底线验收与自定义清单强制并列（MEM-D2/D4c），创建目标时由 API 层调用。
+
+    底线项不可删除：用户传了自定义清单也必须并入——
+    - `deliverable_exists`：run 必须存在非空课表产物，杜绝「仅 draft_only 的
+      清单在零课表上也达成」；
+    - `no_hard_conflicts`：交付课表硬冲突独立重算；
+    - `coverage`：仅当请求带明确目标集合（课次/班级/业务线/班型范围）时并入。
+    清单里已有同 kind 的项不重复追加（用户自己的口径优先），底线由
+    「缺失即补齐」保证，不由用户自觉保证。
+    """
+    merged = [dict(item) for item in checklist]
+    present = {str(item.get("kind") or "") for item in merged}
+    if "deliverable_exists" not in present:
+        merged.append(
+            _bottom_line_item(
+                "deliverable_exists",
+                "存在非空课表产物（本次求解至少安置 1 个课次）",
+            )
+        )
+    if "no_hard_conflicts" not in present:
+        merged.append(
+            _bottom_line_item(
+                "no_hard_conflicts",
+                "结果课表无硬冲突（按教室/班级/教师/日程独立重算，不信任求解器自报）",
+            )
+        )
+    if has_target_set and "coverage" not in present:
+        merged.append(
+            _bottom_line_item(
+                "coverage",
+                "目标课次完整且不重复（逐项比对，不允许漏排或重复交付）",
+            )
+        )
+    return merged
+
+
 # ---------------------------------------------------------------- 验收器
 
 
@@ -269,15 +339,96 @@ def _course_subjects(course: CourseSession, subject_type: str) -> set[str]:
 
 
 def _unverifiable(key: str, requirement: str, kind: str, detail: str) -> dict[str, Any]:
-    """没有可核对对象（无课表/缺参数）≠ 通过：一律 fail 并给出补救方向。"""
+    """没有可核对对象（无课表/缺参数/缺日期）≠ 通过：verdict=unverifiable。
+
+    MEM-D2/D4b：不能因为「没检测到越界」就判通过——该项 passed=False 并带
+    verdict="unverifiable"，detail 说明缺什么；整体 all_passed 要求所有项
+    passed=True 且无 unverifiable。
+    """
     return {
         "key": key,
         "requirement": requirement,
         "kind": kind,
         "passed": False,
+        "verdict": "unverifiable",
         "detail": detail,
         "evidence": None,
     }
+
+
+# ------------------------------------------------- 三集合口径（MEM-D2/D4a）
+#
+# 一次带 goal 的局部重排会产生三个不同的课次集合，验收前必须分清：
+# 1. 目标课次（期望集合）：goal 清单 coverage 参数（显式课次 id 或范围过滤）
+#    从当前方案解析出的集合——验收的「应然」；
+# 2. 本次求解课次：本次 run 实际排的课次——验收的「本次实然」；
+# 3. 合并交付课表：_persist_result 会把父版本里未参与本次重排的旧课次
+#    （change_kind="unchanged"）合并回最终课表——它只用于 no_hard_conflicts
+#    这类「交付物全局自洽」检查。
+# date_range_match / coverage / forbidden_slot_free 只看 1∪2；把合并回填的
+# 旧课次混进来，就会把「保留上周原样」误判成「日期越界/禁排违规」。
+
+
+def _deliverable_assignments(run: SolverRun) -> list[dict[str, Any]]:
+    """合并交付课表：result_payload.assignments（含父版本合并回填的保留行）。"""
+    return [
+        dict(a)
+        for a in (run.result_payload or {}).get("assignments") or []
+        if isinstance(a, dict)
+    ]
+
+
+def _solved_course_business_ids(run: SolverRun) -> set[str]:
+    """本次求解课次（业务 id 集合）。
+
+    取数口径：`_persist_result` 在把父版本保留行合并进 assignments **之前**，
+    先从求解产物计算出 `solved_course_business_ids` 落入 result_payload——
+    这是「求解产物」与「合并回填」最稳的分界，不依赖行内字段约定。旧载荷
+    缺该字段时退回 `change_kind != "unchanged"` 口径（求解器产物不带
+    change_kind，合并回填行恒为 "unchanged"）。
+    """
+    solved = {
+        str(v)
+        for v in (run.result_payload or {}).get("solved_course_business_ids") or []
+        if str(v).strip()
+    }
+    if solved:
+        return solved
+    return {
+        str(a.get("course_business_id"))
+        for a in _deliverable_assignments(run)
+        if a.get("course_business_id") and a.get("change_kind") != "unchanged"
+    }
+
+
+def _goal_expected_course_ids(db: Any, goal: SolveGoal) -> set[str]:
+    """目标课次（期望集合）：取 goal 清单里第一条 coverage 项的口径解析。"""
+    for entry in goal.checklist or []:
+        if str(entry.get("kind")) == "coverage":
+            return _expected_course_ids(db, goal.schedule_set_id, dict(entry.get("params") or {}))
+    return set()
+
+
+def _acceptance_scope_assignments(
+    db: Any, goal: SolveGoal, run: SolverRun
+) -> tuple[list[dict[str, Any]], set[str], set[str]]:
+    """明细核对对象：目标课次 ∪ 本次求解课次 对应的交付行（D4a）。
+
+    合并回填的旧课次既不在求解产物里、也不属于本目标的承诺范围，必须排除；
+    反过来，求解可能安置目标集合之外的课次（范围提取副作用），这些行同样要
+    受日期/禁排约束。返回 (核对行, 求解集合, 期望集合)。
+    """
+    solved = _solved_course_business_ids(run)
+    expected = _goal_expected_course_ids(db, goal)
+    target_ids = solved | expected
+    if not target_ids:
+        return [], solved, expected
+    scoped = [
+        a
+        for a in _deliverable_assignments(run)
+        if str(a.get("course_business_id") or "") in target_ids
+    ]
+    return scoped, solved, expected
 
 
 def _check_coverage(
@@ -287,34 +438,73 @@ def _check_coverage(
     params: dict[str, Any],
     has_schedule: bool,
 ) -> dict[str, Any]:
-    """目标课次集合与结果课次集合逐项比对。
+    """目标课次集合与结果课次集合逐项比对（MEM-D2/D4b+D4c 口径）。
 
     期望集合按 coverage 参数（显式课次 id 或范围过滤条件）从当前方案解析；
     同时对照本次求解的**输入选择**（快照 + 请求范围），把缺口拆成两类：
     未进求解范围（范围提取漏课次，可修正范围重跑）与求解未安置（等待教务）。
+    另含两道新增防线：
+    - 重复检测：同一目标课次在交付课表出现 ≥2 次直接 failed（D4c）；
+    - 无法验证≠通过：参数无法解析、课次缺日期/缺时段时判 unverifiable，
+      绝不因「没检测到缺口」洗成达标（D4b）。
     """
-    item = {"key": "coverage", "kind": "coverage"}
+    requirement = str(params.get("requirement") or "覆盖目标课次")
+    item = {"key": "coverage", "kind": "coverage", "requirement": requirement}
+    date_from_raw = params.get("date_from")
+    date_to_raw = params.get("date_to")
+    date_from = _parse_date(date_from_raw)
+    date_to = _parse_date(date_to_raw)
+    if (date_from_raw and date_from is None) or (date_to_raw and date_to is None):
+        return _unverifiable(
+            "coverage",
+            requirement,
+            "coverage",
+            "coverage 日期参数无法解析（date_from/date_to 不是合法日期），"
+            "无法确定目标课次集合——请修订目标清单",
+        )
     expected = _expected_course_ids(db, goal.schedule_set_id, params)
-    solved = {
-        str(v)
-        for v in (run.result_payload or {}).get("solved_course_business_ids") or []
-    }
+    assignments = _deliverable_assignments(run)
+    solved = _solved_course_business_ids(run)
     if not expected:
         # 没有可核对对象 ≠ 通过：空口径的 coverage 会把「漏课次」洗成达标。
-        return {
-            **item,
-            "requirement": str(params.get("requirement") or "覆盖目标课次"),
-            "passed": False,
-            "detail": (
-                "求解未产出课表，无法核对覆盖"
-                if not has_schedule
-                else "coverage 项未解析出任何目标课次（范围参数为空或无匹配课次），请修订目标清单"
-            ),
-            "evidence": None,
-        }
+        return _unverifiable(
+            "coverage",
+            requirement,
+            "coverage",
+            "求解未产出课表，无法核对覆盖"
+            if not has_schedule
+            else "coverage 项未解析出任何目标课次（范围参数为空或无匹配课次），请修订目标清单",
+        )
+    # D4c 重复检测：目标课次在交付课表（合并后全集）出现 ≥2 次 = 重复交付。
+    occurrence = Counter(
+        str(a.get("course_business_id"))
+        for a in assignments
+        if a.get("course_business_id")
+    )
+    duplicates = sorted(
+        course_id
+        for course_id in expected
+        if occurrence.get(course_id, 0) >= 2
+    )
     input_ids = _run_input_course_ids(db, run, params)
     missing_from_scope = sorted(expected - input_ids)
     missing_from_result = sorted((expected & input_ids) - solved)
+    if duplicates:
+        return {
+            **item,
+            "passed": False,
+            "detail": (
+                f"{len(duplicates)} 个目标课次在交付课表中重复出现（≥2 次）："
+                f"{_join(duplicates)}——请核对课次主数据是否重复导入"
+            ),
+            "evidence": {
+                "duplicates": [
+                    {"course_business_id": course_id, "count": occurrence[course_id]}
+                    for course_id in duplicates
+                ],
+                "expected_count": len(expected),
+            },
+        }
     passed = not missing_from_scope and not missing_from_result and has_schedule
     detail_bits = [f"目标课次 {len(expected)} 个，结果命中 {len(expected & solved)} 个"]
     if missing_from_scope:
@@ -323,15 +513,43 @@ def _check_coverage(
         detail_bits.append(f"进入范围但未出现在结果：{_join(missing_from_result)}")
     if not has_schedule and not (missing_from_scope or missing_from_result):
         detail_bits.append("本次求解未产出课表，覆盖无从谈起")
+    # D4b 无法验证 ≠ 通过：目标课次排上了但没有日期/时段，覆盖结论不可信。
+    placed = expected & solved
+    undated = sorted(
+        str(a.get("course_business_id"))
+        for a in assignments
+        if str(a.get("course_business_id") or "") in placed
+        and _parse_date(a.get("lesson_date")) is None
+    )
+    missing_slot = sorted(
+        str(a.get("course_business_id"))
+        for a in assignments
+        if str(a.get("course_business_id") or "") in placed
+        and not str(a.get("slot_business_id") or "").strip()
+    )
+    if (date_from or date_to) and undated:
+        return _unverifiable(
+            "coverage",
+            requirement,
+            "coverage",
+            f"{len(undated)} 个目标课次缺少上课日期，无法按日期范围核对覆盖：{_join(undated)}",
+        )
+    if missing_slot:
+        return _unverifiable(
+            "coverage",
+            requirement,
+            "coverage",
+            f"{len(missing_slot)} 个目标课次没有时段信息，无法确认真实落位：{_join(missing_slot)}",
+        )
     return {
         **item,
-        "requirement": str(params.get("requirement") or "覆盖目标课次"),
         "passed": passed,
         "detail": "；".join(detail_bits),
         "evidence": {
             "expected_count": len(expected),
             "missing_from_scope": missing_from_scope,
             "missing_from_result": missing_from_result,
+            "duplicates": [],
         },
     }
 
@@ -394,6 +612,58 @@ def _run_input_course_ids(db: Any, run: SolverRun, params: dict[str, Any]) -> se
     }
 
 
+def _missing_subject_ids(
+    db: Any, schedule_set_id: str, subject_type: str, subject_ids: set[str]
+) -> set[str]:
+    """按主体类型核对主数据存在性（MEM-D2/D4d），返回不存在的主体 id。"""
+    if not subject_ids:
+        return set()
+    model_by_type: dict[str, Any] = {
+        "teacher": Teacher,
+        "classroom": Room,
+        "cohort": ClassGroup,
+    }
+    model = model_by_type.get(subject_type)
+    if model is not None:
+        known = set(
+            db.scalars(
+                select(model.business_id).where(
+                    model.schedule_set_id == schedule_set_id,
+                    model.business_id.in_(subject_ids),
+                )
+            )
+        )
+        return subject_ids - known
+    if subject_type == "course":
+        known = set(
+            db.scalars(
+                select(CourseSession.business_id).where(
+                    CourseSession.schedule_set_id == schedule_set_id,
+                    CourseSession.business_id.in_(subject_ids),
+                )
+            )
+        )
+        return subject_ids - known
+    return subject_ids  # 未知主体类型 = 全部无法核对
+
+
+def _missing_slot_ids(
+    db: Any, schedule_set_id: str, slot_ids: set[str]
+) -> set[str]:
+    """核对时段存在性（MEM-D2/D4d）：方案主数据里没有的时段无法复核。"""
+    if not slot_ids:
+        return set()
+    known = set(
+        db.scalars(
+            select(TimeSlot.business_id).where(
+                TimeSlot.schedule_set_id == schedule_set_id,
+                TimeSlot.business_id.in_(slot_ids),
+            )
+        )
+    )
+    return slot_ids - known
+
+
 def _check_forbidden_slots(
     db: Any,
     goal: SolveGoal,
@@ -401,31 +671,50 @@ def _check_forbidden_slots(
     params: dict[str, Any],
     has_schedule: bool,
 ) -> dict[str, Any]:
-    """独立检查禁排时段是否仍被占用——不信任求解器的「已满足」。"""
+    """独立检查禁排时段是否仍被占用——不信任求解器的「已满足」。
+
+    MEM-D2/D4d：执行前先验证 subject/slot 在当前方案主数据中存在；指向不存在
+    的对象时该项 unverifiable（「禁排对象不存在，请补齐参数」），绝不当成
+    「禁排已满足」。MEM-D2/D4a：只核对 目标课次 ∪ 本次求解课次——合并回填
+    的旧课次不是本目标的验收对象（保留上周原样不算违规）。
+    """
     requirement = str(params.get("requirement") or "禁排时段不被占用")
     item = {"key": "forbidden_slot_free", "kind": "forbidden_slot_free", "requirement": requirement}
     slots = {str(v) for v in params.get("slot_business_ids") or [] if str(v).strip()}
     subject_ids = {str(v) for v in params.get("subject_ids") or [] if str(v).strip()}
     if params.get("needs_params") or not slots or not subject_ids:
-        return {
-            **item,
-            "passed": False,
-            "detail": "禁排参数未量化（缺主体或时段），无法独立复核——请修订目标清单",
-            "evidence": None,
-        }
-    if not has_schedule:
-        return {
-            **item,
-            "passed": False,
-            "detail": "本次求解未产出课表，无法复核禁排时段",
-            "evidence": None,
-        }
+        return _unverifiable(
+            "forbidden_slot_free",
+            requirement,
+            "forbidden_slot_free",
+            "禁排参数未量化（缺主体或时段），无法独立复核——请修订目标清单",
+        )
     subject_type = str(params.get("subject_type") or "teacher")
-    assignments = [
-        dict(a)
-        for a in (run.result_payload or {}).get("assignments") or []
-        if isinstance(a, dict)
-    ]
+    unknown_subjects = sorted(
+        _missing_subject_ids(db, goal.schedule_set_id, subject_type, subject_ids)
+    )
+    unknown_slots = sorted(_missing_slot_ids(db, goal.schedule_set_id, slots))
+    if unknown_subjects or unknown_slots:
+        missing_bits = []
+        if unknown_subjects:
+            label = _SUBJECT_TYPE_LABELS.get(subject_type, subject_type)
+            missing_bits.append(f"{label} {_join(unknown_subjects)}")
+        if unknown_slots:
+            missing_bits.append(f"时段 {_join(unknown_slots)}")
+        return _unverifiable(
+            "forbidden_slot_free",
+            requirement,
+            "forbidden_slot_free",
+            "禁排对象不存在，请补齐参数：当前方案主数据中找不到 " + "；".join(missing_bits),
+        )
+    if not has_schedule:
+        return _unverifiable(
+            "forbidden_slot_free",
+            requirement,
+            "forbidden_slot_free",
+            "本次求解未产出课表，无法复核禁排时段",
+        )
+    assignments, _solved, _expected = _acceptance_scope_assignments(db, goal, run)
     course_ids = {
         str(a.get("course_session_id")) for a in assignments if a.get("course_session_id")
     }
@@ -470,20 +759,18 @@ def _check_forbidden_slots(
 def _check_no_hard_conflicts(
     db: Any, goal: SolveGoal, run: SolverRun, params: dict[str, Any], has_schedule: bool
 ) -> dict[str, Any]:
+    """硬冲突独立重算（底线项）。口径 = 合并交付课表（D4a）：全局资源冲突
+    本来就该看全集——教室/教师/日程冲突不分「本次重排」还是「保留原样」。"""
     requirement = str(params.get("requirement") or "无硬冲突")
     item = {"key": "no_hard_conflicts", "kind": "no_hard_conflicts", "requirement": requirement}
     if not has_schedule:
-        return {
-            **item,
-            "passed": False,
-            "detail": "本次求解未产出课表，无法复核硬冲突",
-            "evidence": None,
-        }
-    assignments = [
-        dict(a)
-        for a in (run.result_payload or {}).get("assignments") or []
-        if isinstance(a, dict)
-    ]
+        return _unverifiable(
+            "no_hard_conflicts",
+            requirement,
+            "no_hard_conflicts",
+            "本次求解未产出课表，无法复核硬冲突",
+        )
+    assignments = _deliverable_assignments(run)
     conflicts = count_hard_conflicts(db, assignments, goal.schedule_set_id)
     nonzero = "、".join(
         f"{key} {value}" for key, value in conflicts.items() if key != "total" and value
@@ -508,19 +795,19 @@ def _check_max_changes(
     limit = params.get("max_changes")
     baseline_id = str(params.get("baseline_schedule_version_id") or "")
     if limit is None or not baseline_id:
-        return {
-            **item,
-            "passed": False,
-            "detail": "未提供上限或基准版本，无法核算变更数——请修订目标清单",
-            "evidence": None,
-        }
+        return _unverifiable(
+            "max_changes",
+            requirement,
+            "max_changes",
+            "未提供上限或基准版本，无法核算变更数——请修订目标清单",
+        )
     if not has_schedule:
-        return {
-            **item,
-            "passed": False,
-            "detail": "本次求解未产出课表，无法核算变更数",
-            "evidence": None,
-        }
+        return _unverifiable(
+            "max_changes",
+            requirement,
+            "max_changes",
+            "本次求解未产出课表，无法核算变更数",
+        )
     baseline = db.get(ScheduleVersion, baseline_id)
     if baseline is None or baseline.schedule_set_id != goal.schedule_set_id:
         return {
@@ -651,32 +938,87 @@ def _check_draft_only(
     }
 
 
+def _check_deliverable_exists(
+    db: Any, goal: SolveGoal, run: SolverRun, params: dict[str, Any], has_schedule: bool
+) -> dict[str, Any]:
+    """底线验收（MEM-D2/D4c）：run 必须存在非空课表产物（assignment 数 > 0）。
+
+    仅 draft_only 之类的自定义清单在「零课表 + 无违规」上也能全过——没有交付物
+    的目标不得判 achieved，这条底线把「求解跑完」和「真的排出了课」分开。
+    """
+    del db, goal, params
+    requirement = "存在非空课表产物"
+    assignments = _deliverable_assignments(run)
+    passed = has_schedule and bool(assignments)
+    return {
+        "key": "deliverable_exists",
+        "kind": "deliverable_exists",
+        "requirement": requirement,
+        "passed": passed,
+        "detail": (
+            f"课表产物 {len(assignments)} 条（独立核对 result 载荷，不信任自报）"
+            if passed
+            else "本次求解未产出任何课表产物（assignment 数为 0），目标不能算达成"
+        ),
+        "evidence": {"assignment_count": len(assignments)},
+    }
+
+
 def _check_date_range(
     db: Any, goal: SolveGoal, run: SolverRun, params: dict[str, Any], has_schedule: bool
 ) -> dict[str, Any]:
-    """范围端点核对：结果日期必须落在请求范围内（防范围提取漏课次的另一道网）。"""
+    """范围端点核对：结果日期必须落在请求范围内（防范围提取漏课次的另一道网）。
+
+    MEM-D2/D4a：只核对 目标课次 ∪ 本次求解课次。合并交付课表里保留了旧课次
+    （局部重排一周时，其余三周的课次原样并入），它们不是本次请求的承诺对象，
+    混进来会把「保留原样」误判成越界。MEM-D2/D4b：日期参数无法解析、核对对象
+    缺日期时判 unverifiable——不能因「没检测到越界」放行。
+    """
     requirement = str(params.get("requirement") or "结果日期在请求范围内")
     item = {"key": "date_range_match", "kind": "date_range_match", "requirement": requirement}
-    date_from = _parse_date(params.get("date_from"))
-    date_to = _parse_date(params.get("date_to"))
+    date_from_raw = params.get("date_from")
+    date_to_raw = params.get("date_to")
+    date_from = _parse_date(date_from_raw)
+    date_to = _parse_date(date_to_raw)
+    if (date_from_raw and date_from is None) or (date_to_raw and date_to is None):
+        return _unverifiable(
+            "date_range_match",
+            requirement,
+            "date_range_match",
+            "日期范围参数无法解析（date_from/date_to 不是合法日期），无法核对——请修订目标清单",
+        )
     if not date_from and not date_to:
-        return {**item, "passed": False, "detail": "未提供日期范围参数，无法核对", "evidence": None}
+        return _unverifiable(
+            "date_range_match",
+            requirement,
+            "date_range_match",
+            "未提供日期范围参数，无法核对——请修订目标清单",
+        )
     if not has_schedule:
-        return {
-            **item,
-            "passed": False,
-            "detail": "本次求解未产出课表，无法核对日期范围",
-            "evidence": None,
-        }
-    assignments = [
-        dict(a)
-        for a in (run.result_payload or {}).get("assignments") or []
-        if isinstance(a, dict)
-    ]
+        return _unverifiable(
+            "date_range_match",
+            requirement,
+            "date_range_match",
+            "本次求解未产出课表，无法核对日期范围",
+        )
+    assignments, _solved, _expected = _acceptance_scope_assignments(db, goal, run)
+    if not assignments:
+        return _unverifiable(
+            "date_range_match",
+            requirement,
+            "date_range_match",
+            "交付课表中定位不到目标课次或本次求解课次，无法核对日期范围",
+        )
+    undated: list[dict[str, Any]] = []
     outside: list[dict[str, Any]] = []
     for assignment in assignments:
         lesson_date = _parse_date(assignment.get("lesson_date"))
         if lesson_date is None:
+            undated.append(
+                {
+                    "course_business_id": assignment.get("course_business_id"),
+                }
+            )
             continue
         if (date_from and lesson_date < date_from) or (date_to and lesson_date > date_to):
             outside.append(
@@ -685,6 +1027,14 @@ def _check_date_range(
                     "lesson_date": lesson_date.isoformat(),
                 }
             )
+    if undated:
+        undated_courses = sorted({str(v["course_business_id"]) for v in undated})
+        return _unverifiable(
+            "date_range_match",
+            requirement,
+            "date_range_match",
+            f"{len(undated)} 个核对课次缺少上课日期，无法核对日期范围：{_join(undated_courses)}",
+        )
     low_bound = date_from.isoformat() if date_from else "不限"
     high_bound = date_to.isoformat() if date_to else "不限"
     bounds = f"{low_bound} ~ {high_bound}"
@@ -695,10 +1045,12 @@ def _check_date_range(
         "detail": (
             f"有 {len(outside)} 个课次落在请求范围（{bounds}）之外：{_join(outside_courses)}"
             if outside
-            else f"全部结果日期都在请求范围（{bounds}）内"
+            else f"全部核对课次的日期都在请求范围（{bounds}）内"
         ),
         "evidence": {
             "outside": outside[:20],
+            "undated_count": 0,
+            "checked_count": len(assignments),
             "date_from": params.get("date_from"),
             "date_to": params.get("date_to"),
         },
@@ -706,6 +1058,7 @@ def _check_date_range(
 
 
 _CHECKERS = {
+    "deliverable_exists": _check_deliverable_exists,
     "coverage": _check_coverage,
     "forbidden_slot_free": _check_forbidden_slots,
     "no_hard_conflicts": _check_no_hard_conflicts,
@@ -723,7 +1076,23 @@ _AWAIT_ADMIN_KINDS = {"no_hard_conflicts"}
 _REMEDIABLE_KINDS = {"coverage", "date_range_match", "max_changes"}
 
 
-def _decide(items: list[dict[str, Any]], has_schedule: bool) -> dict[str, Any]:
+def _decide(
+    items: list[dict[str, Any]],
+    has_schedule: bool,
+    run: SolverRun | None = None,
+) -> dict[str, Any]:
+    """按缺口给出决策建议（MEM-D2/D6）：解释文案按求解状态三态分开。
+
+    - UNKNOWN（含超时）：不是「约束放不下」——尚未找到可行解也未证明无解，
+      是否继续由求解预算与诊断决定，目标保持 open；
+    - INFEASIBLE：当前模型已证明无解（presolve 预检不算——CP-SAT 未运行），
+      进 awaiting_decision 的规则/数据调整流程；
+    - 有可行解但有缺口：按缺口逐项处理（原有 await_admin / 补救动作逻辑）。
+    """
+    model_status = str(getattr(run, "model_status", "") or "") if run is not None else ""
+    presolve = bool((getattr(run, "result_payload", None) or {}).get("presolve_infeasible"))
+    unknown = model_status == "UNKNOWN"
+    infeasible = model_status == "INFEASIBLE"
     failed = [entry for entry in items if not entry["passed"]]
     if not failed:
         return {
@@ -736,10 +1105,22 @@ def _decide(items: list[dict[str, Any]], has_schedule: bool) -> dict[str, Any]:
     for entry in failed:
         kind = entry["kind"]
         evidence = entry.get("evidence") or {}
+        unverifiable = entry.get("verdict") == "unverifiable"
         if kind == "coverage":
             missing_scope = list(evidence.get("missing_from_scope") or [])
             missing_result = list(evidence.get("missing_from_result") or [])
-            if missing_scope:
+            duplicates = list(evidence.get("duplicates") or [])
+            if duplicates:
+                gaps.append(
+                    {
+                        "key": entry["key"],
+                        "kind": kind,
+                        "summary": f"目标课次在交付课表中重复出现：{len(duplicates)} 个",
+                        "next_step": "核对课次主数据是否重复导入（同一课次出现 ≥2 次），修正后重跑",
+                        "remedy": "await_admin",
+                    }
+                )
+            elif missing_scope:
                 gaps.append(
                     {
                         "key": entry["key"],
@@ -755,8 +1136,12 @@ def _decide(items: list[dict[str, Any]], has_schedule: bool) -> dict[str, Any]:
                         "key": entry["key"],
                         "kind": kind,
                         "summary": f"求解未能安置：{'、'.join(missing_result[:8])}",
-                        "next_step": "等待教务放宽规则或调整（当前约束放不下这些课次）",
-                        "remedy": "await_admin",
+                        "next_step": (
+                            "求解未得出结论（UNKNOWN）：先看诊断，由预算与诊断决定是否继续"
+                            if unknown
+                            else "等待教务放宽规则或调整（当前约束放不下这些课次）"
+                        ),
+                        "remedy": "raise_budget" if unknown else "await_admin",
                     }
                 )
             else:
@@ -769,8 +1154,24 @@ def _decide(items: list[dict[str, Any]], has_schedule: bool) -> dict[str, Any]:
                         "remedy": "await_admin" if not has_schedule else "resolve_scope",
                     }
                 )
-            if missing_result:
+            if missing_result and not unknown:
                 awaiting = True
+            if duplicates:
+                awaiting = True
+        elif kind == "deliverable_exists":
+            gaps.append(
+                {
+                    "key": entry["key"],
+                    "kind": kind,
+                    "summary": entry["detail"],
+                    "next_step": (
+                        "求解未得出结论（UNKNOWN）：先看诊断，由预算与诊断决定是否继续"
+                        if unknown
+                        else "本次求解未产出课表：先看求解诊断，再决定加预算、修范围或调整规则"
+                    ),
+                    "remedy": "raise_budget" if unknown else "resolve_scope",
+                }
+            )
         elif kind in _AWAIT_ADMIN_KINDS:
             gaps.append(
                 {
@@ -794,7 +1195,7 @@ def _decide(items: list[dict[str, Any]], has_schedule: bool) -> dict[str, Any]:
             )
             awaiting = True
         elif kind == "forbidden_slot_free":
-            unquantified = "未量化" in entry["detail"]
+            unquantified = "未量化" in entry["detail"] or "不存在" in entry["detail"]
             gaps.append(
                 {
                     "key": entry["key"],
@@ -829,12 +1230,44 @@ def _decide(items: list[dict[str, Any]], has_schedule: bool) -> dict[str, Any]:
                     "remedy": remedy,
                 }
             )
+        # 无法验证 ≠ 通过：这类缺口允许的下一步是补参数/补数据，不是放行。
+        if unverifiable and kind not in {"coverage", "forbidden_slot_free", "deliverable_exists"}:
+            gaps[-1]["next_step"] = f"{gaps[-1]['next_step']}（该项当前无法验证，需先补齐核对条件）"
+    if unknown:
+        # D6：UNKNOWN 不进「约束放不下」的 awaiting_decision 叙事——目标保持 open，
+        # 由预算与诊断决定是否继续。
+        return {
+            "status": "open",
+            "reason": (
+                f"求解未得出结论（UNKNOWN，含超时）：{len(failed)} 项无法核对。"
+                "是否继续由求解预算与诊断决定——可加大时限或缩小范围后重跑，目标保持 open"
+            ),
+            "gaps": gaps,
+        }
+    if infeasible:
+        if presolve:
+            return {
+                "status": "open",
+                "reason": (
+                    f"求解前预检判定不可行（CP-SAT 未运行，不能表述为「已证明无解」）："
+                    f"{len(failed)} 项无法核对。请核对课次范围与输入数据后重跑"
+                ),
+                "gaps": gaps,
+            }
+        return {
+            "status": "awaiting_decision",
+            "reason": (
+                f"当前模型已证明无解：{len(failed)} 项未通过。"
+                "需要教务调整规则或数据后重排（进入规则/数据调整流程）"
+            ),
+            "gaps": gaps,
+        }
     return {
         "status": "awaiting_decision" if awaiting else "open",
         "reason": (
-            f"{len(failed)} 项未通过；其中存在必须由教务放宽或裁决的缺口"
+            f"{len(failed)} 项未通过；有可行解但未达标，按缺口逐项处理"
             if awaiting
-            else f"{len(failed)} 项未通过；存在允许的补救动作，按建议执行后可再次求解"
+            else f"{len(failed)} 项未通过；存在允许的补救动作，按缺口逐项处理后可再次求解"
         ),
         "gaps": gaps,
     }
@@ -859,15 +1292,17 @@ def evaluate_goal(db: Any, goal: SolveGoal, run: SolverRun) -> dict[str, Any]:
                 )
             )
             continue
-        items.append(
-            checker(db, goal, run, dict(entry.get("params") or {}), has_schedule)
-            | {
-                "key": str(entry.get("key") or kind),
-                "requirement": str(entry.get("requirement") or ""),
-            }
-        )
-    decision = _decide(items, has_schedule)
+        item = checker(db, goal, run, dict(entry.get("params") or {}), has_schedule)
+        item["key"] = str(entry.get("key") or kind)
+        item["requirement"] = str(entry.get("requirement") or "")
+        # verdict 归一（MEM-D2/D4b）：unverifiable 由验收器显式标注，其余按
+        # passed 归为 passed/failed；底线徽标随清单 params 透传给前端。
+        item["verdict"] = str(item.get("verdict") or ("passed" if item["passed"] else "failed"))
+        item["bottom_line"] = bool((entry.get("params") or {}).get("bottom_line"))
+        items.append(item)
+    decision = _decide(items, has_schedule, run)
     passed_count = sum(1 for entry in items if entry["passed"])
+    unverifiable_count = sum(1 for entry in items if entry["verdict"] == "unverifiable")
     return {
         "goal_id": goal.id,
         "instruction": goal.instruction,
@@ -875,9 +1310,11 @@ def evaluate_goal(db: Any, goal: SolveGoal, run: SolverRun) -> dict[str, Any]:
         "run_status": run.status,
         "model_status": run.model_status,
         "has_schedule": has_schedule,
-        "all_passed": passed_count == len(items) and bool(items),
+        # 无法验证 ≠ 通过：all_passed 要求所有项 passed=True 且无 unverifiable。
+        "all_passed": passed_count == len(items) and bool(items) and unverifiable_count == 0,
         "passed_count": passed_count,
         "failed_count": len(items) - passed_count,
+        "unverifiable_count": unverifiable_count,
         "items": items,
         "gaps": decision["gaps"],
         "decision": {"status": decision["status"], "reason": decision["reason"]},
@@ -889,8 +1326,9 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
     """run 到达 completed 后回灌：报告落 run.goal_report，目标状态随最新验收走。
 
     abandoned 是人工终态，验收器不越权改动；其余状态一律反映最近一次验收
-    （含 achieved 回退——后一次跑砸了就该让人看见）。评估异常由调用方兜底，
-    绝不影响求解结果本身的落库。
+    （含 achieved 回退——后一次跑砸了就该让人看见）。评估异常由调用方兜底
+    （tasks._evaluate_goal_for_run：置 acceptance_status=failed 并落 detail），
+    绝不影响求解结果本身的落库。验收成功 → acceptance_status=completed。
     """
     if not run.goal_id:
         return None
@@ -901,6 +1339,8 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
     run.goal_report = report
     goal.latest_run_id = run.id
     goal.status = str(report["decision"]["status"])
+    goal.acceptance_status = "completed"
+    goal.acceptance_detail = None
     return report
 
 
@@ -918,12 +1358,15 @@ def goal_run_counts(db: Any, schedule_set_id: str) -> dict[str, int]:
 
 
 __all__ = [
+    "BOTTOM_LINE_KINDS",
+    "GOAL_ACCEPTANCE_STATUSES",
     "GOAL_CHECKLIST_KINDS",
     "GOAL_STATUSES",
     "PUBLISH_AUDIT_ACTIONS",
     "apply_goal_evaluation",
     "build_checklist",
     "draft_checklist_from_interpretation",
+    "ensure_bottom_line_items",
     "evaluate_goal",
     "goal_run_counts",
 ]

@@ -25,6 +25,7 @@ from ..models import (
 
 # 偏好记忆已在创建任务时冻结进快照，执行路径只读 snapshot.payload["memory"]。
 # (见 _attach_memory_preferences；本模块不再现场编译偏好。)
+from ..timezone import shanghai_now
 from .solver import solve_problem
 
 settings = get_settings()
@@ -264,6 +265,9 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
         if run is None:
             return
         run_goal_id = run.goal_id
+        # MEM-D2/D4a 取数口径：solved_course_business_ids 必须在把父版本保留行
+        # 合并进 assignments **之前**计算——它是「本次求解课次」与「合并交付课表」
+        # 的分界，goal 验收器的三集合判定依赖这个字段。
         result["solved_course_business_ids"] = sorted(
             {
                 str(item.get("course_business_id") or "")
@@ -404,6 +408,13 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
             if event:
                 event.status = "candidate_ready"
                 event.candidate_schedule_id = schedule.id
+        if run_goal_id:
+            # MEM-D2/D6：run completed 时先把验收状态置 pending（报告在下面
+            # 的独立事务里异步生成）。前端据此显示「验收中…」而不是干等。
+            goal = db.get(SolveGoal, run_goal_id)
+            if goal is not None and goal.status != "abandoned":
+                goal.acceptance_status = "pending"
+                goal.acceptance_detail = None
         db.commit()
     # 目标验收闭环（MEM-C3）：run 到达 completed 后对关联目标自动出验收报告。
     # 放在求解结果事务之外单独提交——验收层的任何异常都不得影响求解落库，
@@ -424,8 +435,34 @@ def _evaluate_goal_for_run(run_id: str, goal_id: str) -> None:
                 return
             apply_goal_evaluation(db, run)
             db.commit()
-    except Exception:  # noqa: BLE001 - 验收失败只记日志，求解结果不受影响
-        logger.exception("目标验收执行失败：求解结果不受影响，目标状态保持上一次验收")
+    except Exception as exc:  # noqa: BLE001 - 验收失败不影响求解结果落库
+        # MEM-D2/D6：验收异常不再只打日志——acceptance_status 置 failed，原因
+        # 同时落 goal.acceptance_detail 与 run.goal_report 失败标记，API 可见、
+        # 前端可停轮询并显示「验收失败：原因」。
+        logger.exception("目标验收执行失败：求解结果不受影响，目标验收状态置 failed")
+        try:
+            with SessionLocal() as db:
+                run = db.get(SolverRun, run_id)
+                goal = db.get(SolveGoal, goal_id)
+                detail = f"{type(exc).__name__}: {exc}"[:1000]
+                if goal is not None:
+                    goal.acceptance_status = "failed"
+                    goal.acceptance_detail = detail
+                if run is not None:
+                    run.goal_report = {
+                        "goal_id": goal_id,
+                        "run_id": run_id,
+                        "acceptance_status": "failed",
+                        "acceptance_error": detail,
+                        "all_passed": False,
+                        "items": [],
+                        "gaps": [],
+                        "decision": None,
+                        "evaluated_at": shanghai_now().isoformat(),
+                    }
+                db.commit()
+        except Exception:  # noqa: BLE001 - 兜底落库也失败时只能记日志
+            logger.exception("目标验收失败状态落库失败：验收结果不可见，请检查数据库")
 
 
 def _persist_failure(run_id: str, message: str) -> None:
@@ -434,6 +471,25 @@ def _persist_failure(run_id: str, message: str) -> None:
         if run:
             run.status = "failed"
             run.error_message = message
+            # MEM-D2/D6：run 失败 = 不会有验收报告。若挂着目标，同步把验收
+            # 状态置 failed 并落失败标记，避免目标永远停在 pending、前端永远
+            # 轮询不到报告。
+            if run.goal_id:
+                goal = db.get(SolveGoal, run.goal_id)
+                if goal is not None and goal.status != "abandoned":
+                    goal.acceptance_status = "failed"
+                    goal.acceptance_detail = f"求解失败，未进入验收：{message}"[:1000]
+                run.goal_report = {
+                    "goal_id": run.goal_id,
+                    "run_id": run.id,
+                    "acceptance_status": "failed",
+                    "acceptance_error": f"求解失败，未进入验收：{message}"[:1000],
+                    "all_passed": False,
+                    "items": [],
+                    "gaps": [],
+                    "decision": None,
+                    "evaluated_at": shanghai_now().isoformat(),
+                }
             db.commit()
 
 

@@ -4891,10 +4891,12 @@ export const useConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRul
 /**
  * 回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。
 
-事件范围（MEM-C2 修正 3）：当前方案内、最近 90 天的调课事件（按 created_at
-滚动窗口，口径见 memory_solver.MINING_EVENT_WINDOW_DAYS）。配置了 AI 走模型
-归纳（模型只提名，代码按白名单与证据支持性裁决）；未配置或调用失败优雅降级
-为确定性统计：同主体+同类型+同归因类调课 ≥2 次即产生候选。
+可学习事件经公共前置筛选（MEM-D1 §7 D3，口径见
+memory_solver.learning_basis_events）：当前方案内、最近 90 天滚动窗口、
+候选未被取消或拒绝、declared_reason 非临时被迫类。配置了 AI 走模型归纳
+（模型只提名，代码按白名单与证据支持性裁决；输入已预筛，提示词不再要求
+模型自行过滤）；未配置或调用失败优雅降级为确定性统计：同主体+同类型+
+同归因类调课 ≥2 次即产生候选。
  * @summary Create Memory Mining Run
  */
 export const createMemoryMiningRunApiV1MemoryMiningRunsPost = (
@@ -5375,7 +5377,9 @@ export function useSolverRunEventsApiV1SolverRunsRunIdEventsGet<TData = Awaited<
 
 checklist 缺省时按结构化范围字段确定性生成；显式传入则原样保存（kind 由
 schema 枚举把关）。基准版本必须属于当前方案，「尽量少改」的验收上限在这里
-一次定清，验收器绝不会把「尽量」升级为「绝不」。
+一次定清，验收器绝不会把「尽量」升级为「绝不」。底线验收项（MEM-D2/D4c：
+deliverable_exists / no_hard_conflicts / 有明确目标集合时的 coverage）无论
+自定义还是自动生成都强制并入，不可删除。
  * @summary Create Goal
  */
 export const createGoalApiV1GoalsPost = (

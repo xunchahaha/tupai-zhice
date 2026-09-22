@@ -11,6 +11,7 @@ export type GoalChecklistItemKind = typeof GoalChecklistItemKind[keyof typeof Go
 
 // eslint-disable-next-line @typescript-eslint/no-redeclare
 export const GoalChecklistItemKind = {
+  deliverable_exists: 'deliverable_exists',
   coverage: 'coverage',
   forbidden_slot_free: 'forbidden_slot_free',
   no_hard_conflicts: 'no_hard_conflicts',

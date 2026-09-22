@@ -16,7 +16,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { asArray, datetime, errorMessage } from "@/lib/format";
-import { goalKindLabel, goalStatusLabel, GOAL_STATUS_TONE, parseGoalReport } from "@/lib/goal";
+import { goalAcceptanceLabel, goalKindLabel, goalStatusLabel, GOAL_STATUS_TONE, isBottomLineItem, parseGoalReport } from "@/lib/goal";
 import { modelStatusLabel, statusLabel } from "@/lib/labels";
 import { modelStatusTone, statusTone } from "@/lib/status";
 
@@ -134,18 +134,26 @@ function GoalDetailDialog({ goalId, onClose }: { goalId: string; onClose: () => 
             <div className="rounded-md border border-zinc-200 bg-zinc-50/60 px-4 py-3">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge tone={GOAL_STATUS_TONE[goal.status] ?? "blue"}>{goalStatusLabel(goal.status)}</Badge>
+                <Badge tone={goal.acceptance_status === "failed" ? "yellow" : goal.acceptance_status === "completed" ? "green" : "blue"}>
+                  {goalAcceptanceLabel(goal.acceptance_status)}
+                </Badge>
                 <span className="text-xs text-zinc-500">创建于 {datetime(goal.created_at)}</span>
               </div>
               <p className="mt-2 leading-6 text-zinc-800">{goal.instruction}</p>
+              {goal.acceptance_status === "failed" && goal.acceptance_detail ? (
+                <p className="mt-2 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs text-amber-900">验收失败：{goal.acceptance_detail}</p>
+              ) : null}
             </div>
             <div>
-              <div className="text-xs font-medium text-zinc-500">验收清单</div>
+              <div className="text-xs font-medium text-zinc-500">验收清单（底线项不可删除，与附加项并列验收）</div>
               <ul className="mt-2 space-y-1.5">
                 {goal.checklist.map((item) => {
-                  const entry = item as { key?: string; kind?: string; requirement?: string };
+                  const entry = item as { key?: string; kind?: string; requirement?: string; params?: Record<string, unknown> };
                   return (
                     <li key={String(entry.key ?? entry.kind)} className="rounded border border-zinc-100 px-3 py-2 text-xs leading-5 text-zinc-700">
-                      <span className="font-medium">{goalKindLabel(entry.kind)}</span> · {entry.requirement ?? ""}
+                      <span className="font-medium">{goalKindLabel(entry.kind)}</span>
+                      {isBottomLineItem({ params: entry.params }) ? <Badge tone="blue">底线</Badge> : null}
+                      {" "}· {entry.requirement ?? ""}
                     </li>
                   );
                 })}
@@ -155,16 +163,28 @@ function GoalDetailDialog({ goalId, onClose }: { goalId: string; onClose: () => 
               <div>
                 <div className="flex items-center gap-2 text-xs font-medium text-zinc-500">
                   最新验收
-                  <Badge tone={report.all_passed ? "green" : "yellow"}>
-                    {report.all_passed ? `全部 ${report.passed_count} 项通过` : `${report.failed_count} 项缺口`}
-                  </Badge>
+                  {report.acceptance_status === "failed" ? (
+                    <Badge tone="yellow">验收失败</Badge>
+                  ) : (
+                    <Badge tone={report.all_passed ? "green" : "yellow"}>
+                      {report.all_passed ? `全部 ${report.passed_count} 项通过` : `${report.failed_count} 项缺口`}
+                    </Badge>
+                  )}
                 </div>
+                {report.acceptance_status === "failed" ? (
+                  <p className="mt-1 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                    验收失败：{report.acceptance_error ?? "验收器执行时发生异常，未能生成报告"}
+                  </p>
+                ) : null}
                 <ul className="mt-2 space-y-1 text-xs">
                   {report.items.map((item) => (
                     <li key={item.key} className="flex gap-2">
-                      <span aria-hidden className={item.passed ? "text-emerald-600" : "text-red-600"}>{item.passed ? "✓" : "✗"}</span>
+                      <span aria-hidden className={item.passed ? "text-emerald-600" : item.verdict === "unverifiable" ? "text-amber-600" : "text-red-600"}>{item.passed ? "✓" : item.verdict === "unverifiable" ? "?" : "✗"}</span>
                       <span className="text-zinc-700">
-                        {goalKindLabel(item.kind)}——{item.detail}
+                        {goalKindLabel(item.kind)}
+                        {item.bottom_line ? <Badge tone="blue">底线</Badge> : null}
+                        {item.verdict === "unverifiable" ? <Badge tone="yellow">无法验证</Badge> : null}
+                        ——{item.detail}
                       </span>
                     </li>
                   ))}
@@ -196,9 +216,17 @@ function GoalDetailDialog({ goalId, onClose }: { goalId: string; onClose: () => 
                           {run.status === "completed" ? modelStatusLabel(run.model_status) : statusLabel(run.status)}
                         </Badge>
                         {runReport ? (
-                          <span className={runReport.all_passed ? "text-emerald-700" : "text-amber-700"}>
-                            验收 {runReport.passed_count}/{runReport.items.length} 项通过
-                          </span>
+                          runReport.acceptance_status === "failed" ? (
+                            <span className="inline-flex items-center gap-1 text-amber-700" title={runReport.acceptance_error ?? undefined}>
+                              <CircleAlert className="size-3" />验收失败：{runReport.acceptance_error ?? "原因未记录"}
+                            </span>
+                          ) : (
+                            <span className={runReport.all_passed ? "text-emerald-700" : "text-amber-700"}>
+                              验收 {runReport.passed_count}/{runReport.items.length} 项通过
+                            </span>
+                          )
+                        ) : run.goal_id && run.status === "completed" ? (
+                          <span className="text-zinc-400">验收中…</span>
                         ) : (
                           <span className="inline-flex items-center gap-1 text-zinc-400"><CircleAlert className="size-3" />尚无验收报告</span>
                         )}

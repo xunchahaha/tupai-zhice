@@ -554,6 +554,10 @@ class PreferenceTransition(BaseModel):
     以 trial_authorized + trial_until 参与小权重试用；采纳（confirmed）仍是正式生效路径。
     MEM-C2 修正 4：target_status=rejected 时建议带 rejection_reason（拒绝原因五选，
     落 preference_rejections 供去重）；缺省按「其他」处理。前端必填，API 兜底。
+    MEM-D1 冲突裁决三动作全部走本端点：保留旧弃新 = 候选 rejected；
+    以新替旧 = 旧条目 expired 且带 supersedes=<候选 id>（provenance 记
+    superseded_by）、候选再 confirmed；授权试用 = action=authorize_trial
+    （旧新并存，旧全权、候选小权重）。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -562,6 +566,9 @@ class PreferenceTransition(BaseModel):
     target_status: Literal["confirmed", "rejected", "expired"] | None = None
     # 红线①：induced_from_adjustment 条目传 hard 一律 422。
     target_modality: Literal["hard", "soft"] | None = None
+    # 冲突裁决「以新替旧」（MEM-D1）：target_status=expired 时可选指向替代它的
+    # 候选 id，旧条目 provenance 记 superseded_by 形成显式审计链。
+    supersedes: str | None = Field(default=None, min_length=1, max_length=36)
     trial_days: int = Field(default=30, ge=1, le=365)
     reason: str | None = Field(default=None, max_length=500)
     # 拒绝原因（MEM-C2 修正 4）：临时请假 / 主体识别错误 / 归纳错误 /
@@ -608,8 +615,11 @@ class PreferenceResponse(ORMModel):
     valid_until: date | None = None
     trial_authorized: bool = False
     trial_until: date | None = None
-    # 矛盾消解（MEM-C2 修正 4）：与同主体同类条目窗口重叠且约束互斥时为 True，
-    # 编译期跳过（outcome=conflict_unresolved），前端以 amber 徽标提示。
+    # 矛盾消解（MEM-C2 修正 4 / MEM-D1 语义）：候选侧 proposed_conflict 标——
+    # 本条与同主体同类条目窗口重叠且约束互斥时落在提出方（较新条目）上；
+    # 被点名的旧条目不受影响、照常编译（outcome=applied）。本条为授权试用或
+    # confirmed 时编译期跳过（outcome=conflict_unresolved），教务按三动作裁决
+    # （保留旧弃新/以新替旧/授权试用）后由后端重算清除；前端 amber 徽标提示。
     conflict: bool = False
     provenance: dict[str, Any]
     created_at: datetime
@@ -634,6 +644,7 @@ class MiningRunResponse(BaseModel):
 
 
 GoalChecklistKind = Literal[
+    "deliverable_exists",
     "coverage",
     "forbidden_slot_free",
     "no_hard_conflicts",
@@ -649,7 +660,8 @@ class GoalChecklistItem(BaseModel):
     params 是各验收器自己的参数包（coverage 的范围条件、forbidden_slot_free 的
     主体+时段、max_changes 的上限与基准版本、date_range_match 的日期端点）；
     结构由验收器解释，这里不做 cross-field 校验——未知参数在验收时按
-    「无法核对=不通过」处理，绝不静默放行。
+    「无法核对=不通过」处理，绝不静默放行。params.bottom_line=True 标记底线
+    验收项（MEM-D2/D4c：创建目标时强制并入，不可删除，前端打「底线」徽标）。
     """
 
     key: str = Field(min_length=1, max_length=80)
@@ -700,6 +712,10 @@ class GoalResponse(ORMModel):
     instruction: str
     checklist: list[dict[str, Any]]
     status: str
+    # 最近一次验收执行本身的状态（MEM-D2/D6）：pending=报告未生成、
+    # completed=报告已落库、failed=验收异常（原因见 acceptance_detail）。
+    acceptance_status: str = "pending"
+    acceptance_detail: str | None = None
     latest_run_id: str | None = None
     run_count: int = 0
     created_by: str | None = None
