@@ -3811,7 +3811,7 @@
           "memory"
         ],
         "summary": "Create Memory Mining Run",
-        "description": "回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。\n\n可学习事件经公共前置筛选（MEM-D1 §7 D3，口径见\nmemory_solver.learning_basis_events）：当前方案内、最近 90 天滚动窗口、\n候选未被取消或拒绝、declared_reason 非临时被迫类。配置了 AI 走模型归纳\n（模型只提名，代码按白名单与证据支持性裁决；输入已预筛，提示词不再要求\n模型自行过滤）；未配置或调用失败优雅降级为确定性统计：同主体+同类型+\n同归因类调课 ≥2 次即产生候选。",
+        "description": "回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。\n\n可学习事件经公共前置筛选（MEM-D1 §7 D3 + MEM-E1b §8，口径见\nmemory_solver.learning_basis_events）：当前方案内、最近 90 天滚动窗口、\n已产生结果版本且未被后续放弃（候选版本曾被发布 = 教务采纳这次调课）、\ndeclared_reason 非临时被迫类。配置了 AI 走模型归纳\n（模型只提名，代码按白名单与证据支持性裁决；输入已预筛，提示词不再要求\n模型自行过滤）；未配置或调用失败优雅降级为确定性统计：同主体+同类型+\n同归因类调课 ≥2 次即产生候选。",
         "operationId": "create_memory_mining_run_api_v1_memory_mining_runs_post",
         "security": [
           {

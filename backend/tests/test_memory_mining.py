@@ -7,10 +7,14 @@
 - 同批被拒证据再挖掘不复现，带新证据允许重提且标注此前被拒原因；
 - 临时公差/教师请假类与已取消的调课事件不进学习集（AI 与统计同一前置筛选）；
 - 矛盾三分支：new_replaces / time_sliced / conflict_flagged；
-- MEM-D1：conflict 是候选侧 proposed_conflict 标，旧 confirmed 条目照常编译；
-  冲突裁决三动作（保留旧弃新/以新替旧/授权试用）全部走既有 transition 端点；
+- MEM-D1 + MEM-E1a：conflict 是提出方侧 proposed_conflict 标，提出方按授权状态
+  判定（未授权条目永远是提出方，同授权级别内取较新者）；conflict 的编译排除
+  只作用于未授权条目，已授权条目带标记照常编译；冲突裁决三动作（保留旧弃新/
+  以新替旧/授权试用）全部走既有 transition 端点；
 - MEM-D1 D2：候选 constraint 自带日期窗口时条目级默认有效期取最小覆盖；
-  编辑有效期后冲突标重算。
+  编辑有效期后冲突标重算；
+- MEM-E1c：冲突配对与编译共用实际生效窗口（约束∩条目级）口径；
+- MEM-E1b：学习集要求「已产生结果版本且未被后续放弃」的接受依据。
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 import app.api as api
 from app.db import SessionLocal
@@ -39,6 +44,7 @@ from app.models import (
 from app.services.ai import AIService
 from app.services.memory_solver import (
     compile_memory_state,
+    learning_basis_events,
     refresh_conflict_flags,
     resolve_conflicts_for_new_entry,
 )
@@ -118,8 +124,46 @@ def _add_event(
     payload: dict[str, Any],
     declared_reason: str | None = None,
     status: str = "candidate_ready",
+    candidate_status: str | None = None,
 ) -> RescheduleEvent:
+    """落一条调课事件。MEM-E1b 接受依据：candidate_ready 事件默认挂一个已发布
+    的候选版本（candidate_schedule_id 非空 = 已产生结果版本且未被后续放弃）；
+    candidate_status="draft" 表示候选停留在待发布（未被接受）；pending /
+    candidate_discarded 不挂候选，与真实链路一致（创建时无候选；删除候选版本时
+    api.delete_schedule 会同步置空该列并置 candidate_discarded）。"""
     with SessionLocal() as db:
+        candidate_id: str | None = None
+        if status == "candidate_ready":
+            snapshot_id = db.scalar(
+                select(DataSnapshot.id).where(DataSnapshot.schedule_set_id == scope_id)
+            )
+            assert snapshot_id is not None
+            next_no = int(
+                db.scalar(
+                    select(func.max(ScheduleVersion.version_no)).where(
+                        ScheduleVersion.schedule_set_id == scope_id
+                    )
+                )
+                or 0
+            ) + 1
+            run = SolverRun(
+                schedule_set_id=scope_id,
+                snapshot_id=snapshot_id,
+                status="completed",
+                request_payload={},
+            )
+            db.add(run)
+            db.flush()
+            candidate = ScheduleVersion(
+                schedule_set_id=scope_id,
+                version_no=next_no,
+                name=f"调课候选 V{next_no}",
+                solver_run_id=run.id,
+                status=candidate_status or "published",
+            )
+            db.add(candidate)
+            db.flush()
+            candidate_id = candidate.id
         event = RescheduleEvent(
             schedule_set_id=scope_id,
             event_type=event_type,
@@ -128,6 +172,7 @@ def _add_event(
             payload=payload,
             status=status,
             parent_schedule_id=version_id,
+            candidate_schedule_id=candidate_id,
         )
         db.add(event)
         db.commit()
@@ -694,11 +739,13 @@ def test_conflict_flag_lands_on_candidate_only_and_old_entry_still_compiles() ->
         assert old_row.provenance["conflict_with"] == [new.id]
         assert new_row.provenance["conflict_with"] == [old.id]
 
-        # 编译侧：旧条目照常 applied 且进 compiled_rules；候选不进（未授权）。
+        # 编译侧：旧条目照常 applied 且进 compiled_rules；未授权候选带
+        # proposed_conflict 标 → conflict_unresolved（MEM-E1a：conflict 的编译
+        # 排除只作用于未授权条目，这里标出具体原因）。
         state = compile_memory_state(db, "default")
         outcomes = {item["entry_id"]: item for item in state["outcomes"]}
         assert outcomes[old.id]["outcome"] == "applied"
-        assert outcomes[new.id]["outcome"] == "not_authorized"
+        assert outcomes[new.id]["outcome"] == "conflict_unresolved"
         assert any(rule["memory_entry_id"] == old.id for rule in state["compiled_rules"])
         assert all(rule["memory_entry_id"] != new.id for rule in state["compiled_rules"])
 
@@ -717,12 +764,14 @@ def test_conflict_flag_lands_on_candidate_only_and_old_entry_still_compiles() ->
         assert new_row.conflict is False
         state = compile_memory_state(db, "default")
         outcomes = {item["entry_id"]: item for item in state["outcomes"]}
-        assert outcomes[new.id]["outcome"] == "not_authorized"  # probation 未授权，语义不变
+        # 标清了以后，未授权候选回到普通 not_authorized 语义。
+        assert outcomes[new.id]["outcome"] == "not_authorized"
 
 
-def test_conflict_flag_excludes_trial_entry_until_adjudicated() -> None:
-    """授权试用条目带 proposed_conflict 标时先被拦下（conflict_unresolved），
-    裁决前不得与旧条目同时进目标函数。"""
+def test_authorized_conflict_proposer_still_compiles() -> None:
+    """MEM-E1a：已授权条目（confirmed / 授权试用）带 proposed_conflict 标记时
+    编译参与度不受影响——conflict 标记的编译排除只作用于未授权条目，未经显式
+    裁决不改变已生效依据，求解仍按现值执行；标记保留供教务 amber 徽标裁决。"""
     today = shanghai_now().date()
     old = _add_entry(
         subject_id="T-TRIAL-FLAG",
@@ -741,16 +790,111 @@ def test_conflict_flag_excludes_trial_entry_until_adjudicated() -> None:
         assert new_row is not None
         new_row.trial_authorized = True
         new_row.trial_until = today + timedelta(days=30)
-        resolve_conflicts_for_new_entry(db, new_row)
+        assert resolve_conflicts_for_new_entry(db, new_row) == "conflict_flagged"
         db.commit()
     with SessionLocal() as db:
+        old_row = db.get(PreferenceEntry, old.id)
+        new_row = db.get(PreferenceEntry, new.id)
+        assert old_row is not None and new_row is not None
+        # 双方都已授权：标记落较新者（提出方），但两侧照常编译。
+        assert new_row.conflict is True
+        assert old_row.conflict is False
         state = compile_memory_state(db, "default")
         outcomes = {item["entry_id"]: item for item in state["outcomes"]}
-        # 旧条目不受影响；试用条目因 proposed_conflict 待裁决而暂不进求解输入。
         assert outcomes[old.id]["outcome"] == "applied"
-        assert outcomes[new.id]["outcome"] == "conflict_unresolved"
+        assert outcomes[new.id]["outcome"] == "applied"
+        assert "存在未裁决冲突提议" in outcomes[new.id]["detail"]
         assert any(rule["memory_entry_id"] == old.id for rule in state["compiled_rules"])
-        assert all(rule["memory_entry_id"] != new.id for rule in state["compiled_rules"])
+        assert any(rule["memory_entry_id"] == new.id for rule in state["compiled_rules"])
+
+
+def test_conflict_flag_lands_on_earlier_unauthorized_candidate_after_edit(
+    client: TestClient, mining_scope: dict[str, Any]
+) -> None:
+    """MEM-E1a 核心回归：较早创建的未授权候选 P 被编辑成与较晚 confirmed C 互斥
+    后，proposed_conflict 标记必须落 P 侧（未授权条目永远是提出方，不按
+    created_at 猜），C 照常 applied 且在 compiled_rules——旧实现按创建时间把
+    标记落到 C 上，让已确认偏好再次被排除。"""
+    scope_id = mining_scope["scope_id"]
+    headers = mining_scope["headers"]
+    earlier = _add_scoped_entry(
+        scope_id,
+        subject_id="T-E1A-EDIT",
+        status="probation",
+        source="induced_from_adjustment",
+        confidence=0.5,
+        weight=40,
+        constraint={"slot_ids": ["S1"]},
+        created_at=shanghai_now() - timedelta(minutes=5),
+    )
+    later = _add_scoped_entry(
+        scope_id,
+        subject_id="T-E1A-EDIT",
+        constraint={"slot_ids": ["S1"]},
+    )
+    # 编辑较早候选成 S2：与 C（S1）互斥（prefer_slot 目标集不相交）。
+    patched = client.patch(
+        f"/api/v1/memory/preferences/{earlier.id}",
+        headers=headers,
+        json={"constraint": {"slot_ids": ["S2"]}},
+    )
+    assert patched.status_code == 200, patched.text
+
+    with SessionLocal() as db:
+        candidate = db.get(PreferenceEntry, earlier.id)
+        confirmed = db.get(PreferenceEntry, later.id)
+        assert candidate is not None and confirmed is not None
+        # 提出方 = 未授权候选 P（尽管它创建得更早）；C 不带标记、状态不变。
+        assert candidate.conflict is True
+        assert confirmed.conflict is False
+        assert confirmed.status == "confirmed"
+        assert str(candidate.id) in {
+            str(item) for item in confirmed.provenance.get("conflict_with") or []
+        }
+        state = compile_memory_state(db, scope_id)
+    outcomes = {item["entry_id"]: item for item in state["outcomes"]}
+    assert outcomes[later.id]["outcome"] == "applied"
+    assert outcomes[earlier.id]["outcome"] == "conflict_unresolved"
+    assert any(rule["memory_entry_id"] == later.id for rule in state["compiled_rules"])
+    assert all(rule["memory_entry_id"] != earlier.id for rule in state["compiled_rules"])
+
+
+def test_conflict_flag_lands_on_newer_when_both_unauthorized(
+    client: TestClient, mining_scope: dict[str, Any]
+) -> None:
+    """MEM-E1a 同级兜底：双方都未授权时，标记落较新者（创建时间仅在同级内
+    作提出方归属）。"""
+    scope_id = mining_scope["scope_id"]
+    older = _add_scoped_entry(
+        scope_id,
+        subject_id="T-E1A-BOTH",
+        status="probation",
+        source="induced_from_adjustment",
+        confidence=0.5,
+        weight=40,
+        constraint={"slot_ids": ["S1"]},
+        created_at=shanghai_now() - timedelta(minutes=5),
+    )
+    newer = _add_scoped_entry(
+        scope_id,
+        subject_id="T-E1A-BOTH",
+        status="probation",
+        source="induced_from_adjustment",
+        confidence=0.5,
+        weight=40,
+        constraint={"slot_ids": ["S2"]},
+    )
+    with SessionLocal() as db:
+        newer_row = db.get(PreferenceEntry, newer.id)
+        assert newer_row is not None
+        assert resolve_conflicts_for_new_entry(db, newer_row) == "conflict_flagged"
+        db.commit()
+    with SessionLocal() as db:
+        older_row = db.get(PreferenceEntry, older.id)
+        newer_row = db.get(PreferenceEntry, newer.id)
+        assert older_row is not None and newer_row is not None
+        assert newer_row.conflict is True
+        assert older_row.conflict is False
 
 
 # ---------------------------------------------------------------- 冲突裁决三动作（MEM-D1）
@@ -764,13 +908,14 @@ def test_adjudication_keep_old_rejects_candidate(
     headers = mining_scope["headers"]
     old, candidate = _seed_conflict_pair(scope_id, "T-ADJ-KEEP")
 
-    # 裁决前：旧条目 applied 且在 compiled_rules 里；候选不进（未授权）。
+    # 裁决前：旧条目 applied 且在 compiled_rules 里；候选带未裁决冲突提议
+    # （MEM-E1a：未授权 + 标记 → conflict_unresolved，本就不进求解输入）。
     with SessionLocal() as db:
         state = compile_memory_state(db, scope_id)
         outcomes = {item["entry_id"]: item["outcome"] for item in state["outcomes"]}
         assert outcomes[old.id] == "applied"
         assert any(rule["memory_entry_id"] == old.id for rule in state["compiled_rules"])
-        assert outcomes[candidate.id] == "not_authorized"
+        assert outcomes[candidate.id] == "conflict_unresolved"
 
     rejected = client.post(
         f"/api/v1/memory/preferences/{candidate.id}/transition",
@@ -1072,3 +1217,113 @@ def test_learning_basis_prefilter_applies_to_ai_path_too(
     assert body["skipped_invalid"] == 1
     assert len(body["created"]) == 1
     assert body["created"][0]["subject_id"] == "T9"
+
+
+# ------------------------------------------------- 冲突窗口共用口径（MEM-E1c）
+
+
+def test_conflict_pairing_uses_effective_date_window(
+    client: TestClient, mining_scope: dict[str, Any]
+) -> None:
+    """MEM-E1c：冲突配对与编译共用实际生效窗口（约束∩条目级交集）口径。
+
+    两条同主体 prefer_slot 偏好（目标集不相交，若条目级全学期窗口重叠会被旧
+    口径误标冲突），约束窗口 9/24-25 与 9/26-27 实际不重叠 → 不冲突、双双
+    applied；任一侧交集为空（not_applicable）也不参与配对。"""
+    scope_id = mining_scope["scope_id"]
+    headers = mining_scope["headers"]
+    first = client.post(
+        "/api/v1/memory/preferences",
+        headers=headers,
+        json={
+            "subject_type": "teacher",
+            "subject_id": "T9",
+            "predicate": "prefer_slot",
+            "constraint": {
+                "slot_ids": ["S1"],
+                "date_from": "2026-09-24",
+                "date_to": "2026-09-25",
+            },
+            "source": "explicit_stated",
+        },
+    )
+    assert first.status_code == 201, first.text
+    second = client.post(
+        "/api/v1/memory/preferences",
+        headers=headers,
+        json={
+            "subject_type": "teacher",
+            "subject_id": "T9",
+            "predicate": "prefer_slot",
+            "constraint": {
+                "slot_ids": ["S2"],
+                "date_from": "2026-09-26",
+                "date_to": "2026-09-27",
+            },
+            "source": "explicit_stated",
+        },
+    )
+    assert second.status_code == 201, second.text
+    first_id, second_id = first.json()["id"], second.json()["id"]
+
+    with SessionLocal() as db:
+        first_row = db.get(PreferenceEntry, first_id)
+        second_row = db.get(PreferenceEntry, second_id)
+        assert first_row is not None and second_row is not None
+        # 实际生效窗口不重叠：双双清标（条目级窗口都是全学期也不误标冲突）。
+        assert first_row.conflict is False
+        assert second_row.conflict is False
+        assert first_row.provenance.get("conflict_with") is None
+        assert second_row.provenance.get("conflict_with") is None
+        state = compile_memory_state(db, scope_id)
+    outcomes = {item["entry_id"]: item for item in state["outcomes"]}
+    assert outcomes[first_id]["outcome"] == "applied"
+    assert outcomes[second_id]["outcome"] == "applied"
+    rules = {rule["memory_entry_id"]: rule for rule in state["compiled_rules"]}
+    assert set(rules) == {first_id, second_id}
+    # 每条规则的 scope 按各自的交集窗口切片，互不越界。
+    assert rules[first_id]["scope"]["date_from"] == "2026-09-24"
+    assert rules[first_id]["scope"]["date_to"] == "2026-09-25"
+    assert rules[second_id]["scope"]["date_from"] == "2026-09-26"
+    assert rules[second_id]["scope"]["date_to"] == "2026-09-27"
+
+
+# ------------------------------------------------- 学习集接受依据（MEM-E1b）
+
+
+def test_learning_basis_requires_accepted_basis(
+    client: TestClient, mining_scope: dict[str, Any]
+) -> None:
+    """MEM-E1b：「最终态被接受」落实——pending（未产出候选）与候选停在待发布
+    （candidate_ready 但未被接受）的事件都不进学习集；只有已产生结果版本且未被
+    后续放弃（candidate_schedule_id 非空）的事件才算有接受依据。"""
+    scope_id = mining_scope["scope_id"]
+    version_id = mining_scope["version_id"]
+    pending = _add_event(
+        scope_id,
+        version_id,
+        event_type="teacher_leave",
+        payload={"teacher_business_id": "T-PEND", "slot_business_ids": ["S1"]},
+        status="pending",
+    )
+    draft = _add_event(
+        scope_id,
+        version_id,
+        event_type="teacher_leave",
+        payload={"teacher_business_id": "T-DRAFT", "slot_business_ids": ["S1"]},
+        candidate_status="draft",
+    )
+    adopted = [
+        _add_event(
+            scope_id,
+            version_id,
+            event_type="teacher_leave",
+            payload={"teacher_business_id": "T9", "slot_business_ids": ["S1"]},
+        )
+        for _ in range(2)
+    ]
+    with SessionLocal() as db:
+        assert pending.candidate_schedule_id is None
+        assert draft.candidate_schedule_id is not None
+        events = learning_basis_events(db, scope_id)
+    assert {event.id for event in events} == {event.id for event in adopted}

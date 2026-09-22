@@ -535,11 +535,13 @@ class PreferenceEntry(TimestampMixin, Base):
     # 参与求解，trial_until 到期自动退出；纯候选永远不影响排课。
     trial_authorized: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     trial_until: Mapped[date | None] = mapped_column(Date, nullable=True)
-    # 矛盾消解（MEM-C2 修正 4 / MEM-D1 语义 = proposed_conflict）：与同主体同谓词
-    # 的另一活跃条目条目级窗口重叠且约束互斥时，标记落在提出方（较新条目）上；
-    # 被点名的旧条目不受影响、照常编译。提出方本身为授权试用或 confirmed 时
-    # 编译期跳过（outcome=conflict_unresolved），教务三动作裁决（保留旧弃新/
-    # 以新替旧/授权试用）后由 refresh_conflict_flags 重算清除。
+    # 矛盾消解（MEM-C2 修正 4 / MEM-D1 proposed_conflict / MEM-E1a 授权口径）：
+    # 与同主体同谓词的另一活跃条目实际生效窗口重叠且约束互斥时，标记落在提出方
+    # 上——提出方按授权状态判定：未授权条目（probation 且未授权试用）永远是提出
+    # 方，创建时间仅用于同授权级别内的归属兜底。conflict 的编译排除效果只作用于
+    # 未授权条目（本就不进求解输入，outcome=conflict_unresolved）；已授权条目带
+    # 标记照常编译（outcome=applied，detail 注明存在未裁决冲突提议）。教务三动作
+    # 裁决（保留旧弃新/以新替旧/授权试用）后由 refresh_conflict_flags 重算清除。
     conflict: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 

@@ -3481,9 +3481,10 @@ def update_preference(
         "last_edited_at": shanghai_now().isoformat(),
     }
     audit(db, user, "update", "preference_entry", entry.id, payload.model_dump(mode="json"))
-    # 唯一冲突重算入口（MEM-D1 D2）：编辑约束/有效期/谓词后重算 proposed_conflict
-    # 标——编辑把互斥改兼容（或窗口错开）时自动清标，改出互斥时标记落编辑一方
-    # （组内较新条目）。
+    # 唯一冲突重算入口（MEM-D1 D2 / MEM-E1a）：编辑约束/有效期/谓词后重算
+    # proposed_conflict 标——编辑把互斥改兼容（或窗口错开）时自动清标，改出
+    # 互斥时标记落提出方（按授权状态判定：未授权条目永远是提出方，同级取
+    # 较新者）。
     refresh_conflict_flags(db, entry.schedule_set_id, *original_group)
     if (entry.subject_type, entry.subject_id, entry.predicate) != original_group:
         refresh_conflict_flags(
@@ -3883,9 +3884,10 @@ def create_memory_mining_run(
 ) -> MiningRunResponse:
     """回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。
 
-    可学习事件经公共前置筛选（MEM-D1 §7 D3，口径见
+    可学习事件经公共前置筛选（MEM-D1 §7 D3 + MEM-E1b §8，口径见
     memory_solver.learning_basis_events）：当前方案内、最近 90 天滚动窗口、
-    候选未被取消或拒绝、declared_reason 非临时被迫类。配置了 AI 走模型归纳
+    已产生结果版本且未被后续放弃（候选版本曾被发布 = 教务采纳这次调课）、
+    declared_reason 非临时被迫类。配置了 AI 走模型归纳
     （模型只提名，代码按白名单与证据支持性裁决；输入已预筛，提示词不再要求
     模型自行过滤）；未配置或调用失败优雅降级为确定性统计：同主体+同类型+
     同归因类调课 ≥2 次即产生候选。

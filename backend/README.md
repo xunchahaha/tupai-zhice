@@ -204,12 +204,16 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
   （constraint 日期与 `valid_from`/`valid_until` 的**交集**，MEM-D1 D2）随编译进入
   规则 scope，只约束窗口内的课次。
 - **挖掘**：`POST /api/v1/memory/mining-runs` 回顾近期调课事件（含一键归因
-  `declared_reason`）。可学习事件先经**公共前置筛选**（MEM-D1 D3，
+  `declared_reason`）。可学习事件先经**公共前置筛选**（MEM-D1 D3 + MEM-E1b，
   `services/memory_solver.py::learning_basis_events`，AI 与统计两条路径共用）：
-  当前方案内 + **最近 90 天**滚动窗口（上限 200 条）+ **候选未被取消或拒绝**
-  （事件模型里稳定的负向终态是 `candidate_discarded`——候选版本被删除即教务
-  放弃这次调课）+ `declared_reason` 非临时被迫类（临时公差/教师请假/教室故障
-  等一次性事件不进学习集）。配置 AI 时走 `services/ai.py::mine_preferences`
+  当前方案内 + **最近 90 天**滚动窗口（上限 200 条）+ **调课已被采纳**
+  （pending/candidate_ready/candidate_discarded 三个事件状态标签本身都不构成
+  「已被接受」；唯一接受依据是事件已产生结果版本且该版本未被后续放弃——
+  候选版本 `candidate_schedule_id` 曾被发布（status ∈ published/archived/
+  rolled_back）= 教务采纳了这次调课；停在 draft 的候选只是待发布提议。发布
+  不回写事件状态，所以排除按候选版本正判实现。未被接受的尝试留历史、可分析
+  失败原因，但不作偏好证据）+ `declared_reason` 非临时被迫类（临时公差/教师
+  请假/教室故障等一次性事件不进学习集）。配置 AI 时走 `services/ai.py::mine_preferences`
   （模型只提名，允许弃权并可输出 `reasons` 自述失败原因；提示词注明输入已预筛，
   不要求模型自行过滤）；代码做**两道校验**（MEM-C2 修正 3）：结构校验（主体
   在事件里出现过、约束的时段/教室/日期必须来自候选引用的证据事件——教室按事件
@@ -229,22 +233,28 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
   **仅当新条目已获授权**——未授权候选与旧条目窗口错开时并存不动）；相邻不重叠 →
   时间切片并存；窗口重叠且约束互斥（`prefer_*` 目标集不相交或数值谓词取值不同；
   `avoid_*` 取并集恒兼容）→ **候选提出冲突**（MEM-D1 D1）。
-- **冲突只由候选提出，裁决是显式操作（MEM-D1 D1）**：`conflict` 标记是候选侧
-  `proposed_conflict`——只落在提出方（组内较新条目）上，被点名的旧 confirmed
-  条目**照常编译**（outcome=applied），其编译参与度永不因未授权候选而改变。
-  提出方本身已是 confirmed/授权试用时编译期跳过（outcome=conflict_unresolved）。
+- **冲突标记 = 提出方侧 proposed_conflict，裁决是显式操作（MEM-D1 D1 + MEM-E1a）**：
+  `conflict` 标记只落在提出方上——提出方**按授权状态判定**（MEM-E1a）：未授权
+  条目（`probation` 且未授权试用）永远只能是提出方，创建时间仅用于同授权级别
+  内的归属兜底（双方都未授权或都已授权时落较新者）；被点名的对侧状态与编译
+  参与度永不因标记而改变。conflict 的**编译排除只作用于未授权条目**（本就不进
+  求解输入，outcome=`conflict_unresolved`）；已授权条目带标记照常编译
+  （outcome=`applied`，detail 注明「存在未裁决冲突提议，求解仍按现值执行」）。
   裁决三动作全部走既有 transition 端点：**保留旧弃新** = 候选 `rejected`；
   **以新替旧** = 旧条目 transition `expired` 且带 `supersedes=<候选 id>`
   （provenance 记 superseded_by）+ 候选 transition `confirmed`——切换只发生在
   裁决之后；**授权试用** = `action=authorize_trial`（旧新并存：旧全权、候选
   试用期小权重，provenance 记 `conflict_resolved_with` 不再重打标）。
   `refresh_conflict_flags` 是创建/编辑/确认/失效/拒绝/授权试用共用的唯一冲突
-  重算入口：标记按「落提出方」重算，**日期窗口不相交不算冲突**（D2），对方
-  离开活跃集或已显式裁决共存时自动清标；`PATCH /memory/preferences/{id}` 编辑
-  约束/有效期/谓词后同样触发重算。
-- **两层日期取交集（MEM-D1 D2）**：编译窗口 = constraint 内 `date_from/date_to`
-  与条目级 `valid_from/valid_until` 的**交集**（旧实现是条目级覆盖 constraint），
-  交集为空 → outcome=`not_applicable`（明确不适用），条目不进编译。
+  重算入口：标记按「授权状态定提出方」重算，窗口重叠按**实际生效窗口**
+  （约束∩条目级交集，MEM-E1c）判断，任一侧交集为空（not_applicable）不参与
+  配对，对方离开活跃集或已显式裁决共存时自动清标；`PATCH /memory/preferences/{id}`
+  编辑约束/有效期/谓词后同样触发重算。
+- **两层日期取交集（MEM-D1 D2 + MEM-E1c）**：编译窗口 = constraint 内
+  `date_from/date_to` 与条目级 `valid_from/valid_until` 的**交集**（旧实现是
+  条目级覆盖 constraint），交集为空 → outcome=`not_applicable`（明确不适用），
+  条目不进编译、也不参与冲突配对——冲突配对与编译共用同一窗口口径，实际作用
+  日期不重叠的偏好不再被误标冲突。
 - **求解联动（创建时冻结）**：`api.create_solver_run` 在创建任务时即调
   `services/memory_solver.py::compile_memory_state`，把条目快照、编译后的内部软规则、
   逐条使用结果（applied/not_authorized/expired/unsupported_predicate/converted_to_rule/

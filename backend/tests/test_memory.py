@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 import app.api as api
 from app.db import SessionLocal
@@ -115,7 +116,38 @@ def _add_reschedule_event(
     payload: dict[str, Any],
     declared_reason: str | None = None,
 ) -> RescheduleEvent:
+    """candidate_ready 事件默认挂一个已发布候选版本（MEM-E1b：candidate_schedule_id
+    非空 = 已产生结果版本且未被后续放弃，是学习集要求的接受依据）。"""
     with SessionLocal() as db:
+        snapshot_id = db.scalar(
+            select(DataSnapshot.id).where(DataSnapshot.schedule_set_id == scope_id)
+        )
+        assert snapshot_id is not None
+        next_no = int(
+            db.scalar(
+                select(func.max(ScheduleVersion.version_no)).where(
+                    ScheduleVersion.schedule_set_id == scope_id
+                )
+            )
+            or 0
+        ) + 1
+        run = SolverRun(
+            schedule_set_id=scope_id,
+            snapshot_id=snapshot_id,
+            status="completed",
+            request_payload={},
+        )
+        db.add(run)
+        db.flush()
+        candidate = ScheduleVersion(
+            schedule_set_id=scope_id,
+            version_no=next_no,
+            name=f"调课候选 V{next_no}",
+            solver_run_id=run.id,
+            status="published",
+        )
+        db.add(candidate)
+        db.flush()
         event = RescheduleEvent(
             schedule_set_id=scope_id,
             event_type=event_type,
@@ -124,6 +156,7 @@ def _add_reschedule_event(
             payload=payload,
             status="candidate_ready",
             parent_schedule_id=version_id,
+            candidate_schedule_id=candidate.id,
         )
         db.add(event)
         db.commit()

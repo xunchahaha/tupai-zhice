@@ -615,11 +615,12 @@ class PreferenceResponse(ORMModel):
     valid_until: date | None = None
     trial_authorized: bool = False
     trial_until: date | None = None
-    # 矛盾消解（MEM-C2 修正 4 / MEM-D1 语义）：候选侧 proposed_conflict 标——
-    # 本条与同主体同类条目窗口重叠且约束互斥时落在提出方（较新条目）上；
-    # 被点名的旧条目不受影响、照常编译（outcome=applied）。本条为授权试用或
-    # confirmed 时编译期跳过（outcome=conflict_unresolved），教务按三动作裁决
-    # （保留旧弃新/以新替旧/授权试用）后由后端重算清除；前端 amber 徽标提示。
+    # 矛盾消解（MEM-C2 修正 4 / MEM-D1 / MEM-E1a）：proposed_conflict 标——本条
+    # 与同主体同类条目实际生效窗口重叠且约束互斥时落在提出方上（按授权状态判定：
+    # 未授权条目永远是提出方，同级取较新者）；被点名的对侧不受影响、照常编译。
+    # conflict 的编译排除只作用于未授权条目（conflict_unresolved）；已授权条目带
+    # 标记照常 applied（detail 注明），教务按三动作裁决（保留旧弃新/以新替旧/
+    # 授权试用）后由后端重算清除；前端 amber 徽标提示。
     conflict: bool = False
     provenance: dict[str, Any]
     created_at: datetime
