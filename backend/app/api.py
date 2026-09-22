@@ -116,6 +116,7 @@ from .schemas import (
     FeishuWorkspaceCreate,
     FeishuWorkspaceResponse,
     GoalChecklistItem,
+    GoalChecklistReplaceRequest,
     GoalCreateRequest,
     GoalDetailResponse,
     GoalResponse,
@@ -4238,6 +4239,8 @@ def _goal_response(db: Session, goal: SolveGoal, run_count: int | None = None) -
         )
     response = GoalResponse.model_validate(goal)
     response.run_count = run_count
+    # 清单版本号（MEM-D3）：初始清单为 v1，每修订一次 +1（历史在 checklist_history）。
+    response.checklist_version = len(goal.checklist_history or []) + 1
     return response
 
 
@@ -4349,7 +4352,76 @@ def get_goal(goal_id: str, db: Db, user: CurrentUser, scope: ViewerScope) -> Goa
     latest = next((run for run in runs if run.id == goal.latest_run_id), None)
     response.latest_report = latest.goal_report if latest is not None else None
     response.run_count = len(runs)
+    response.checklist_history = list(goal.checklist_history or [])
+    response.checklist_version = len(response.checklist_history) + 1
     return response
+
+
+@router.patch("/goals/{goal_id}/checklist", response_model=GoalResponse, tags=["goals"])
+def replace_goal_checklist(
+    goal_id: str,
+    payload: GoalChecklistReplaceRequest,
+    db: Db,
+    user: AdminOrScheduler,
+    scope: SchedulerScope,
+) -> GoalResponse:
+    """整体替换验收清单（MEM-D3）：补救动作不改目标归属，清单可继续修订。
+
+    校验复用创建目标时的同一套规则：key 唯一、kind 白名单（schema Literal）、
+    底线项强制并入（`ensure_bottom_line_items`——底线不可删除，用户传什么都会
+    被补回）。每次保存把旧清单快照进 `checklist_history`（含版本号/时间/操作人），
+    当前版本号 = 历史长度 + 1；历史只追加不改写，正在验收的口径永远以
+    `checklist` 为准。目标状态不由清单编辑改动——状态永远反映最近一次验收。
+    """
+    goal = get_scoped_or_404(db, SolveGoal, goal_id, scope)
+    if goal.status == "abandoned":
+        raise HTTPException(status_code=409, detail="目标已放弃，清单不再接受修订")
+    new_items = payload.checklist
+    if not new_items:
+        raise HTTPException(status_code=422, detail="验收清单不能为空")
+    keys = [item.key for item in new_items]
+    if len(set(keys)) != len(keys):
+        raise HTTPException(status_code=422, detail="验收清单的 key 不能重复")
+    new_checklist = [item.model_dump() for item in new_items]
+    # 底线验收与自定义清单并列（MEM-D2/D4c，修订时同样强制）：旧清单或新清单
+    # 里出现过 coverage 口径，就视为「有明确目标集合」，底线 coverage 缺失即补回。
+    old_checklist = list(goal.checklist or [])
+    has_target_set = any(
+        str(item.get("kind")) == "coverage" for item in [*old_checklist, *new_checklist]
+    )
+    new_checklist = ensure_bottom_line_items(new_checklist, has_target_set=has_target_set)
+    old_version = len(goal.checklist_history or []) + 1
+    goal.checklist_history = [
+        *(goal.checklist_history or []),
+        {
+            "version": old_version,
+            "saved_at": shanghai_now().isoformat(),
+            "saved_by": user.id,
+            "items": old_checklist,
+        },
+    ]
+    goal.checklist = new_checklist
+    audit(
+        db,
+        user,
+        "update_checklist",
+        "solve_goal",
+        goal.id,
+        {
+            "from_version": old_version,
+            "to_version": old_version + 1,
+            "checklist_kinds": sorted(
+                {
+                    str(item.get("kind"))
+                    for item in new_checklist
+                    if str(item.get("kind")) in GOAL_CHECKLIST_KINDS
+                }
+            ),
+        },
+    )
+    db.commit()
+    db.refresh(goal)
+    return _goal_response(db, goal)
 
 
 @router.post("/goals/{goal_id}/abandon", response_model=GoalResponse, tags=["goals"])

@@ -15,6 +15,7 @@ export interface GoalResponse {
   schedule_set_id: string;
   instruction: string;
   checklist: GoalResponseChecklistItem[];
+  checklist_version?: number;
   status: string;
   acceptance_status?: string;
   acceptance_detail?: GoalResponseAcceptanceDetail;

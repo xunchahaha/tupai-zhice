@@ -678,6 +678,18 @@ class GoalForbiddenSlot(BaseModel):
     slot_business_ids: list[str] = Field(min_length=1)
 
 
+class GoalChecklistReplaceRequest(BaseModel):
+    """整体替换验收清单（MEM-D3 `PATCH /goals/{id}/checklist` 的 body）。
+
+    传完整 checklist 数组（不是增量 patch）：验收口径必须始终是一份完整、
+    自洽的清单，增量合并会把「删了一项」表达成「没提这一项」。kind 白名单由
+    `GoalChecklistItem` 的 Literal 把关；key 唯一与底线项强制并入在 API 层
+    复用创建目标时的同一套校验（`ensure_bottom_line_items`）。
+    """
+
+    checklist: list[GoalChecklistItem]
+
+
 class GoalCreateRequest(BaseModel):
     """创建持久目标。
 
@@ -711,6 +723,9 @@ class GoalResponse(ORMModel):
     schedule_set_id: str
     instruction: str
     checklist: list[dict[str, Any]]
+    # 清单版本号（MEM-D3）：初始清单为 v1，每次 PATCH /checklist 修订 +1；
+    # 修订历史在 GoalDetailResponse.checklist_history。
+    checklist_version: int = 1
     status: str
     # 最近一次验收执行本身的状态（MEM-D2/D6）：pending=报告未生成、
     # completed=报告已落库、failed=验收异常（原因见 acceptance_detail）。
@@ -794,6 +809,9 @@ class GoalDetailResponse(GoalResponse):
 
     runs: list[SolverRunResponse] = Field(default_factory=list)
     latest_report: dict[str, Any] | None = None
+    # 清单修订历史（MEM-D3）：[{version, saved_at, saved_by, items}] 只读快照，
+    # version 是被替换清单的版本号（当前版本 = len(self.checklist_history)+1）。
+    checklist_history: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AssignmentResponse(BaseModel):

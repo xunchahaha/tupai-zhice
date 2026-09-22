@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import {
   getListPreferencesApiV1MemoryPreferencesGetQueryKey,
+  transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost,
   useConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost,
   useCreateMemoryMiningRunApiV1MemoryMiningRunsPost,
   useListClassGroupsApiV1ClassGroupsGet,
@@ -100,6 +101,29 @@ function conflictWithIds(entry: PreferenceResponse): string[] {
   return Array.isArray(value) ? value.map(String) : [];
 }
 
+/**
+ * 活跃冲突对（MEM-D1 proposed_conflict）：标记只落在提出方（组内较新条目）上，
+ * 双方 provenance.conflict_with 互记对方 id 仅供定位。据此从任意一侧的卡片
+ * 还原出 (提出方=新, 被点名=旧)：被标记方是旧条目而非候选的场景同样适用——
+ * 裁决动作作用于整对，而不是当前这一行。对方已离开活跃集（已裁决/已失效）
+ * 时返回 null，不出按钮。
+ */
+function activeConflictPair(
+  entry: PreferenceResponse,
+  entries: PreferenceResponse[],
+): { proposer: PreferenceResponse; previous: PreferenceResponse } | null {
+  const counterpartIds = conflictWithIds(entry);
+  if (!counterpartIds.length) return null;
+  for (const id of counterpartIds) {
+    const other = entries.find((item) => item.id === id);
+    if (!other || (other.status !== "probation" && other.status !== "confirmed")) continue;
+    const proposer = entry.conflict ? entry : other.conflict ? other : null;
+    if (!proposer) continue;
+    return { proposer, previous: proposer.id === entry.id ? other : entry };
+  }
+  return null;
+}
+
 function predicateLabel(value: string): string {
   return PREDICATE_LABELS[value] ?? value;
 }
@@ -188,7 +212,11 @@ export function MemoryPage() {
   const [adjustingId, setAdjustingId] = useState<string | null>(null);
   // trialingId：正在「授权试用」的条目；天数由内联表单 TrialForm 自己持有。
   const [trialingId, setTrialingId] = useState<string | null>(null);
-  const [rejecting, setRejecting] = useState<PreferenceResponse | null>(null);
+  // rejecting：正在走「拒绝」弹窗的候选；keepOld=true 表示这是冲突裁决里的
+  // 「保留旧弃新」（拒绝的是提出方候选，旧条目保持原样），弹窗文案随之切换。
+  const [rejecting, setRejecting] = useState<{ entry: PreferenceResponse; keepOld: boolean } | null>(null);
+  // replacing：「以新替旧」的两步调用在途（旧条目 expired+supersedes → 候选 confirmed）。
+  const [replacing, setReplacing] = useState(false);
   const [expiring, setExpiring] = useState<PreferenceResponse | null>(null);
   const [converting, setConverting] = useState<PreferenceResponse | null>(null);
 
@@ -269,33 +297,6 @@ export function MemoryPage() {
   };
   const slotLabel = (id: string): string => nameMaps.slots.get(id) ?? formatSlot(id);
   const summaryOf = (entry: PreferenceResponse): string => constraintSummary(entry.constraint, slotLabel);
-  // 矛盾消解（MEM-C2 修正 4）一键裁决：复用现有 expire 能力。
-  // 保留旧弃新 = 把 provenance.conflict_with 里的对方条目停用；以新替旧 = 停用本条。
-  const resolveConflictKeep = (entry: PreferenceResponse) => {
-    for (const otherId of conflictWithIds(entry)) {
-      transition.mutate({
-        entryId: otherId,
-        data: { target_status: "expired", reason: "冲突处理：保留本条，弃置对方" },
-      });
-    }
-  };
-  const resolveConflictReplace = (entry: PreferenceResponse) => {
-    transition.mutate({
-      entryId: entry.id,
-      data: { target_status: "expired", reason: "冲突处理：以新偏好替换旧偏好" },
-    });
-  };
-  const conflictActions = (entry: PreferenceResponse) =>
-    entry.conflict ? (
-      <>
-        <Button size="sm" variant="outline" onClick={() => resolveConflictKeep(entry)}>
-          保留旧弃新
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => resolveConflictReplace(entry)}>
-          以新替旧
-        </Button>
-      </>
-    ) : null;
   // amber 提示徽标：与旧偏好冲突 / 此前被拒（带新证据重提的候选）。
   const memoryBadges = (entry: PreferenceResponse) => (
     <>
@@ -314,6 +315,51 @@ export function MemoryPage() {
 
   const entries = asArray<PreferenceResponse>(preferences.data);
   const probation = entries.filter((entry) => entry.status === "probation");
+
+  // 冲突裁决三动作（MEM-D1，语义以 proposed_conflict 为准）：
+  // - 保留旧弃新 = 拒绝提出方候选（带 rejection_reason，走既有拒绝弹窗），旧条目不动；
+  // - 以新替旧 = 旧条目 transition expired 且带 supersedes=<候选 id>（provenance 记
+  //   superseded_by 审计链），随后候选 transition confirmed——两个调用必须按序
+  //   （旧条目先退场，候选再正式生效），因此这里不走 mutation 队列而是顺序 await；
+  // - 授权试用 = 既有 authorize_trial（旧新并存）。
+  // 按钮从冲突对的任意一侧（候选卡或被点名的旧条目行）进入都作用于整对。
+  const conflictPairOf = (entry: PreferenceResponse) => activeConflictPair(entry, entries);
+  const resolveConflictReplace = async (pair: { proposer: PreferenceResponse; previous: PreferenceResponse }) => {
+    setReplacing(true);
+    try {
+      await transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost(pair.previous.id, {
+        target_status: "expired",
+        supersedes: pair.proposer.id,
+        reason: "冲突处理：以新偏好替换旧偏好",
+      });
+      await transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost(pair.proposer.id, {
+        target_status: "confirmed",
+        reason: "冲突处理：以新偏好替换旧偏好（旧条目已带 supersedes 审计链退场）",
+      });
+      invalidate();
+      toast.success("已用新偏好替换旧偏好，新偏好正式生效");
+    } catch (error) {
+      toast.error(errorMessage(error));
+      invalidate();
+    } finally {
+      setReplacing(false);
+    }
+  };
+  const conflictActions = (entry: PreferenceResponse) => {
+    const pair = conflictPairOf(entry);
+    if (!pair) return null;
+    return (
+      <>
+        <Button size="sm" variant="outline" disabled={replacing} onClick={() => setRejecting({ entry: pair.proposer, keepOld: true })}>
+          保留旧弃新
+        </Button>
+        <Button size="sm" variant="outline" disabled={replacing} onClick={() => void resolveConflictReplace(pair)}>
+          {replacing ? "替换中…" : "以新替旧"}
+        </Button>
+      </>
+    );
+  };
+
   const visible = entries.filter(
     (entry) =>
       (statusFilter === "all" || entry.status === statusFilter)
@@ -486,7 +532,7 @@ export function MemoryPage() {
                           <Pencil className="size-3.5" />
                           调整后采纳
                         </Button>
-                        <Button size="sm" variant="outline" onClick={() => setRejecting(entry)}>
+                        <Button size="sm" variant="outline" onClick={() => setRejecting({ entry, keepOld: false })}>
                           <X className="size-3.5" />
                           拒绝
                         </Button>
@@ -550,10 +596,11 @@ export function MemoryPage() {
       )}
 
       <RejectDialog
-        key={rejecting?.id ?? "none"}
-        entry={rejecting}
+        key={rejecting ? `${rejecting.entry.id}-${rejecting.keepOld}` : "none"}
+        entry={rejecting?.entry ?? null}
+        keepOld={rejecting?.keepOld ?? false}
         subjectLabel={
-          rejecting ? `${subjectName(rejecting)} · ${predicateLabel(rejecting.predicate)}` : ""
+          rejecting ? `${subjectName(rejecting.entry)} · ${predicateLabel(rejecting.entry.predicate)}` : ""
         }
         pending={transition.isPending}
         onOpenChange={(open) => {
@@ -562,7 +609,7 @@ export function MemoryPage() {
         onConfirm={(reason, note) => {
           if (!rejecting) return;
           transition.mutate({
-            entryId: rejecting.id,
+            entryId: rejecting.entry.id,
             data: {
               target_status: "rejected",
               rejection_reason: reason as PreferenceTransitionRejectionReason,
@@ -633,15 +680,19 @@ function ChipRemove({ label, onRemove }: { label: string; onRemove: () => void }
 }
 
 /** 「拒绝」弹窗（MEM-C2 修正 4）：原因五选必填 + 选「其他」时显示备注输入框。
- *  提交后后端把拒绝原因落 preference_rejections，同批证据的候选不再复现。 */
+ *  提交后后端把拒绝原因落 preference_rejections，同批证据的候选不再复现。
+ *  keepOld=true（MEM-D1 冲突裁决「保留旧弃新」）：拒绝的对象是提出方候选，
+ *  被点名的旧条目保持原样，文案据此切换。 */
 function RejectDialog({
   entry,
+  keepOld,
   subjectLabel,
   pending,
   onOpenChange,
   onConfirm,
 }: {
   entry: PreferenceResponse | null;
+  keepOld?: boolean;
   subjectLabel: string;
   pending?: boolean;
   onOpenChange: (open: boolean) => void;
@@ -652,10 +703,14 @@ function RejectDialog({
   return (
     <Dialog open={Boolean(entry)} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
       <DialogContent className="max-w-md">
-        <DialogTitle className="text-base font-semibold text-zinc-950">拒绝这条候选偏好？</DialogTitle>
+        <DialogTitle className="text-base font-semibold text-zinc-950">
+          {keepOld ? "保留旧偏好，拒绝这条新候选？" : "拒绝这条候选偏好？"}
+        </DialogTitle>
         <DialogDescription className="mt-2 text-sm leading-6 text-zinc-500">
           {entry
-            ? `「${subjectLabel}」将被标记为已拒绝，不再参与排课；同一批证据的同类归纳不再提醒。`
+            ? `「${subjectLabel}」将被标记为已拒绝，不再参与排课；同一批证据的同类归纳不再提醒。${
+                keepOld ? "与之冲突的旧偏好保持生效，不受影响。" : ""
+              }`
             : ""}
         </DialogDescription>
         <fieldset className="mt-4">
@@ -697,7 +752,7 @@ function RejectDialog({
             disabled={pending || !reason}
             onClick={() => onConfirm(reason, reason === "other" && note.trim() ? note.trim() : null)}
           >
-            确认拒绝
+            {keepOld ? "拒绝新候选" : "确认拒绝"}
           </Button>
         </div>
       </DialogContent>

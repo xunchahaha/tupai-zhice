@@ -316,6 +316,20 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
 - **关联求解**：`POST /api/v1/solver-runs` 与 `POST /api/v1/assistant/solve` 可选
   `goal_id`；自动验收钩子在 `services/tasks.py::_persist_result` 的事务之外单独
   提交——验收层任何异常都不影响求解结果落库。已放弃目标拒绝再关联新任务（409）。
+- **清单修订与历史（MEM-D3）**：`PATCH /api/v1/goals/{id}/checklist` 整体替换
+  验收清单——body 为完整 checklist 数组，校验复用创建口径（key 唯一、kind 白名单、
+  `ensure_bottom_line_items` 强制并入底线）；每次保存把旧清单快照进
+  `solve_goals.checklist_history`（`[{version, saved_at, saved_by, items}]`，
+  迁移 `d7f2a9c4b8e1`，down=e5c9a1d3f7b2），当前版本号 =
+  `GoalResponse.checklist_version`（历史长度+1，初始 v1），历史只追加不改写。
+  典型用途：禁排占位项补参（量化 subject/slot 后从「恒不通过」恢复参与验收）。
+  已放弃目标 409、跨方案 404；目标状态不由清单编辑改动。
+- **目标连续性（MEM-D3）**：补救不脱离原目标——前端重新解析保留已绑定 goalId
+  （口径不一致以提示条说明「清单可继续修订」）；手动求解携带会话持有的
+  `goal_id`（无目标时 null，行为不变）；solver 页支持 `?goal=<id>` 深链绑定
+  （goals 详情「继续处理 → 修正范围后重新求解」入口跳转，open/awaiting_decision
+  均可见，awaiting_decision 的决策文案完整展示）；选基准版本时创建清单自动附带
+  `max_changes` 项（params.baseline=所选版本，上限默认 50，仅设验收上限）。
 - **与 interpret 打通**：`/assistant/interpret`（含流式）响应携带
   `goal_checklist_draft`（业务范围→coverage、日期→date_range_match、禁排语→
   forbidden_slot_free 占位）与 `checklist_warnings`；占位项 `needs_params=true`，

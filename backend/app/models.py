@@ -614,6 +614,11 @@ class SolveGoal(TimestampMixin, Base):
     # 逐项验收清单：[{key, requirement, kind, params}]，kind 枚举见
     # services/goal.py GOAL_CHECKLIST_KINDS。
     checklist: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    # 清单修订历史（MEM-D3）：PATCH /goals/{id}/checklist 每次保存把旧清单快照
+    # 进这里（[{version, saved_at, saved_by, items}]，version 是被替换清单的
+    # 版本号）；当前版本号 = len(checklist_history) + 1，初始清单为 v1。
+    # 审计靠快照本身，不改写 checklist——正在验收的口径永远以 checklist 为准。
+    checklist_history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), default="open", index=True)
     latest_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)

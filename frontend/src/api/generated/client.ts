@@ -64,6 +64,7 @@ import type {
   FeishuSyncRequest,
   FeishuWorkspaceCreate,
   FeishuWorkspaceResponse,
+  GoalChecklistReplaceRequest,
   GoalCreateRequest,
   GoalDetailResponse,
   GoalResponse,
@@ -5630,6 +5631,78 @@ export function useGetGoalApiV1GoalsGoalIdGet<TData = Awaited<ReturnType<typeof 
 
 
 
+/**
+ * 整体替换验收清单（MEM-D3）：补救动作不改目标归属，清单可继续修订。
+
+校验复用创建目标时的同一套规则：key 唯一、kind 白名单（schema Literal）、
+底线项强制并入（`ensure_bottom_line_items`——底线不可删除，用户传什么都会
+被补回）。每次保存把旧清单快照进 `checklist_history`（含版本号/时间/操作人），
+当前版本号 = 历史长度 + 1；历史只追加不改写，正在验收的口径永远以
+`checklist` 为准。目标状态不由清单编辑改动——状态永远反映最近一次验收。
+ * @summary Replace Goal Checklist
+ */
+export const replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch = (
+    goalId: string,
+    goalChecklistReplaceRequest: GoalChecklistReplaceRequest,
+ ) => {
+      
+      
+      return customInstance<GoalResponse>(
+      {url: `/api/v1/goals/${goalId}/checklist`, method: 'PATCH',
+      headers: {'Content-Type': 'application/json', },
+      data: goalChecklistReplaceRequest
+    },
+      );
+    }
+  
+
+
+export const getReplaceGoalChecklistApiV1GoalsGoalIdChecklistPatchMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch>>, TError,{goalId: string;data: GoalChecklistReplaceRequest}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch>>, TError,{goalId: string;data: GoalChecklistReplaceRequest}, TContext> => {
+
+const mutationKey = ['replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch>>, {goalId: string;data: GoalChecklistReplaceRequest}> = (props) => {
+          const {goalId,data} = props ?? {};
+
+          return  replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch(goalId,data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ReplaceGoalChecklistApiV1GoalsGoalIdChecklistPatchMutationResult = NonNullable<Awaited<ReturnType<typeof replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch>>>
+    export type ReplaceGoalChecklistApiV1GoalsGoalIdChecklistPatchMutationBody = GoalChecklistReplaceRequest
+    export type ReplaceGoalChecklistApiV1GoalsGoalIdChecklistPatchMutationError = HTTPValidationError
+
+    /**
+ * @summary Replace Goal Checklist
+ */
+export const useReplaceGoalChecklistApiV1GoalsGoalIdChecklistPatch = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch>>, TError,{goalId: string;data: GoalChecklistReplaceRequest}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch>>,
+        TError,
+        {goalId: string;data: GoalChecklistReplaceRequest},
+        TContext
+      > => {
+
+      const mutationOptions = getReplaceGoalChecklistApiV1GoalsGoalIdChecklistPatchMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
 /**
  * 人工放弃目标（终态）。放弃是显式的人的决定，验收器不会自动放弃任何目标。
  * @summary Abandon Goal

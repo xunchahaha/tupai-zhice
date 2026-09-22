@@ -28,6 +28,8 @@ const OUTCOME_LABELS: Record<string, string> = {
   converted_to_rule: "已转正式规则",
   hard_requires_conversion: "待转正式规则",
   conflict_unresolved: "冲突待处理",
+  // MEM-D1 D2：constraint 日期窗口与条目有效期交集为空 = 明确不适用（不是冲突）。
+  not_applicable: "不适用：日期窗口与约束范围不相交",
   compile_error: "编译失败",
 };
 

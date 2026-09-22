@@ -794,3 +794,180 @@ def test_goal_api_create_solve_evaluate_abandon(
     target = next(row for row in rows if row["id"] == goal["id"])
     assert target["status"] == "abandoned"
     assert target["run_count"] >= 1
+
+
+# ------------------------------------------------- 清单修订端点（MEM-D3）
+
+
+def test_goal_checklist_patch_quantifies_forbidden_placeholder(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """禁排占位项补参（MEM-D3）：PATCH 清单量化参数后，该项从「恒不通过」恢复
+    参与验收——验收口径永远以当前 checklist 为准，报告随之反映新参数。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    course = _add_course(scope["scope_id"], "C23", lesson_date=date(2026, 10, 5))
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={
+            "instruction": "排 B1 班的课，张老师别排在被点名的时段",
+            "checklist": [
+                {
+                    "key": "forbidden_slot_free-draft",
+                    "requirement": "禁排要求待量化：补充主体与具体时段后才能独立复核",
+                    "kind": "forbidden_slot_free",
+                    "params": {
+                        "subject_type": "teacher",
+                        "subject_ids": [],
+                        "slot_business_ids": [],
+                        "needs_params": True,
+                    },
+                }
+            ],
+        },
+    )
+    assert created.status_code == 201, created.text
+    goal = created.json()
+    assert goal["checklist_version"] == 1
+    # 未量化前：unverifiable，绝不因「没检测到越界」放行。
+    run_unquantified = _make_run(scope["scope_id"], goal["id"], [_assignment(course, slot="S2")])
+    with SessionLocal() as db:
+        report = apply_goal_evaluation(db, db.get(SolverRun, run_unquantified.id))
+    assert report is not None
+    forbidden = next(i for i in report["items"] if i["kind"] == "forbidden_slot_free")
+    assert forbidden["verdict"] == "unverifiable"
+
+    # PATCH 量化参数（教师 T9 不占 S2）→ 版本 +1，旧清单快照进历史。
+    patched = client.patch(
+        f"/api/v1/goals/{goal['id']}/checklist",
+        headers=headers,
+        json={
+            "checklist": [
+                {
+                    "key": "forbidden_slot_free-1",
+                    "requirement": "教师 T9 不占用指定时段（S2）——独立复核，不信任求解器自报",
+                    "kind": "forbidden_slot_free",
+                    "params": {
+                        "subject_type": "teacher",
+                        "subject_ids": ["T9"],
+                        "slot_business_ids": ["S2"],
+                    },
+                }
+            ]
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["checklist_version"] == 2
+    assert body["checklist"][0]["params"]["slot_business_ids"] == ["S2"]
+
+    # 量化后：占用了禁排时段 → failed（不再是 unverifiable 恒不通过，而是真实复核）。
+    run_violating = _make_run(scope["scope_id"], goal["id"], [_assignment(course, slot="S2")])
+    with SessionLocal() as db:
+        report_bad = apply_goal_evaluation(db, db.get(SolverRun, run_violating.id))
+    assert report_bad is not None
+    forbidden_bad = next(i for i in report_bad["items"] if i["kind"] == "forbidden_slot_free")
+    assert forbidden_bad["passed"] is False
+    assert forbidden_bad["verdict"] == "failed"
+    assert report_bad["decision"]["status"] == "awaiting_decision"
+
+    # 换到非禁排时段 → 通过。
+    run_ok = _make_run(scope["scope_id"], goal["id"], [_assignment(course, slot="S1")])
+    with SessionLocal() as db:
+        report_ok = apply_goal_evaluation(db, db.get(SolverRun, run_ok.id))
+    assert report_ok is not None
+    forbidden_ok = next(i for i in report_ok["items"] if i["kind"] == "forbidden_slot_free")
+    assert forbidden_ok["passed"] is True
+
+    # 详情带只读历史：v1 快照保存了占位清单原文。
+    detail = client.get(f"/api/v1/goals/{goal['id']}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    history = detail.json()["checklist_history"]
+    assert [entry["version"] for entry in history] == [1]
+    assert history[0]["items"][0]["key"] == "forbidden_slot_free-draft"
+    assert history[0]["items"][0]["params"].get("needs_params") is True
+    assert detail.json()["checklist_version"] == 2
+
+
+def test_goal_checklist_patch_validations(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """PATCH 清单校验：复用创建时的校验（空清单/key 唯一/kind 白名单/底线不可删），
+    版本号随修订递增，已放弃目标 409，跨方案 404。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "重排 B1 班课表", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+
+    def patch(body: dict[str, Any]) -> Any:
+        return client.patch(f"/api/v1/goals/{goal_id}/checklist", headers=headers, json=body)
+
+    # 空清单：恒真清单会把缺口洗成达标，必须拒绝（与创建口径一致）。
+    assert patch({"checklist": []}).status_code == 422
+    # key 重复：验收报告按 key 对齐缺口，重复 key 无法定位。
+    dup = patch(
+        {
+            "checklist": [
+                {"key": "a", "requirement": "r", "kind": "draft_only", "params": {}},
+                {"key": "a", "requirement": "r2", "kind": "draft_only", "params": {}},
+            ]
+        }
+    )
+    assert dup.status_code == 422
+    # kind 白名单（schema Literal）：未知验收类型在验收时只能 unverifiable，入口就拒。
+    bad_kind = patch(
+        {"checklist": [{"key": "a", "requirement": "r", "kind": "no_such_kind", "params": {}}]}
+    )
+    assert bad_kind.status_code == 422
+
+    # 底线项不可删除：只传 draft_only，响应仍强制并入门线三项。
+    # 目标创建时带过 class_business_ids（coverage 口径），修订后底线 coverage 也补回。
+    trimmed = patch(
+        {
+            "checklist": [
+                {"key": "custom", "requirement": "只交付草稿", "kind": "draft_only", "params": {}}
+            ]
+        }
+    )
+    assert trimmed.status_code == 200, trimmed.text
+    kinds = {item["kind"] for item in trimmed.json()["checklist"]}
+    assert {"deliverable_exists", "no_hard_conflicts", "coverage", "draft_only"} <= kinds
+    assert trimmed.json()["checklist_version"] == 2
+
+    # 第二次修订：版本 3，历史长度 2（版本 1、2 依序快照）。
+    second = patch(
+        {
+            "checklist": [
+                {"key": "custom", "requirement": "改口径", "kind": "draft_only", "params": {}}
+            ]
+        }
+    )
+    assert second.status_code == 200
+    assert second.json()["checklist_version"] == 3
+    detail = client.get(f"/api/v1/goals/{goal_id}", headers=headers)
+    history = detail.json()["checklist_history"]
+    assert [entry["version"] for entry in history] == [1, 2]
+    assert all(entry["items"] for entry in history)
+
+    # 已放弃目标：终态，清单不再接受修订。
+    abandoned = client.post(f"/api/v1/goals/{goal_id}/abandon", headers=headers)
+    assert abandoned.status_code == 200
+    after_abandon = patch(
+        {"checklist": [{"key": "a", "requirement": "r", "kind": "draft_only", "params": {}}]}
+    )
+    assert after_abandon.status_code == 409
+
+    # 跨方案：goal 属于另一方案时按 404 处理（不作为侧信道暴露存在性）。
+    other = _make_scope(client, auth_headers)
+    cross = client.patch(
+        f"/api/v1/goals/{goal_id}/checklist",
+        headers=other["headers"],
+        json={"checklist": [{"key": "a", "requirement": "r", "kind": "draft_only", "params": {}}]},
+    )
+    assert cross.status_code == 404

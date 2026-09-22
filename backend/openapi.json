@@ -4364,6 +4364,80 @@
         }
       }
     },
+    "/api/v1/goals/{goal_id}/checklist": {
+      "patch": {
+        "tags": [
+          "goals"
+        ],
+        "summary": "Replace Goal Checklist",
+        "description": "整体替换验收清单（MEM-D3）：补救动作不改目标归属，清单可继续修订。\n\n校验复用创建目标时的同一套规则：key 唯一、kind 白名单（schema Literal）、\n底线项强制并入（`ensure_bottom_line_items`——底线不可删除，用户传什么都会\n被补回）。每次保存把旧清单快照进 `checklist_history`（含版本号/时间/操作人），\n当前版本号 = 历史长度 + 1；历史只追加不改写，正在验收的口径永远以\n`checklist` 为准。目标状态不由清单编辑改动——状态永远反映最近一次验收。",
+        "operationId": "replace_goal_checklist_api_v1_goals__goal_id__checklist_patch",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "goal_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Goal Id"
+            }
+          },
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoalChecklistReplaceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/goals/{goal_id}/abandon": {
       "post": {
         "tags": [
@@ -9009,6 +9083,23 @@
         "title": "GoalChecklistItem",
         "description": "逐项验收项（MEM-C3）。kind 与 services/goal.py 验收器一一对应。\n\nparams 是各验收器自己的参数包（coverage 的范围条件、forbidden_slot_free 的\n主体+时段、max_changes 的上限与基准版本、date_range_match 的日期端点）；\n结构由验收器解释，这里不做 cross-field 校验——未知参数在验收时按\n「无法核对=不通过」处理，绝不静默放行。params.bottom_line=True 标记底线\n验收项（MEM-D2/D4c：创建目标时强制并入，不可删除，前端打「底线」徽标）。"
       },
+      "GoalChecklistReplaceRequest": {
+        "properties": {
+          "checklist": {
+            "items": {
+              "$ref": "#/components/schemas/GoalChecklistItem"
+            },
+            "type": "array",
+            "title": "Checklist"
+          }
+        },
+        "type": "object",
+        "required": [
+          "checklist"
+        ],
+        "title": "GoalChecklistReplaceRequest",
+        "description": "整体替换验收清单（MEM-D3 `PATCH /goals/{id}/checklist` 的 body）。\n\n传完整 checklist 数组（不是增量 patch）：验收口径必须始终是一份完整、\n自洽的清单，增量合并会把「删了一项」表达成「没提这一项」。kind 白名单由\n`GoalChecklistItem` 的 Literal 把关；key 唯一与底线项强制并入在 API 层\n复用创建目标时的同一套校验（`ensure_bottom_line_items`）。"
+      },
       "GoalCreateRequest": {
         "properties": {
           "instruction": {
@@ -9149,6 +9240,11 @@
             "type": "array",
             "title": "Checklist"
           },
+          "checklist_version": {
+            "type": "integer",
+            "title": "Checklist Version",
+            "default": 1
+          },
           "status": {
             "type": "string",
             "title": "Status"
@@ -9224,6 +9320,14 @@
               }
             ],
             "title": "Latest Report"
+          },
+          "checklist_history": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Checklist History"
           }
         },
         "type": "object",
@@ -9296,6 +9400,11 @@
             },
             "type": "array",
             "title": "Checklist"
+          },
+          "checklist_version": {
+            "type": "integer",
+            "title": "Checklist Version",
+            "default": 1
           },
           "status": {
             "type": "string",

@@ -109,6 +109,51 @@ const entries = [
 
 const miningResponse = { engine: "deterministic", events_scanned: 4, created: [{ ...entries[0] }, { ...entries[0], id: "pref-new" }], skipped_existing: 0 };
 
+// MEM-D1 冲突对：候选 pref-new（probation，带 proposed_conflict 标记）与旧条目
+// pref-old（confirmed）同主体同谓词，provenance 双向互记对方 id。
+const conflictEntries = [
+  {
+    id: "pref-new",
+    schedule_set_id: "set-1",
+    subject_type: "teacher",
+    subject_id: "T-001",
+    predicate: "avoid_slot",
+    constraint: { slot_ids: [slot.business_id] },
+    modality: "soft",
+    confidence: 0.5,
+    source: "induced_from_adjustment",
+    evidence: ["evt-1", "evt-2"],
+    weight: 40,
+    status: "probation",
+    conflict: true,
+    valid_from: "2026-09-01",
+    valid_until: "2027-02-28",
+    provenance: { origin: "mining", conflict_with: ["pref-old"], rationale: "新归纳与旧偏好互斥" },
+    created_at: "2026-09-10T01:00:00Z",
+    updated_at: "2026-09-10T01:00:00Z",
+  },
+  {
+    id: "pref-old",
+    schedule_set_id: "set-1",
+    subject_type: "teacher",
+    subject_id: "T-001",
+    predicate: "avoid_slot",
+    constraint: { slot_ids: ["SLOT-其他时段"] },
+    modality: "soft",
+    confidence: 0.9,
+    source: "admin_directive",
+    evidence: [],
+    weight: 60,
+    status: "confirmed",
+    conflict: false,
+    valid_from: "2026-09-01",
+    valid_until: "2027-02-28",
+    provenance: { origin: "api", conflict_with: ["pref-new"] },
+    created_at: "2026-09-01T01:00:00Z",
+    updated_at: "2026-09-02T01:00:00Z",
+  },
+];
+
 function renderPage() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -304,5 +349,136 @@ describe("MemoryPage", () => {
       ),
     );
     await waitFor(() => expect(mocks.success).toHaveBeenCalledWith("挖掘出 2 条候选偏好"));
+  });
+});
+
+// MEM-D1 冲突裁决三动作：proposed_conflict 标记落提出方（候选），provenance
+// 双向互记。旧实现（对 conflict_with 对方/本条做 expire）不符合新语义，这里
+// 按新语义固化：保留旧弃新=候选 rejected（带原因）；以新替旧=旧条目 expired
+// 带 supersedes + 候选 confirmed（两次调用按序）；授权试用=既有三态。
+describe("MemoryPage conflict adjudication (MEM-D1)", () => {
+  afterEach(cleanup);
+  beforeEach(() => {
+    mocks.request.mockReset();
+    mocks.success.mockReset();
+    mocks.error.mockReset();
+    mocks.request.mockImplementation(async (config: { url: string; method?: string }) => {
+      const method = (config.method ?? "GET").toUpperCase();
+      if (config.url === "/api/v1/memory/preferences" && method === "GET") return conflictEntries;
+      if (config.url === "/api/v1/teachers") return [{ id: "t1", business_id: "T-001", name: "张老师", subject: "数学" }];
+      if (config.url === "/api/v1/rooms") return [];
+      if (config.url === "/api/v1/class-groups") return [];
+      if (config.url === "/api/v1/course-sessions") return [];
+      if (config.url === "/api/v1/time-slots") return [slot];
+      if (config.url === "/api/v1/solver-runs") return [];
+      if (config.url.startsWith("/api/v1/memory/preferences/")) return conflictEntries[0];
+      return [];
+    });
+  });
+
+  it("rejects the proposer candidate when keeping the old preference (no expire on the old entry)", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    // 候选卡（收件箱）与全部偏好表的行都会出「保留旧弃新 / 以新替旧」按钮
+    //（按钮从冲突对任意一侧进入都作用于整对），取第一个即可。
+    const keepButtons = await screen.findAllByRole("button", { name: "保留旧弃新" });
+    await user.click(keepButtons[0]);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent("保留旧偏好，拒绝这条新候选？");
+    expect(dialog).toHaveTextContent("旧偏好保持生效");
+
+    const confirm = screen.getByRole("button", { name: "拒绝新候选" });
+    expect(confirm).toBeDisabled();
+    await user.click(screen.getByLabelText("归纳错误"));
+    await user.click(confirm);
+
+    await waitFor(() =>
+      expect(mocks.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "/api/v1/memory/preferences/pref-new/transition",
+          method: "POST",
+          data: { target_status: "rejected", rejection_reason: "wrong_generalization", reason: null },
+        }),
+      ),
+    );
+    // 旧条目不被 expire——保留旧弃新只动候选。
+    const oldEntryCalls = mocks.request.mock.calls.filter(
+      ([config]) => String(config.url).includes("pref-old/transition"),
+    );
+    expect(oldEntryCalls).toHaveLength(0);
+  });
+
+  it("replaces the old entry with the candidate via ordered expired+supersedes then confirmed calls", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const replaceButtons = await screen.findAllByRole("button", { name: "以新替旧" });
+    await user.click(replaceButtons[0]);
+
+    // 两次调用必须按序：先旧条目 expired 且带 supersedes=<候选 id>，再候选 confirmed。
+    await waitFor(() =>
+      expect(mocks.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "/api/v1/memory/preferences/pref-new/transition",
+          method: "POST",
+          data: expect.objectContaining({ target_status: "confirmed" }),
+        }),
+      ),
+    );
+    const transitionCalls = mocks.request.mock.calls.filter(([config]) =>
+      String(config.url).endsWith("/transition"),
+    ) as Array<[{ url: string; data: Record<string, unknown> }]>;
+    expect(transitionCalls).toHaveLength(2);
+    expect(transitionCalls[0][0].url).toBe("/api/v1/memory/preferences/pref-old/transition");
+    expect(transitionCalls[0][0].data).toMatchObject({
+      target_status: "expired",
+      supersedes: "pref-new",
+    });
+    expect(transitionCalls[1][0].url).toBe("/api/v1/memory/preferences/pref-new/transition");
+    expect(transitionCalls[1][0].data).toMatchObject({ target_status: "confirmed" });
+    await waitFor(() =>
+      expect(mocks.success).toHaveBeenCalledWith("已用新偏好替换旧偏好，新偏好正式生效"),
+    );
+  });
+
+  it("resolves the pair from the marked old entry row with the same semantics", async () => {
+    const user = userEvent.setup();
+    // 被标记方为「旧条目」而非候选的场景：提出方按 conflict 标记判断，而不是
+    // 按状态判断——从旧条目行进入，裁决动作仍然作用于整对。
+    mocks.request.mockImplementation(async (config: { url: string; method?: string }) => {
+      const method = (config.method ?? "GET").toUpperCase();
+      if (config.url === "/api/v1/memory/preferences" && method === "GET") {
+        return [
+          { ...conflictEntries[0], conflict: false },
+          { ...conflictEntries[1], conflict: true },
+        ];
+      }
+      if (config.url === "/api/v1/teachers") return [{ id: "t1", business_id: "T-001", name: "张老师", subject: "数学" }];
+      if (config.url === "/api/v1/rooms") return [];
+      if (config.url === "/api/v1/class-groups") return [];
+      if (config.url === "/api/v1/course-sessions") return [];
+      if (config.url === "/api/v1/time-slots") return [slot];
+      if (config.url === "/api/v1/solver-runs") return [];
+      if (config.url.startsWith("/api/v1/memory/preferences/")) return conflictEntries[0];
+      return [];
+    });
+    renderPage();
+
+    // 标记在旧条目上：从旧条目的行里点「保留旧弃新」，拒绝的仍是提出方（pref-old）。
+    const keepButtons = await screen.findAllByRole("button", { name: "保留旧弃新" });
+    await user.click(keepButtons[0]);
+    await user.click(screen.getByLabelText("主体识别错误"));
+    await user.click(screen.getByRole("button", { name: "拒绝新候选" }));
+
+    await waitFor(() =>
+      expect(mocks.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "/api/v1/memory/preferences/pref-old/transition",
+          method: "POST",
+          data: { target_status: "rejected", rejection_reason: "subject_misidentified", reason: null },
+        }),
+      ),
+    );
   });
 });

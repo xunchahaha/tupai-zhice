@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { act } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { act, type ReactNode } from "react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SolverPage } from "@/pages/solver-page";
@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   diff: vi.fn<(...args: unknown[]) => { data: undefined }>(() => ({ data: undefined })),
   get: vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => ({ data: { configured: false, app_configuration: { aily_configured: false } } })),
   post: vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => ({ data: {} })),
+  submitMutate: vi.fn(),
   stream: vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => {
     throw new Error("stream unavailable");
   }),
@@ -33,7 +34,7 @@ vi.mock("@/api/generated/client", () => ({
   useListSolverRunsApiV1SolverRunsGet: () => ({ data: mocks.runs }),
   useGetScheduleApiV1SchedulesScheduleIdGet: () => ({ data: undefined }),
   useGetSolverRunApiV1SolverRunsRunIdGet: () => ({ data: undefined }),
-  useSubmitSolverRunApiV1SolverRunsPost: () => ({ mutate: vi.fn() }),
+  useSubmitSolverRunApiV1SolverRunsPost: () => ({ mutate: mocks.submitMutate }),
   useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet: (...args: unknown[]) => mocks.diff(...args),
 }));
 
@@ -63,9 +64,9 @@ function mockInterpretation() {
   };
 }
 
-function renderPage() {
+function renderPage(initialEntry = "/solver", router: ReactNode | null = null) {
   return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <MemoryRouter><SolverPage /></MemoryRouter>
+    {router ?? <MemoryRouter initialEntries={[initialEntry]}><SolverPage /></MemoryRouter>}
   </QueryClientProvider>);
 }
 
@@ -194,6 +195,7 @@ describe("SolverPage goal acceptance loop (MEM-C3)", () => {
   afterEach(cleanup);
   beforeEach(() => {
     mocks.diff.mockClear();
+    mocks.submitMutate.mockClear();
     mocks.runs = [];
     mocks.schedules = [{ id: "v1", status: "published", solver_run_id: "run-1", version_no: 1, name: "已发布课表" }];
     // userEvent 实例跨测试共享会把 pointer 状态带进下一个用例（上一用例卸载
@@ -201,6 +203,12 @@ describe("SolverPage goal acceptance loop (MEM-C3)", () => {
     mocks.get.mockReset().mockResolvedValue({ data: { configured: true, model: "text-model", app_configuration: { aily_configured: false } } });
     mocks.post.mockReset().mockResolvedValue({ data: {} });
     mocks.stream.mockReset().mockRejectedValue(new Error("stream unavailable"));
+    // MEM-D3：手动求解 POST /api/v1/solver-runs 的默认回包。
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      const url = String(args[0]);
+      if (url === "/api/v1/solver-runs") return { data: { id: "run-manual", status: "queued", model_status: null } };
+      return { data: {} };
+    });
   });
 
   it("creates a tracking goal with the prefilled checklist, then solves with goal_id", async () => {
@@ -254,6 +262,113 @@ describe("SolverPage goal acceptance loop (MEM-C3)", () => {
     const [solveUrl, solveBody] = mocks.post.mock.calls[0] as [string, Record<string, unknown>];
     expect(solveUrl).toBe("/api/v1/assistant/solve");
     expect(solveBody.goal_id).toBeNull();
+  });
+
+  it("keeps the goal bound across re-parse and annotates the confirmation card (MEM-D3)", async () => {
+    mockAiConfigured();
+    const interpretation = mockInterpretation() as ReturnType<typeof mockInterpretation> & {
+      goal_checklist_draft: Array<{ key: string; requirement: string; kind: string; params: Record<string, never> }>;
+    };
+    interpretation.goal_checklist_draft = [
+      { key: "coverage", requirement: "覆盖全部目标课次", kind: "coverage", params: {} },
+    ];
+    mocks.stream.mockResolvedValue(interpretation);
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      const url = String(args[0]);
+      if (url === "/api/v1/goals") return { data: { id: "goal-1", status: "open", checklist: [] } };
+      return { data: { id: "run-1", status: "queued", model_status: null } };
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    await user.click(screen.getByRole("button", { name: /确认并开始求解/ }));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
+    const [firstSolveUrl, firstSolveBody] = mocks.post.mock.calls[1] as [string, Record<string, unknown>];
+    expect(firstSolveUrl).toBe("/api/v1/assistant/solve");
+    expect(firstSolveBody.goal_id).toBe("goal-1");
+
+    // 重新解析：不脱离原目标——goalId 保留，确认卡出现「已关联目标 #N」提示条。
+    mocks.post.mockClear();
+    mocks.post.mockImplementation(async () => ({ data: { id: "run-2", status: "queued" } }));
+    await user.click(screen.getByRole("button", { name: "让 AI 解析排课指令" }));
+    expect(await screen.findByText(/已解析完成（用时/)).toBeInTheDocument();
+    expect(screen.getByText(/已关联目标 #goal-1/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /确认并开始求解/ }));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
+    // 不再新建 goal，直接复用已绑定的目标求解。
+    const [solveUrl, reparseSolveBody] = mocks.post.mock.calls[0] as [string, Record<string, unknown>];
+    expect(solveUrl).toBe("/api/v1/assistant/solve");
+    expect(reparseSolveBody.goal_id).toBe("goal-1");
+  });
+
+  it("adds a max_changes checklist item when a baseline is selected (MEM-D3 baseline linkage)", async () => {
+    mockAiConfigured();
+    const interpretation = mockInterpretation() as ReturnType<typeof mockInterpretation> & {
+      goal_checklist_draft: Array<{ key: string; requirement: string; kind: string; params: Record<string, never> }>;
+    };
+    interpretation.goal_checklist_draft = [
+      { key: "coverage", requirement: "覆盖全部目标课次", kind: "coverage", params: {} },
+    ];
+    mocks.stream.mockResolvedValue(interpretation);
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      const url = String(args[0]);
+      if (url === "/api/v1/goals") return { data: { id: "goal-2", status: "open", checklist: [] } };
+      return { data: { id: "run-1", status: "queued", model_status: null } };
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    await user.selectOptions(screen.getByLabelText("基准版本"), "v1");
+    // 选基准后确认卡出现提示 + 上限输入，徽标说明「按变更数验收」。
+    expect(screen.getByText("已选基准：清单将附带变更数验收项")).toBeInTheDocument();
+    expect(screen.getByLabelText("变更数验收上限")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /确认并开始求解/ }));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
+    const [goalUrl, goalBody] = mocks.post.mock.calls[0] as [string, Record<string, unknown>];
+    expect(goalUrl).toBe("/api/v1/goals");
+    const checklist = goalBody.checklist as Array<{ kind: string; params: Record<string, unknown> }>;
+    const maxChanges = checklist.find((item) => item.kind === "max_changes");
+    expect(maxChanges).toBeDefined();
+    expect(maxChanges!.params.baseline_schedule_version_id).toBe("v1");
+    expect(maxChanges!.params.max_changes).toBe(50);
+    expect(goalBody.baseline_schedule_version_id).toBe("v1");
+  });
+
+  it("binds a goal from the ?goal= deep link and carries it through manual solving (MEM-D3)", async () => {
+    const user = userEvent.setup();
+    // AI 未配置 → 手动参数是唯一入口；目标详情按 URL 路由返回固定 goal。
+    mocks.get.mockImplementation(async (...args: unknown[]) => {
+      const url = String(args[0]);
+      if (url === "/api/v1/goals/goal-77") {
+        return { data: { id: "goal-77", status: "open", instruction: "重排 B1 班三天课", checklist: [] } };
+      }
+      return { data: { configured: false, model: null, app_configuration: { aily_configured: false } } };
+    });
+    renderPage("/solver?goal=goal-77");
+    // 挂载即拉取目标并绑定，提示条出现。
+    expect(await screen.findByText(/已关联目标 #goal-77/)).toBeInTheDocument();
+    expect(await screen.findByText("手动求解参数")).toBeInTheDocument();
+    // 手动求解参数区显示关联徽标；提交 /solver-runs 时带上 goal_id。
+    expect(screen.getByText(/本次求解关联目标/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /按参数开始求解/ }));
+    await waitFor(() => expect(mocks.submitMutate).toHaveBeenCalledTimes(1));
+    const submitted = mocks.submitMutate.mock.calls[0][0] as { data: Record<string, unknown> };
+    // 手动求解携带当前会话持有的 goal_id（MEM-D3 目标连续性）。
+    expect(submitted.data.goal_id).toBe("goal-77");
+  });
+
+  it("shows no goal badge and omits goal_id when the session has no bound goal", async () => {
+    const user = userEvent.setup();
+    mocks.get.mockResolvedValue({ data: { configured: false, model: null, app_configuration: { aily_configured: false } } });
+    renderPage("/solver");
+    expect(await screen.findByText("手动求解参数")).toBeInTheDocument();
+    expect(screen.queryByText(/本次求解关联目标/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /按参数开始求解/ }));
+    await waitFor(() => expect(mocks.submitMutate).toHaveBeenCalledTimes(1));
+    const submitted = mocks.submitMutate.mock.calls[0][0] as { data: Record<string, unknown> };
+    // 没有 goal 时行为不变：字段为 null（后端 goal_id 可选，等价于未关联）。
+    expect(submitted.data.goal_id).toBeNull();
+    mocks.submitMutate.mockClear();
   });
 
   it("renders the acceptance report with per-item results and gap next steps", async () => {

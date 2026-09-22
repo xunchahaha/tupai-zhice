@@ -11,6 +11,7 @@ import type { GoalDetailResponseLatestRunId } from './goalDetailResponseLatestRu
 import type { GoalDetailResponseCreatedBy } from './goalDetailResponseCreatedBy';
 import type { SolverRunResponse } from './solverRunResponse';
 import type { GoalDetailResponseLatestReport } from './goalDetailResponseLatestReport';
+import type { GoalDetailResponseChecklistHistoryItem } from './goalDetailResponseChecklistHistoryItem';
 
 /**
  * 目标详情：runs 历史（各 run 带自己的 goal_report）+ 最近一次验收报告。
@@ -20,6 +21,7 @@ export interface GoalDetailResponse {
   schedule_set_id: string;
   instruction: string;
   checklist: GoalDetailResponseChecklistItem[];
+  checklist_version?: number;
   status: string;
   acceptance_status?: string;
   acceptance_detail?: GoalDetailResponseAcceptanceDetail;
@@ -30,4 +32,5 @@ export interface GoalDetailResponse {
   updated_at: string;
   runs?: SolverRunResponse[];
   latest_report?: GoalDetailResponseLatestReport;
+  checklist_history?: GoalDetailResponseChecklistHistoryItem[];
 }

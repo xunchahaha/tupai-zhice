@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   goals: [] as Array<Record<string, unknown>>,
   detail: undefined as Record<string, unknown> | undefined,
   abandon: vi.fn(),
+  patch: vi.fn(),
 }));
 
 vi.mock("@/api/generated/client", () => ({
@@ -27,6 +28,23 @@ vi.mock("@/api/generated/client", () => ({
       config?.mutation?.onSuccess?.();
     },
     isPending: false,
+  }),
+  useReplaceGoalChecklistApiV1GoalsGoalIdChecklistPatch: (config?: { mutation?: { onSuccess?: (data: unknown) => void; onError?: (e: unknown) => void } }) => ({
+    mutate: (vars: unknown) => {
+      mocks.patch(vars);
+      config?.mutation?.onSuccess?.({ checklist_version: 2 });
+    },
+    isPending: false,
+  }),
+  // 主数据 hooks：补参表单与收件箱共用；这里给出最小可选项。
+  useListTeachersApiV1TeachersGet: () => ({ data: [{ id: "t1", business_id: "T9", name: "教师九" }] }),
+  useListClassGroupsApiV1ClassGroupsGet: () => ({ data: [{ id: "c1", business_id: "B1", name: "B1 班" }] }),
+  useListRoomsApiV1RoomsGet: () => ({ data: [{ id: "r1", business_id: "R1", name: "教室1" }] }),
+  useListTimeSlotsApiV1TimeSlotsGet: () => ({
+    data: [
+      { id: "s1", business_id: "S1", weekday: "周一", start_time: "08:30", end_time: "11:30" },
+      { id: "s2", business_id: "S2", weekday: "周二", start_time: "08:30", end_time: "11:30" },
+    ],
   }),
 }));
 
@@ -64,6 +82,7 @@ describe("GoalsPage (MEM-C3)", () => {
   afterEach(cleanup);
   beforeEach(() => {
     mocks.abandon.mockClear();
+    mocks.patch.mockClear();
     mocks.detail = undefined;
   });
 
@@ -138,5 +157,116 @@ describe("GoalsPage (MEM-C3)", () => {
     expect(dialog).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "放弃目标" }));
     await waitFor(() => expect(mocks.abandon).toHaveBeenCalledWith({ goalId: "goal-1" }));
+  });
+});
+
+// MEM-D3 目标连续性闭环：继续处理入口、禁排占位补参、清单版本与历史。
+describe("GoalsPage goal continuity (MEM-D3)", () => {
+  const user = userEvent.setup();
+  afterEach(cleanup);
+  beforeEach(() => {
+    mocks.abandon.mockClear();
+    mocks.patch.mockClear();
+    mocks.detail = undefined;
+  });
+
+  it("opens the detail with a continue section listing full decision text and action buttons for awaiting_decision", async () => {
+    mocks.goals = [goalFixture()];
+    mocks.detail = {
+      ...goalFixture(),
+      checklist_version: 1,
+      checklist_history: [],
+      runs: [],
+      latest_report: {
+        goal_id: "goal-1",
+        instruction: "排好 B1 班 10 月第一周的课，只出草稿",
+        all_passed: false,
+        passed_count: 1,
+        failed_count: 1,
+        items: [],
+        gaps: [],
+        // awaiting_decision 的决策文案必须完整展示（不截断）。
+        decision: {
+          status: "awaiting_decision",
+          reason: "1 项未通过；其中存在必须由教务放宽或裁决的缺口：求解未能安置 C24，需要教务调整规则或数据后重排（进入规则/数据调整流程）",
+        },
+      },
+    };
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "详情" }));
+    expect(await screen.findByText("继续处理")).toBeInTheDocument();
+    // 完整决策文案逐字可见。
+    expect(screen.getByText(/必须由教务放宽或裁决的缺口：求解未能安置 C24/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "修正范围后重新求解" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "放弃目标" })).toBeInTheDocument();
+  });
+
+  it("offers the param form inline and quantizes a needs_params forbidden item through the checklist PATCH", async () => {
+    mocks.goals = [goalFixture({ status: "open" })];
+    mocks.detail = {
+      ...goalFixture({ status: "open" }),
+      checklist_version: 1,
+      checklist_history: [],
+      runs: [],
+      latest_report: null,
+      checklist: [
+        {
+          key: "forbidden_slot_free-draft",
+          requirement: "禁排要求待量化：补充主体与具体时段后才能独立复核",
+          kind: "forbidden_slot_free",
+          params: { subject_type: "teacher", subject_ids: [], slot_business_ids: [], needs_params: true },
+        },
+      ],
+    };
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "详情" }));
+    // open 状态同样有继续处理入口 + 补齐禁排参数按钮。
+    await screen.findByText("继续处理");
+    await user.click(screen.getByRole("button", { name: "补齐禁排参数" }));
+    // 内联表单：主体类型/主体下拉 + 时段多选。
+    expect(screen.getByLabelText("禁排主体类型")).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("禁排主体类型"), "teacher");
+    await user.selectOptions(screen.getByLabelText("禁排主体"), "T9");
+    await user.selectOptions(screen.getByLabelText("添加禁排时段"), "S1");
+    await user.click(screen.getByRole("button", { name: "保存参数" }));
+
+    await waitFor(() => expect(mocks.patch).toHaveBeenCalledTimes(1));
+    const call = mocks.patch.mock.calls[0][0] as {
+      goalId: string;
+      data: { checklist: Array<{ key: string; kind: string; params: Record<string, unknown> }> };
+    };
+    expect(call.goalId).toBe("goal-1");
+    // PATCH body 是完整清单（量化后的禁排项替换占位项），kind 走同一白名单。
+    expect(call.data.checklist).toHaveLength(1);
+    expect(call.data.checklist[0]).toMatchObject({
+      key: "forbidden_slot_free-draft",
+      kind: "forbidden_slot_free",
+      params: { subject_type: "teacher", subject_ids: ["T9"], slot_business_ids: ["S1"] },
+    });
+    expect(call.data.checklist[0].params).not.toHaveProperty("needs_params", true);
+  });
+
+  it("shows the checklist version and expands read-only history snapshots", async () => {
+    mocks.goals = [goalFixture()];
+    mocks.detail = {
+      ...goalFixture(),
+      checklist_version: 3,
+      checklist_history: [
+        { version: 1, saved_at: "2026-09-20T08:00:00+08:00", saved_by: null, items: [{ key: "a", kind: "draft_only", requirement: "只交付草稿" }] },
+        { version: 2, saved_at: "2026-09-21T08:00:00+08:00", saved_by: null, items: [{ key: "a", kind: "draft_only", requirement: "改口径：仍只出草稿" }] },
+      ],
+      runs: [],
+      latest_report: null,
+    };
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "详情" }));
+    // 清单版本号 v{n} 展示（当前=历史长度+1=3）。
+    expect(await screen.findByText(/验收清单 v3/)).toBeInTheDocument();
+    // 历史默认折叠，展开后按版本倒序只读展示。
+    expect(screen.queryByText(/v2 · 保存于/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /历史版本（2）/ }));
+    expect(await screen.findByText(/v2 · 保存于/)).toBeInTheDocument();
+    expect(screen.getByText(/v1 · 保存于/)).toBeInTheDocument();
+    expect(screen.getByText(/改口径：仍只出草稿/)).toBeInTheDocument();
   });
 });
