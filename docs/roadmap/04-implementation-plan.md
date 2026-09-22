@@ -1,6 +1,6 @@
 # 04 · 实施计划与进度
 
-> 状态：四期「第三轮复审残留修复」进行中（2026-09-22，依 02 文档 §8；D 波已修部分路径，E 波收尾）
+> 状态：✅ 四期第三轮复审残留修复完成 · VER-4 通过（2026-09-22：后端 357 / 前端 132 / e2e 3 / orval 零 diff）
 > 批次策略遵循工作区 AGENTS.md：按模块分批、实现代理自检 + 局部验证、里程碑统一全量验证、每批一个原子提交。
 
 ## 勘察修正（重要）
@@ -76,10 +76,10 @@ VER-1 收口
 
 | 批次 | 内容 | 状态 | 提交 |
 | --- | --- | --- | --- |
-| MEM-E1 | 记忆侧：冲突提出方按授权状态判定（较早候选被编辑不再波及较晚确认项）；学习集要求明确接受依据（pending/candidate_ready 不入）；窗口判断统一用实际生效交集函数 | 🔄 实现中 | — |
-| MEM-E2 | 目标侧：清单修订后 acceptance 回 pending、验收绑定 checklist_version 与参数快照；底线补全传完整范围；「交付课次不重复」独立底线项 | 🔄 实现中 | — |
-| MEM-E3 | 「以新替旧」后端原子裁决端点（同事务：旧 expired+supersedes、候选 confirmed、冲突重算、审计、幂等），前端改调 | 排队（等 E1/E2 释放共享文件） | — |
-| VER-4 | 终验：全量 pytest + vitest + build + orval 零 diff + e2e；CI 待 billing 修复后自动核验 | 排队 | — |
+| MEM-E1 | 记忆侧：冲突提出方按授权状态判定（较早候选被编辑不再波及较晚确认项）；学习集要求明确接受依据（pending/candidate_ready/draft 不入，采纳=候选版本曾发布）；窗口判断统一用实际生效交集函数 | ✅ 完成（4 新用例，全量 351 passed，9001490） | 9001490 |
+| MEM-E2 | 目标侧：清单修订后 acceptance 回 pending、验收绑定 checklist_version 与参数快照；底线补全传完整范围；「交付课次不重复」独立底线项 | ✅ 完成（347 passed / 前端 131 passed，338ac6c） | 338ac6c |
+| MEM-E3 | 「以新替旧」后端原子裁决端点（同事务：旧 expired+supersedes、候选 confirmed、冲突重算、审计、幂等），前端改调 | ✅ 完成（6 新用例，全量 357 passed / 前端 132 passed，f36e28c） | f36e28c |
+| VER-4 | 终验：全量 pytest + vitest + build + orval 零 diff + e2e；CI 待 billing 修复后自动核验 | ✅ 后端 ruff/mypy/357 passed；前端 tsc/132/build/orval 零 diff/e2e 3 passed；CI 仍待 billing（workflow 就绪 f77ac9c） | — |
 
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 
