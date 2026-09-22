@@ -15,6 +15,10 @@
    AI 未配置或失败时功能照常可用（优雅降级，文案明确建议教务确认）。
 5. 拒绝记忆与矛盾消解（§6 修正 4）：拒绝记录按规范化签名落库，同批证据被拒
    的候选不再复现；同主体同谓词新旧条目按生效窗口区分 替代/分时段/存疑冲突。
+6. 组合正确性（MEM-D1，§7）：候选只能「提出冲突」，不得改动已生效记忆——
+   conflict 标记只落在提出方（较新条目，proposed_conflict 语义），旧 confirmed
+   条目的编译参与度永不因未授权候选而改变；两层日期（constraint 窗口与条目级
+   有效期）取交集而非覆盖；AI 与统计两条挖掘路径共用同一「可学习事件」前置筛选。
 
 红线（与 API 层共同保证）：induced_from_adjustment 条目在本模块也只会以
 软规则形态进入模型——硬约束路径不接收任何记忆来源。
@@ -23,7 +27,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -48,10 +52,12 @@ MINING_EVENT_WINDOW_DAYS = 90
 DEFAULT_VALIDITY_DAYS = 180
 
 # 编译器版本：随冻结的 memory 节一起落快照，用于解释「这版课表是哪版编译器排的」。
-MEMORY_COMPILER_VERSION = 3
+# v4（MEM-D1）：conflict 标记改候选侧 proposed_conflict 语义 + 两层日期取交集
+# + 新增 not_applicable outcome。
+MEMORY_COMPILER_VERSION = 4
 
-# 逐条使用结果枚举（§6 修正 2/6 + MEM-C2 修正 4）：随 memory 节冻结，解释层与
-# 前端按它展示「已应用 X / 未使用 Y 及原因」。
+# 逐条使用结果枚举（§6 修正 2/6 + MEM-C2 修正 4 + MEM-D1）：随 memory 节冻结，
+# 解释层与前端按它展示「已应用 X / 未使用 Y 及原因」。
 MEMORY_OUTCOMES = (
     "applied",
     "not_authorized",
@@ -60,6 +66,7 @@ MEMORY_OUTCOMES = (
     "converted_to_rule",
     "hard_requires_conversion",
     "conflict_unresolved",
+    "not_applicable",
     "compile_error",
 )
 
@@ -135,14 +142,37 @@ def default_valid_until_for_scope(db: Session, schedule_set_id: str) -> date:
     return max_date or default_valid_until()
 
 
+def candidate_entry_validity(
+    candidate_constraint: dict[str, Any] | None, today: date
+) -> tuple[date, date]:
+    """挖掘候选落库的条目级默认有效期（MEM-D1 D2）。
+
+    候选 constraint 自带日期窗口（date_from/date_to，ISO 字符串）时，条目级
+    valid_from/valid_until 取「覆盖该窗口的最小合理范围」——两端按窗口原值、
+    缺端沿用默认，保证条目级窗口**不得比 constraint 窗口更宽**（否则编译交集
+    前条目就先把自己的有效期报宽了）；constraint 无日期则维持原默认
+    （今天起 +180 天）。constraint 日期解析失败按缺端处理，窗口真的自相矛盾时
+    由编译层的 not_applicable 兜底（该候选永远不会参与求解）。
+    """
+    low = _parse_entry_date((candidate_constraint or {}).get("date_from"))
+    high = _parse_entry_date((candidate_constraint or {}).get("date_to"))
+    return low or today, high or default_valid_until(today)
+
+
 def normalized_constraint(constraint: dict[str, Any] | None) -> str:
     return json.dumps(constraint or {}, ensure_ascii=False, sort_keys=True)
 
 
-# ---------------------------------------------------------------- 矛盾消解（MEM-C2 修正 4）
+# ------------------------------------------------- 矛盾消解（MEM-C2 修正 4 + MEM-D1 修正）
 # 同主体+同谓词新旧条目按生效窗口三分支：new_replaces（窗口不重叠 → 旧条目
 # expired、provenance 记 superseded_by）/ time_sliced（相邻不重叠 → 并存）/
-# conflict_flagged（窗口重叠且约束互斥 → 旧条目打 conflict 标，待教务裁决）。
+# conflict_flagged（窗口重叠且约束互斥 → 冲突标记待教务裁决）。
+#
+# MEM-D1（§7 D1）：候选只能「提出冲突」，不得改动已生效记忆——conflict 标记是
+# 候选侧的 proposed_conflict，只落在提出方（较新条目）上，旧 confirmed 条目的
+# 编译参与度永不因未授权候选而改变；冲突裁决（保留旧弃新 / 以新替旧 / 授权
+# 试用）是显式可审计操作，全部走既有 transition 端点，裁决后由
+# refresh_conflict_flags 重算。
 
 # 「相邻」的判定容差：旧窗口结束日 +1 天即为新窗口开始日视为首尾相接。
 ADJACENT_TOLERANCE_DAYS = 1
@@ -225,18 +255,31 @@ def _active_others(
 def resolve_conflicts_for_new_entry(db: Session, new_entry: PreferenceEntry) -> str:
     """新条目落库后调用（未 commit）：对同主体同谓词的旧活跃条目做三分支消解。
 
+    MEM-D1（§7 D1）边界：
+    - conflict_flagged 分支只把 proposed_conflict 标记留给新条目（由
+      refresh_conflict_flags 统一重算落位），双方 provenance 互记对方 id 仅供
+      审计与前端定位对方条目——旧条目的状态与编译参与度都不动。
+    - new_replaces 分支（旧条目 expired、provenance 记 superseded_by）只在
+      新条目本身已获授权（confirmed 或授权试用中）时发生；未授权候选与旧条目
+      窗口错开时二者并存（编译的日期窗口互不越界），「未经批准不改变依据」。
+    - 冲突裁决全部走既有 transition 端点：保留旧弃新（候选 rejected）/
+      以新替旧（旧条目 transition 到 expired 且带 supersedes=<候选 id>，候选
+      confirmed）/ 授权试用（action=authorize_trial，旧新并存）。
+
     返回本次发生的最强分支：conflict_flagged > new_replaces > time_sliced > coexist。
-    只改旧条目（expired / conflict 标记 / provenance），不修改新条目状态。
     """
     new_window = _entry_window(new_entry)
+    new_authorized = new_entry.status == "confirmed" or trial_active(
+        new_entry, shanghai_now().date()
+    )
     branch = "coexist"
     for old in _active_others(db, new_entry):
         old_window = _entry_window(old)
         if _windows_overlap(new_window, old_window):
             if constraints_conflict(new_entry.predicate, new_entry.constraint, old.constraint):
-                # 存疑保留：旧条目打 conflict 标（编译期跳过），双方 provenance
-                # 互记对方 id，前端给出「保留旧弃新 / 以新替旧」一键裁决。
-                old.conflict = True
+                # 存疑保留：双方 provenance 互记对方 id（纯审计链，不改变任何
+                # 一侧的状态或编译参与度）；proposed_conflict 标记由
+                # refresh_conflict_flags 按「标记落提出方」统一重算。
                 old.provenance = {
                     **(old.provenance or {}),
                     "conflict_with": sorted(
@@ -262,7 +305,11 @@ def resolve_conflicts_for_new_entry(db: Session, new_entry: PreferenceEntry) -> 
             # 分时段并存：编译时日期窗口已进规则 scope，互不越界。
             branch = branch if branch in {"conflict_flagged", "new_replaces"} else "time_sliced"
             continue
-        # 窗口不重叠也不相邻：新条目取代旧条目（旧 expired，链路保留审计）。
+        if not new_authorized:
+            # MEM-D1：未授权候选不得让旧条目失效——窗口错开的双方并存。
+            continue
+        # 新条目已获授权且窗口不重叠也不相邻：新条目取代旧条目（旧 expired，
+        # 链路保留审计）。
         old.status = "expired"
         old.provenance = {
             **(old.provenance or {}),
@@ -270,14 +317,28 @@ def resolve_conflicts_for_new_entry(db: Session, new_entry: PreferenceEntry) -> 
             "superseded_at": shanghai_now().isoformat(),
         }
         branch = branch if branch == "conflict_flagged" else "new_replaces"
+    refresh_conflict_flags(
+        db,
+        new_entry.schedule_set_id,
+        new_entry.subject_type,
+        new_entry.subject_id,
+        new_entry.predicate,
+    )
     return branch
 
 
 def refresh_conflict_flags(
     db: Session, schedule_set_id: str, subject_type: str, subject_id: str, predicate: str
 ) -> None:
-    """一条目离开活跃集（expired/rejected）后重算同组 conflict 标：剩余活跃条目
-    两两互斥则保持打标，否则清标——教务一键裁决后标记自动解除。"""
+    """同组活跃条目的 conflict 标统一重算——创建/编辑/确认/失效/拒绝/授权试用
+    共用的唯一冲突重算入口（MEM-D1）。
+
+    标记语义（proposed_conflict）：同组内每对「条目级生效窗口重叠且约束互斥」
+    的活跃条目，标记落在较新一方（提出方）上；较旧一方的标记与编译参与度永不
+    因对方而改变。日期窗口不相交不算冲突（MEM-D1 D2）。显式裁决后不再重标：
+    较新一方 provenance.conflict_resolved_with 记录了已裁决共存的对方 id
+    （授权试用动作写入，见 API 层）。窗口错开、约束兼容或对方已离开活跃集时清标。
+    """
     db.flush()  # SessionLocal 是 autoflush=False：先落状态变更，重算才能看到
     actives = list(
         db.scalars(
@@ -290,13 +351,20 @@ def refresh_conflict_flags(
             )
         )
     )
-    for entry in actives:
-        has_conflict = any(
-            constraints_conflict(predicate, entry.constraint, other.constraint)
-            for other in actives
-            if other.id != entry.id
+    ordered = sorted(actives, key=lambda item: (item.created_at or shanghai_now(), item.id))
+    for index, entry in enumerate(ordered):
+        window = _entry_window(entry)
+        resolved_with = {
+            str(item)
+            for item in (entry.provenance or {}).get("conflict_resolved_with") or []
+        }
+        # 只与更早的条目配对：本条是这对冲突的提出方，标记落在本条上。
+        entry.conflict = any(
+            _windows_overlap(window, _entry_window(other))
+            and constraints_conflict(predicate, entry.constraint, other.constraint)
+            and str(other.id) not in resolved_with
+            for other in ordered[:index]
         )
-        entry.conflict = has_conflict
 
 
 def _is_expired(entry: PreferenceEntry, today: date) -> bool:
@@ -316,6 +384,43 @@ def effective_weight(entry: PreferenceEntry) -> float:
     return float(entry.weight) * decay * float(entry.confidence or 0.0)
 
 
+def _parse_entry_date(value: Any) -> date | None:
+    """constraint 日期的宽容解析：date/datetime 原样取值，字符串按 ISO 前 10 位。"""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _effective_date_window(
+    entry: PreferenceEntry,
+) -> tuple[date | None, date | None] | None:
+    """条目的实际生效窗口 = constraint 内 date_from/date_to 与条目级
+    valid_from/valid_until 的交集（MEM-D1 D2：取交集，不再互相覆盖）。
+
+    返回 (low, high)，任一端可为 None（该侧开区间）；两层窗口不相交时返回
+    None——编译按 outcome=not_applicable 处理（约束明确不适用于当前有效期），
+    条目不进编译。
+    """
+    constraint = entry.constraint or {}
+    low = _parse_entry_date(constraint.get("date_from"))
+    high = _parse_entry_date(constraint.get("date_to"))
+    if entry.valid_from is not None:
+        low = entry.valid_from if low is None else max(low, entry.valid_from)
+    if entry.valid_until is not None:
+        high = entry.valid_until if high is None else min(high, entry.valid_until)
+    if low is not None and high is not None and low > high:
+        return None
+    return low, high
+
+
 def _entry_to_rule(entry: PreferenceEntry) -> dict[str, Any] | None:
     path = PREDICATE_SOLVER_PATHS.get(entry.predicate)
     if path is None:
@@ -326,16 +431,20 @@ def _entry_to_rule(entry: PreferenceEntry) -> dict[str, Any] | None:
     if path.get("scope_key"):
         values = constraint.get(path["scope_key"]) or []
         scope[path["scope_key"]] = [str(item) for item in values if item]
-    for key in ("date_from", "date_to", "minimum_consecutive"):
-        if constraint.get(key) is not None:
-            scope[key] = constraint[key]
-    # §6 修正 5：条目的生效日期窗口进入规则 scope——软惩罚只作用于 lesson_date
-    # 落在窗口内的课次（date-aware 求解路径按 scope 日期过滤）。登记状态的过期
-    # 判断仍按「今天 vs valid_until」，但作用范围由这个窗口决定。
-    if entry.valid_from is not None:
-        scope["date_from"] = entry.valid_from.isoformat()
-    if entry.valid_until is not None:
-        scope["date_to"] = entry.valid_until.isoformat()
+    if constraint.get("minimum_consecutive") is not None:
+        scope["minimum_consecutive"] = constraint["minimum_consecutive"]
+    # §6 修正 5 + MEM-D1（§7 D2）：constraint 日期窗口与条目级生效窗口取交集后
+    # 进入规则 scope——软惩罚只作用于 lesson_date 落在交集内的课次（date-aware
+    # 求解路径按 scope 日期过滤）。交集为空时 _entry_outcome 已判 not_applicable，
+    # 不会走到这里；登记状态的过期判断仍按「今天 vs valid_until」，作用范围由
+    # 这个交集窗口决定。
+    window = _effective_date_window(entry)
+    if window is not None:
+        low, high = window
+        if low is not None:
+            scope["date_from"] = low.isoformat()
+        if high is not None:
+            scope["date_to"] = high.isoformat()
     return {
         "business_id": f"MEMORY-{entry.id}",
         "actor_type": SUBJECT_ACTOR_TYPES.get(entry.subject_type, entry.subject_type),
@@ -387,20 +496,26 @@ def _entry_outcome(entry: PreferenceEntry, today: date) -> tuple[str, str]:
     if _is_expired(entry, today):
         until = entry.valid_until
         return "expired", f"有效期至 {until.isoformat() if until else '?'}，已过期作废"
+    if entry.status == "probation" and not trial_active(entry, today):
+        if entry.trial_authorized and entry.trial_until is not None:
+            return "expired", f"授权试用已于 {entry.trial_until.isoformat()} 到期"
+        return "not_authorized", "待确认候选未经采纳或授权试用，不进入求解输入"
     if entry.conflict:
-        # MEM-C2 修正 4：与其他活跃条目窗口重叠且约束互斥——在教务裁决前不进
-        # 求解输入（最小处理），避免两条互斥偏好同时参与目标函数。
+        # MEM-D1（§7 D1）：conflict 是候选侧 proposed_conflict 标记，只落在提出方
+        # （较新条目）上；被它点名的旧条目不受影响、照常编译。走到这里的都是
+        # 本来就会参与求解的条目（confirmed / 授权试用），在教务裁决（保留旧弃新/
+        # 以新替旧/授权试用）前暂不进求解输入，避免两条互斥偏好同时进目标函数。
         others = (entry.provenance or {}).get("conflict_with") or []
         detail = "与同主体同类偏好冲突，待教务处理"
         if others:
             detail += f"：{'、'.join(map(str, others))}"
         return "conflict_unresolved", detail
-    if entry.status == "probation" and not trial_active(entry, today):
-        if entry.trial_authorized and entry.trial_until is not None:
-            return "expired", f"授权试用已于 {entry.trial_until.isoformat()} 到期"
-        return "not_authorized", "待确认候选未经采纳或授权试用，不进入求解输入"
     if entry.predicate not in COMPILE_OPEN_PREDICATES:
         return "unsupported_predicate", "当前版本没有该谓词的求解路径，仅登记不编译"
+    if _effective_date_window(entry) is None:
+        # MEM-D1（§7 D2）：constraint 日期窗口与条目级有效期不相交——明确不适用，
+        # 而不是把其中一层窗口悄悄换成另一层。
+        return "not_applicable", "constraint 日期窗口与条目有效期不相交，当前不适用"
     return "applied", ""
 
 
@@ -510,6 +625,48 @@ def reason_noise_class(declared_reason: str | None) -> str:
     if any(marker in text for marker in TEACHER_REQUEST_MARKERS):
         return "request"
     return "unknown"
+
+
+# 可学习事件的「最终态被接受」口径（MEM-D1 §7 D3）：调课事件模型里能稳定区分的
+# 负向终态只有 candidate_discarded——候选版本被删除（DELETE /schedules 会同步把
+# 关联事件置为该状态）即教务取消/放弃这次调课；当前事件模型没有独立的「拒绝」
+# 状态，候选被放弃就是取消与拒绝的唯一稳定落点。其余状态（pending=处理中或
+# 求解失败未产出候选、candidate_ready=候选待发布）都视为「未被取消或拒绝」，
+# 进入学习集。
+LEARNING_EXCLUDED_EVENT_STATUSES = frozenset({"candidate_discarded"})
+
+
+def learning_basis_events(db: Session, schedule_set_id: str) -> list[RescheduleEvent]:
+    """可学习事件的公共前置筛选（MEM-D1 §7 D3）：AI 与统计两条挖掘路径共用。
+
+    口径四条：
+    ① 方案内（schedule_set_id 隔离）；
+    ② 时间窗：created_at 距今 ≤ MINING_EVENT_WINDOW_DAYS（90 天）滚动窗口，
+       上限 MINING_EVENT_LIMIT 条（与既有挖掘口径一致）；
+    ③ 最终态被接受：事件候选未被取消或拒绝（见
+       LEARNING_EXCLUDED_EVENT_STATUSES 的口径注释）；
+    ④ declared_reason 非临时类：reason_noise_class != "forced"（临时公差/教师
+       请假/教室故障等被迫一次性事件不进学习集）。
+
+    模型有无配置不改变业务边界：过滤在这里完成后才轮到 AI 提示词或确定性统计，
+    AI 提示词只说明输入已预筛，不再要求模型自行过滤。
+    """
+    cutoff = shanghai_now() - timedelta(days=MINING_EVENT_WINDOW_DAYS)
+    events = list(
+        db.scalars(
+            select(RescheduleEvent)
+            .where(
+                RescheduleEvent.schedule_set_id == schedule_set_id,
+                RescheduleEvent.created_at >= cutoff,
+                RescheduleEvent.status.notin_(LEARNING_EXCLUDED_EVENT_STATUSES),
+            )
+            .order_by(RescheduleEvent.created_at.desc())
+            .limit(MINING_EVENT_LIMIT)
+        )
+    )
+    return [
+        event for event in events if reason_noise_class(event.declared_reason) != "forced"
+    ]
 
 
 def mining_event_view(event: RescheduleEvent) -> dict[str, Any]:

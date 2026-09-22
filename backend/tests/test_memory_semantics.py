@@ -1,12 +1,13 @@
-"""记忆语义与安全边界（MEM-C1）验收测试。
+"""记忆语义与安全边界（MEM-C1 + MEM-D1 D2）验收测试。
 
-覆盖 docs/roadmap/02-agent-memory.md §6 审查修正表第 1、2、5、6 组：
+覆盖 docs/roadmap/02-agent-memory.md §6 审查修正表第 1、2、5、6 组与 §7 D2：
 
 1. 三态拆分：纯 probation 候选不进求解输入（snapshot.memory.compiled_rules 为空）；
    「授权试用」后以试用期衰减权重进入；trial_until 到期自动退出。
 2. 偏好库只管软偏好：hard 条目不再编译（hard_requires_conversion），
    convert-to-rule 生成 hardness=hard 的正式规则并双向回链。
-3. 生效日期窗口：条目 valid_from/valid_until 进入规则 scope，只约束窗口内课次；
+3. 生效日期窗口：constraint 日期与条目 valid_from/valid_until 取**交集**进规则
+   scope（MEM-D1 D2，不再覆盖）；交集为空 → not_applicable 不进编译；
    创建 API 的默认有效期取方案最大上课日期。
 4. 偏好冻结进快照：创建任务即编译冻结，事后改/停记忆不影响该 run 的可复现性；
    编译失败显式提示「本次未使用偏好记忆」，不无声出课表。
@@ -329,6 +330,53 @@ def test_validity_window_scopes_rule_to_lessons(
     inside = solve_problem({**payload, "rules": [inside_rule]})
     assert inside["model_status"] in {"OPTIMAL", "FEASIBLE"}
     assert inside["objective_value"] == entry.weight, "窗口内的课次应吃到偏好惩罚"
+
+
+# ------------------------------------------------- MEM-D1 D2：两层日期取交集
+
+
+def test_constraint_dates_intersect_with_entry_validity(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """constraint 日期窗口与条目级有效期取交集，不再互相覆盖：
+    constraint 9/24-25 + 条目级到 12/31 → 编译窗口就是 9/24-25。"""
+    scope = _make_scope(client, auth_headers)
+    entry = _add_entry(
+        scope["scope_id"],
+        subject_id="T9",
+        constraint={"slot_ids": ["S1"], "date_from": "2026-09-24", "date_to": "2026-09-25"},
+        valid_from=date(2026, 9, 1),
+        valid_until=date(2026, 12, 31),
+    )
+
+    with SessionLocal() as db:
+        state = compile_memory_state(db, scope["scope_id"])
+    rule = next(item for item in state["compiled_rules"] if item["memory_entry_id"] == entry.id)
+    # 编译窗口 = 两层窗口的交集（窄的一侧），条目级 12/31 不再把两天窗口撑宽。
+    assert rule["scope"]["date_from"] == "2026-09-24"
+    assert rule["scope"]["date_to"] == "2026-09-25"
+
+
+def test_disjoint_constraint_and_entry_windows_are_not_applicable(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """两层日期窗口不相交 → outcome=not_applicable，条目不进编译（明确不适用，
+    而不是拿另一层窗口顶上）。"""
+    scope = _make_scope(client, auth_headers)
+    entry = _add_entry(
+        scope["scope_id"],
+        subject_id="T9",
+        constraint={"slot_ids": ["S1"], "date_from": "2026-01-10", "date_to": "2026-01-20"},
+        valid_from=date(2026, 9, 1),
+        valid_until=date(2026, 12, 31),
+    )
+
+    with SessionLocal() as db:
+        state = compile_memory_state(db, scope["scope_id"])
+    outcomes = {item["entry_id"]: item for item in state["outcomes"]}
+    assert outcomes[entry.id]["outcome"] == "not_applicable"
+    assert "不相交" in outcomes[entry.id]["detail"]
+    assert all(rule["memory_entry_id"] != entry.id for rule in state["compiled_rules"])
 
 
 def test_default_valid_until_uses_schedule_max_lesson_date(
