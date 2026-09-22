@@ -89,6 +89,8 @@ import type {
   OverviewAnalyticsResponse,
   OverviewResponse,
   PasswordChange,
+  PreferenceAdjudicateReplace,
+  PreferenceAdjudicateReplaceResponse,
   PreferenceConvertRequest,
   PreferenceCreate,
   PreferenceResponse,
@@ -4818,6 +4820,80 @@ export const useTransitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost 
     }
     
 /**
+ * 「以新替旧」原子裁决（MEM-E3，依据 docs/roadmap/02-agent-memory.md §8）。
+
+用户批准的是「替换」，不是「先丢旧的」：旧条目 expired+superseded_by 与候选
+confirmed+supersedes 必须在同一事务内完成（随后 refresh_conflict_flags 重算、
+审计、commit）。任一步校验失败即整体回滚——旧条目保持原状，不会出现「旧的
+已退场、新的没生效」的中间态。重复调用幂等：候选已 confirmed、旧条目已
+expired 且 provenance 互链时返回 200 与当前状态（detail=already_applied），
+不做二次变更。保留旧弃新路径不需要新端点：单次 reject 即可，事务天然成立。
+ * @summary Adjudicate Replace Preference
+ */
+export const adjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost = (
+    candidateId: string,
+    preferenceAdjudicateReplace: PreferenceAdjudicateReplace,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<PreferenceAdjudicateReplaceResponse>(
+      {url: `/api/v1/memory/preferences/${candidateId}/adjudicate-replace`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: preferenceAdjudicateReplace, signal
+    },
+      );
+    }
+  
+
+
+export const getAdjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof adjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost>>, TError,{candidateId: string;data: PreferenceAdjudicateReplace}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof adjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost>>, TError,{candidateId: string;data: PreferenceAdjudicateReplace}, TContext> => {
+
+const mutationKey = ['adjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof adjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost>>, {candidateId: string;data: PreferenceAdjudicateReplace}> = (props) => {
+          const {candidateId,data} = props ?? {};
+
+          return  adjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost(candidateId,data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AdjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePostMutationResult = NonNullable<Awaited<ReturnType<typeof adjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost>>>
+    export type AdjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePostMutationBody = PreferenceAdjudicateReplace
+    export type AdjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePostMutationError = HTTPValidationError
+
+    /**
+ * @summary Adjudicate Replace Preference
+ */
+export const useAdjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof adjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost>>, TError,{candidateId: string;data: PreferenceAdjudicateReplace}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof adjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost>>,
+        TError,
+        {candidateId: string;data: PreferenceAdjudicateReplace},
+        TContext
+      > => {
+
+      const mutationOptions = getAdjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
  * 把 hard 偏好条目转成正式规则（MEM-C1 修正 2）：偏好库只管理软偏好。
 
 正式规则 hardness=hard、kind 对齐 constraint-catalog 类型；provenance 经
@@ -4892,9 +4968,10 @@ export const useConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRul
 /**
  * 回顾本学期的调课事件，归纳偏好候选（human-in-the-loop 的入口）。
 
-可学习事件经公共前置筛选（MEM-D1 §7 D3，口径见
+可学习事件经公共前置筛选（MEM-D1 §7 D3 + MEM-E1b §8，口径见
 memory_solver.learning_basis_events）：当前方案内、最近 90 天滚动窗口、
-候选未被取消或拒绝、declared_reason 非临时被迫类。配置了 AI 走模型归纳
+已产生结果版本且未被后续放弃（候选版本曾被发布 = 教务采纳这次调课）、
+declared_reason 非临时被迫类。配置了 AI 走模型归纳
 （模型只提名，代码按白名单与证据支持性裁决；输入已预筛，提示词不再要求
 模型自行过滤）；未配置或调用失败优雅降级为确定性统计：同主体+同类型+
 同归因类调课 ≥2 次即产生候选。

@@ -1076,6 +1076,278 @@ def test_editing_validity_recomputes_conflict_flags(
         assert old_row.conflict is False
 
 
+# ------------------------------------------------- 「以新替旧」原子裁决（MEM-E3）
+
+
+def test_adjudicate_replace_switches_entries_in_one_request(
+    client: TestClient, mining_scope: dict[str, Any]
+) -> None:
+    """MEM-E3：单次请求完成「以新替旧」——同一事务内旧条目 expired+superseded_by、
+    候选 confirmed+supersedes、冲突清标；编译输入随之切换。"""
+    scope_id = mining_scope["scope_id"]
+    headers = mining_scope["headers"]
+    old, candidate = _seed_conflict_pair(scope_id, "T-ADJ-REPLACE-ATOM")
+
+    replaced = client.post(
+        f"/api/v1/memory/preferences/{candidate.id}/adjudicate-replace",
+        headers=headers,
+        json={"rejection_reason": "preference_changed"},
+    )
+    assert replaced.status_code == 200, replaced.text
+    body = replaced.json()
+    assert body["detail"] == "replaced"
+    assert body["candidate"]["status"] == "confirmed"
+    assert body["old_entry"]["status"] == "expired"
+
+    with SessionLocal() as db:
+        old_row = db.get(PreferenceEntry, old.id)
+        cand_row = db.get(PreferenceEntry, candidate.id)
+        assert old_row is not None and cand_row is not None
+        assert old_row.status == "expired"
+        assert old_row.provenance["superseded_by"] == candidate.id
+        assert old_row.provenance["superseded_at"]
+        assert old_row.provenance["rejection_reason"] == "preference_changed"
+        assert old_row.conflict is False
+        assert cand_row.status == "confirmed"
+        assert cand_row.provenance["supersedes"] == old.id
+        assert cand_row.conflict is False
+        # 编译输入只剩候选：切换完成，旧的已退场且新的已生效，没有中间态。
+        state = compile_memory_state(db, scope_id)
+        outcomes = {item["entry_id"]: item["outcome"] for item in state["outcomes"]}
+        assert old.id not in outcomes
+        assert outcomes[candidate.id] == "applied"
+        assert [rule["memory_entry_id"] for rule in state["compiled_rules"]] == [candidate.id]
+
+
+def test_adjudicate_replace_rolls_back_when_later_step_fails(
+    client: TestClient, mining_scope: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MEM-E3：事务后段失败时整体回滚——旧条目保持 confirmed 原状（没有
+    superseded_by 审计链），候选保持 probation 带标，不出现「旧的已退场、
+    新的没生效」的中间态。"""
+    scope_id = mining_scope["scope_id"]
+    headers = mining_scope["headers"]
+    old, candidate = _seed_conflict_pair(scope_id, "T-ADJ-REPLACE-ROLLBACK")
+
+    def _explode(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("模拟事务后段失败")
+
+    monkeypatch.setattr(api, "refresh_conflict_flags", _explode)
+    with pytest.raises(RuntimeError, match="模拟事务后段失败"):
+        client.post(
+            f"/api/v1/memory/preferences/{candidate.id}/adjudicate-replace",
+            headers=headers,
+            json={},
+        )
+
+    with SessionLocal() as db:
+        old_row = db.get(PreferenceEntry, old.id)
+        cand_row = db.get(PreferenceEntry, candidate.id)
+        assert old_row is not None and cand_row is not None
+        # 回滚生效：两端都保持裁决前的原状。
+        assert old_row.status == "confirmed"
+        assert "superseded_by" not in (old_row.provenance or {})
+        assert cand_row.status == "probation"
+        assert "supersedes" not in (cand_row.provenance or {})
+        assert cand_row.conflict is True
+
+
+def test_adjudicate_replace_is_idempotent_on_replay(
+    client: TestClient, mining_scope: dict[str, Any]
+) -> None:
+    """MEM-E3：重复调用幂等——已完成过的裁决原样返回（detail=already_applied），
+    不做二次变更。"""
+    scope_id = mining_scope["scope_id"]
+    headers = mining_scope["headers"]
+    old, candidate = _seed_conflict_pair(scope_id, "T-ADJ-REPLACE-REPLAY")
+
+    first = client.post(
+        f"/api/v1/memory/preferences/{candidate.id}/adjudicate-replace", headers=headers, json={}
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["detail"] == "replaced"
+
+    second = client.post(
+        f"/api/v1/memory/preferences/{candidate.id}/adjudicate-replace", headers=headers, json={}
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["detail"] == "already_applied"
+    assert second.json()["candidate"]["status"] == "confirmed"
+    assert second.json()["old_entry"]["status"] == "expired"
+
+    with SessionLocal() as db:
+        old_row = db.get(PreferenceEntry, old.id)
+        cand_row = db.get(PreferenceEntry, candidate.id)
+        assert old_row is not None and cand_row is not None
+        assert old_row.status == "expired"
+        assert cand_row.status == "confirmed"
+        assert cand_row.provenance["supersedes"] == old.id
+
+
+def test_adjudicate_replace_without_counterpart_is_rejected(
+    client: TestClient, mining_scope: dict[str, Any]
+) -> None:
+    """MEM-E3：候选没有活跃冲突对端 → 422，不产生任何状态变更。"""
+    scope_id = mining_scope["scope_id"]
+    headers = mining_scope["headers"]
+    lonely = _add_scoped_entry(
+        scope_id,
+        subject_id="T-ADJ-REPLACE-LONELY",
+        status="probation",
+        source="induced_from_adjustment",
+        confidence=0.5,
+        weight=40,
+        constraint={"slot_ids": ["S2"]},
+    )
+
+    rejected = client.post(
+        f"/api/v1/memory/preferences/{lonely.id}/adjudicate-replace",
+        headers=headers,
+        json={},
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert "冲突对端" in rejected.json()["detail"]
+
+    with SessionLocal() as db:
+        row = db.get(PreferenceEntry, lonely.id)
+        assert row is not None
+        assert row.status == "probation"
+
+
+def test_adjudicate_replace_with_multiple_counterparts_requires_explicit_old(
+    client: TestClient, mining_scope: dict[str, Any]
+) -> None:
+    """MEM-E3：候选与多个活跃条目互指冲突 → 不显式指定 old_entry_id 时 422；
+    显式指定后只替换被点名的那条。"""
+    scope_id = mining_scope["scope_id"]
+    headers = mining_scope["headers"]
+    subject = "T-ADJ-REPLACE-MULTI"
+    old_primary = _add_scoped_entry(
+        scope_id, subject_id=subject, constraint={"slot_ids": ["S1"]}
+    )
+    old_secondary = _add_scoped_entry(
+        scope_id,
+        subject_id=subject,
+        constraint={"slot_ids": ["S2"]},
+        provenance={},
+    )
+    candidate = _add_scoped_entry(
+        scope_id,
+        subject_id=subject,
+        status="probation",
+        source="induced_from_adjustment",
+        confidence=0.5,
+        weight=40,
+        constraint={"slot_ids": ["S1", "S2"]},
+    )
+    with SessionLocal() as db:
+        cand_row = db.get(PreferenceEntry, candidate.id)
+        primary_row = db.get(PreferenceEntry, old_primary.id)
+        secondary_row = db.get(PreferenceEntry, old_secondary.id)
+        assert cand_row is not None and primary_row is not None and secondary_row is not None
+        cand_row.provenance = {
+            **(cand_row.provenance or {}),
+            "conflict_with": [old_primary.id, old_secondary.id],
+        }
+        primary_row.provenance = {
+            **(primary_row.provenance or {}),
+            "conflict_with": [candidate.id],
+        }
+        secondary_row.provenance = {
+            **(secondary_row.provenance or {}),
+            "conflict_with": [candidate.id],
+        }
+        db.commit()
+
+    ambiguous = client.post(
+        f"/api/v1/memory/preferences/{candidate.id}/adjudicate-replace", headers=headers, json={}
+    )
+    assert ambiguous.status_code == 422, ambiguous.text
+    assert "old_entry_id" in ambiguous.json()["detail"]
+
+    bogus = client.post(
+        f"/api/v1/memory/preferences/{candidate.id}/adjudicate-replace",
+        headers=headers,
+        json={"old_entry_id": "not-a-counterpart"},
+    )
+    assert bogus.status_code == 422, bogus.text
+
+    explicit = client.post(
+        f"/api/v1/memory/preferences/{candidate.id}/adjudicate-replace",
+        headers=headers,
+        json={"old_entry_id": old_primary.id},
+    )
+    assert explicit.status_code == 200, explicit.text
+    assert explicit.json()["detail"] == "replaced"
+
+    with SessionLocal() as db:
+        primary_row = db.get(PreferenceEntry, old_primary.id)
+        secondary_row = db.get(PreferenceEntry, old_secondary.id)
+        assert primary_row is not None and secondary_row is not None
+        assert primary_row.status == "expired"
+        assert primary_row.provenance["superseded_by"] == candidate.id
+        # 未被点名的那条保持原状。
+        assert secondary_row.status == "confirmed"
+
+
+def test_adjudicate_replace_permission_matrix(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """MEM-E3 权限矩阵：未登录 401；方案 approver 403；方案 scheduler 放行。"""
+    suffix = uuid4().hex[:8]
+    created = client.post(
+        "/api/v1/schedule-sets", headers=auth_headers, json={"name": f"裁决权限-{suffix}"}
+    )
+    assert created.status_code == 201, created.text
+    scope_id = created.json()["id"]
+
+    users: dict[str, str] = {}
+    for role in ("scheduler", "approver"):
+        username = f"{role}_{suffix}"
+        member = client.post(
+            "/api/v1/users",
+            headers=auth_headers,
+            json={"username": username, "password": "scope-policy-2026", "role": role},
+        )
+        assert member.status_code == 201, member.text
+        users[role] = member.json()["id"]
+        grant = client.put(
+            f"/api/v1/schedule-sets/{scope_id}/members/{users[role]}",
+            headers=auth_headers,
+            json={"user_id": users[role], "access_role": role},
+        )
+        assert grant.status_code == 200, grant.text
+
+    tokens = {
+        role: client.post(
+            "/api/v1/auth/token",
+            data={"username": f"{role}_{suffix}", "password": "scope-policy-2026"},
+        ).json()["access_token"]
+        for role in ("scheduler", "approver")
+    }
+
+    old, candidate = _seed_conflict_pair(scope_id, "T-ADJ-REPLACE-PERM")
+    url = f"/api/v1/memory/preferences/{candidate.id}/adjudicate-replace"
+
+    anonymous = client.post(url, json={})
+    assert anonymous.status_code == 401, anonymous.text
+
+    approver = client.post(
+        url,
+        headers={"Authorization": f"Bearer {tokens['approver']}", "X-Schedule-Set-Id": scope_id},
+        json={},
+    )
+    assert approver.status_code == 403, approver.text
+
+    scheduler = client.post(
+        url,
+        headers={"Authorization": f"Bearer {tokens['scheduler']}", "X-Schedule-Set-Id": scope_id},
+        json={"old_entry_id": old.id},
+    )
+    assert scheduler.status_code == 200, scheduler.text
+    assert scheduler.json()["detail"] == "replaced"
+
+
 # ------------------------------------------------- 候选默认有效期与公共前置筛选（MEM-D1 D2/D3）
 
 

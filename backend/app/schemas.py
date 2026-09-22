@@ -627,6 +627,38 @@ class PreferenceResponse(ORMModel):
     updated_at: datetime
 
 
+class PreferenceAdjudicateReplace(BaseModel):
+    """「以新替旧」原子裁决请求（MEM-E3）。
+
+    旧条目退场原因沿用拒绝原因五选枚举（记录进旧条目 provenance 与审计日志，
+    缺省「其他」）；被替换的旧条目缺省取候选的唯一活跃冲突对端，多于一对时
+    必须显式传 old_entry_id。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    old_entry_id: str | None = Field(default=None, min_length=1, max_length=36)
+    rejection_reason: Literal[
+        "temporary_leave",
+        "subject_misidentified",
+        "wrong_generalization",
+        "preference_changed",
+        "other",
+    ] = "other"
+
+
+class PreferenceAdjudicateReplaceResponse(BaseModel):
+    """「以新替旧」裁决结果：候选与旧条目的当前状态。
+
+    detail=replaced 表示本次事务完成了切换；already_applied 表示此前已裁决
+    （重复调用幂等），未做二次变更。
+    """
+
+    candidate: PreferenceResponse
+    old_entry: PreferenceResponse
+    detail: Literal["replaced", "already_applied"]
+
+
 class MiningRunResponse(BaseModel):
     """一次偏好挖掘的结果。created 即落库后的候选清单（status=probation）。
 

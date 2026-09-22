@@ -3731,6 +3731,80 @@
         }
       }
     },
+    "/api/v1/memory/preferences/{candidate_id}/adjudicate-replace": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Adjudicate Replace Preference",
+        "description": "「以新替旧」原子裁决（MEM-E3，依据 docs/roadmap/02-agent-memory.md §8）。\n\n用户批准的是「替换」，不是「先丢旧的」：旧条目 expired+superseded_by 与候选\nconfirmed+supersedes 必须在同一事务内完成（随后 refresh_conflict_flags 重算、\n审计、commit）。任一步校验失败即整体回滚——旧条目保持原状，不会出现「旧的\n已退场、新的没生效」的中间态。重复调用幂等：候选已 confirmed、旧条目已\nexpired 且 provenance 互链时返回 200 与当前状态（detail=already_applied），\n不做二次变更。保留旧弃新路径不需要新端点：单次 reject 即可，事务天然成立。",
+        "operationId": "adjudicate_replace_preference_api_v1_memory_preferences__candidate_id__adjudicate_replace_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "candidate_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Candidate Id"
+            }
+          },
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreferenceAdjudicateReplace"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferenceAdjudicateReplaceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/memory/preferences/{entry_id}/convert-to-rule": {
       "post": {
         "tags": [
@@ -10812,6 +10886,65 @@
           "new_password"
         ],
         "title": "PasswordChange"
+      },
+      "PreferenceAdjudicateReplace": {
+        "properties": {
+          "old_entry_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 36,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Entry Id"
+          },
+          "rejection_reason": {
+            "type": "string",
+            "enum": [
+              "temporary_leave",
+              "subject_misidentified",
+              "wrong_generalization",
+              "preference_changed",
+              "other"
+            ],
+            "title": "Rejection Reason",
+            "default": "other"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "PreferenceAdjudicateReplace",
+        "description": "「以新替旧」原子裁决请求（MEM-E3）。\n\n旧条目退场原因沿用拒绝原因五选枚举（记录进旧条目 provenance 与审计日志，\n缺省「其他」）；被替换的旧条目缺省取候选的唯一活跃冲突对端，多于一对时\n必须显式传 old_entry_id。"
+      },
+      "PreferenceAdjudicateReplaceResponse": {
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/PreferenceResponse"
+          },
+          "old_entry": {
+            "$ref": "#/components/schemas/PreferenceResponse"
+          },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "replaced",
+              "already_applied"
+            ],
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "candidate",
+          "old_entry",
+          "detail"
+        ],
+        "title": "PreferenceAdjudicateReplaceResponse",
+        "description": "「以新替旧」裁决结果：候选与旧条目的当前状态。\n\ndetail=replaced 表示本次事务完成了切换；already_applied 表示此前已裁决\n（重复调用幂等），未做二次变更。"
       },
       "PreferenceConvertRequest": {
         "properties": {

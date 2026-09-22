@@ -138,6 +138,8 @@ from .schemas import (
     OverviewAnalyticsResponse,
     OverviewResponse,
     PasswordChange,
+    PreferenceAdjudicateReplace,
+    PreferenceAdjudicateReplaceResponse,
     PreferenceConvertRequest,
     PreferenceCreate,
     PreferenceResponse,
@@ -3659,6 +3661,154 @@ def _record_preference_rejection(
             evidence=evidence,
             rejected_by=rejected_by,
         )
+    )
+
+
+@router.post(
+    "/memory/preferences/{candidate_id}/adjudicate-replace",
+    response_model=PreferenceAdjudicateReplaceResponse,
+    tags=["memory"],
+)
+def adjudicate_replace_preference(
+    candidate_id: str,
+    payload: PreferenceAdjudicateReplace,
+    db: Db,
+    user: AdminOrScheduler,
+    scope: SchedulerScope,
+) -> PreferenceAdjudicateReplaceResponse:
+    """「以新替旧」原子裁决（MEM-E3，依据 docs/roadmap/02-agent-memory.md §8）。
+
+    用户批准的是「替换」，不是「先丢旧的」：旧条目 expired+superseded_by 与候选
+    confirmed+supersedes 必须在同一事务内完成（随后 refresh_conflict_flags 重算、
+    审计、commit）。任一步校验失败即整体回滚——旧条目保持原状，不会出现「旧的
+    已退场、新的没生效」的中间态。重复调用幂等：候选已 confirmed、旧条目已
+    expired 且 provenance 互链时返回 200 与当前状态（detail=already_applied），
+    不做二次变更。保留旧弃新路径不需要新端点：单次 reject 即可，事务天然成立。
+    """
+    candidate = get_scoped_or_404(db, PreferenceEntry, candidate_id, scope)
+
+    def _linked(entry: PreferenceEntry) -> set[str]:
+        return {str(item) for item in (entry.provenance or {}).get("conflict_with") or []}
+
+    # 幂等分支：裁决已完成过的组合原样返回，不做二次变更。
+    if candidate.status == "confirmed":
+        superseded_id = str((candidate.provenance or {}).get("supersedes") or "")
+        superseded = db.get(PreferenceEntry, superseded_id) if superseded_id else None
+        if (
+            superseded is not None
+            and superseded.schedule_set_id == scope.id
+            and superseded.status == "expired"
+            and str((superseded.provenance or {}).get("superseded_by") or "") == candidate.id
+        ):
+            return PreferenceAdjudicateReplaceResponse(
+                candidate=candidate, old_entry=superseded, detail="already_applied"
+            )
+        raise HTTPException(
+            status_code=409, detail="候选已确认但未携带以新替旧审计链，无需重复裁决"
+        )
+    if candidate.status != "probation":
+        raise HTTPException(
+            status_code=409, detail=f"{candidate.status} 状态的候选不能执行以新替旧"
+        )
+
+    def _active_mutual_counterparts() -> list[PreferenceEntry]:
+        """候选的活跃冲突对端：provenance.conflict_with 互指且仍在活跃集的条目。"""
+        linked = _linked(candidate)
+        if not linked:
+            return []
+        return [
+            entry
+            for entry in db.scalars(
+                select(PreferenceEntry).where(
+                    PreferenceEntry.id.in_(linked),
+                    PreferenceEntry.schedule_set_id == scope.id,
+                    PreferenceEntry.status.in_(["probation", "confirmed"]),
+                )
+            )
+            if candidate.id in _linked(entry)
+        ]
+
+    # 冲突关系以 provenance.conflict_with 互指为准；互指缺失时先经
+    # refresh_conflict_flags 判定一次（真冲突会补写互链）。refresh 只 flush 不
+    # commit，判定后仍不成立即整体回滚、旧条目不动。
+    counterparts = _active_mutual_counterparts()
+    if not counterparts:
+        refresh_conflict_flags(
+            db, scope.id, candidate.subject_type, candidate.subject_id, candidate.predicate
+        )
+        counterparts = _active_mutual_counterparts()
+
+    old: PreferenceEntry | None
+    if payload.old_entry_id is not None:
+        old = next((item for item in counterparts if item.id == payload.old_entry_id), None)
+        if old is None:
+            raise HTTPException(
+                status_code=422, detail="old_entry_id 不是该候选的活跃冲突对端，无法被其替换"
+            )
+    elif not counterparts:
+        raise HTTPException(status_code=422, detail="候选没有活跃的冲突对端，无法执行以新替旧")
+    elif len(counterparts) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail="候选与多个条目存在冲突，请显式指定要被替换的 old_entry_id",
+        )
+    else:
+        old = counterparts[0]
+
+    if (old.subject_type, old.subject_id, old.predicate) != (
+        candidate.subject_type,
+        candidate.subject_id,
+        candidate.predicate,
+    ):  # 防御：冲突配对只在同主体同谓词组内成立
+        raise HTTPException(status_code=422, detail="old_entry_id 与候选不在同一偏好组内")
+
+    now = shanghai_now().isoformat()
+    # 第一步：旧条目退场（expired + superseded_by 审计链），退场原因记录在案。
+    old.provenance = {
+        **(old.provenance or {}),
+        "superseded_by": candidate.id,
+        "superseded_at": now,
+        "rejection_reason": payload.rejection_reason,
+        "last_transition_by": user.id,
+        "last_transition_at": now,
+        "last_transition_reason": f"以新替旧：被候选 {candidate.id} 原子替换",
+    }
+    old.status = "expired"
+    old.conflict = False  # 离开活跃集：本条涉及的 proposed_conflict 标随裁决了结
+    # 第二步：候选转正（confirmed + supersedes 回链）。
+    candidate.provenance = {
+        **(candidate.provenance or {}),
+        "supersedes": old.id,
+        "last_transition_by": user.id,
+        "last_transition_at": now,
+        "last_transition_reason": f"以新替旧：原子替换旧条目 {old.id}",
+    }
+    candidate.status = "confirmed"
+    candidate.conflict = False
+    # 唯一冲突重算入口（MEM-D1 / MEM-E1a）：按裁决后的活跃集重算 proposed_conflict 标。
+    refresh_conflict_flags(
+        db, scope.id, candidate.subject_type, candidate.subject_id, candidate.predicate
+    )
+    audit(
+        db,
+        user,
+        "adjudicate_replace",
+        "preference_entry",
+        candidate.id,
+        {
+            "candidate_id": candidate.id,
+            "old_entry_id": old.id,
+            "rejection_reason": payload.rejection_reason,
+            "subject_type": candidate.subject_type,
+            "subject_id": candidate.subject_id,
+            "predicate": candidate.predicate,
+        },
+    )
+    db.commit()
+    db.refresh(candidate)
+    db.refresh(old)
+    return PreferenceAdjudicateReplaceResponse(
+        candidate=candidate, old_entry=old, detail="replaced"
     )
 
 

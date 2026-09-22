@@ -6,7 +6,7 @@ import { toast } from "sonner";
 
 import {
   getListPreferencesApiV1MemoryPreferencesGetQueryKey,
-  transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost,
+  useAdjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost,
   useConvertPreferenceToRuleApiV1MemoryPreferencesEntryIdConvertToRulePost,
   useCreateMemoryMiningRunApiV1MemoryMiningRunsPost,
   useListClassGroupsApiV1ClassGroupsGet,
@@ -215,8 +215,6 @@ export function MemoryPage() {
   // rejecting：正在走「拒绝」弹窗的候选；keepOld=true 表示这是冲突裁决里的
   // 「保留旧弃新」（拒绝的是提出方候选，旧条目保持原样），弹窗文案随之切换。
   const [rejecting, setRejecting] = useState<{ entry: PreferenceResponse; keepOld: boolean } | null>(null);
-  // replacing：「以新替旧」的两步调用在途（旧条目 expired+supersedes → 候选 confirmed）。
-  const [replacing, setReplacing] = useState(false);
   const [expiring, setExpiring] = useState<PreferenceResponse | null>(null);
   const [converting, setConverting] = useState<PreferenceResponse | null>(null);
 
@@ -259,6 +257,18 @@ export function MemoryPage() {
         invalidate();
         setConverting(null);
         toast.success("已转为正式硬规则，原偏好条目归档为已失效");
+      },
+      onError: (error) => toast.error(errorMessage(error)),
+    },
+  });
+  // 「以新替旧」原子裁决（MEM-E3）：单个请求由后端在同一事务内完成旧条目退场
+  // 与候选转正——前端不再顺序发两个 transition 请求，第二步失败不会再出现
+  // 「旧的已退场、新的没生效」且无法恢复的中间态。
+  const replace = useAdjudicateReplacePreferenceApiV1MemoryPreferencesCandidateIdAdjudicateReplacePost({
+    mutation: {
+      onSuccess: (data) => {
+        invalidate();
+        toast.success(data.detail === "already_applied" ? "该替换此前已生效" : "已替换生效");
       },
       onError: (error) => toast.error(errorMessage(error)),
     },
@@ -318,43 +328,27 @@ export function MemoryPage() {
 
   // 冲突裁决三动作（MEM-D1，语义以 proposed_conflict 为准）：
   // - 保留旧弃新 = 拒绝提出方候选（带 rejection_reason，走既有拒绝弹窗），旧条目不动；
-  // - 以新替旧 = 旧条目 transition expired 且带 supersedes=<候选 id>（provenance 记
-  //   superseded_by 审计链），随后候选 transition confirmed——两个调用必须按序
-  //   （旧条目先退场，候选再正式生效），因此这里不走 mutation 队列而是顺序 await；
+  // - 以新替旧 = 调用原子裁决端点 adjudicate-replace（MEM-E3）：后端在同一事务内
+  //   完成旧条目 expired+superseded_by、候选 confirmed+supersedes 与冲突重算，
+  //   前端只发一个请求，失败时后端整体回滚、旧条目保持原状；
   // - 授权试用 = 既有 authorize_trial（旧新并存）。
   // 按钮从冲突对的任意一侧（候选卡或被点名的旧条目行）进入都作用于整对。
   const conflictPairOf = (entry: PreferenceResponse) => activeConflictPair(entry, entries);
-  const resolveConflictReplace = async (pair: { proposer: PreferenceResponse; previous: PreferenceResponse }) => {
-    setReplacing(true);
-    try {
-      await transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost(pair.previous.id, {
-        target_status: "expired",
-        supersedes: pair.proposer.id,
-        reason: "冲突处理：以新偏好替换旧偏好",
-      });
-      await transitionPreferenceApiV1MemoryPreferencesEntryIdTransitionPost(pair.proposer.id, {
-        target_status: "confirmed",
-        reason: "冲突处理：以新偏好替换旧偏好（旧条目已带 supersedes 审计链退场）",
-      });
-      invalidate();
-      toast.success("已用新偏好替换旧偏好，新偏好正式生效");
-    } catch (error) {
-      toast.error(errorMessage(error));
-      invalidate();
-    } finally {
-      setReplacing(false);
-    }
-  };
   const conflictActions = (entry: PreferenceResponse) => {
     const pair = conflictPairOf(entry);
     if (!pair) return null;
     return (
       <>
-        <Button size="sm" variant="outline" disabled={replacing} onClick={() => setRejecting({ entry: pair.proposer, keepOld: true })}>
+        <Button size="sm" variant="outline" disabled={replace.isPending} onClick={() => setRejecting({ entry: pair.proposer, keepOld: true })}>
           保留旧弃新
         </Button>
-        <Button size="sm" variant="outline" disabled={replacing} onClick={() => void resolveConflictReplace(pair)}>
-          {replacing ? "替换中…" : "以新替旧"}
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={replace.isPending}
+          onClick={() => replace.mutate({ candidateId: pair.proposer.id, data: {} })}
+        >
+          {replace.isPending ? "替换中…" : "以新替旧"}
         </Button>
       </>
     );

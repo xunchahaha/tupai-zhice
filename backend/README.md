@@ -240,11 +240,14 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
   参与度永不因标记而改变。conflict 的**编译排除只作用于未授权条目**（本就不进
   求解输入，outcome=`conflict_unresolved`）；已授权条目带标记照常编译
   （outcome=`applied`，detail 注明「存在未裁决冲突提议，求解仍按现值执行」）。
-  裁决三动作全部走既有 transition 端点：**保留旧弃新** = 候选 `rejected`；
-  **以新替旧** = 旧条目 transition `expired` 且带 `supersedes=<候选 id>`
-  （provenance 记 superseded_by）+ 候选 transition `confirmed`——切换只发生在
-  裁决之后；**授权试用** = `action=authorize_trial`（旧新并存：旧全权、候选
-  试用期小权重，provenance 记 `conflict_resolved_with` 不再重打标）。
+  裁决三动作：**保留旧弃新** = 候选 `rejected`（走 transition）；**以新替旧** =
+  `POST /memory/preferences/{candidate_id}/adjudicate-replace` 原子裁决（MEM-E3：
+  同一事务内旧条目 `expired`+`superseded_by`、候选 `confirmed`+`supersedes`、
+  `refresh_conflict_flags` 重算、审计、commit；任一步失败整体回滚，旧条目保持
+  原状；重复调用幂等，已完成过的裁决返回 `detail=already_applied`，不再出现
+  「旧的已退场、新的没生效」的两步请求中间态）；**授权试用** = `action=authorize_trial`
+  （旧新并存：旧全权、候选试用期小权重，provenance 记 `conflict_resolved_with`
+  不再重打标）。
   `refresh_conflict_flags` 是创建/编辑/确认/失效/拒绝/授权试用共用的唯一冲突
   重算入口：标记按「授权状态定提出方」重算，窗口重叠按**实际生效窗口**
   （约束∩条目级交集，MEM-E1c）判断，任一侧交集为空（not_applicable）不参与
@@ -424,6 +427,7 @@ RBAC 正交：链接的签发/轮换/停用复用 `admin/scheduler` 角色，撤
 - 总览分析数据：`GET /api/v1/overview/analytics`（教师负荷、教室时段热力、软约束指标、飞书同步健康）
 - 记忆偏好：`GET/POST /api/v1/memory/preferences`、`PATCH /api/v1/memory/preferences/{id}`、
   `POST /api/v1/memory/preferences/{id}/transition`（含 `action=authorize_trial` 授权试用）、
+  `POST /api/v1/memory/preferences/{candidate_id}/adjudicate-replace`（「以新替旧」原子裁决，MEM-E3）、
   `POST /api/v1/memory/preferences/{id}/convert-to-rule`（hard 条目转正式规则，仅管理员）
 - 偏好挖掘：`POST /api/v1/memory/mining-runs`
 - 调课归因：`POST /api/v1/reschedule-events` 请求体可选 `declared_reason`

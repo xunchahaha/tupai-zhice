@@ -353,9 +353,9 @@ describe("MemoryPage", () => {
 });
 
 // MEM-D1 冲突裁决三动作：proposed_conflict 标记落提出方（候选），provenance
-// 双向互记。旧实现（对 conflict_with 对方/本条做 expire）不符合新语义，这里
-// 按新语义固化：保留旧弃新=候选 rejected（带原因）；以新替旧=旧条目 expired
-// 带 supersedes + 候选 confirmed（两次调用按序）；授权试用=既有三态。
+// 双向互记。按新语义固化：保留旧弃新=候选 rejected（带原因）；以新替旧=调用
+// 后端原子裁决端点 adjudicate-replace（MEM-E3，单次请求，旧条目退场与候选转正
+// 由后端同一事务完成）；授权试用=既有三态。
 describe("MemoryPage conflict adjudication (MEM-D1)", () => {
   afterEach(cleanup);
   beforeEach(() => {
@@ -409,37 +409,63 @@ describe("MemoryPage conflict adjudication (MEM-D1)", () => {
     expect(oldEntryCalls).toHaveLength(0);
   });
 
-  it("replaces the old entry with the candidate via ordered expired+supersedes then confirmed calls", async () => {
+  it("replaces the old entry with one atomic adjudicate-replace request (MEM-E3)", async () => {
     const user = userEvent.setup();
     renderPage();
 
     const replaceButtons = await screen.findAllByRole("button", { name: "以新替旧" });
     await user.click(replaceButtons[0]);
 
-    // 两次调用必须按序：先旧条目 expired 且带 supersedes=<候选 id>，再候选 confirmed。
+    // 单次请求：替换端点收到候选 id，body 为空对象（后端取唯一冲突对端）。
     await waitFor(() =>
       expect(mocks.request).toHaveBeenCalledWith(
         expect.objectContaining({
-          url: "/api/v1/memory/preferences/pref-new/transition",
+          url: "/api/v1/memory/preferences/pref-new/adjudicate-replace",
           method: "POST",
-          data: expect.objectContaining({ target_status: "confirmed" }),
+          data: {},
         }),
       ),
     );
+    // 不再有任何两步 transition 调用——旧条目退场与候选转正由后端同一事务完成。
     const transitionCalls = mocks.request.mock.calls.filter(([config]) =>
       String(config.url).endsWith("/transition"),
-    ) as Array<[{ url: string; data: Record<string, unknown> }]>;
-    expect(transitionCalls).toHaveLength(2);
-    expect(transitionCalls[0][0].url).toBe("/api/v1/memory/preferences/pref-old/transition");
-    expect(transitionCalls[0][0].data).toMatchObject({
-      target_status: "expired",
-      supersedes: "pref-new",
-    });
-    expect(transitionCalls[1][0].url).toBe("/api/v1/memory/preferences/pref-new/transition");
-    expect(transitionCalls[1][0].data).toMatchObject({ target_status: "confirmed" });
-    await waitFor(() =>
-      expect(mocks.success).toHaveBeenCalledWith("已用新偏好替换旧偏好，新偏好正式生效"),
     );
+    expect(transitionCalls).toHaveLength(0);
+    await waitFor(() => expect(mocks.success).toHaveBeenCalledWith("已替换生效"));
+  });
+
+  it("shows the backend detail and never touches the old entry when the replace fails", async () => {
+    const user = userEvent.setup();
+    mocks.request.mockImplementation(async (config: { url: string; method?: string }) => {
+      const method = (config.method ?? "GET").toUpperCase();
+      if (config.url === "/api/v1/memory/preferences" && method === "GET") return conflictEntries;
+      if (config.url === "/api/v1/teachers") return [{ id: "t1", business_id: "T-001", name: "张老师", subject: "数学" }];
+      if (config.url === "/api/v1/rooms") return [];
+      if (config.url === "/api/v1/class-groups") return [];
+      if (config.url === "/api/v1/course-sessions") return [];
+      if (config.url === "/api/v1/time-slots") return [slot];
+      if (config.url === "/api/v1/solver-runs") return [];
+      if (config.url.endsWith("/adjudicate-replace")) {
+        // 模拟后端裁决失败（axios 错误形态：errorMessage 读 response.data.detail）。
+        throw { response: { data: { detail: "候选没有活跃的冲突对端，无法执行以新替旧" } } };
+      }
+      if (config.url.startsWith("/api/v1/memory/preferences/")) return conflictEntries[0];
+      return [];
+    });
+    renderPage();
+
+    const replaceButtons = await screen.findAllByRole("button", { name: "以新替旧" });
+    await user.click(replaceButtons[0]);
+
+    // 失败 toast 透传后端 detail；全程没有第二个请求，旧条目不会被先退场。
+    await waitFor(() =>
+      expect(mocks.error).toHaveBeenCalledWith("候选没有活跃的冲突对端，无法执行以新替旧"),
+    );
+    const transitionCalls = mocks.request.mock.calls.filter(([config]) =>
+      String(config.url).endsWith("/transition"),
+    );
+    expect(transitionCalls).toHaveLength(0);
+    expect(mocks.request.mock.calls.filter(([config]) => String(config.url).endsWith("/adjudicate-replace"))).toHaveLength(1);
   });
 
   it("resolves the pair from the marked old entry row with the same semantics", async () => {
