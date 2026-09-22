@@ -186,6 +186,21 @@ Goal 对象保存原始指令 + 逐项验收清单（课次集合逐项比对/�
 
 实现参数（≥2 证据/90 天/0.3x）为可调实现细节，不属产品承诺。
 
+## 8. 第三轮复审（2026-09-22，对照 84fac81，MEM-E 系列依据）
+
+隔离反例验证（正常场景 1 过、反例 2 失败）确认 D 波修复只覆盖了部分路径，六项残留：
+
+| # | 问题 | 修正决策 | 批次 |
+| --- | --- | --- | --- |
+| E1a | **冲突提出方按 created_at 判定**——「较早候选被编辑成与较晚 confirmed 冲突」时标记落错侧，已确认偏好再次被排除 | 冲突判定首先依据**授权状态**：未授权条目（probation 未授权）永远只能是提出方；已授权/confirmed 只在被**显式裁决操作**点名时改变状态。创建时间仅用于同授权级别内的提出方归属。回归测试固定「较早候选→较晚确认项→编辑较早候选→确认项仍 applied」 | MEM-E1 |
+| E1b | 「最终态被接受」未落实：学习集只排除 candidate_discarded，pending/candidate_ready 都算已接受 | 学习依据必须有**明确接受依据**：调课候选版本被采纳（发布/被教务接受的显式状态或 accepted 标记）；未被接受的尝试留历史但不作偏好证据。口径以模型里可稳定查询的字段实现并注释 | MEM-E1 |
+| E1c | 编译窗口=交集、冲突窗口=条目有效期，两套口径不一致（实际不重叠的偏好被误标冲突） | **所有窗口判断共用 **（约束∩条目级），冲突配对先看实际生效窗口是否重叠 | MEM-E1 |
+| E2a | 清单修订后目标仍显示旧版「已达成」；验收未绑定 checklist_version | 修订清单 → acceptance_status 强制回 pending（历史报告保留但标注版本）；SolverRun/report 记录所用 checklist_version 与参数快照；在途验收不得被新版本悄悄换口径 | MEM-E2 |
+| E2b | 底线补 coverage 只传 has_target_set 布尔，参数丢失 → 完成了却被无参数检查卡住；无范围清单的「课次不重复」跟着 coverage 一起消失 | 底线补全传递**完整规范化范围**（创建时从请求解析、修订时保留旧参数或显式新范围）；「交付课次不重复」拆成不依赖范围的独立完整性底线项 | MEM-E2 |
+| E3 | 「以新替旧」是两个独立请求，第二步失败时旧偏好已退场 | 新增后端原子裁决端点 （同一事务：旧 expired+supersedes、候选 confirmed、冲突重算、审计；失败整体不变、重复请求幂等明确）；前端改调它 | MEM-E3 |
+
+CI 备注：runner 因账户计费未启动（jobs steps=[]，未实际运行）；CI 补 e2e job 使其等价本地 VER。
+
 ## Sources
 
 - Anthropic：Building Effective Agents、Effective Context Engineering、Claude Agent SDK 文档、官方 Memory Tool 公告（anthropic.com/engineering、code.claude.com、platform.claude.com）
