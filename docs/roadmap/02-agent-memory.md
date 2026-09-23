@@ -201,6 +201,18 @@ Goal 对象保存原始指令 + 逐项验收清单（课次集合逐项比对/�
 
 CI 备注：runner 因账户计费未启动（jobs steps=[]，未实际运行）；CI 补 e2e job 使其等价本地 VER。
 
+## 9. 第四轮复审（2026-09-23，对照 c1ac7d46，MEM-F 收口批次）
+
+7 个隔离用例：3 过、4 未达预期，归并为 3 类。功能范围冻结——不再新增记忆/Agent/自动重跑机制，只做现有能力内部的三项正确性保证。
+
+| # | 问题 | 修正决策 | 批次 |
+| --- | --- | --- | --- |
+| F1 | **空日期交集的新条目仍可触发 new_replaces**：constraint 10/1-2 + 条目有效期至 9/30 → 交集空 → 本应 not_applicable，却作为 confirmed 走替代分支停用有效旧条目 |  顶部守卫：新条目实际窗口为空 → 直接返回 not_applicable（不触发替代/冲突/相邻分支）；验收=不适用的新条目无论状态如何都不能使有效旧条目退出 | MEM-F |
+| F2 | **旧验收写回覆盖新版本 pending**：验收 A 按 v1 算完，写回前清单被修订为 v2（pending），A 写回旧结论 → achieved/completed |  写回时事务内校验当前 checklist_version == 本次验收版本；不一致 → 报告仅作历史保存（标注版本），acceptance_status 保持 pending 且 detail「清单已修订至 v{n}，本报告基于 v{m}，需重新验收」，goal.status 不得写 achieved | MEM-F |
+| F3 | 范围修订语义：显式  清除不生效（真值判断把空列表当未提供）；完整清单与显式 scope 并存时优先级不一致（静默沿用旧范围） | 合并函数区分「未提供（保留旧值）/显式空列表（清除该维度）/非空（替换）」——用 pydantic  感知字段是否提交；契约统一为**显式 scope 优先于清单 coverage 既有参数**并写入接口文档 | MEM-F |
+
+配套：6 个业务场景迁入项目回归测试（此前为审查方隔离脚本）；LICENSE 按复审结论定为 **Apache-2.0**（补文件与 manifest/README 同步）；CI 补 e2e job。
+
 ## Sources
 
 - Anthropic：Building Effective Agents、Effective Context Engineering、Claude Agent SDK 文档、官方 Memory Tool 公告（anthropic.com/engineering、code.claude.com、platform.claude.com）
