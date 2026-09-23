@@ -54,3 +54,40 @@ jobs:
         run: pnpm exec vitest run
       - name: Build
         run: pnpm build
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install backend dependencies
+        run: uv sync --group dev
+        working-directory: backend
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: E2E tests (self-managed backend 8001 + frontend 5174)
+        run: pnpm test:e2e
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: frontend/test-results/
+          retention-days: 7

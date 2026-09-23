@@ -88,4 +88,4 @@ Web 管理端：<http://127.0.0.1:5173>
 
 ## License
 
-License: TBD — 维护者正在 Apache-2.0 与 MIT 之间定夺（分析见 [docs/roadmap/README.md](docs/roadmap/README.md) ADR-4）。在 LICENSE 文件落地前，请勿 fork 后直接商用分发。
+本项目的全部代码与文档以 [Apache-2.0](LICENSE) 许可发布：允许商用、修改与再分发，需保留版权与许可声明；贡献代码即表示同意以同一许可授权。

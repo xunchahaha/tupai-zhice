@@ -2,6 +2,7 @@
 name = "tupai-zhice-backend"
 version = "0.1.0"
 description = "Backend for the TuPai ZhiCe scheduling MVP"
+license = "Apache-2.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "alembic>=1.16,<2",

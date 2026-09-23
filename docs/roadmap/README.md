@@ -36,7 +36,7 @@
 - **ADR-1 导入体系**：三层管线（L1 模板保底 / L2 智能映射任意 Excel / L3 平台连接器）；L2 为开源核心卖点，不引第三方 importer UI 库（视觉冻结约束），LLM 语义层复用现有 OpenAI-compatible 通道且可关闭。详见 [01](01-data-import.md)。
 - **ADR-2 记忆与自进化**：整体保持 workflow（CP-SAT 是完美 Verifier），LLM 只做解析/归纳/解释；自研 PreferenceEntry 关系表（双时间轴、试用期状态、归纳条目永不自动升硬约束），不引向量库/图库/厂商托管记忆。详见 [02](02-agent-memory.md)。
 - **ADR-3 集成抽象**：Protocol 能力接口（table_store/calendar/notifier/approval/nl）+ manifest 动态表单 + LocalAdapter 默认可用；feishu.py 生产逻辑 strangler 收敛不重写。详见 [03](03-integrations.md)。
-- **ADR-4 License（待用户拍板）**：仓库当前**无 LICENSE 文件**（pyproject/package.json 也未声明）。建议 **Apache-2.0**（专利条款对 adopter 与贡献者都更稳）或 **MIT**（最简）；若在意 AI 数据层面合规表述可在 README 增加可接受使用条款附录。任选其一后补 LICENSE 文件 + 双 manifest 字段。
+- **ADR-4 License（已定，2026-09-23）**：Apache-2.0。LICENSE 文件（官方原文）+ backend/pyproject  字段 + frontend/package.json  字段 + README License 节已全部落地。
 
 ## 遗留事项（本次升级范围外，记录待办）
 
