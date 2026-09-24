@@ -1,6 +1,6 @@
 # 04 · 实施计划与进度
 
-> 状态：✅ 六期第五轮复审 F2 并发收口完成 · VER-6 通过（2026-09-25：后端 ruff/mypy 全过 + pytest 365 passed；前端未改动，未跑前端套件；e2e 未在本地运行，待推送后 CI 覆盖）
+> 状态：✅ 七期第六轮复审修订侧收口完成 · VER-7 通过（2026-09-25：后端 ruff/mypy 全过 + pytest 369 passed；前端 tsc 0 错误 + vitest 19 passed；e2e 未在本地运行，待推送后 CI 覆盖）
 > 批次策略遵循工作区 AGENTS.md：按模块分批、实现代理自检 + 局部验证、里程碑统一全量验证、每批一个原子提交。
 
 ## 勘察修正（重要）
@@ -96,6 +96,13 @@ VER-1 收口
 | --- | --- | --- | --- |
 | MEM-G | 目标验收写回数据库级并发保护：清单版本落为持久化计数列 checklist_revision（alembic 迁移存量回填 + 修订时 SQL 表达式同事务自增），验收结论写回只走条件 UPDATE——WHERE 携带 checklist_revision=评估时版本与 status<>'abandoned' 双条件并按实际行数判定，版本不匹配或目标已放弃时报告仅留档为历史、目标当前状态一字不改；四个并发交错（含重读后、提交前窗口）进入回归测试 | ✅ 完成（后端 ruff/mypy 全过 + pytest 365 passed，1a6a42b） | 1a6a42b |
 | VER-6 | 终验：后端 ruff/mypy 全过 + pytest 365 passed；前端未改动，未跑前端套件；e2e 未在本地运行（无前端改动，CI 的 e2e job 将在推送后覆盖，CI 因账户 billing 仍未启动） | ✅（后端口径） | — |
+
+## 七期「第六轮复审修订侧收口」批次（2026-09-25，功能范围冻结）
+
+| 批次 | 内容 | 状态 | 提交 |
+| --- | --- | --- | --- |
+| MEM-H | 清单修订侧并发复位保护：修订落库只走单条数据库条件 UPDATE（`apply_goal_checklist_revision`）——历史快照追加、清单替换、版本自增（SQL 表达式取库中当前值）与验收复位在同一语句里，SET 无条件把 acceptance_status 复位 pending 并用 CASE 按数据库当时状态把 achieved 回退 open，WHERE 携带读取时 checklist_revision 与 status<>'abandoned'，rowcount=0 时回滚、按库中状态返回 409 冲突且不留修订审计记录；先验收后修订等反向交错进入回归测试 | ✅ 完成（后端 ruff/mypy 全过 + pytest 369 passed，3b3ef96） | 3b3ef96 |
+| VER-7 | 终验：后端 ruff/mypy 全过 + pytest 369 passed；前端 tsc 0 错误 + vitest 19 passed；e2e 未在本地运行（CI 的 e2e job 将在推送后覆盖，CI 因账户 billing 仍未启动，runners 未分配） | ✅ | — |
 
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 
