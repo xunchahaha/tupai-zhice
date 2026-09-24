@@ -5725,9 +5725,12 @@ goal.status 为 achieved 时回退 open（状态必须由新版本的验收重�
 停留在旧版结论上）。latest_run_id 与历史报告保留（审计链），但响应附
 `latest_report_meta`，前端据此把旧结论标注为「历史版本 v{n-1} 的结论」。
 
-MEM-E2/E2b：修订时底线补全传递完整规范化范围——优先保留旧 coverage 项的
-范围参数（`previous_checklist`），用户显式给出的新范围字段才覆盖，旧范围
-丢失会让「排好了」被判 unverifiable。
+MEM-E2/E2b：修订时底线补全传递完整范围——优先保留旧 coverage 项的范围参数
+（`previous_checklist`），旧范围丢失会让「排好了」被判 unverifiable。
+MEM-F/F3：body.scope 直接以请求模型传入——合并层用 pydantic
+`model_fields_set` 感知「字段是否显式提交」，实现 未提交保留 / 显式空列表
+（或 null 日期）清除 / 显式非空替换 的三态语义；**显式 scope 优先于清单
+coverage 既有参数**。
  * @summary Replace Goal Checklist
  */
 export const replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch = (
