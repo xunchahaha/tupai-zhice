@@ -216,6 +216,7 @@ from .services.explain import (
 from .services.feishu import FeishuService, FeishuServiceError, json_text
 from .services.goal import (
     GOAL_CHECKLIST_KINDS,
+    apply_goal_checklist_revision,
     build_checklist,
     draft_checklist_from_interpretation,
     ensure_bottom_line_items,
@@ -4554,6 +4555,12 @@ def replace_goal_checklist(
     `model_fields_set` 感知「字段是否显式提交」，实现 未提交保留 / 显式空列表
     （或 null 日期）清除 / 显式非空替换 的三态语义；**显式 scope 优先于清单
     coverage 既有参数**。
+
+    MEM-F/F2（第六轮复审收口）：修订落库只走**单条数据库条件 UPDATE**（见
+    `apply_goal_checklist_revision`）——历史快照、清单替换、版本自增与验收
+    复位（无条件回 pending、achieved 按库中状态回退 open）在同一条语句里，
+    WHERE 携带读取时版本号与 status <> 'abandoned'；行数=0（版本已前移或已
+    放弃）返回 409 冲突，不带着旧快照提交，也不留修订审计记录。
     """
     goal = get_scoped_or_404(db, SolveGoal, goal_id, scope)
     if goal.status == "abandoned":
@@ -4573,31 +4580,45 @@ def replace_goal_checklist(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     old_version = int(goal.checklist_revision)
-    goal.checklist_history = [
-        *(goal.checklist_history or []),
-        {
-            "version": old_version,
-            "saved_at": shanghai_now().isoformat(),
-            "saved_by": user.id,
-            "items": old_checklist,
-        },
-    ]
-    goal.checklist = new_checklist
-    # MEM-F/F2 收口：版本号是持久化计数列，版本自增与修订写入（历史快照、
-    # 清单替换、验收复位）在同一事务提交。用 SQL 表达式自增（checklist_revision
-    # = checklist_revision + 1）——递增取数据库当前值，即使出现并发修订，
-    # 单写者下也不会互相吞掉版本号。
-    goal.checklist_revision = SolveGoal.checklist_revision + 1
+    history_entry = {
+        "version": old_version,
+        "saved_at": shanghai_now().isoformat(),
+        "saved_by": user.id,
+        "items": old_checklist,
+    }
     # MEM-E2/E2a：修订使旧版验收结论失效——强制回 pending；achieved 的目标
     # 状态回退 open（附原因），等待按新清单重新验收。failed 的执行状态同样
-    # 归位 pending（旧失败原因对应旧清单，不再有意义）。
+    # 归位 pending（旧失败原因对应旧清单，不再有意义）。detail 文案按请求
+    # 读取时的快照选择，随下面的条件 UPDATE 一并落库。
+    acceptance_detail: str | None = None
     if goal.acceptance_status in {"completed", "failed"}:
-        goal.acceptance_status = "pending"
-        goal.acceptance_detail = f"清单修订至 v{old_version + 1}，等待新验收"
+        acceptance_detail = f"清单修订至 v{old_version + 1}，等待新验收"
     if goal.status == "achieved":
-        goal.status = "open"
-        goal.acceptance_detail = (
+        acceptance_detail = (
             f"清单修订至 v{old_version + 1}（原已达成结论基于 v{old_version}），等待新验收"
+        )
+    # MEM-F/F2（第六轮复审收口）：修订侧并发保护。读取（get_scoped_or_404）到
+    # 落库之间，另一会话可能已按旧清单完成验收或已放弃目标——复位依据不能是
+    # 请求快照，必须由数据库按落库当时的行状态给出。历史快照、清单替换、
+    # 版本自增与验收复位（无条件回 pending、achieved 按库中状态回退 open）
+    # 合并为单条条件 UPDATE，WHERE 携带读取时版本号与未放弃；行数=0 = 版本
+    # 已前移或已放弃：回滚后按当前库中状态返回 409——绝不带着旧快照继续
+    # 提交；audit 在行数判定之后才入会话，冲突路径不留下修订审计记录。
+    if not apply_goal_checklist_revision(
+        db,
+        goal,
+        old_version=old_version,
+        new_checklist=new_checklist,
+        history_entry=history_entry,
+        acceptance_detail=acceptance_detail,
+    ):
+        db.rollback()
+        db.refresh(goal)
+        if goal.status == "abandoned":
+            raise HTTPException(status_code=409, detail="目标已放弃，清单不再接受修订")
+        raise HTTPException(
+            status_code=409,
+            detail=f"清单已被并发修订至 v{goal.checklist_revision}，请刷新后重试",
         )
     audit(
         db,
@@ -4615,7 +4636,9 @@ def replace_goal_checklist(
                     if str(item.get("kind")) in GOAL_CHECKLIST_KINDS
                 }
             ),
-            "acceptance_reset": goal.acceptance_status == "pending",
+            # 条件 UPDATE 的 SET 子句无条件把 acceptance_status 写回 pending，
+            # 因此该口径恒为 True（与此前复位 if 之后的取值一致）。
+            "acceptance_reset": True,
         },
     )
     db.commit()

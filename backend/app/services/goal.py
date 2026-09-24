@@ -24,7 +24,7 @@ from collections import Counter
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 
 from ..models import (
     AuditLog,
@@ -1742,6 +1742,61 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
     return report
 
 
+def apply_goal_checklist_revision(
+    db: Any,
+    goal: SolveGoal,
+    *,
+    old_version: int,
+    new_checklist: list[dict[str, Any]],
+    history_entry: dict[str, Any],
+    acceptance_detail: str | None = None,
+) -> bool:
+    """清单修订落库（MEM-F/F2 第六轮复审收口）：单条条件 UPDATE 写全部字段。
+
+    与验收侧（apply_goal_evaluation）对偶的并发保护：修订请求在 API 层读到
+    的是旧快照，从读到落库之间，另一会话可能已按旧清单完成验收（status=
+    achieved / acceptance_status=completed）——复位依据不能是请求快照，必须
+    由数据库按落库当时的行状态给出。历史快照追加、清单替换、版本自增与
+    验收复位合并为**同一条** UPDATE：
+
+    - WHERE 携带 `checklist_revision = 修订请求读取时版本 AND status <>
+      'abandoned'`（abandoned 是人工终态，不被修订覆盖）；
+    - SET 同时写 checklist / checklist_history / checklist_revision+1（SQL
+      表达式自增，取数据库当前值），并**无条件**把 acceptance_status 写回
+      pending（新版本永远回到待验收），status 用 CASE 按数据库当时状态把
+      achieved 回退 open、其他状态保持不变；
+    - 行数=1 才算修订成功；行数=0 = 版本已前移或已放弃，返回 False，由调用
+      方回滚并返回冲突——绝不带着旧快照继续提交，也不产生修订审计记录。
+
+    复位必须出现在最终 SQL 的 SET 子句里：若在会话内对 ORM 对象普通赋值，
+    当对象加载时已是 pending/open（快照与库中同值）时 flush 判定无净变化，
+    这些列不会出现在 UPDATE 里，复位会被静默吞掉。本函数不触碰 ORM 对象；
+    行数=1 后由调用方提交并 refresh 同步会话内对象。
+    """
+    values: dict[str, Any] = {
+        "checklist": new_checklist,
+        "checklist_history": [*(goal.checklist_history or []), history_entry],
+        "checklist_revision": SolveGoal.checklist_revision + 1,
+        "acceptance_status": "pending",
+        "status": case((SolveGoal.status == "achieved", "open"), else_=SolveGoal.status),
+    }
+    if acceptance_detail is not None:
+        # detail 文案由调用方按请求读取时的快照选择；快照为 pending 时与既有
+        # 行为一致——不覆写库中已有的说明（如「等待重新验收」标记）。
+        values["acceptance_detail"] = acceptance_detail
+    result = db.execute(
+        update(SolveGoal)
+        .where(
+            SolveGoal.id == goal.id,
+            SolveGoal.checklist_revision == old_version,
+            SolveGoal.status != "abandoned",
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0) == 1
+
+
 def goal_run_counts(db: Any, schedule_set_id: str) -> dict[str, int]:
     """目标列表用：一次分组查询拿到每个目标的关联 run 数。"""
     rows = db.execute(
@@ -1761,6 +1816,7 @@ __all__ = [
     "GOAL_CHECKLIST_KINDS",
     "GOAL_STATUSES",
     "PUBLISH_AUDIT_ACTIONS",
+    "apply_goal_checklist_revision",
     "apply_goal_evaluation",
     "build_checklist",
     "draft_checklist_from_interpretation",

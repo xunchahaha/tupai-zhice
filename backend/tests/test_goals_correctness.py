@@ -19,10 +19,16 @@
     checklist_revision = 评估时版本 AND status <> 'abandoned'），按实际行数
     判定——修订/放弃发生在重读之后、提交之前的竞态窗口内，报告只留档为
     历史，不得改写目标当前状态。
+11. 第六轮复审收口：修订侧同构保护——清单修订落库只走单条数据库条件 UPDATE
+    （WHERE 携带读取时 checklist_revision AND status <> 'abandoned'；SET 无条件
+    acceptance_status='pending'、按库中状态把 achieved 回退 open）。先验收后
+    修订、修订与放弃交错、并发版本冲突一律返回冲突响应，请求旧快照不得
+    覆盖库中状态，冲突路径不留修订审计记录。
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import date
 from typing import Any
@@ -32,9 +38,11 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+import app.api as api_module
 import app.services.goal as goal_module
 from app.db import SessionLocal
 from app.models import (
+    AuditLog,
     Campus,
     CourseSession,
     DataSnapshot,
@@ -963,6 +971,286 @@ def test_abandon_between_reread_and_writeback_is_terminal(
         run_row = db.get(SolverRun, run.id)
         assert run_row is not None and run_row.goal_report is not None
         assert run_row.goal_report["decision"]["status"] == "achieved"
+
+
+# ------------------- 第六轮复审收口：修订侧同构条件 UPDATE（单条落库 + 行数判定）
+
+
+def _wrap_revision_before_write(
+    monkeypatch: pytest.MonkeyPatch, hook: Callable[[], None]
+) -> None:
+    """在修订端点「读取之后、条件 UPDATE 之前」插入一次对方动作。
+
+    修订写入抽在 services.apply_goal_checklist_revision（api 层唯一调用方），
+    包装它在 app.api 里的绑定：第一次调用先执行 hook（另一会话的交错动作），
+    再放行真实落库；同请求链上的后续调用（嵌套 PATCH）直接放行，只拦一次。
+    """
+    real_revision = goal_module.apply_goal_checklist_revision
+    fired = {"done": False}
+
+    def _hooked(db: Any, goal: Any, **kwargs: Any) -> bool:
+        if not fired["done"]:
+            fired["done"] = True
+            hook()
+        return real_revision(db, goal, **kwargs)
+
+    monkeypatch.setattr(api_module, "apply_goal_checklist_revision", _hooked)
+
+
+_V2_COVERAGE_BODY = {
+    "checklist": [
+        {
+            "key": "coverage",
+            "requirement": "覆盖 C1（v2 口径）",
+            "kind": "coverage",
+            "params": {"course_business_ids": ["C1"]},
+        }
+    ]
+}
+
+
+def test_acceptance_lands_between_read_and_revision_resets_conclusion(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第六轮复审核心反例（先验收后修订）：修订请求读到 open/pending 后、
+    落库前，另一会话按 v1 完成验收（条件 UPDATE 命中，写入 achieved/completed）。
+
+    复位依据必须是数据库落库当时的行状态：单条条件 UPDATE 的 SET 无条件把
+    acceptance_status 写回 pending、CASE 把 achieved 回退 open——v2 清单不得
+    挂着 v1 的成功结论；v1 报告留档（latest_run_id/latest_report_meta）。
+    快照驱动的复位 if 在此窗口会漏（快照仍是 open/pending）；会话内 ORM
+    普通赋值会因「与快照同值、无净变化」静默丢复位（复审点名的陷阱）——
+    只有条件 UPDATE 的 SET 子句能挡住。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    assert created.json()["status"] == "open"
+    assert created.json()["acceptance_status"] == "pending"
+    course = _add_course(scope["scope_id"], "C1", lesson_date=date(2026, 10, 5))
+    run = _make_run(
+        scope["scope_id"],
+        goal_id,
+        [_assignment(course)],
+        snapshot_sessions=[{"business_id": "C1", "is_active": True, "class_business_id": "B1"}],
+    )
+
+    def _accept_on_other_session() -> None:
+        # 交错窗口：另一会话按 v1 完成验收——版本未被修订、结论 UPDATE 命中。
+        with SessionLocal() as db2:
+            run2 = db2.get(SolverRun, run.id)
+            assert run2 is not None
+            assert apply_goal_evaluation(db2, run2) is not None
+            db2.commit()
+        with SessionLocal() as db2:
+            raced = db2.get(SolveGoal, goal_id)
+            assert raced is not None
+            assert raced.status == "achieved"
+            assert raced.acceptance_status == "completed"
+
+    _wrap_revision_before_write(monkeypatch, _accept_on_other_session)
+    patched = client.patch(
+        f"/api/v1/goals/{goal_id}/checklist", headers=headers, json=_V2_COVERAGE_BODY
+    )
+    monkeypatch.undo()
+
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["checklist_version"] == 2
+    # 复位来自数据库当时状态：v2 清单挂着 open/pending，不是 v1 的成功结论。
+    assert body["status"] == "open"
+    assert body["acceptance_status"] == "pending"
+    assert body["acceptance_detail"] is None
+    # v1 报告留档（审计链），响应标注「历史版本结论」。
+    assert body["latest_run_id"] == run.id
+    meta = body["latest_report_meta"]
+    assert meta is not None
+    assert meta["run_id"] == run.id
+    assert meta["checklist_version"] == 1
+    assert meta["is_current_version"] is False
+    assert "历史版本 v1" in meta["note"]
+
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        assert goal_row.checklist_revision == 2
+        assert goal_row.status == "open"
+        assert goal_row.acceptance_status == "pending"
+        assert goal_row.latest_run_id == run.id
+        assert goal_row.checklist_history
+        assert goal_row.checklist_history[0]["version"] == 1
+        assert goal_row.checklist_history[0]["items"]
+        run_row = db.get(SolverRun, run.id)
+        assert run_row is not None and run_row.goal_report is not None
+        assert run_row.goal_report["meta"]["checklist_version"] == 1
+
+
+def test_abandon_between_read_and_revision_returns_conflict(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第六轮复审交错③（修订与放弃）：放弃发生在修订请求读取之后、落库之前。
+
+    条件 UPDATE 的 WHERE status <> 'abandoned' 行数=0：返回 409 冲突，目标
+    保持人工终态 abandoned，清单/版本号/历史一字不改，不留下修订审计记录。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    original_keys = [item["key"] for item in created.json()["checklist"]]
+
+    def _abandon_on_other_session() -> None:
+        response = client.post(f"/api/v1/goals/{goal_id}/abandon", headers=headers)
+        assert response.status_code == 200, response.text
+
+    _wrap_revision_before_write(monkeypatch, _abandon_on_other_session)
+    patched = client.patch(
+        f"/api/v1/goals/{goal_id}/checklist", headers=headers, json=_V2_COVERAGE_BODY
+    )
+    monkeypatch.undo()
+
+    assert patched.status_code == 409, patched.text
+    assert patched.json()["detail"] == "目标已放弃，清单不再接受修订"
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        assert goal_row.status == "abandoned"
+        assert goal_row.checklist_revision == 1
+        assert goal_row.acceptance_status == "pending"
+        assert [item["key"] for item in goal_row.checklist] == original_keys
+        assert goal_row.checklist_history == []
+        # 冲突路径不留修订审计（abandon 自己的审计不在本断言范围）。
+        revisions = db.scalars(
+            select(AuditLog).where(
+                AuditLog.action == "update_checklist", AuditLog.resource_id == goal_id
+            )
+        ).all()
+        assert revisions == []
+
+
+def test_concurrent_revisions_late_write_gets_conflict(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第六轮复审交错④（版本冲突）：两次修订竞速——后者以读取时 v1 为条件
+    落库，前者已把版本推到 v2：WHERE 行数=0 → 409 冲突。
+
+    后者不得覆盖前者的清单、不得再自增版本、不留审计；冲突响应按重读后的
+    当前版本提示刷新。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+
+    def _revise_on_other_session() -> None:
+        # 先完成的修订（内层 PATCH）完整落库 v2；本包装在嵌套请求里直接放行。
+        inner = client.patch(
+            f"/api/v1/goals/{goal_id}/checklist",
+            headers=headers,
+            json={
+                "checklist": [
+                    {
+                        "key": "revision-first",
+                        "requirement": "先到者",
+                        "kind": "draft_only",
+                        "params": {},
+                    }
+                ]
+            },
+        )
+        assert inner.status_code == 200, inner.text
+        assert inner.json()["checklist_version"] == 2
+
+    _wrap_revision_before_write(monkeypatch, _revise_on_other_session)
+    outer = client.patch(
+        f"/api/v1/goals/{goal_id}/checklist",
+        headers=headers,
+        json={
+            "checklist": [
+                {
+                    "key": "revision-second",
+                    "requirement": "后到者",
+                    "kind": "draft_only",
+                    "params": {},
+                }
+            ]
+        },
+    )
+    monkeypatch.undo()
+
+    assert outer.status_code == 409, outer.text
+    detail = outer.json()["detail"]
+    assert "并发修订" in detail
+    assert "v2" in detail
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        assert goal_row.checklist_revision == 2
+        keys = [item["key"] for item in goal_row.checklist]
+        assert "revision-first" in keys
+        assert "revision-second" not in keys
+        assert [entry["version"] for entry in goal_row.checklist_history] == [1]
+        revisions = db.scalars(
+            select(AuditLog).where(
+                AuditLog.action == "update_checklist", AuditLog.resource_id == goal_id
+            )
+        ).all()
+        assert len(revisions) == 1
+
+
+def test_no_race_revision_keeps_open_and_pending(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """第六轮复审交错⑤（无竞争基线）：open/pending 的 v1 → v2 仍 open/pending。
+
+    快照与库中同值时，复位列依旧出现在条件 UPDATE 的 SET 子句里（无条件
+    写回），行为不回归：版本递增、历史快照、清单替换、无 detail 覆写。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    assert created.json()["checklist_version"] == 1
+
+    patched = client.patch(
+        f"/api/v1/goals/{goal_id}/checklist", headers=headers, json=_V2_COVERAGE_BODY
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["checklist_version"] == 2
+    assert body["status"] == "open"
+    assert body["acceptance_status"] == "pending"
+    assert body["acceptance_detail"] is None
+    assert body["latest_run_id"] is None
+    assert body["latest_report_meta"] is None
+
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        assert goal_row.checklist_revision == 2
+        assert goal_row.status == "open"
+        assert goal_row.acceptance_status == "pending"
+        assert goal_row.acceptance_detail is None
+        keys = [item["key"] for item in goal_row.checklist]
+        assert "coverage" in keys
+        assert [entry["version"] for entry in goal_row.checklist_history] == [1]
 
 
 # ------------------------------------------------- MEM-F/F3：范围修订三态 + 契约统一

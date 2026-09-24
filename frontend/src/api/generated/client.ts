@@ -5731,6 +5731,12 @@ MEM-F/F3：body.scope 直接以请求模型传入——合并层用 pydantic
 `model_fields_set` 感知「字段是否显式提交」，实现 未提交保留 / 显式空列表
 （或 null 日期）清除 / 显式非空替换 的三态语义；**显式 scope 优先于清单
 coverage 既有参数**。
+
+MEM-F/F2（第六轮复审收口）：修订落库只走**单条数据库条件 UPDATE**（见
+`apply_goal_checklist_revision`）——历史快照、清单替换、版本自增与验收
+复位（无条件回 pending、achieved 按库中状态回退 open）在同一条语句里，
+WHERE 携带读取时版本号与 status <> 'abandoned'；行数=0（版本已前移或已
+放弃）返回 409 冲突，不带着旧快照提交，也不留修订审计记录。
  * @summary Replace Goal Checklist
  */
 export const replaceGoalChecklistApiV1GoalsGoalIdChecklistPatch = (
