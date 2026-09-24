@@ -1,6 +1,6 @@
 # 04 · 实施计划与进度
 
-> 状态：五期「第四轮复审收口」进行中（2026-09-25，依 02 文档 §9；D/E 波已修，F 波收口中）
+> 状态：✅ 五期第四轮复审收口完成 · VER-5 通过（2026-09-25：后端 363 / 前端 132 / build / orval 零 diff / e2e 3）
 > 批次策略遵循工作区 AGENTS.md：按模块分批、实现代理自检 + 局部验证、里程碑统一全量验证、每批一个原子提交。
 
 ## 勘察修正（重要）
@@ -85,10 +85,10 @@ VER-1 收口
 
 | 批次 | 内容 | 状态 | 提交 |
 | --- | --- | --- | --- |
-| MEM-F | 三项正确性收口：①空交集新条目不得触发 new_replaces ②旧验收写回带 checklist_version 条件（不覆盖新版本 pending）③范围修订三态语义（未提供/显式空列表/非空，显式 scope 优先）+ 6 业务场景迁入回归 | 🔄 实现中（F1/F2/F3 已落盘，flaky 测试定位中） | — |
+| MEM-F | 三项正确性收口：①空交集新条目不得触发 new_replaces ②旧验收写回带 checklist_version 条件（不覆盖新版本 pending）③范围修订三态语义（未提供/显式空列表/非空，显式 scope 优先）+ 6 业务场景迁入回归 + 4 处时间炸弹测试改相对窗口 | ✅ 完成（全量 363 passed / 前端 132 passed，238f1f8） | 238f1f8 |
 | LICENSE | Apache-2.0 定稿（官方原文 LICENSE + 双 manifest 字段 + README License 节） | ✅ | ec050c9 |
 | CI-e2e | CI 补 e2e job（自管服务 + playwright chromium + trace 上传），与本地 VER 口径对齐 | ✅ | ec050c9 |
-| VER-5 | 终验：全量 pytest + vitest + build + orval 零 diff + e2e | 排队（等 MEM-F） | — |
+| VER-5 | 终验：全量 pytest + vitest + build + orval 零 diff + e2e | ✅ 后端 ruff/mypy/363 passed；前端 tsc/132/build/orval 零 diff/e2e 3 passed；CI 待 billing（workflow 含 e2e job，ec050c9） | — |
 
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 
