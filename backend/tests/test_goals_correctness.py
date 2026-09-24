@@ -14,7 +14,11 @@
 7. D6 验收异常可见：acceptance_status=failed 落库且 API 可见（含 run 失败路径）；
 8. MEM-F/F2：旧版本验收报告写回不覆盖新版本的 pending（§9 第四轮复审）；
 9. MEM-F/F3：范围修订三态语义（未提交保留 / 显式空清除 / 显式非空替换），
-   显式 scope 优先于清单 coverage 既有参数。
+   显式 scope 优先于清单 coverage 既有参数；
+10. 第五轮复审 F2 收口：验收写回只走数据库条件 UPDATE（WHERE 携带持久化
+    checklist_revision = 评估时版本 AND status <> 'abandoned'），按实际行数
+    判定——修订/放弃发生在重读之后、提交之前的竞态窗口内，报告只留档为
+    历史，不得改写目标当前状态。
 """
 
 from __future__ import annotations
@@ -686,7 +690,14 @@ def test_apply_goal_evaluation_marks_completed_on_success(
     assert created.status_code == 201, created.text
     goal = created.json()
     course = _add_course(scope["scope_id"], "C1", lesson_date=date(2026, 10, 5))
-    run = _make_run(scope["scope_id"], goal["id"], [_assignment(course)])
+    # 求解输入快照带上目标课次：coverage 按范围核对通过，报告 decision=achieved
+    # （交错④验证「无竞争时正常完成仍 achieved」需要一份真正的达成报告）。
+    run = _make_run(
+        scope["scope_id"],
+        goal["id"],
+        [_assignment(course)],
+        snapshot_sessions=[{"business_id": "C1", "is_active": True, "class_business_id": "B1"}],
+    )
     with SessionLocal() as db:
         run_row = db.get(SolverRun, run.id)
         assert run_row is not None
@@ -696,6 +707,10 @@ def test_apply_goal_evaluation_marks_completed_on_success(
         assert goal_row is not None
         assert goal_row.acceptance_status == "completed"
         assert goal_row.acceptance_detail is None
+        # 无竞争时条件 UPDATE 行数=1：结论照常生效，会话内对象经 refresh 与
+        # 数据库一致（status/acceptance/latest_run_id 全部可见）。
+        assert goal_row.status == "achieved"
+        assert goal_row.latest_run_id == run.id
 
 
 # ------------------------------------------------- MEM-F/F2：旧报告写回不覆盖新版本 pending
@@ -780,6 +795,174 @@ def test_stale_report_writeback_keeps_pending_and_never_achieves(
         assert goal_row is not None
         assert goal_row.acceptance_status == "completed"
         assert goal_row.acceptance_detail is None
+
+
+# ------------------------- 第五轮复审 F2 收口：数据库条件 UPDATE 挡住写回竞态窗口
+
+
+def test_revision_between_reread_and_writeback_keeps_report_as_history(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """第五轮复审交错②：修订发生在**重读之后、提交之前**。
+
+    会话一按 v1 完成评估并重读（仍是 v1），会话二此刻把清单修订至 v2，会话一
+    再提交。重读挡不住这个窗口——只有写回的数据库条件 UPDATE（WHERE
+    checklist_revision = 评估时版本）能挡：行数=0，报告留档为历史，目标当前
+    状态一字不改（不写 achieved、不强行写 pending/detail、不动 latest_run_id）。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    course = _add_course(scope["scope_id"], "C1", lesson_date=date(2026, 10, 5))
+    run = _make_run(scope["scope_id"], goal_id, [_assignment(course)])
+
+    with SessionLocal() as db1:
+        run1 = db1.get(SolverRun, run.id)
+        goal1 = db1.get(SolveGoal, goal_id)
+        assert run1 is not None and goal1 is not None
+
+        # 拦截写回路径上的事务内重读：重读一返回（此刻会话一看到的是 v1），
+        # 立即让会话二经真实 PATCH 端点把清单修订至 v2——精确复现「重读之后、
+        # 条件写回之前」的竞态窗口；只拦第一次，后续 refresh 走原路。
+        original_refresh = db1.refresh
+        revived = False
+
+        def _refresh_then_revive(target: Any, *args: Any, **kwargs: Any) -> None:
+            nonlocal revived
+            original_refresh(target, *args, **kwargs)
+            if not revived:
+                revived = True
+                db1.refresh = original_refresh  # type: ignore[method-assign]
+                patched = client.patch(
+                    f"/api/v1/goals/{goal_id}/checklist",
+                    headers=headers,
+                    json={
+                        "checklist": [
+                            {
+                                "key": "coverage",
+                                "requirement": "覆盖 C1（v2 口径）",
+                                "kind": "coverage",
+                                "params": {"course_business_ids": ["C1"]},
+                            }
+                        ]
+                    },
+                )
+                assert patched.status_code == 200, patched.text
+                assert patched.json()["checklist_version"] == 2
+
+        db1.refresh = _refresh_then_revive  # type: ignore[method-assign]
+        report = apply_goal_evaluation(db1, run1)
+        db1.commit()
+
+    assert report is not None
+    # 条件 UPDATE 行数=0：meta 注记评估版本与写回时点版本，报告留档为历史。
+    meta = report["meta"]
+    assert meta["evaluated_checklist_version"] == 1
+    assert meta["current_checklist_version"] == 2
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        # 目标当前状态一字不改：旧 v1 结论不得覆盖修订后的「等待新验收」。
+        assert goal_row.status == "open"
+        assert goal_row.acceptance_status == "pending"
+        assert goal_row.acceptance_detail is None
+        assert goal_row.latest_run_id is None
+        # 报告作为历史保存（审计链），双版本可解释。
+        run_row = db.get(SolverRun, run.id)
+        assert run_row is not None and run_row.goal_report is not None
+        stored_meta = run_row.goal_report["meta"]
+        assert stored_meta["checklist_version"] == 1
+        assert stored_meta["evaluated_checklist_version"] == 1
+        assert stored_meta["current_checklist_version"] == 2
+
+    # 竞态输家不影响主路径：按 v2 重新验收照常闭环（求解快照带课次，
+    # coverage 通过 → decision=achieved）。
+    run2 = _make_run(
+        scope["scope_id"],
+        goal_id,
+        [_assignment(course)],
+        snapshot_sessions=[{"business_id": "C1", "is_active": True, "class_business_id": "B1"}],
+    )
+    with SessionLocal() as db:
+        apply_goal_evaluation(db, db.get(SolverRun, run2.id))
+        db.commit()
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        assert goal_row.status == "achieved"
+        assert goal_row.acceptance_status == "completed"
+        assert goal_row.latest_run_id == run2.id
+
+
+def test_abandon_between_reread_and_writeback_is_terminal(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """第五轮复审交错③：验收写回窗口内目标被另一会话人工放弃（终态）。
+
+    写回的条件 UPDATE 携带 status <> 'abandoned'：行数=0，算出的 achieved
+    结论不得写回覆盖人工终态，报告只留档。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    course = _add_course(scope["scope_id"], "C1", lesson_date=date(2026, 10, 5))
+    run = _make_run(
+        scope["scope_id"],
+        goal_id,
+        [_assignment(course)],
+        snapshot_sessions=[{"business_id": "C1", "is_active": True, "class_business_id": "B1"}],
+    )
+
+    with SessionLocal() as db1:
+        run1 = db1.get(SolverRun, run.id)
+        goal1 = db1.get(SolveGoal, goal_id)
+        assert run1 is not None and goal1 is not None
+
+        # 拦截写回路径上的事务内重读：重读一返回，立即让会话二经真实
+        # abandon 端点把目标置为 abandoned——复现「放弃插在重读之后、
+        # 条件写回之前」的窗口；只拦第一次。
+        original_refresh = db1.refresh
+        abandoned = False
+
+        def _refresh_then_abandon(target: Any, *args: Any, **kwargs: Any) -> None:
+            nonlocal abandoned
+            original_refresh(target, *args, **kwargs)
+            if not abandoned:
+                abandoned = True
+                db1.refresh = original_refresh  # type: ignore[method-assign]
+                response = client.post(f"/api/v1/goals/{goal_id}/abandon", headers=headers)
+                assert response.status_code == 200, response.text
+
+        db1.refresh = _refresh_then_abandon  # type: ignore[method-assign]
+        report = apply_goal_evaluation(db1, run1)
+        db1.commit()
+
+    # 报告本身按 v1 算出达成，但写回被 status <> 'abandoned' 拦下（行数=0）：
+    # 版本未变，meta 注记两版本同为 v1，结论未生效。
+    assert report is not None
+    assert report["decision"]["status"] == "achieved"
+    assert report["meta"]["evaluated_checklist_version"] == 1
+    assert report["meta"]["current_checklist_version"] == 1
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        # 人工终态不被写回覆盖：状态保持 abandoned，验收状态与指针未被改动。
+        assert goal_row.status == "abandoned"
+        assert goal_row.acceptance_status == "pending"
+        assert goal_row.latest_run_id is None
+        # 报告仍作为该 run 的历史留档（审计链完整）。
+        run_row = db.get(SolverRun, run.id)
+        assert run_row is not None and run_row.goal_report is not None
+        assert run_row.goal_report["decision"]["status"] == "achieved"
 
 
 # ------------------------------------------------- MEM-F/F3：范围修订三态 + 契约统一

@@ -618,9 +618,17 @@ class SolveGoal(TimestampMixin, Base):
     checklist: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     # 清单修订历史（MEM-D3）：PATCH /goals/{id}/checklist 每次保存把旧清单快照
     # 进这里（[{version, saved_at, saved_by, items}]，version 是被替换清单的
-    # 版本号）；当前版本号 = len(checklist_history) + 1，初始清单为 v1。
-    # 审计靠快照本身，不改写 checklist——正在验收的口径永远以 checklist 为准。
+    # 版本号）。审计靠快照本身，不改写 checklist——正在验收的口径永远以
+    # checklist 为准；当前版本号以下面的 checklist_revision 持久化列为准。
     checklist_history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    # 清单修订版本号（MEM-F/F2 第五轮复审收口）：持久化计数列，初始 v1，
+    # PATCH /goals/{id}/checklist 修订时与修订写入在同一事务 +1（SQL 表达式
+    # 自增，递增由数据库单写者保证）。验收写回以它为乐观锁：条件 UPDATE 携带
+    # `checklist_revision = 评估时版本 AND status <> 'abandoned'`，行数=0 即
+    # 「评估到写回之间清单已前移或目标已放弃」，报告只留档、不改写目标当前结论。
+    checklist_revision: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
     status: Mapped[str] = mapped_column(String(20), default="open", index=True)
     latest_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)

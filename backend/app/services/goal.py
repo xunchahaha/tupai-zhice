@@ -24,7 +24,7 @@ from collections import Counter
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from ..models import (
     AuditLog,
@@ -1545,10 +1545,12 @@ def _decide(
 def _checklist_version(goal: SolveGoal) -> int:
     """当前清单版本号（MEM-D3/E2a 口径）：初始 v1，每修订一次 +1。
 
-    与响应层 `GoalResponse.checklist_version`（历史长度+1）完全一致——验收
-    报告绑定版本号时必须用同一口径，前端才能对上「哪个结论是哪个版本的」。
+    版本号由数据库持久化列 `checklist_revision` 承载（MEM-F/F2 第五轮复审
+    收口）：PATCH /goals/{id}/checklist 修订时在同一事务自增，验收报告绑定
+    的版本号与验收写回的条件 UPDATE 用的是同一个计数——不再从
+    checklist_history 长度派生，避免「读历史长度」与「写回条件」各说各话。
     """
-    return len(goal.checklist_history or []) + 1
+    return int(goal.checklist_revision)
 
 
 def _snapshot_coverage_params(checklist: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1648,13 +1650,22 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
     （tasks._evaluate_goal_for_run：置 acceptance_status=failed 并落 detail），
     绝不影响求解结果本身的落库。验收成功 → acceptance_status=completed。
 
-    MEM-F（§9 F2）写回前版本复核：报告是按**评估时点**的清单算出来的；从评估
-    到写回之间清单可能已被另一会话修订（验收按 v1 计算 → 修订至 v2 → 写回）。
-    写回阶段在事务内重读当前 checklist_version，与本次报告的评估版本不一致时：
-    报告仅作历史保存（meta 标注 evaluated_checklist_version/current_checklist_
-    version 两个版本），acceptance_status 保持/置为 pending（detail 说明需重新
-    验收），goal.status **不得写 achieved**——旧口径的结论不得覆盖「等待新验收」
-    的事实，也不能让旧版本悄悄宣告目标达成。
+    MEM-F（§9 F2）写回版本保护（第五轮复审收口）：报告是按**评估时点**的清单
+    算出来的；从评估到写回之间清单可能已被另一会话修订（验收按 v1 计算 →
+    修订至 v2 → 写回），目标也可能已被另一会话放弃。目标状态的最终写回只走
+    **数据库条件 UPDATE**——WHERE 携带
+    `checklist_revision = 本次评估版本 AND status <> 'abandoned'`，按实际更新
+    行数判定：
+
+    - 行数=1：这份报告成为当前结论（status/acceptance_status/latest_run_id）；
+    - 行数=0：评估到写回之间版本已前移或目标已被放弃——报告仅作历史保存
+      （meta 标注 evaluated_checklist_version/current_checklist_version），
+      **目标当前状态一字不改**：不写 achieved，也不强行把 acceptance_status
+      拉回 pending——那一刻另一会话可能已完成新版本的验收或已放弃目标。
+
+    重读（db.refresh）时已发现版本前移的（修订早于重读），同样以条件 UPDATE
+    落「等待重新验收」标记，且仅当目标仍停留在重读时版本、未被放弃且验收
+    状态仍是 pending 时才落；标记条件也不满足时同样零改写。
     """
     if not run.goal_id:
         return None
@@ -1664,23 +1675,70 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
     report = evaluate_goal(db, goal, run)
     evaluated_version = int(report["meta"]["checklist_version"])
     # 事务内重读：本会话持有的 goal 可能是修订前的旧快照，写回前必须以持久化
-    # 状态为准（db.refresh 把 checklist_history 刷到当前最新值）。
+    # 状态为准（db.refresh 把清单与版本号刷到当前最新值）。重读之后到条件
+    # UPDATE 之间的竞态由 UPDATE 的 WHERE 子句在数据库层面兜住——条件 UPDATE
+    # 是本路径上这些字段的唯一写法，行数判定后立即 refresh 同步会话内对象，
+    # 不留任何可被旧 ORM 对象普通赋值绕过保护的缺口。
     db.refresh(goal)
     current_version = _checklist_version(goal)
     run.goal_report = report
-    goal.latest_run_id = run.id
     if current_version != evaluated_version:
+        # 重读时已发现版本前移：报告只留档，另落「等待重新验收」标记——条件
+        # 与结论写回同构（版本 + 未放弃），再加「仍是 pending」：新版本已有
+        # 结论（completed/failed）时旧报告不得覆盖。
         meta = report["meta"]
         meta["evaluated_checklist_version"] = evaluated_version
         meta["current_checklist_version"] = current_version
-        goal.acceptance_status = "pending"
-        goal.acceptance_detail = (
-            f"清单已修订至 v{current_version}，本报告基于 v{evaluated_version}，需重新验收"
+        marker = db.execute(
+            update(SolveGoal)
+            .where(
+                SolveGoal.id == goal.id,
+                SolveGoal.checklist_revision == current_version,
+                SolveGoal.status != "abandoned",
+                SolveGoal.acceptance_status == "pending",
+            )
+            .values(
+                acceptance_status="pending",
+                acceptance_detail=(
+                    f"清单已修订至 v{current_version}，本报告基于 v{evaluated_version}，需重新验收"
+                ),
+                latest_run_id=run.id,
+            )
+            .execution_options(synchronize_session=False)
         )
+        if int(marker.rowcount or 0) == 1:
+            db.refresh(goal)
+            return report
+        # 标记也没落上：重读到落标记之间目标又动了（再修订/新版本已有结论/
+        # 已放弃）——保持零改写，仅刷新注记的「写回时点版本」。
+        db.refresh(goal)
+        meta["current_checklist_version"] = _checklist_version(goal)
         return report
-    goal.status = str(report["decision"]["status"])
-    goal.acceptance_status = "completed"
-    goal.acceptance_detail = None
+    # 结论生效的条件 UPDATE：版本仍是评估时版本且目标未被放弃才允许写。
+    conclusion = db.execute(
+        update(SolveGoal)
+        .where(
+            SolveGoal.id == goal.id,
+            SolveGoal.checklist_revision == evaluated_version,
+            SolveGoal.status != "abandoned",
+        )
+        .values(
+            status=str(report["decision"]["status"]),
+            acceptance_status="completed",
+            acceptance_detail=None,
+            latest_run_id=run.id,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if int(conclusion.rowcount or 0) == 1:
+        db.refresh(goal)
+        return report
+    # 行数=0：写回竞态输家——报告留档为历史（run.goal_report 已保存），目标
+    # 当前状态一字不改；meta 标注评估版本与写回时点版本供前端/审计解释。
+    db.refresh(goal)
+    meta = report["meta"]
+    meta["evaluated_checklist_version"] = evaluated_version
+    meta["current_checklist_version"] = _checklist_version(goal)
     return report
 
 

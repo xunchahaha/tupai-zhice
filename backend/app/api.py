@@ -4213,7 +4213,9 @@ def create_solver_run(
     if goal_id:
         goal_for_version = db.get(SolveGoal, goal_id)
         if goal_for_version is not None:
-            payload["goal_checklist_version"] = len(goal_for_version.checklist_history or []) + 1
+            # 版本号以持久化计数列为准（MEM-F/F2 收口），与验收写回的
+            # 条件 UPDATE 用同一计数。
+            payload["goal_checklist_version"] = int(goal_for_version.checklist_revision)
     run = SolverRun(
         schedule_set_id=schedule_set_id,
         snapshot_id=snapshot.id,
@@ -4398,8 +4400,9 @@ def _goal_response(db: Session, goal: SolveGoal, run_count: int | None = None) -
         )
     response = GoalResponse.model_validate(goal)
     response.run_count = run_count
-    # 清单版本号（MEM-D3）：初始清单为 v1，每修订一次 +1（历史在 checklist_history）。
-    response.checklist_version = len(goal.checklist_history or []) + 1
+    # 清单版本号（MEM-D3）：持久化计数列 checklist_revision（初始 v1，每修订
+    # 一次 +1；修订历史在 checklist_history）——与验收写回的条件 UPDATE 同一计数。
+    response.checklist_version = int(goal.checklist_revision)
     return response
 
 
@@ -4519,7 +4522,7 @@ def get_goal(goal_id: str, db: Db, user: CurrentUser, scope: ViewerScope) -> Goa
     response.latest_report = latest.goal_report if latest is not None else None
     response.run_count = len(runs)
     response.checklist_history = list(goal.checklist_history or [])
-    response.checklist_version = len(response.checklist_history) + 1
+    response.checklist_version = int(goal.checklist_revision)
     return response
 
 
@@ -4569,7 +4572,7 @@ def replace_goal_checklist(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    old_version = len(goal.checklist_history or []) + 1
+    old_version = int(goal.checklist_revision)
     goal.checklist_history = [
         *(goal.checklist_history or []),
         {
@@ -4580,6 +4583,11 @@ def replace_goal_checklist(
         },
     ]
     goal.checklist = new_checklist
+    # MEM-F/F2 收口：版本号是持久化计数列，版本自增与修订写入（历史快照、
+    # 清单替换、验收复位）在同一事务提交。用 SQL 表达式自增（checklist_revision
+    # = checklist_revision + 1）——递增取数据库当前值，即使出现并发修订，
+    # 单写者下也不会互相吞掉版本号。
+    goal.checklist_revision = SolveGoal.checklist_revision + 1
     # MEM-E2/E2a：修订使旧版验收结论失效——强制回 pending；achieved 的目标
     # 状态回退 open（附原因），等待按新清单重新验收。failed 的执行状态同样
     # 归位 pending（旧失败原因对应旧清单，不再有意义）。
