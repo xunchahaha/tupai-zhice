@@ -1,6 +1,6 @@
 # 04 · 实施计划与进度
 
-> 状态：✅ 七期第六轮复审修订侧收口完成 · VER-7 通过（2026-09-25：后端 ruff/mypy 全过 + pytest 369 passed；前端 tsc 0 错误 + vitest 19 passed；e2e 未在本地运行，待推送后 CI 覆盖）
+> 状态：✅ 七期第六轮复审修订侧收口完成 · VER-7 通过（2026-09-25：后端 ruff/mypy 全过 + pytest 369 passed；前端 tsc 0 错误 + vitest 132 passed / 19 文件；e2e 未在本地运行，待推送后 CI 覆盖）
 > 批次策略遵循工作区 AGENTS.md：按模块分批、实现代理自检 + 局部验证、里程碑统一全量验证、每批一个原子提交。
 
 ## 勘察修正（重要）
@@ -102,7 +102,7 @@ VER-1 收口
 | 批次 | 内容 | 状态 | 提交 |
 | --- | --- | --- | --- |
 | MEM-H | 清单修订侧并发复位保护：修订落库只走单条数据库条件 UPDATE（`apply_goal_checklist_revision`）——历史快照追加、清单替换、版本自增（SQL 表达式取库中当前值）与验收复位在同一语句里，SET 无条件把 acceptance_status 复位 pending 并用 CASE 按数据库当时状态把 achieved 回退 open，WHERE 携带读取时 checklist_revision 与 status<>'abandoned'，rowcount=0 时回滚、按库中状态返回 409 冲突且不留修订审计记录；先验收后修订等反向交错进入回归测试 | ✅ 完成（后端 ruff/mypy 全过 + pytest 369 passed，3b3ef96） | 3b3ef96 |
-| VER-7 | 终验：后端 ruff/mypy 全过 + pytest 369 passed；前端 tsc 0 错误 + vitest 19 passed；e2e 未在本地运行（CI 的 e2e job 将在推送后覆盖，CI 因账户 billing 仍未启动，runners 未分配） | ✅ | — |
+| VER-7 | 终验：后端 ruff/mypy 全过 + pytest 369 passed；前端 tsc 0 错误 + vitest 132 passed（19 文件）；e2e 未在本地运行（CI 的 e2e job 将在推送后覆盖，CI 因账户 billing 仍未启动，runners 未分配） | ✅ | — |
 
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 
