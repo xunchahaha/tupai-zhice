@@ -730,7 +730,16 @@ class GoalChecklistReplaceRequest(BaseModel):
 
 
 class GoalScopePatch(BaseModel):
-    """修订清单时可选的范围字段（MEM-E2/E2b）：只显式给出要改的维度。"""
+    """修订清单时可选的范围字段（MEM-E2/E2b → MEM-F/F3 三态语义）。
+
+    **显式 scope 优先于清单 coverage 既有参数**。字段级三态（按字段是否在
+    请求 body 里显式出现判定，实现口径是 pydantic v2 的 ``model_fields_set``
+    ——真值判断会把「显式 []」和「未提供」混为一谈）：
+
+    - 未提交（字段不出现）：保留旧值（无旧值则该维度无限制）；
+    - 显式空列表 / 显式 ``null`` 日期：清除该维度限制；
+    - 显式非空：替换为新值。
+    """
 
     business_lines: list[str] | None = None
     product_types: list[str] | None = None

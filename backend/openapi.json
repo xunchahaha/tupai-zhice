@@ -4444,7 +4444,7 @@
           "goals"
         ],
         "summary": "Replace Goal Checklist",
-        "description": "整体替换验收清单（MEM-D3）：补救动作不改目标归属，清单可继续修订。\n\n校验复用创建目标时的同一套规则：key 唯一、kind 白名单（schema Literal）、\n底线项强制并入（`ensure_bottom_line_items`——底线不可删除，用户传什么都会\n被补回）。每次保存把旧清单快照进 `checklist_history`（含版本号/时间/操作人），\n当前版本号 = 历史长度 + 1；历史只追加不改写，正在验收的口径永远以\n`checklist` 为准。\n\nMEM-E2/E2a：清单修订使**既有验收结论失效**——原 acceptance_status 为\ncompleted/failed 时强制回 pending，detail 写「清单修订至 v{n}，等待新验收」；\ngoal.status 为 achieved 时回退 open（状态必须由新版本的验收重新给出，不得\n停留在旧版结论上）。latest_run_id 与历史报告保留（审计链），但响应附\n`latest_report_meta`，前端据此把旧结论标注为「历史版本 v{n-1} 的结论」。\n\nMEM-E2/E2b：修订时底线补全传递完整规范化范围——优先保留旧 coverage 项的\n范围参数（`previous_checklist`），用户显式给出的新范围字段才覆盖，旧范围\n丢失会让「排好了」被判 unverifiable。",
+        "description": "整体替换验收清单（MEM-D3）：补救动作不改目标归属，清单可继续修订。\n\n校验复用创建目标时的同一套规则：key 唯一、kind 白名单（schema Literal）、\n底线项强制并入（`ensure_bottom_line_items`——底线不可删除，用户传什么都会\n被补回）。每次保存把旧清单快照进 `checklist_history`（含版本号/时间/操作人），\n当前版本号 = 历史长度 + 1；历史只追加不改写，正在验收的口径永远以\n`checklist` 为准。\n\nMEM-E2/E2a：清单修订使**既有验收结论失效**——原 acceptance_status 为\ncompleted/failed 时强制回 pending，detail 写「清单修订至 v{n}，等待新验收」；\ngoal.status 为 achieved 时回退 open（状态必须由新版本的验收重新给出，不得\n停留在旧版结论上）。latest_run_id 与历史报告保留（审计链），但响应附\n`latest_report_meta`，前端据此把旧结论标注为「历史版本 v{n-1} 的结论」。\n\nMEM-E2/E2b：修订时底线补全传递完整范围——优先保留旧 coverage 项的范围参数\n（`previous_checklist`），旧范围丢失会让「排好了」被判 unverifiable。\nMEM-F/F3：body.scope 直接以请求模型传入——合并层用 pydantic\n`model_fields_set` 感知「字段是否显式提交」，实现 未提交保留 / 显式空列表\n（或 null 日期）清除 / 显式非空替换 的三态语义；**显式 scope 优先于清单\ncoverage 既有参数**。",
         "operationId": "replace_goal_checklist_api_v1_goals__goal_id__checklist_patch",
         "security": [
           {
@@ -9670,7 +9670,7 @@
         },
         "type": "object",
         "title": "GoalScopePatch",
-        "description": "修订清单时可选的范围字段（MEM-E2/E2b）：只显式给出要改的维度。"
+        "description": "修订清单时可选的范围字段（MEM-E2/E2b → MEM-F/F3 三态语义）。\n\n**显式 scope 优先于清单 coverage 既有参数**。字段级三态（按字段是否在\n请求 body 里显式出现判定，实现口径是 pydantic v2 的 ``model_fields_set``\n——真值判断会把「显式 []」和「未提供」混为一谈）：\n\n- 未提交（字段不出现）：保留旧值（无旧值则该维度无限制）；\n- 显式空列表 / 显式 ``null`` 日期：清除该维度限制；\n- 显式非空：替换为新值。"
       },
       "HTTPValidationError": {
         "properties": {

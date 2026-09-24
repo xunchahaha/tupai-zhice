@@ -11,11 +11,15 @@
 4. D4c coverage 查重：缺一课与重复一课各判 failed；
 5. D4d 禁排参数存在性：subject/slot 不在当前方案主数据 → unverifiable；
 6. D6 决策消费求解状态：UNKNOWN 与 INFEASIBLE 的 _decide 文案/状态分支；
-7. D6 验收异常可见：acceptance_status=failed 落库且 API 可见（含 run 失败路径）。
+7. D6 验收异常可见：acceptance_status=failed 落库且 API 可见（含 run 失败路径）；
+8. MEM-F/F2：旧版本验收报告写回不覆盖新版本的 pending（§9 第四轮复审）；
+9. MEM-F/F3：范围修订三态语义（未提交保留 / 显式空清除 / 显式非空替换），
+   显式 scope 优先于清单 coverage 既有参数。
 """
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date
 from typing import Any
 from uuid import uuid4
@@ -36,9 +40,14 @@ from app.models import (
     Teacher,
     TimeSlot,
 )
+from app.schemas import GoalScopePatch
 from app.services.goal import (
+    _checklist_version,
     apply_goal_evaluation,
+    ensure_bottom_line_items,
     evaluate_goal,
+    merge_coverage_scope,
+    normalize_goal_scope,
 )
 from app.services.tasks import _evaluate_goal_for_run, _persist_failure
 
@@ -687,3 +696,294 @@ def test_apply_goal_evaluation_marks_completed_on_success(
         assert goal_row is not None
         assert goal_row.acceptance_status == "completed"
         assert goal_row.acceptance_detail is None
+
+
+# ------------------------------------------------- MEM-F/F2：旧报告写回不覆盖新版本 pending
+
+
+def test_stale_report_writeback_keeps_pending_and_never_achieves(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """MEM-F/F2 并发交错：验收按 v1 计算 → 另一会话修订清单至 v2 → 第一会话写回。
+
+    报告仍保存并标注双版本（evaluated_checklist_version/current_checklist_version）；
+    acceptance_status 保持 pending；goal.status 不得写 achieved。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    course = _add_course(scope["scope_id"], "C1", lesson_date=date(2026, 10, 5))
+    run = _make_run(scope["scope_id"], goal_id, [_assignment(course)])
+
+    # 会话一：加载 goal（此刻清单还是 v1）。
+    with SessionLocal() as db1:
+        run1 = db1.get(SolverRun, run.id)
+        goal1 = db1.get(SolveGoal, goal_id)
+        assert run1 is not None and goal1 is not None
+        assert _checklist_version(goal1) == 1
+
+        # 会话二：交错修订清单至 v2 并提交（正常走 PATCH 端点）。
+        patched = client.patch(
+            f"/api/v1/goals/{goal_id}/checklist",
+            headers=headers,
+            json={
+                "checklist": [
+                    {
+                        "key": "coverage",
+                        "requirement": "覆盖 C1（v2 口径）",
+                        "kind": "coverage",
+                        "params": {"course_business_ids": ["C1"]},
+                    }
+                ]
+            },
+        )
+        assert patched.status_code == 200, patched.text
+        assert patched.json()["checklist_version"] == 2
+
+        # 会话一：按会话内旧快照（v1）验收并写回。
+        report = apply_goal_evaluation(db1, run1)
+        db1.commit()
+
+    assert report is not None
+    meta = report["meta"]
+    assert meta["evaluated_checklist_version"] == 1
+    assert meta["current_checklist_version"] == 2
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        # 旧口径结论不得覆盖新版本的 pending，更不得宣告达成。
+        assert goal_row.acceptance_status == "pending"
+        assert goal_row.status != "achieved"
+        assert "清单已修订至 v2" in (goal_row.acceptance_detail or "")
+        assert "本报告基于 v1" in (goal_row.acceptance_detail or "")
+        assert "需重新验收" in (goal_row.acceptance_detail or "")
+        # 报告保留（审计链），meta 双版本可解释。
+        run_row = db.get(SolverRun, run.id)
+        assert run_row is not None and run_row.goal_report is not None
+        stored_meta = run_row.goal_report["meta"]
+        assert stored_meta["checklist_version"] == 1
+        assert stored_meta["evaluated_checklist_version"] == 1
+        assert stored_meta["current_checklist_version"] == 2
+        assert goal_row.latest_run_id == run.id
+
+    # 报告保留 ≠ 结论生效：按当前 v2 重新验收后恢复主路径 completed。
+    run2 = _make_run(scope["scope_id"], goal_id, [_assignment(course)])
+    with SessionLocal() as db:
+        apply_goal_evaluation(db, db.get(SolverRun, run2.id))
+        db.commit()
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        assert goal_row.acceptance_status == "completed"
+        assert goal_row.acceptance_detail is None
+
+
+# ------------------------------------------------- MEM-F/F3：范围修订三态 + 契约统一
+
+
+def test_merge_coverage_scope_three_state_semantics() -> None:
+    """MEM-F/F3：scope 合并三态——未提交保留旧值 / 显式空清除 / 显式非空替换。"""
+    old = {"course_business_ids": ["C1"], "class_business_ids": ["B2"]}
+
+    def _assert_kept(merged: dict[str, Any]) -> None:
+        assert merged["course_business_ids"] == ["C1"]
+        assert merged["class_business_ids"] == ["B2"]
+
+    # 未提交（scope 为 None / 空模型）→ 旧值原样保留。
+    _assert_kept(merge_coverage_scope(old, None))
+    _assert_kept(merge_coverage_scope(old, GoalScopePatch()))
+    # 显式空列表 → 清除该维度限制；未提交的班级维度保留。
+    cleared = merge_coverage_scope(old, GoalScopePatch(course_business_ids=[]))
+    assert cleared["course_business_ids"] == []
+    assert cleared["class_business_ids"] == ["B2"]
+    # 显式非空 → 替换新值。
+    replaced = merge_coverage_scope(old, GoalScopePatch(course_business_ids=["C9"]))
+    assert replaced["course_business_ids"] == ["C9"]
+    assert replaced["class_business_ids"] == ["B2"]
+    # 显式 null 日期 → 清除该端点；未提交的另一端保留。
+    dated = {**old, "date_from": "2026-10-01", "date_to": "2026-10-31"}
+    cleared_date = merge_coverage_scope(dated, GoalScopePatch(date_from=None))
+    assert cleared_date["date_from"] is None
+    assert cleared_date["date_to"] == "2026-10-31"
+    replaced_date = merge_coverage_scope(dated, GoalScopePatch(date_from="2026-10-05"))
+    assert replaced_date["date_from"] == "2026-10-05"
+    assert replaced_date["date_to"] == "2026-10-31"
+    # dict 调用方保守口径：只有非空值视为提交（normalize_goal_scope 产物里的
+    # 空维度不会被误判成「显式清除」）。
+    _assert_kept(merge_coverage_scope(old, normalize_goal_scope()))
+    dict_scope = normalize_goal_scope(course_business_ids=["C9"])
+    conservative = merge_coverage_scope(old, dict_scope)
+    assert conservative["course_business_ids"] == ["C9"]
+    assert conservative["class_business_ids"] == ["B2"]
+
+
+def test_bottom_line_scope_overrides_full_checklist_coverage() -> None:
+    """MEM-F/F3 契约=scope 胜：完整清单带旧 coverage（B1 班）+ 显式 scope B2 →
+    生效 B2；未提交字段不改写；显式空列表在完整清单上同样清除。"""
+    checklist = [
+        {
+            "key": "coverage",
+            "requirement": "覆盖 B1 班课次",
+            "kind": "coverage",
+            "params": {"class_business_ids": ["B1"]},
+        }
+    ]
+
+    def _coverage(items: list[dict[str, Any]]) -> dict[str, Any]:
+        return next(item for item in items if item["kind"] == "coverage")
+
+    # 未提交 → 用户清单的 coverage 参数原样保留。
+    kept = ensure_bottom_line_items(deepcopy(checklist))
+    assert _coverage(kept)["params"]["class_business_ids"] == ["B1"]
+    # 显式非空 scope → 覆盖完整清单里 coverage 项的旧参数（scope 胜）。
+    overridden = ensure_bottom_line_items(
+        deepcopy(checklist), scope=GoalScopePatch(class_business_ids=["B2"])
+    )
+    assert _coverage(overridden)["params"]["class_business_ids"] == ["B2"]
+    # 显式空列表 → 清除该维度限制。
+    cleared = ensure_bottom_line_items(
+        deepcopy(checklist), scope=GoalScopePatch(class_business_ids=[])
+    )
+    assert "class_business_ids" not in _coverage(cleared)["params"]
+
+
+def test_patch_checklist_scope_three_state_over_coverage_params(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """MEM-F/F3 API 契约：PATCH /goals/{id}/checklist 的 scope 三态——显式 scope
+    优先于清单 coverage 既有参数。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={
+            "instruction": "重排 B2 班 10 月的课",
+            "class_business_ids": ["B2"],
+            "course_business_ids": ["C1"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    coverage_item = {
+        "key": "coverage",
+        "requirement": "覆盖目标课次",
+        "kind": "coverage",
+        "params": {"class_business_ids": ["B2"], "course_business_ids": ["C1"]},
+    }
+
+    def _coverage_of(body: dict[str, Any]) -> dict[str, Any]:
+        return next(item for item in body["checklist"] if item["kind"] == "coverage")
+
+    # ① 未提交（不带 scope）→ 完整清单的 coverage 参数原样保留。
+    patched = client.patch(
+        f"/api/v1/goals/{goal_id}/checklist", headers=headers, json={"checklist": [coverage_item]}
+    )
+    assert patched.status_code == 200, patched.text
+    params = _coverage_of(patched.json())["params"]
+    assert params["course_business_ids"] == ["C1"]
+    assert params["class_business_ids"] == ["B2"]
+
+    # ② 显式空列表 → 旧的 C1 课次限制消失、B2 班保留。
+    patched = client.patch(
+        f"/api/v1/goals/{goal_id}/checklist",
+        headers=headers,
+        json={"checklist": [coverage_item], "scope": {"course_business_ids": []}},
+    )
+    assert patched.status_code == 200, patched.text
+    params = _coverage_of(patched.json())["params"]
+    assert "course_business_ids" not in params
+    assert params["class_business_ids"] == ["B2"]
+
+    # ③ 完整清单带旧 B1 coverage + 显式 scope B2/C9 → 生效 B2/C9（scope 胜）。
+    stale_item = {
+        **coverage_item,
+        "params": {"class_business_ids": ["B1"], "course_business_ids": ["C1"]},
+    }
+    patched = client.patch(
+        f"/api/v1/goals/{goal_id}/checklist",
+        headers=headers,
+        json={
+            "checklist": [stale_item],
+            "scope": {"class_business_ids": ["B2"], "course_business_ids": ["C9"]},
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    params = _coverage_of(patched.json())["params"]
+    assert params["class_business_ids"] == ["B2"]
+    assert params["course_business_ids"] == ["C9"]
+
+
+# ------------------------------------------------- 回归场景⑥：修订后继续执行仍属原目标
+
+
+def test_continued_runs_after_scope_revision_stay_bound_to_goal(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """第四轮复审回归场景⑥：修改范围或预算后继续执行，后续任务仍属原目标
+    （goal_id 绑定断言 + 验收按最新清单版本闭环）。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    _add_course(scope["scope_id"], "C1", lesson_date=date(2026, 10, 5))
+
+    # 第一次求解：任务与目标绑定，报告归属同一目标。
+    first = client.post(
+        "/api/v1/solver-runs",
+        headers=headers,
+        json={"goal_id": goal_id, "wait": True, "time_limit_seconds": 5},
+    )
+    assert first.status_code == 202, first.text
+    first_body = first.json()
+    assert first_body["goal_id"] == goal_id
+    assert first_body["goal_report"]["goal_id"] == goal_id
+
+    # 修订范围（coverage 改按课次 C1 核对）后继续执行：新任务仍绑定同一目标，
+    # 且预算参数照常生效——goal_id 不因补救动作被清空。
+    patched = client.patch(
+        f"/api/v1/goals/{goal_id}/checklist",
+        headers=headers,
+        json={
+            "checklist": [
+                {
+                    "key": "coverage",
+                    "requirement": "覆盖 C1",
+                    "kind": "coverage",
+                    "params": {"course_business_ids": ["C1"]},
+                }
+            ],
+            "scope": {"course_business_ids": ["C1"]},
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    second = client.post(
+        "/api/v1/solver-runs",
+        headers=headers,
+        json={
+            "goal_id": goal_id,
+            "course_business_ids": ["C1"],
+            "wait": True,
+            "time_limit_seconds": 5,
+        },
+    )
+    assert second.status_code == 202, second.text
+    second_body = second.json()
+    assert second_body["goal_id"] == goal_id
+    assert second_body["goal_report"]["goal_id"] == goal_id
+    # 报告按修订后的 v2 清单验收：目标连续性贯穿「修订 → 继续执行 → 重新验收」。
+    assert second_body["goal_report"]["meta"]["checklist_version"] == 2
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        assert goal_row.latest_run_id == second_body["id"]
+        assert goal_row.acceptance_status == "completed"

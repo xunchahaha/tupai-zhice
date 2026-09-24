@@ -38,7 +38,10 @@ from app.models import (
     TimeSlot,
 )
 from app.schemas import SolveRequest
-from app.services.memory_solver import compile_memory_state
+from app.services.memory_solver import (
+    compile_memory_state,
+    resolve_conflicts_for_new_entry,
+)
 from app.services.solver import _session_matches_rule, solve_problem
 from app.services.tasks import execute_solver_run
 from app.timezone import shanghai_now
@@ -277,20 +280,24 @@ def test_validity_window_scopes_rule_to_lessons(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
     scope = _make_scope(client, auth_headers)
+    # 窗口相对 today 生成：口径是「有效期窗口决定软惩罚作用范围」，硬编码日期
+    # 会随真实时间漂移（valid_until 一旦早于今天，条目先被判 expired）。
+    today = shanghai_now().date()
     entry = _add_entry(
         scope["scope_id"],
         subject_id="T9",
-        valid_from=date(2026, 9, 1),
-        valid_until=date(2026, 9, 30),
+        valid_from=today,
+        valid_until=today + timedelta(days=30),
     )
 
     with SessionLocal() as db:
         state = compile_memory_state(db, scope["scope_id"])
     rule = state["compiled_rules"][0]
-    assert rule["scope"]["date_from"] == "2026-09-01"
-    assert rule["scope"]["date_to"] == "2026-09-30"
+    assert rule["scope"]["date_from"] == today.isoformat()
+    assert rule["scope"]["date_to"] == (today + timedelta(days=30)).isoformat()
 
-    # 10 月课次 + 只有周一一个可选时段：惩罚是否生效完全由日期窗口决定。
+    # 窗口外课次 + 只有周一一个可选时段：惩罚是否生效完全由日期窗口决定。
+    outside_date = (today + timedelta(days=60)).isoformat()
     payload: dict[str, Any] = {
         "teachers": [{"business_id": "T9", "name": "教师九", "is_group": False}],
         "rooms": [{"business_id": "R1", "name": "教室1", "is_active": True}],
@@ -309,7 +316,7 @@ def test_validity_window_scopes_rule_to_lessons(
                 "business_id": "L1",
                 "class_business_id": "B1",
                 "teacher_business_id": "T9",
-                "lesson_date": "2026-10-05",
+                "lesson_date": outside_date,
                 "fixed_start_time": "08:30",
                 "fixed_end_time": "11:30",
                 "duration_minutes": 180,
@@ -324,9 +331,12 @@ def test_validity_window_scopes_rule_to_lessons(
     outside = solve_problem({**payload, "rules": [rule]})
     assert outside["model_status"] in {"OPTIMAL", "FEASIBLE"}
     assert outside["assignments"], "窗口外的课次必须照常排出"
-    assert outside["objective_value"] == 0, "9/30 失效的偏好不得约束 10 月课次"
+    assert outside["objective_value"] == 0, "有效期外的偏好不得约束窗口外课次"
 
-    inside_rule = {**rule, "scope": {**rule["scope"], "date_to": "2026-10-31"}}
+    inside_rule = {
+        **rule,
+        "scope": {**rule["scope"], "date_to": (today + timedelta(days=60)).isoformat()},
+    }
     inside = solve_problem({**payload, "rules": [inside_rule]})
     assert inside["model_status"] in {"OPTIMAL", "FEASIBLE"}
     assert inside["objective_value"] == entry.weight, "窗口内的课次应吃到偏好惩罚"
@@ -339,36 +349,48 @@ def test_constraint_dates_intersect_with_entry_validity(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
     """constraint 日期窗口与条目级有效期取交集，不再互相覆盖：
-    constraint 9/24-25 + 条目级到 12/31 → 编译窗口就是 9/24-25。"""
+    constraint 今明两天 + 条目级更宽 → 编译窗口就是 constraint 那两天。
+    （窗口相对 today 生成：valid_from 截窄/撑宽与真实日期无关，硬编码日期会
+    随时间漂移——MEM-F 复审时已踩中一例。）"""
     scope = _make_scope(client, auth_headers)
+    today = shanghai_now().date()
     entry = _add_entry(
         scope["scope_id"],
         subject_id="T9",
-        constraint={"slot_ids": ["S1"], "date_from": "2026-09-24", "date_to": "2026-09-25"},
-        valid_from=date(2026, 9, 1),
-        valid_until=date(2026, 12, 31),
+        constraint={
+            "slot_ids": ["S1"],
+            "date_from": today.isoformat(),
+            "date_to": (today + timedelta(days=1)).isoformat(),
+        },
+        valid_from=today - timedelta(days=30),
+        valid_until=today + timedelta(days=90),
     )
 
     with SessionLocal() as db:
         state = compile_memory_state(db, scope["scope_id"])
     rule = next(item for item in state["compiled_rules"] if item["memory_entry_id"] == entry.id)
-    # 编译窗口 = 两层窗口的交集（窄的一侧），条目级 12/31 不再把两天窗口撑宽。
-    assert rule["scope"]["date_from"] == "2026-09-24"
-    assert rule["scope"]["date_to"] == "2026-09-25"
+    # 编译窗口 = 两层窗口的交集（窄的一侧），条目级宽窗口不把两天窗口撑宽。
+    assert rule["scope"]["date_from"] == today.isoformat()
+    assert rule["scope"]["date_to"] == (today + timedelta(days=1)).isoformat()
 
 
 def test_disjoint_constraint_and_entry_windows_are_not_applicable(
     client: TestClient, auth_headers: dict[str, str]
 ) -> None:
     """两层日期窗口不相交 → outcome=not_applicable，条目不进编译（明确不适用，
-    而不是拿另一层窗口顶上）。"""
+    而不是拿另一层窗口顶上）。constraint 窗口整体早于条目级有效期。"""
     scope = _make_scope(client, auth_headers)
+    today = shanghai_now().date()
     entry = _add_entry(
         scope["scope_id"],
         subject_id="T9",
-        constraint={"slot_ids": ["S1"], "date_from": "2026-01-10", "date_to": "2026-01-20"},
-        valid_from=date(2026, 9, 1),
-        valid_until=date(2026, 12, 31),
+        constraint={
+            "slot_ids": ["S1"],
+            "date_from": (today - timedelta(days=60)).isoformat(),
+            "date_to": (today - timedelta(days=50)).isoformat(),
+        },
+        valid_from=today - timedelta(days=10),
+        valid_until=today + timedelta(days=90),
     )
 
     with SessionLocal() as db:
@@ -377,6 +399,59 @@ def test_disjoint_constraint_and_entry_windows_are_not_applicable(
     assert outcomes[entry.id]["outcome"] == "not_applicable"
     assert "不相交" in outcomes[entry.id]["detail"]
     assert all(rule["memory_entry_id"] != entry.id for rule in state["compiled_rules"])
+
+
+def test_empty_window_new_entry_never_displaces_valid_old_entry(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """MEM-F/F1：空交集的新条目不得触发替代。
+
+    已有有效偏好 A（confirmed，本学期）→ 新增 B（confirmed，constraint 窗口在
+    条目 valid_until 之后 → 交集空；等价复审反例「constraint 10/1-2、条目有效期
+    至 9/30」，窗口相对 today 生成避免真实日期漂移）。修复前：B 虽然永远不会
+    生效，却以 confirmed 授权身份走 new_replaces 分支把 A 顶成 expired；修复后：
+    B 直接判 not_applicable，A 保持 confirmed/applied 且在 compiled_rules 里。"""
+    scope = _make_scope(client, auth_headers)
+    today = shanghai_now().date()
+    valid_a = _add_entry(
+        scope["scope_id"],
+        subject_id="T9",
+        constraint={"slot_ids": ["S1"]},
+        valid_from=today,
+        valid_until=today + timedelta(days=90),
+    )
+    empty_b = _add_entry(
+        scope["scope_id"],
+        subject_id="T9",
+        constraint={
+            "slot_ids": ["S1"],
+            "date_from": (today + timedelta(days=1)).isoformat(),
+            "date_to": (today + timedelta(days=2)).isoformat(),
+        },
+        valid_from=today,
+        valid_until=today,
+    )
+    # B 的两层日期窗口确实不相交（守卫的触发条件）。
+    with SessionLocal() as db:
+        branch = resolve_conflicts_for_new_entry(
+            db, db.get(PreferenceEntry, empty_b.id)
+        )
+        db.commit()
+    assert branch == "not_applicable"
+
+    # A 不受牵连：状态未被置 expired，provenance 没有 superseded_by 链。
+    with SessionLocal() as db:
+        stored_a = db.get(PreferenceEntry, valid_a.id)
+        assert stored_a is not None
+        assert stored_a.status == "confirmed"
+        assert "superseded_by" not in (stored_a.provenance or {})
+        state = compile_memory_state(db, scope["scope_id"])
+    rule_ids = {rule["memory_entry_id"] for rule in state["compiled_rules"]}
+    assert valid_a.id in rule_ids, "有效旧偏好必须照常编译"
+    assert empty_b.id not in rule_ids
+    outcomes = {item["entry_id"]: item["outcome"] for item in state["outcomes"]}
+    assert outcomes[valid_a.id] == "applied"
+    assert outcomes[empty_b.id] == "not_applicable"
 
 
 def test_default_valid_until_uses_schedule_max_lesson_date(

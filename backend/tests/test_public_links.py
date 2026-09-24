@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -32,6 +33,20 @@ from app.timezone import SHANGHAI_TZ
 CLASS_BUSINESS_ID = "B01"
 TEACHER_BUSINESS_ID = "T01"
 TEACHER_NAME = "教师甲"
+
+
+def _leak_scan(body: Any) -> str:
+    """公开载荷的「业务标识不外泄」检查文本：先抹掉 ISO 时间戳再序列化。
+
+    ``generated_at``/``before_time`` 之类的 ``2026-11-09T01:30:52`` 会在
+    01:00–01:59（Asia/Shanghai）之间与工号 ``T01`` 撞子串（``T`` 后跟小时
+    ``01``），让白名单断言在特定时段假失败——泄漏口径针对数据字段，不含
+    展示用时间戳。"""
+    return re.sub(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[+-]\d{2}:\d{2}|Z)?",
+        "",
+        json.dumps(body, ensure_ascii=False),
+    )
 
 
 def _make_published_pair() -> dict[str, Any]:
@@ -245,7 +260,7 @@ def test_schedule_json_is_public_and_whitelisted(
         "after_location",
     }
 
-    serialized = json.dumps(body, ensure_ascii=False)
+    serialized = _leak_scan(body)
     assert "T01" not in serialized  # 教师业务标识（工号）不外泄
     assert "teacher_business_id" not in serialized
     assert "campus_id" not in serialized  # 校区内部主键不外泄
@@ -501,7 +516,7 @@ def test_school_link_drills_down_to_single_class(
     assert body["display_name"]
     assert body["version_no"] == published["current_version_no"]
     assert len(body["rows"]) == 2
-    serialized = json.dumps(body, ensure_ascii=False)
+    serialized = _leak_scan(body)
     assert "T01" not in serialized  # 教师工号不因下钻外泄
 
     # 仅 school scope 有效：class/teacher 链接本就绑定单一资源，scope 不符
@@ -542,7 +557,7 @@ def test_teacher_scope_payload_only_exposes_names(
     assert body["display_name"] == TEACHER_NAME
     assert body["rows"]
     assert all(row["teacher_names"] == [TEACHER_NAME] for row in body["rows"])
-    serialized = json.dumps(body, ensure_ascii=False)
+    serialized = _leak_scan(body)
     assert TEACHER_BUSINESS_ID not in serialized
 
 

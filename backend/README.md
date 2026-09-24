@@ -252,7 +252,11 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
   重算入口：标记按「授权状态定提出方」重算，窗口重叠按**实际生效窗口**
   （约束∩条目级交集，MEM-E1c）判断，任一侧交集为空（not_applicable）不参与
   配对，对方离开活跃集或已显式裁决共存时自动清标；`PATCH /memory/preferences/{id}`
-  编辑约束/有效期/谓词后同样触发重算。
+  编辑约束/有效期/谓词后同样触发重算。**空交集守卫（MEM-F/F1）**：新条目自身
+  的实际生效窗口为空（constraint 日期与条目级有效期不相交）时，
+  `resolve_conflicts_for_new_entry` 直接返回 `not_applicable`——不进入替代/
+  冲突/相邻任何分支、不改动任何旧条目（与编译层 not_applicable 同口径：
+  「永远不会生效」的条目不得让有效旧偏好退出）。
 - **两层日期取交集（MEM-D1 D2 + MEM-E1c）**：编译窗口 = constraint 内
   `date_from/date_to` 与条目级 `valid_from/valid_until` 的**交集**（旧实现是
   条目级覆盖 constraint），交集为空 → outcome=`not_applicable`（明确不适用），
@@ -312,8 +316,12 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
   前端打「底线」徽标。底线不可删除，用户附加清单与底线并列验收——仅 draft_only
   的自定义清单在零课表上也达不成。MEM-E2/E2b：补全传递**完整规范化范围**
   （`normalize_goal_scope`，不再用 has_target_set 布尔）——补入的 coverage 携带
-  可解析的范围参数；修订时优先保留旧 coverage 项 params（`merge_coverage_scope`），
-  body.scope 显式字段才覆盖；补全后统一校验 key 唯一（重复 422）。
+  可解析的范围参数。MEM-F/F3：范围合并（`merge_coverage_scope`）为**三态语义，
+  显式 scope 优先于清单 coverage 既有参数**——按 `GoalScopePatch.model_fields_set`
+  感知「字段是否显式提交」（dict 调用方保守按「非空即提交」）：未提交=保留旧值，
+  显式空列表 / 显式 `null` 日期=清除该维度限制，显式非空=替换；显式提交的字段
+  直接写入清单 coverage 项 params（完整清单里的旧 coverage 参数也会被覆盖）；
+  补全后统一校验 key 唯一（重复 422）。
 - **清单版本绑定（MEM-E2/E2a）**：验收报告 `report.meta.checklist_version`
   记录本次验收所用清单版本（= `checklist_history` 长度+1，与响应
   `checklist_version` 同口径）+ `meta.checklist_snapshot`（当时 coverage 参数
@@ -324,6 +332,13 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
   achieved 回退 open；latest_run_id 与历史报告保留，PATCH 响应附
   `latest_report_meta` 标注旧结论版本，前端据此区分「当前版本结论」与「历史
   版本结论」（pending 时当前结论区显示「等待新验收（v{n}）」而非旧通过）。
+  **写回前版本复核（MEM-F/F2）**：`apply_goal_evaluation` 在写回阶段事务内
+  `db.refresh(goal)` 重读当前 `_checklist_version`，与报告评估版本不一致
+  （验收按 v1 计算、写回前清单已被另一会话修订至 v2）时，报告仅作历史保存且
+  meta 加注 `evaluated_checklist_version`/`current_checklist_version`，
+  `acceptance_status` 置回 pending（detail=「清单已修订至 v{n}，本报告基于
+  v{m}，需重新验收」），`goal.status` 不得写 achieved——旧口径结论不覆盖
+  「等待新验收」。
 - **状态机**：`open → achieved`（全部通过；draft_only 目标在合格草稿交付即达成）；
   存在「必须由教务放宽或裁决」的缺口（硬冲突未消、求解未能安置、禁排仍被占、
   目标期间发生了发布）→ `awaiting_decision`；存在允许的补救动作（范围提取漏课次

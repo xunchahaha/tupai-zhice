@@ -336,24 +336,75 @@ def draft_checklist_from_interpretation(
     return items, warnings
 
 
-def merge_coverage_scope(
-    old_params: dict[str, Any] | None, new_scope: dict[str, Any] | None
-) -> dict[str, Any]:
-    """修订清单时合并 coverage 范围（MEM-E2/E2b）：旧参数优先保留。
+# coverage 范围维度字段（MEM-F/F3 三态合并语义的适用字段）：列表维度允许
+# 「显式空列表清除限制」；日期端点允许「显式 null 清除边界」。
+SCOPE_LIST_FIELDS = (
+    "business_lines",
+    "product_types",
+    "class_business_ids",
+    "course_business_ids",
+)
+SCOPE_DATE_FIELDS = ("date_from", "date_to")
+_SCOPE_ALL_FIELDS = (*SCOPE_LIST_FIELDS, *SCOPE_DATE_FIELDS)
 
-    修订只应改变用户显式给出的内容：用户没给新范围字段时，旧 coverage 的
-    范围参数必须原样保留（丢了范围参数 → 验收时解析不出目标课次 → 明明
-    排好了却判 unverifiable）。用户显式给了哪个字段，就用新值覆盖哪个字段。
-    date_from/date_to 只有显式传入（非 None）才覆盖。
+
+def _scope_field_values(scope: Any) -> dict[str, Any]:
+    """从 scope 来源取原始值：dict 原样返回；pydantic 模型（GoalScopePatch）
+    逐字段读取（日期转 ISO 字符串）；None 返回空。"""
+    if scope is None:
+        return {}
+    if isinstance(scope, dict):
+        return dict(scope)
+    return {
+        "business_lines": list(scope.business_lines or []),
+        "product_types": list(scope.product_types or []),
+        "class_business_ids": list(scope.class_business_ids or []),
+        "course_business_ids": list(scope.course_business_ids or []),
+        "date_from": scope.date_from.isoformat() if scope.date_from else None,
+        "date_to": scope.date_to.isoformat() if scope.date_to else None,
+    }
+
+
+def _submitted_scope_fields(scope: Any) -> set[str]:
+    """scope 里被**显式提交**的字段集合（MEM-F/F3 三态合并的前提）。
+
+    - pydantic 模型（API 层的 ``GoalScopePatch``）：``model_fields_set`` 只含
+      请求 body 里显式出现的字段——「空列表/ null 与未提供」由此区分（真值
+      判断会把两者混为一谈，显式 [] 会被当成「没给」）；
+    - dict（服务层直传/历史调用方）：保守沿用旧口径，只有非空值视为提交，
+      不会把 ``normalize_goal_scope`` 产物里的空维度误判成「显式清除」。
     """
+    if scope is None:
+        return set()
+    fields_set = getattr(scope, "model_fields_set", None)
+    if fields_set is not None:
+        return {str(field) for field in fields_set}
+    values = _scope_field_values(scope)
+    return {field for field in _SCOPE_ALL_FIELDS if values.get(field)}
+
+
+def merge_coverage_scope(
+    old_params: dict[str, Any] | None, new_scope: Any | None
+) -> dict[str, Any]:
+    """修订清单时合并 coverage 范围（MEM-E2/E2b → MEM-F/F3 三态语义）。
+
+    契约：**显式 scope 优先于清单 coverage 既有参数**。字段级三态——
+
+    - 未提交：保留旧值（无旧值则该维度无限制）；
+    - 显式空列表 / 显式 null 日期：清除该维度限制；
+    - 显式非空：替换为新值。
+
+    「是否显式提交」见 ``_submitted_scope_fields``：API 层传 ``GoalScopePatch``
+    模型时按 ``model_fields_set`` 判定；dict 调用方保守按「非空即提交」。
+    返回值统一经 ``normalize_goal_scope`` 规范化（去空白、空维度归零），
+    保证快照与验收口径一致。
+    """
+    values = _scope_field_values(new_scope)
+    submitted = _submitted_scope_fields(new_scope)
     merged: dict[str, Any] = dict(old_params or {})
-    for field in ("business_lines", "product_types", "class_business_ids", "course_business_ids"):
-        if new_scope is not None and new_scope.get(field):
-            merged[field] = list(new_scope[field])
-    for field in ("date_from", "date_to"):
-        if new_scope is not None and new_scope.get(field):
-            merged[field] = new_scope[field]
-    # 规范化去空白，保证快照与验收口径一致。
+    for field in _SCOPE_ALL_FIELDS:
+        if field in submitted:
+            merged[field] = values.get(field)
     return normalize_goal_scope(
         business_lines=merged.get("business_lines"),
         product_types=merged.get("product_types"),
@@ -367,7 +418,7 @@ def merge_coverage_scope(
 def ensure_bottom_line_items(
     checklist: list[dict[str, Any]],
     *,
-    scope: dict[str, Any] | None = None,
+    scope: Any = None,
     previous_checklist: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """底线验收与自定义清单强制并列（MEM-D2/D4c，MEM-E2/E2b 修订），API 层调用。
@@ -379,11 +430,17 @@ def ensure_bottom_line_items(
     - `no_duplicate_lessons`：交付课次不重复（不依赖范围，永远并入）；
     - `coverage`：仅当能解析出明确目标集合时并入，且**必须携带完整规范化
       范围参数**（MEM-E2/E2b：范围来自 `scope`；修订时优先保留
-      `previous_checklist` 旧 coverage 项的 params，`scope` 显式给出的字段才
-      覆盖——旧范围丢失会让「排好了」被判 unverifiable）。
+      `previous_checklist` 旧 coverage 项的 params。MEM-F/F3：scope 支持
+      `GoalScopePatch` 模型或 dict，显式提交的字段优先于清单 coverage 既有
+      参数——三态见 `merge_coverage_scope`）。
 
     补全后统一校验最终清单：key 唯一（重复直接 ValueError，调用方转 422），
     coverage 类底线项的参数完整性由 `normalize_goal_scope` 保证。
+
+    MEM-F/F3：清单里已有 coverage 项时，**显式 scope 优先于清单 coverage 既有
+    参数**——scope 显式提交的字段（`model_fields_set` 感知）直接写入该项参数：
+    非空替换、显式空列表/null 清除该维度；未提交字段保留清单原值（缺了再用
+    合并范围补齐，避免「无参数检查」恒 unverifiable，MEM-E2/E2b）。
     """
     merged = [dict(item) for item in checklist]
     present = {str(item.get("kind") or "") for item in merged}
@@ -408,9 +465,10 @@ def ensure_bottom_line_items(
                 "交付课次不重复（同一课次在交付课表出现 ≥2 次即不通过）",
             )
         )
-    # coverage 底线：清单里已有 coverage 项时，用户口径优先——只在其 params
-    # 缺范围字段时用合并范围补齐（显式 params 永不被静默改写）；没有 coverage
-    # 项但能解析出目标集合时，补一条带完整范围参数的底线 coverage。
+    # coverage 底线：清单里已有 coverage 项时——MEM-F/F3 显式 scope 优先写入，
+    # 未提交字段保留用户口径、缺范围时用合并范围补齐（显式 params 永不被静默
+    # 改写）；没有 coverage 项但能解析出目标集合时，补一条带完整范围参数的
+    # 底线 coverage。
     old_params: dict[str, Any] | None = None
     if previous_checklist:
         for entry in previous_checklist:
@@ -418,27 +476,32 @@ def ensure_bottom_line_items(
                 old_params = dict(entry.get("params") or {})
                 break
     effective_scope = merge_coverage_scope(old_params, scope)
+    scope_submitted = _submitted_scope_fields(scope)
     coverage_entries = [item for item in merged if str(item.get("kind")) == "coverage"]
     if coverage_entries:
         for entry in coverage_entries:
             params = dict(entry.get("params") or {})
-            if not any(
-                params.get(field) for field in
-                ("business_lines", "product_types", "class_business_ids", "course_business_ids")
-            ) and _has_scope(effective_scope):
+            # MEM-F/F3：显式提交的字段优先——非空替换、显式空清除该维度。
+            for field in _SCOPE_ALL_FIELDS:
+                if field not in scope_submitted:
+                    continue
+                value = effective_scope.get(field)
+                if value:
+                    params[field] = list(value) if isinstance(value, list) else value
+                else:
+                    params.pop(field, None)
+            if not any(params.get(field) for field in SCOPE_LIST_FIELDS) and _has_scope(
+                effective_scope
+            ):
                 # 用户的 coverage 项没写范围（或只有 needs_params 类占位）：
-                # 补上解析出的范围，避免「无参数检查」恒 unverifiable。
-                for field in (
-                    "business_lines",
-                    "product_types",
-                    "class_business_ids",
-                    "course_business_ids",
-                    "date_from",
-                    "date_to",
-                ):
+                # 补上解析出的范围，避免「无参数检查」恒 unverifiable。显式
+                # 提交的字段刚处理过，不回头重填（否则「显式清除」被撤销）。
+                for field in _SCOPE_ALL_FIELDS:
+                    if field in scope_submitted:
+                        continue
                     if effective_scope.get(field) and not params.get(field):
                         params[field] = effective_scope[field]
-                entry["params"] = params
+            entry["params"] = params
     elif _has_scope(effective_scope):
         bits = _scope_bits(effective_scope)
         merged.append(
@@ -1584,6 +1647,14 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
     （含 achieved 回退——后一次跑砸了就该让人看见）。评估异常由调用方兜底
     （tasks._evaluate_goal_for_run：置 acceptance_status=failed 并落 detail），
     绝不影响求解结果本身的落库。验收成功 → acceptance_status=completed。
+
+    MEM-F（§9 F2）写回前版本复核：报告是按**评估时点**的清单算出来的；从评估
+    到写回之间清单可能已被另一会话修订（验收按 v1 计算 → 修订至 v2 → 写回）。
+    写回阶段在事务内重读当前 checklist_version，与本次报告的评估版本不一致时：
+    报告仅作历史保存（meta 标注 evaluated_checklist_version/current_checklist_
+    version 两个版本），acceptance_status 保持/置为 pending（detail 说明需重新
+    验收），goal.status **不得写 achieved**——旧口径的结论不得覆盖「等待新验收」
+    的事实，也不能让旧版本悄悄宣告目标达成。
     """
     if not run.goal_id:
         return None
@@ -1591,8 +1662,22 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
     if goal is None or goal.status == "abandoned":
         return None
     report = evaluate_goal(db, goal, run)
+    evaluated_version = int(report["meta"]["checklist_version"])
+    # 事务内重读：本会话持有的 goal 可能是修订前的旧快照，写回前必须以持久化
+    # 状态为准（db.refresh 把 checklist_history 刷到当前最新值）。
+    db.refresh(goal)
+    current_version = _checklist_version(goal)
     run.goal_report = report
     goal.latest_run_id = run.id
+    if current_version != evaluated_version:
+        meta = report["meta"]
+        meta["evaluated_checklist_version"] = evaluated_version
+        meta["current_checklist_version"] = current_version
+        goal.acceptance_status = "pending"
+        goal.acceptance_detail = (
+            f"清单已修订至 v{current_version}，本报告基于 v{evaluated_version}，需重新验收"
+        )
+        return report
     goal.status = str(report["decision"]["status"])
     goal.acceptance_status = "completed"
     goal.acceptance_detail = None

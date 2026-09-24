@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import UTC, date, datetime
 from io import BytesIO
@@ -825,6 +826,15 @@ def test_public_bitable_projections_use_only_current_schedule_and_safe_fields(
     assert any(item["指标名称"] == "调整课次" for item in summary)
 
     public_text = str([*class_rows, *notices, *summary])
+    # 抹掉 ISO 时间戳（如 2026-11-09T01:30:52.123+08:00）再查泄漏：时间戳的
+    # 「T」后跟小时「01」会在 01:00–01:59（Asia/Shanghai）之间与工号 T01 撞
+    # 子串，让白名单断言在特定时段假失败——泄漏口径针对数据字段，不含展示用
+    # 时间戳；其余 forbidden 值（内部文案/主键）不会出现在时间戳里。
+    public_text = re.sub(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[+-]\d{2}:\d{2}|Z)?",
+        "",
+        public_text,
+    )
     for forbidden in forbidden_values:
         assert forbidden not in public_text
 

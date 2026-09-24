@@ -1490,6 +1490,12 @@ def test_learning_basis_prefilter_applies_to_ai_path_too(
     assert len(body["created"]) == 1
     assert body["created"][0]["subject_id"] == "T9"
 
+    # MEM-F 回归场景③：AI 路径输入与公共前置筛选（learning_basis_events，即
+    # 确定性统计路径的同一输入源）完全一致——模型有无配置不改变业务边界。
+    with SessionLocal() as db:
+        basis = learning_basis_events(db, scope_id)
+    assert {str(event.id) for event in basis} == {str(item["id"]) for item in captured["views"]}
+
 
 # ------------------------------------------------- 冲突窗口共用口径（MEM-E1c）
 
@@ -1500,10 +1506,23 @@ def test_conflict_pairing_uses_effective_date_window(
     """MEM-E1c：冲突配对与编译共用实际生效窗口（约束∩条目级交集）口径。
 
     两条同主体 prefer_slot 偏好（目标集不相交，若条目级全学期窗口重叠会被旧
-    口径误标冲突），约束窗口 9/24-25 与 9/26-27 实际不重叠 → 不冲突、双双
-    applied；任一侧交集为空（not_applicable）也不参与配对。"""
+    口径误标冲突），约束窗口「今明两天」与「后两天」实际不重叠 → 不冲突、双双
+    applied；任一侧交集为空（not_applicable）也不参与配对。窗口相对 today 生成：
+    该口径以「约束∩条目级有效期」的交集为准，硬编码历史日期会随时间漂移成
+    空交集或被 valid_from 截窄（MEM-F 复审当日即踩中一次）。"""
     scope_id = mining_scope["scope_id"]
     headers = mining_scope["headers"]
+    today = shanghai_now().date()
+    window_1 = (today, today + timedelta(days=1))
+    window_2 = (today + timedelta(days=2), today + timedelta(days=3))
+
+    def _constraint(slot: str, window: tuple[date, date]) -> dict[str, Any]:
+        return {
+            "slot_ids": [slot],
+            "date_from": window[0].isoformat(),
+            "date_to": window[1].isoformat(),
+        }
+
     first = client.post(
         "/api/v1/memory/preferences",
         headers=headers,
@@ -1511,11 +1530,7 @@ def test_conflict_pairing_uses_effective_date_window(
             "subject_type": "teacher",
             "subject_id": "T9",
             "predicate": "prefer_slot",
-            "constraint": {
-                "slot_ids": ["S1"],
-                "date_from": "2026-09-24",
-                "date_to": "2026-09-25",
-            },
+            "constraint": _constraint("S1", window_1),
             "source": "explicit_stated",
         },
     )
@@ -1527,11 +1542,7 @@ def test_conflict_pairing_uses_effective_date_window(
             "subject_type": "teacher",
             "subject_id": "T9",
             "predicate": "prefer_slot",
-            "constraint": {
-                "slot_ids": ["S2"],
-                "date_from": "2026-09-26",
-                "date_to": "2026-09-27",
-            },
+            "constraint": _constraint("S2", window_2),
             "source": "explicit_stated",
         },
     )
@@ -1553,11 +1564,12 @@ def test_conflict_pairing_uses_effective_date_window(
     assert outcomes[second_id]["outcome"] == "applied"
     rules = {rule["memory_entry_id"]: rule for rule in state["compiled_rules"]}
     assert set(rules) == {first_id, second_id}
-    # 每条规则的 scope 按各自的交集窗口切片，互不越界。
-    assert rules[first_id]["scope"]["date_from"] == "2026-09-24"
-    assert rules[first_id]["scope"]["date_to"] == "2026-09-25"
-    assert rules[second_id]["scope"]["date_from"] == "2026-09-26"
-    assert rules[second_id]["scope"]["date_to"] == "2026-09-27"
+    # 每条规则的 scope 按各自的交集窗口切片，互不越界（交集 = 约束窗口本身：
+    # 条目级默认有效期从今天起且覆盖两个窗口）。
+    assert rules[first_id]["scope"]["date_from"] == window_1[0].isoformat()
+    assert rules[first_id]["scope"]["date_to"] == window_1[1].isoformat()
+    assert rules[second_id]["scope"]["date_from"] == window_2[0].isoformat()
+    assert rules[second_id]["scope"]["date_to"] == window_2[1].isoformat()
 
 
 # ------------------------------------------------- 学习集接受依据（MEM-E1b）

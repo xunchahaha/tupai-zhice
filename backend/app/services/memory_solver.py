@@ -23,6 +23,10 @@
    两层日期（constraint 窗口与条目级有效期）取交集而非覆盖，冲突配对与编译
    共用同一实际生效窗口口径（MEM-E1c）；AI 与统计两条挖掘路径共用同一「可
    学习事件」前置筛选（MEM-E1b：只收「已产生结果版本且未被后续放弃」的事件）。
+7. 空交集守卫（MEM-F，§9 F1）：新条目的实际生效窗口为空（constraint 日期与
+   条目级有效期交集为空）时，resolve_conflicts_for_new_entry 直接判
+   not_applicable——不触发替代/冲突/相邻任何分支，与编译层 not_applicable 口径
+   一致；「永远不会生效」的条目不得让有效旧偏好退出。
 
 红线（与 API 层共同保证）：induced_from_adjustment 条目在本模块也只会以
 软规则形态进入模型——硬约束路径不接收任何记忆来源。
@@ -310,8 +314,18 @@ def resolve_conflicts_for_new_entry(db: Session, new_entry: PreferenceEntry) -> 
       以新替旧（旧条目 transition 到 expired 且带 supersedes=<候选 id>，候选
       confirmed）/ 授权试用（action=authorize_trial，旧新并存）。
 
-    返回本次发生的最强分支：conflict_flagged > new_replaces > time_sliced > coexist。
+    返回本次发生的最强分支：conflict_flagged > new_replaces > time_sliced > coexist
+    > not_applicable。
+
+    MEM-F（§9 F1）顶部守卫：新条目自身的实际生效窗口为空（constraint 日期窗口
+    与条目级 valid_from/valid_until 交集为空）→ 编译层对它判 not_applicable、
+    永不进求解输入；消解层口径必须一致——这样的条目无论什么状态（含 confirmed）
+    都不得触发替代/冲突/相邻任何分支、不得改动任何旧条目，直接返回
+    not_applicable。否则一个「永远不会生效」的新条目也能把有效旧偏好顶掉。
     """
+    new_window_check = _effective_date_window(new_entry)
+    if new_window_check is None:
+        return "not_applicable"
     new_window = _effective_window_bounds(new_entry)
     new_authorized = new_entry.status == "confirmed" or trial_active(
         new_entry, shanghai_now().date()

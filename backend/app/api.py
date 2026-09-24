@@ -4545,9 +4545,12 @@ def replace_goal_checklist(
     停留在旧版结论上）。latest_run_id 与历史报告保留（审计链），但响应附
     `latest_report_meta`，前端据此把旧结论标注为「历史版本 v{n-1} 的结论」。
 
-    MEM-E2/E2b：修订时底线补全传递完整规范化范围——优先保留旧 coverage 项的
-    范围参数（`previous_checklist`），用户显式给出的新范围字段才覆盖，旧范围
-    丢失会让「排好了」被判 unverifiable。
+    MEM-E2/E2b：修订时底线补全传递完整范围——优先保留旧 coverage 项的范围参数
+    （`previous_checklist`），旧范围丢失会让「排好了」被判 unverifiable。
+    MEM-F/F3：body.scope 直接以请求模型传入——合并层用 pydantic
+    `model_fields_set` 感知「字段是否显式提交」，实现 未提交保留 / 显式空列表
+    （或 null 日期）清除 / 显式非空替换 的三态语义；**显式 scope 优先于清单
+    coverage 既有参数**。
     """
     goal = get_scoped_or_404(db, SolveGoal, goal_id, scope)
     if goal.status == "abandoned":
@@ -4560,27 +4563,9 @@ def replace_goal_checklist(
         raise HTTPException(status_code=422, detail="验收清单的 key 不能重复")
     new_checklist = [item.model_dump() for item in new_items]
     old_checklist = list(goal.checklist or [])
-    # 底线补全（MEM-E2/E2b）：优先保留旧 coverage 的范围参数，body 里显式给出
-    # 的范围字段才覆盖——修订是「改口径」，不是「丢范围」。
-    explicit_scope = normalize_goal_scope(
-        business_lines=payload.scope.business_lines if payload.scope else None,
-        product_types=payload.scope.product_types if payload.scope else None,
-        class_business_ids=payload.scope.class_business_ids if payload.scope else None,
-        course_business_ids=payload.scope.course_business_ids if payload.scope else None,
-        date_from=(
-            payload.scope.date_from.isoformat()
-            if payload.scope and payload.scope.date_from
-            else None
-        ),
-        date_to=(
-            payload.scope.date_to.isoformat()
-            if payload.scope and payload.scope.date_to
-            else None
-        ),
-    )
     try:
         new_checklist = ensure_bottom_line_items(
-            new_checklist, scope=explicit_scope, previous_checklist=old_checklist
+            new_checklist, scope=payload.scope, previous_checklist=old_checklist
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

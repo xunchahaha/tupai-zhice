@@ -207,11 +207,13 @@ CI 备注：runner 因账户计费未启动（jobs steps=[]，未实际运行）
 
 | # | 问题 | 修正决策 | 批次 |
 | --- | --- | --- | --- |
-| F1 | **空日期交集的新条目仍可触发 new_replaces**：constraint 10/1-2 + 条目有效期至 9/30 → 交集空 → 本应 not_applicable，却作为 confirmed 走替代分支停用有效旧条目 |  顶部守卫：新条目实际窗口为空 → 直接返回 not_applicable（不触发替代/冲突/相邻分支）；验收=不适用的新条目无论状态如何都不能使有效旧条目退出 | MEM-F |
-| F2 | **旧验收写回覆盖新版本 pending**：验收 A 按 v1 算完，写回前清单被修订为 v2（pending），A 写回旧结论 → achieved/completed |  写回时事务内校验当前 checklist_version == 本次验收版本；不一致 → 报告仅作历史保存（标注版本），acceptance_status 保持 pending 且 detail「清单已修订至 v{n}，本报告基于 v{m}，需重新验收」，goal.status 不得写 achieved | MEM-F |
-| F3 | 范围修订语义：显式  清除不生效（真值判断把空列表当未提供）；完整清单与显式 scope 并存时优先级不一致（静默沿用旧范围） | 合并函数区分「未提供（保留旧值）/显式空列表（清除该维度）/非空（替换）」——用 pydantic  感知字段是否提交；契约统一为**显式 scope 优先于清单 coverage 既有参数**并写入接口文档 | MEM-F |
+| F1 | **空日期交集的新条目仍可触发 new_replaces**：constraint 10/1-2 + 条目有效期至 9/30 → 交集空 → 本应 not_applicable，却作为 confirmed 走替代分支停用有效旧条目 |  顶部守卫：新条目实际窗口为空 → 直接返回 not_applicable（不触发替代/冲突/相邻分支）；验收=不适用的新条目无论状态如何都不能使有效旧条目退出 | 已修复(MEM-F)：`resolve_conflicts_for_new_entry` 顶部 `_effective_date_window(new_entry)` 为 None 即返回 `not_applicable`（与编译层同口径，跳过替代/冲突/相邻并跳过整组冲突重算）；回归固化「有效旧条目 A 保持 confirmed/applied 且在 compiled_rules、新条目 B=not_applicable、A 无 superseded_by 链」（test_memory_semantics.py） |
+| F2 | **旧验收写回覆盖新版本 pending**：验收 A 按 v1 算完，写回前清单被修订为 v2（pending），A 写回旧结论 → achieved/completed |  写回时事务内校验当前 checklist_version == 本次验收版本；不一致 → 报告仅作历史保存（标注版本），acceptance_status 保持 pending 且 detail「清单已修订至 v{n}，本报告基于 v{m}，需重新验收」，goal.status 不得写 achieved | 已修复(MEM-F)：`apply_goal_evaluation` 写回前 `db.refresh(goal)` 事务内重读 `_checklist_version`，与报告 `meta.checklist_version` 不一致时报告照常落库但 meta 加注 `evaluated_checklist_version`/`current_checklist_version`，acceptance_status 置回 pending（detail 按上述文案）、goal.status 不写；并发交错测试固化（会话一按 v1 验收 → 会话二 PATCH 修订至 v2 → 会话一写回 → pending+双版本标注，test_goals_correctness.py） |
+| F3 | 范围修订语义：显式  清除不生效（真值判断把空列表当未提供）；完整清单与显式 scope 并存时优先级不一致（静默沿用旧范围） | 合并函数区分「未提供（保留旧值）/显式空列表（清除该维度）/非空（替换）」——用 pydantic  感知字段是否提交；契约统一为**显式 scope 优先于清单 coverage 既有参数**并写入接口文档 | 已修复(MEM-F)：`merge_coverage_scope`/`ensure_bottom_line_items` 按 `GoalScopePatch.model_fields_set` 感知显式提交（dict 调用方保守按「非空即提交」兼容旧口径），显式空列表/null 日期清除维度、非空替换、未提交保留，显式字段直接写入清单 coverage 项 params（scope 胜）；PATCH `/goals/{id}/checklist` 直传 scope 模型；契约写入接口文档；测试覆盖三态 + 「完整清单（旧 B1 coverage）+ 显式 scope B2 → 生效 B2」（test_goals_correctness.py） |
 
-配套：6 个业务场景迁入项目回归测试（此前为审查方隔离脚本）；LICENSE 按复审结论定为 **Apache-2.0**（补文件与 manifest/README 同步）；CI 补 e2e job。
+配套：6 个业务场景迁入项目回归测试（此前为审查方隔离脚本；MEM-F 收口时逐条核对归位：①「已确认偏好旁的未授权候选不改编译结果」= test_memory_mining.py::test_conflict_flag_lands_on_candidate_only_and_old_entry_still_compiles；②「约束日期窄于条目有效期不被扩大」= test_memory_semantics.py::test_constraint_dates_intersect_with_entry_validity；③「AI 与统计同准入」= test_memory_mining.py::test_learning_basis_prefilter_applies_to_ai_path_too（含 learning_basis_events 输入一致性断言）；④「局部重排一周不误判越界」= test_goals_correctness.py::test_partial_reschedule_kept_sessions_not_flagged_out_of_range；⑤「日期缺失/课次重复/无课表/自定义清单不判完成」= test_goals_correctness.py 三个 D4b/D4c 测试；⑥「修订后继续执行仍属原目标」= test_goals_correctness.py::test_continued_runs_after_scope_revision_stay_bound_to_goal（新增，goal_id 绑定断言）；⑥此前仅由 test_goals.py::test_acceptance_binds_checklist_version_and_snapshot 部分覆盖）；LICENSE 按复审结论定为 **Apache-2.0**（补文件与 manifest/README 同步）；CI 补 e2e job。
+
+MEM-F 附带修正的测试基建：四处日期敏感断言改为相对 today 或先抹 ISO 时间戳——硬编码历史日期窗（9/24-27）会随真实时间漂移成空交集（MEM-E1c 配对/编译测试踩中），公开载荷泄漏断言的 ``T01`` 会在每日 01:00–01:59 与时间戳 ``T01:xx`` 撞子串（test_public_links.py / test_api.py）。
 
 ## Sources
 
