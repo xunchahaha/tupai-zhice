@@ -10,6 +10,7 @@ import { SolverPage } from "@/pages/solver-page";
 const mocks = vi.hoisted(() => ({
   runs: [] as Record<string, unknown>[],
   schedules: [] as Record<string, unknown>[],
+  courses: [] as Record<string, unknown>[],
   diff: vi.fn<(...args: unknown[]) => { data: undefined }>(() => ({ data: undefined })),
   get: vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => ({ data: { configured: false, app_configuration: { aily_configured: false } } })),
   post: vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => ({ data: {} })),
@@ -29,7 +30,7 @@ vi.mock("@/api/generated/client", () => ({
   getListSolverRunsApiV1SolverRunsGetQueryKey: () => ["runs"],
   getOverviewApiV1OverviewGetQueryKey: () => ["overview"],
   useListRulesApiV1RulesGet: () => ({ data: [] }),
-  useListCourseSessionsApiV1CourseSessionsGet: () => ({ data: [] }),
+  useListCourseSessionsApiV1CourseSessionsGet: () => ({ data: mocks.courses }),
   useListSchedulesApiV1SchedulesGet: () => ({ data: mocks.schedules }),
   useListSolverRunsApiV1SolverRunsGet: () => ({ data: mocks.runs }),
   useGetScheduleApiV1SchedulesScheduleIdGet: () => ({ data: undefined }),
@@ -189,6 +190,28 @@ describe("SolverPage interpret phases", () => {
     expect(screen.getByText("实时状态")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "让 AI 解析排课指令" })).toBeDisabled();
   });
+
+  it("keeps the AI entry usable when only the feishu configuration read fails (问题6)", async () => {
+    // 飞书配置读取失败不得把已配置好的通用 AI 入口一起打成不可用（可选集成解耦）。
+    mocks.get.mockImplementation(async (...args: unknown[]) => {
+      const url = String(args[0]);
+      if (url === "/api/v1/integrations/feishu/connection") throw new Error("feishu 配置读取失败");
+      return { data: { configured: true, model: null, app_configuration: { aily_configured: false } } };
+    });
+    renderPage();
+    expect(await screen.findByText("通用 AI 模型 已接入")).toBeInTheDocument();
+    expect(screen.queryByText("AI 配置读取失败")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "让 AI 解析排课指令" })).toBeEnabled();
+  });
+
+  it("still shows the probe error with retry when both AI and feishu reads fail (问题6)", async () => {
+    mocks.get.mockRejectedValue(new Error("网络中断"));
+    renderPage();
+    expect(await screen.findByText("AI 配置读取失败")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "让 AI 解析排课指令" })).toBeDisabled();
+  });
 });
 
 describe("SolverPage goal acceptance loop (MEM-C3)", () => {
@@ -198,6 +221,7 @@ describe("SolverPage goal acceptance loop (MEM-C3)", () => {
     mocks.submitMutate.mockClear();
     mocks.runs = [];
     mocks.schedules = [{ id: "v1", status: "published", solver_run_id: "run-1", version_no: 1, name: "已发布课表" }];
+    mocks.courses = [];
     // userEvent 实例跨测试共享会把 pointer 状态带进下一个用例（上一用例卸载
     // 组件时指针未释放），这里每条用例独立 setup 并复位接口 mock。
     mocks.get.mockReset().mockResolvedValue({ data: { configured: true, model: "text-model", app_configuration: { aily_configured: false } } });
@@ -301,7 +325,7 @@ describe("SolverPage goal acceptance loop (MEM-C3)", () => {
     expect(reparseSolveBody.goal_id).toBe("goal-1");
   });
 
-  it("adds a max_changes checklist item when a baseline is selected (MEM-D3 baseline linkage)", async () => {
+  it("records only the baseline without a change limit unless the limit toggle is enabled (问题4)", async () => {
     mockAiConfigured();
     const interpretation = mockInterpretation() as ReturnType<typeof mockInterpretation> & {
       goal_checklist_draft: Array<{ key: string; requirement: string; kind: string; params: Record<string, never> }>;
@@ -319,9 +343,44 @@ describe("SolverPage goal acceptance loop (MEM-C3)", () => {
     renderPage();
     await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
     await user.selectOptions(screen.getByLabelText("基准版本"), "v1");
-    // 选基准后确认卡出现提示 + 上限输入，徽标说明「按变更数验收」。
+    // 默认不设上限：确认卡如实说明「未设变更上限」，上限输入也不出现。
+    expect(screen.getByText("已选基准：仅记录基准用于变更对比，未设变更上限")).toBeInTheDocument();
+    expect(screen.queryByLabelText("变更数验收上限")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /确认并开始求解/ }));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
+    const [goalUrl, goalBody] = mocks.post.mock.calls[0] as [string, Record<string, unknown>];
+    expect(goalUrl).toBe("/api/v1/goals");
+    const checklist = goalBody.checklist as Array<{ kind: string }>;
+    // 选基准不再静默附带 max_changes=50：清单里没有任何 max_changes 项。
+    expect(checklist.some((item) => item.kind === "max_changes")).toBe(false);
+    // 基准本身仍被记录（用于变更明细/数量对比与优化配置）。
+    expect(goalBody.baseline_schedule_version_id).toBe("v1");
+  });
+
+  it("attaches the max_changes checklist item only after 设置变更上限 is enabled (问题4)", async () => {
+    mockAiConfigured();
+    const interpretation = mockInterpretation() as ReturnType<typeof mockInterpretation> & {
+      goal_checklist_draft: Array<{ key: string; requirement: string; kind: string; params: Record<string, never> }>;
+    };
+    interpretation.goal_checklist_draft = [
+      { key: "coverage", requirement: "覆盖全部目标课次", kind: "coverage", params: {} },
+    ];
+    mocks.stream.mockResolvedValue(interpretation);
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      const url = String(args[0]);
+      if (url === "/api/v1/goals") return { data: { id: "goal-3", status: "open", checklist: [] } };
+      return { data: { id: "run-1", status: "queued", model_status: null } };
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    await user.selectOptions(screen.getByLabelText("基准版本"), "v1");
+    // 明确开启「设置变更上限」后上限输入才出现，此时确认卡说明将附带验收项。
+    await user.click(screen.getByLabelText("设置变更上限"));
     expect(screen.getByText("已选基准：清单将附带变更数验收项")).toBeInTheDocument();
-    expect(screen.getByLabelText("变更数验收上限")).toBeInTheDocument();
+    const limitInput = screen.getByLabelText("变更数验收上限");
+    await user.clear(limitInput);
+    await user.type(limitInput, "3");
     await user.click(screen.getByRole("button", { name: /确认并开始求解/ }));
     await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
     const [goalUrl, goalBody] = mocks.post.mock.calls[0] as [string, Record<string, unknown>];
@@ -329,9 +388,94 @@ describe("SolverPage goal acceptance loop (MEM-C3)", () => {
     const checklist = goalBody.checklist as Array<{ kind: string; params: Record<string, unknown> }>;
     const maxChanges = checklist.find((item) => item.kind === "max_changes");
     expect(maxChanges).toBeDefined();
+    expect(maxChanges!.params.max_changes).toBe(3);
     expect(maxChanges!.params.baseline_schedule_version_id).toBe("v1");
-    expect(maxChanges!.params.max_changes).toBe(50);
     expect(goalBody.baseline_schedule_version_id).toBe("v1");
+  });
+
+  it("keeps the parsed scope intact when only the time budget is adjusted before a manual retry (问题2)", async () => {
+    mockAiConfigured();
+    mocks.stream.mockResolvedValue({
+      ...mockInterpretation(),
+      business_lines: ["考研"],
+      product_types: ["暑期集训"],
+      class_business_ids: ["C-001"],
+    });
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      const url = String(args[0]);
+      if (url === "/api/v1/goals") return { data: { id: "goal-scope", status: "open", checklist: [] } };
+      return { data: { id: "run-scope", status: "queued", model_status: null } };
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    await user.click(await screen.findByRole("button", { name: /确认并开始求解/ }));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
+    const [solveUrl, solveBody] = mocks.post.mock.calls[1] as [string, Record<string, unknown>];
+    expect(solveUrl).toBe("/api/v1/assistant/solve");
+    expect(solveBody.business_lines).toEqual(["考研"]);
+    expect(solveBody.product_types).toEqual(["暑期集训"]);
+    expect(solveBody.class_business_ids).toEqual(["C-001"]);
+    expect(solveBody.date_from).toBe("2026-08-17");
+    expect(solveBody.date_to).toBe("2026-08-19");
+    expect(solveBody.goal_id).toBe("goal-scope");
+
+    // 只调时间预算（30 → 60），不动任何范围字段，然后走手动入口重试。
+    const timeInput = screen.getByLabelText("求解时限（秒）");
+    await user.clear(timeInput);
+    await user.type(timeInput, "60");
+    await user.click(screen.getByRole("button", { name: /按参数开始求解/ }));
+    await waitFor(() => expect(mocks.submitMutate).toHaveBeenCalledTimes(1));
+    const submitted = mocks.submitMutate.mock.calls[0][0] as { data: Record<string, unknown> };
+    expect(submitted.data.time_limit_seconds).toBe(60);
+    // 除预算外，范围字段与第一次请求完全一致（含 goal_id 关联场景）。
+    expect(submitted.data.business_lines).toEqual(["考研"]);
+    expect(submitted.data.product_types).toEqual(["暑期集训"]);
+    expect(submitted.data.class_business_ids).toEqual(["C-001"]);
+    expect(submitted.data.date_from).toBe("2026-08-17");
+    expect(submitted.data.date_to).toBe("2026-08-19");
+    expect(submitted.data.date_window_days).toBe(3);
+    expect(submitted.data.goal_id).toBe("goal-scope");
+  });
+
+  it("gates a widened scope behind an explicit confirmation before any solve request (问题2)", async () => {
+    mockAiConfigured();
+    mocks.courses = [{ id: "cs-1", business_line: "考研", class_business_id: "C-001", lesson_date: "2026-08-17" }];
+    mocks.stream.mockResolvedValue({ ...mockInterpretation(), class_business_ids: ["C-001"] });
+    mocks.post.mockResolvedValue({ data: { id: "run-wide", status: "queued", model_status: null } });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    expect(await screen.findByText(/已解析完成（用时/)).toBeInTheDocument();
+    // 把班级从解析出的 C-001 改成「全部班级」＝扩大范围，需要单独确认。
+    await user.selectOptions(screen.getByLabelText("班级"), "");
+    expect(screen.getByText(/扩大范围需要单独确认/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /按参数开始求解/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /确认并开始求解/ })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "确认扩大范围" }));
+    expect(screen.queryByText(/扩大范围需要单独确认/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /按参数开始求解/ }));
+    await waitFor(() => expect(mocks.submitMutate).toHaveBeenCalledTimes(1));
+    const submitted = mocks.submitMutate.mock.calls[0][0] as { data: Record<string, unknown> };
+    expect(submitted.data.class_business_ids).toEqual([]);
+  });
+
+  it("keeps manually edited scope fields across a re-parse (问题2)", async () => {
+    mockAiConfigured();
+    mocks.courses = [
+      { id: "cs-1", business_line: "考研", class_business_id: "C-001", lesson_date: "2026-08-17" },
+      { id: "cs-2", business_line: "考研", class_business_id: "C-002", lesson_date: "2026-08-18" },
+    ];
+    mocks.stream.mockResolvedValue({ ...mockInterpretation(), class_business_ids: ["C-001"] });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    expect(await screen.findByText(/已解析完成（用时/)).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("班级"), "C-002");
+    // 重新解析同一指令：用户手动改过的范围字段不被解析结果覆盖。
+    await user.click(screen.getByRole("button", { name: "让 AI 解析排课指令" }));
+    expect(await screen.findByText(/已解析完成（用时/)).toBeInTheDocument();
+    expect(screen.getByLabelText("班级")).toHaveValue("C-002");
   });
 
   it("binds a goal from the ?goal= deep link and carries it through manual solving (MEM-D3)", async () => {
@@ -456,8 +600,8 @@ describe("SolverPage preference memory usage (MEM-C1)", () => {
       },
     }];
     renderPage();
-    expect(await screen.findByText("偏好记忆使用情况")).toBeInTheDocument();
-    expect(screen.getByText(/本次参考 2 条偏好记忆（已应用 1 \/ 未使用 1）/)).toBeInTheDocument();
+    expect(await screen.findByText("偏好记忆（创建时编译口径）")).toBeInTheDocument();
+    expect(screen.getByText(/创建任务时 2 条偏好记忆获准编译（编译进求解输入 1 \/ 未编译 1）/)).toBeInTheDocument();
     expect(screen.getByText(/待确认候选未经采纳或授权试用，不进入求解输入/)).toBeInTheDocument();
   });
 

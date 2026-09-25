@@ -43,6 +43,7 @@ interface SolverParamValues {
   change_weight: number;
   solver_rules: SolverRule[];
   business_lines: string[];
+  product_types: string[];
   class_business_ids: string[];
   date_from: string | null;
   date_to: string | null;
@@ -66,6 +67,7 @@ const defaultParams: SolverParamValues = {
   change_weight: 100000,
   solver_rules: [...SYSTEM_SOLVER_RULES, ...OPTIONAL_SOLVER_RULES].map((item) => item.key),
   business_lines: [],
+  product_types: [],
   class_business_ids: [],
   date_from: null,
   date_to: null,
@@ -101,8 +103,16 @@ export function SolverPage() {
   const interpretStartedAt = useRef(0);
   // 收到后端 stage 事件后锁定轮播（事件即真实进度），避免计时器把阶段倒拨回去。
   const stageLocked = useRef(false);
-  // D6 只预填日期三元组，且用户手动改过的字段不再被下一次解析覆盖。
-  const manuallyEdited = useRef({ date_from: false, date_to: false, date_window_days: false });
+  // D6/问题2：解析结果回填手动参数草稿（日期三元组 + 业务范围），用户手动改过
+  // 的字段不再被下一次解析覆盖。
+  const manuallyEdited = useRef({ date_from: false, date_to: false, date_window_days: false, business_lines: false, class_business_ids: false, product_types: false });
+  // 问题2（单一草稿）：解析写入草稿时的范围基线。判断「手动清空范围」是否属于
+  // 扩大解析确认过的范围时以它为基准，而不是相邻两次编辑的差值——先改成别的
+  // 限定值再清空，仍然算扩大。
+  const parsedScopeBaseline = useRef({ business_lines: [] as string[], class_business_ids: [] as string[] });
+  // 问题2（扩大范围单独确认）：用户把范围字段从限定改为「全部」时暂存原值，
+  // 确认前两个求解入口都被禁用；「恢复原范围」按这里的记录回滚。
+  const [scopeExpansion, setScopeExpansion] = useState<{ business_lines?: string[]; class_business_ids?: string[] } | null>(null);
   const [publishing, setPublishing] = useState<"dry-run" | "publish" | null>(null);
   const [calendarResult, setCalendarResult] = useState<CalendarResult | null>(null);
   const [assistantReady, setAssistantReady] = useState<boolean | null>(null);
@@ -113,9 +123,11 @@ export function SolverPage() {
   const [baselineId, setBaselineId] = useState("");
   const [goalId, setGoalId] = useState("");
   const [goalBusy, setGoalBusy] = useState(false);
-  // MEM-D3（基准联动）：选了基准版本时创建清单自动附带 max_changes 项，
-  // 上限在这里维护（默认 50，可改）；选基准后在确认卡同步提示「按变更数验收」。
+  // MEM-D3（基准联动）+ 问题4：选基准默认只记录基准版本（用于变更明细/数量
+  // 对比与优化配置），不再静默附带 max_changes=50；只有用户明确开启「设置变更
+  // 上限」才把 max_changes 项写进目标清单，上限默认 50、可改。
   const [maxChangesLimit, setMaxChangesLimit] = useState(50);
+  const [changeLimitEnabled, setChangeLimitEnabled] = useState(false);
   // MEM-D3（目标连续性）：goalId 绑定状态/口径提示条文案（确认卡内展示）。
   const [goalNotice, setGoalNotice] = useState("");
   // MEM-D3（继续处理入口）：goals 页跳转 /solver?goal=<id> 时挂载即绑定。
@@ -132,20 +144,45 @@ export function SolverPage() {
   const [assistantProbeError, setAssistantProbeError] = useState("");
   const probeAssistant = useCallback(() => {
     setAssistantProbeError("");
-    void Promise.all([
-      http.get<{ configured: boolean; model: string | null }>("/api/v1/integrations/ai/configuration"),
-      http.get<{ app_configuration: { aily_configured: boolean } }>("/api/v1/integrations/feishu/connection"),
-    ])
-      .then(([ai, feishu]) => {
-        const aiConfigured = ai.data.configured;
-        setAssistantReady(aiConfigured || feishu.data.app_configuration.aily_configured);
-        setAssistantEngine(aiConfigured ? (ai.data.model || "通用 AI 模型") : "Aily（可选通道）");
-      })
-      .catch((error) => {
-        // 此前这里直接吞掉错误，界面只显示「正在读取 AI 配置」且没有重试入口。
+    // 通用 AI 与飞书 Aily 是两条相互独立的通道：分别请求、分别记账，任一条读取
+    // 失败都不拖垮另一条（此前 Promise.all 会让飞书读取失败把已配置好的通用 AI
+    // 入口一起打成不可用）。入口可用性 = 通用 AI 已配置，或已确认 Aily 可用；
+    // 只有「AI 配置读取失败且没有 Aily 兜底」才显示探测错误并提供重试。
+    let ai: { configured: boolean; model: string | null } | "failed" | null = null;
+    let aiReadError = "";
+    let aily: boolean | null = null;
+    const refresh = () => {
+      const aiConfigured = ai !== null && ai !== "failed" && ai.configured;
+      const aiModel = ai !== null && ai !== "failed" ? ai.model : null;
+      const ailyUsable = aily === true;
+      if (ai === null && !ailyUsable) return; // 两条通道都还没有可用结论，继续等待
+      if (ai !== null && ai !== "failed" && !aiConfigured && aily === null) return; // 通用 AI 未配置，等飞书结论后再定，避免「待配置」闪跳
+      if (ai === "failed" && aily === null) return; // AI 配置读取失败，等飞书兜底结论
+      if (ai === "failed" && !ailyUsable) {
         setAssistantReady(null);
-        setAssistantProbeError(errorMessage(error));
-      });
+        setAssistantProbeError(aiReadError || "AI 配置读取失败");
+        return;
+      }
+      if (ai === null) {
+        // 通用 AI 配置仍在读取，但 Aily 已确认可用：先放行入口，不等可选通道。
+        setAssistantProbeError("");
+        setAssistantReady(true);
+        setAssistantEngine("Aily（可选通道）");
+        return;
+      }
+      setAssistantProbeError("");
+      setAssistantReady(aiConfigured || ailyUsable);
+      setAssistantEngine(aiConfigured ? (aiModel || "通用 AI 模型") : "Aily（可选通道）");
+    };
+    http.get<{ configured: boolean; model: string | null }>("/api/v1/integrations/ai/configuration")
+      .then(({ data }) => { ai = data; })
+      .catch((error) => { ai = "failed"; aiReadError = errorMessage(error); })
+      .finally(refresh);
+    // 可选集成的读取失败只失去 Aily 增益，绝不阻断独立路径。
+    http.get<{ app_configuration: { aily_configured: boolean } }>("/api/v1/integrations/feishu/connection")
+      .then(({ data }) => { aily = Boolean(data.app_configuration?.aily_configured); })
+      .catch(() => { aily = false; })
+      .finally(refresh);
   }, []);
   useEffect(probeAssistant, [probeAssistant]);
   // MEM-D3（继续处理入口）：goals 页「修正范围后重新求解」跳转 /solver?goal=<id>，
@@ -286,13 +323,34 @@ export function SolverPage() {
     } else {
       setGoalNotice("");
     }
-    // P1 回填：解析成功后把日期三元组预填进手动参数面板（仅一次，手动改过的不覆盖）。
+    // 问题2：未确认的「扩大范围」随新解析回滚——确认动作没有完成，草稿不能
+    // 带着扩大后的范围静默进入下一次确认。先在闭包内合成回滚后的草稿基线，
+    // 再与回填合并成一次 setParams，避免两次更新互相覆盖。
+    const draftBase = scopeExpansion
+      ? {
+          ...params,
+          ...(scopeExpansion.business_lines ? { business_lines: scopeExpansion.business_lines } : {}),
+          ...(scopeExpansion.class_business_ids ? { class_business_ids: scopeExpansion.class_business_ids } : {}),
+        }
+      : params;
+    if (scopeExpansion) setScopeExpansion(null);
+    // P1 回填：解析结果写入手动参数草稿（业务范围 + 日期三元组），用户手动改过
+    // 的字段不覆盖。自此确认卡与手动面板读写同一份草稿，范围不会再因改预算或
+    // 换入口而悄悄丢失/扩大。
+    const nextBusinessLines = manuallyEdited.current.business_lines ? draftBase.business_lines : data.business_lines ?? [];
+    const nextProductTypes = manuallyEdited.current.product_types ? draftBase.product_types : data.product_types ?? [];
+    const nextClassBusinessIds = manuallyEdited.current.class_business_ids ? draftBase.class_business_ids : data.class_business_ids ?? [];
     setParams((current) => ({
       ...current,
+      business_lines: nextBusinessLines,
+      product_types: nextProductTypes,
+      class_business_ids: nextClassBusinessIds,
       date_from: manuallyEdited.current.date_from ? current.date_from : data.date_from ?? null,
       date_to: manuallyEdited.current.date_to ? current.date_to : data.date_to ?? null,
       date_window_days: manuallyEdited.current.date_window_days ? current.date_window_days : data.date_window_days ?? current.date_window_days,
     }));
+    // 记录本次解析写入草稿的范围基线，作为「扩大范围」判定的基准。
+    parsedScopeBaseline.current = { business_lines: nextBusinessLines, class_business_ids: nextClassBusinessIds };
     setAiWindowFilled(!manuallyEdited.current.date_window_days);
     setPhase("parsed");
     toast.success(data.source === "feishu_aily" ? "Aily（可选通道） 已完成解析" : "AI 模型已完成解析");
@@ -351,19 +409,55 @@ export function SolverPage() {
     manuallyEdited.current[field] = true;
     if (field === "date_window_days") setAiWindowFilled(false);
   };
+  /**
+   * 问题2：范围字段（业务线/班级）的手动编辑入口——打脏标记、写同一份草稿，
+   * 并把「限定 → 全部」的扩大动作拦进单独确认（以解析写入草稿时的范围为基线）；
+   * 改回限定值即视为放弃扩大，撤销该字段的待确认状态。
+   */
+  const handleScopeFieldChange = (field: "business_lines" | "class_business_ids", value: string[]) => {
+    manuallyEdited.current[field] = true;
+    const previous = params[field];
+    setParams((current) => ({ ...current, [field]: value }));
+    if (!value.length && previous.length && parsedScopeBaseline.current[field].length) {
+      setScopeExpansion((current) => ({ ...current, [field]: previous }));
+      return;
+    }
+    setScopeExpansion((current) => {
+      if (!current || !(field in current)) return current;
+      const next = { ...current };
+      delete next[field];
+      return Object.keys(next).length ? next : null;
+    });
+  };
+  const confirmScopeExpansion = () => {
+    // 明确确认后扩大才生效：解除求解入口禁用，草稿保持用户改后的范围。
+    setScopeExpansion(null);
+  };
+  const revertScopeExpansion = () => {
+    if (scopeExpansion) {
+      setParams((current) => ({
+        ...current,
+        ...(scopeExpansion.business_lines ? { business_lines: scopeExpansion.business_lines } : {}),
+        ...(scopeExpansion.class_business_ids ? { class_business_ids: scopeExpansion.class_business_ids } : {}),
+      }));
+    }
+    setScopeExpansion(null);
+  };
   const solveFromInterpretation = async () => {
     if (!interpretation || interpretation.unsupported_requirements?.length) return;
+    // 问题2：扩大范围未确认时不允许任何入口出发求解（按钮已禁用，这里兜底）。
+    if (scopeExpansion) return;
     try {
       // 目标验收闭环（MEM-C3）：先按解析结果登记持久目标（清单用后端预填草稿，
       // 前端可改的项这里暂不展开），再把 goal_id 带进求解任务；run 结束后自动验收。
       let activeGoalId = goalId;
       if (trackGoal && !activeGoalId) {
         setGoalBusy(true);
-        // MEM-D3（基准联动）：选了基准版本时清单自动附带 max_changes 项
-        //（params.baseline=所选版本，上限取「验收上限」输入，默认 50）——
-        // 基准版本不再是摆设，「尽量少改」由此获得真实验收上限。
+        // MEM-D3（基准联动）+ 问题4：基准版本默认只记录下来（用于变更明细/数量
+        // 对比与优化配置）；只有用户明确开启「设置变更上限」才把 max_changes 项
+        // 写进清单（上限取「验收上限」输入，默认 50），不用文案掩盖阈值的有无。
         const checklistDraft: GoalChecklistItem[] = [...(interpretation.goal_checklist_draft ?? [])];
-        if (baselineId && !checklistDraft.some((item) => item.kind === "max_changes")) {
+        if (baselineId && changeLimitEnabled && !checklistDraft.some((item) => item.kind === "max_changes")) {
           checklistDraft.push({
             key: "max_changes-baseline",
             kind: "max_changes",
@@ -373,29 +467,32 @@ export function SolverPage() {
         }
         const { data: goal } = await http.post<{ id: string }>("/api/v1/goals", {
           instruction: interpretation.instruction,
-          business_lines: interpretation.business_lines,
-          product_types: interpretation.product_types,
-          class_business_ids: interpretation.class_business_ids,
-          date_from: interpretation.date_from,
-          date_to: interpretation.date_to,
+          // 问题2：目标清单与求解共用同一份手动草稿的范围口径，不会各说各话。
+          business_lines: params.business_lines,
+          product_types: params.product_types,
+          class_business_ids: params.class_business_ids,
+          date_from: params.date_from,
+          date_to: params.date_to,
           checklist: checklistDraft,
           baseline_schedule_version_id: baselineId || null,
           forbid_publish: true,
         });
         activeGoalId = goal.id;
         setGoalId(goal.id);
-        setGoalNotice(`已登记目标 #${goal.id.slice(0, 8)}${baselineId ? "，按所选基准的变更数验收" : ""}。`);
+        setGoalNotice(`已登记目标 #${goal.id.slice(0, 8)}${baselineId ? (changeLimitEnabled ? "，按所选基准的变更数验收" : "，已记录基准版本用于变更对比（未设变更上限）") : ""}。`);
       }
       const { data } = await http.post<SolverRunResponse>("/api/v1/assistant/solve", {
         instruction: interpretation.instruction,
-        business_lines: interpretation.business_lines,
-        product_types: interpretation.product_types,
-        class_business_ids: interpretation.class_business_ids,
-        date_from: interpretation.date_from,
-        date_to: interpretation.date_to,
-        date_window_days: interpretation.date_window_days,
+        // 问题2（单一数据源）：范围/日期/预算统一读手动参数草稿——确认卡与手动
+        // 面板改的是同一份草稿，两个入口发出的范围口径永远一致，改预算不动范围。
+        business_lines: params.business_lines,
+        product_types: params.product_types,
+        class_business_ids: params.class_business_ids,
+        date_from: params.date_from,
+        date_to: params.date_to,
+        date_window_days: params.date_window_days,
         solver_rules: interpretation.solver_rules,
-        time_limit_seconds: 30,
+        time_limit_seconds: params.time_limit_seconds,
         goal_id: trackGoal ? activeGoalId : null,
         wait: false,
       });
@@ -429,7 +526,7 @@ export function SolverPage() {
       aiConfigured={assistantReady}
       publishedScheduleCount={scheduleList.filter((item) => item.status === "published").length}
     />
-    <section className="border border-blue-200 bg-blue-50/40 p-5"><div className="flex flex-wrap items-center gap-2"><Bot className="size-4 text-blue-600" /><h2 className="font-semibold">一句话排课</h2><Badge tone={assistantReady === true ? "green" : "yellow"}>{assistantReady === true ? `${assistantEngine} 已接入` : assistantReady === false ? "AI 模型待配置" : assistantProbeError ? "AI 配置读取失败" : "正在读取 AI 配置"}</Badge>{assistantProbeError ? <Button size="sm" variant="outline" onClick={probeAssistant}>重试</Button> : null}</div><p className="mt-2 text-xs text-zinc-500">自然语言 → AI 解析业务范围与规则 → 教务确认 → CP-SAT 确定性求解 → 课表与日历下发</p><textarea aria-label="一句话排课指令" className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500 disabled:bg-zinc-50 disabled:text-zinc-400" value={instruction} disabled={phase === "thinking"} onChange={(event) => { setInstruction(event.target.value); setInterpretation(null); if (phase === "failed") { setPhase("idle"); setInterpretError(""); } }} /><div className="mt-3 flex flex-wrap gap-2"><Button onClick={interpret} disabled={assistantReady !== true || interpreting || instruction.trim().length < 2}><Sparkles className="size-4" />{interpreting ? "AI 正在理解指令" : "让 AI 解析排课指令"}</Button>{interpreting ? <Button variant="outline" onClick={cancelInterpret}>取消解析</Button> : null}{interpretation ? <Button variant="outline" onClick={solveFromInterpretation} disabled={Boolean(interpretation.unsupported_requirements?.length) || goalBusy}><Play className="size-4" />{goalBusy ? "正在登记目标…" : "确认并开始求解"}</Button> : null}</div>{assistantReady === false ? <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><div>普通集成应用继续负责外部表格和日历；一句话理解改由独立 AI 模型接口完成，不再要求 Aily 应用标识和技能标识。</div><Button className="mt-3" size="sm" variant="outline" onClick={() => navigate("/integrations?section=ai")}><Settings2 className="size-4" />配置一句话排课 AI</Button></div> : null}{phase === "thinking" ? <InterpretProgress stageIndex={stageIndex} elapsedSeconds={elapsedSeconds} liveText={liveThinking} /> : null}{phase === "failed" ? <div role="alert" className="mt-4 border-l-2 border-red-500 bg-red-50 px-4 py-3 text-sm text-red-800"><div>AI 解析失败：{interpretError}</div>{elapsedSeconds > 30 ? <p className="mt-1 text-xs text-amber-800">本次解析超过 30 秒仍未返回，可稍后重试，或改用手动参数求解。</p> : null}<Button className="mt-2" size="sm" variant="outline" onClick={() => void interpret()} disabled={assistantReady !== true || instruction.trim().length < 2}><RefreshCw className="size-3.5" />重试解析</Button></div> : null}{interpretation ? <><p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-xs text-zinc-600">{interpretation.summary}；解析来源：{interpretation.source === "feishu_aily" ? "Aily（可选通道）" : assistantEngine}。</p><InterpretThought thinking={interpretation.thinking ?? ""} seconds={parsedSeconds} /><div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3"><Scope label="业务线" values={interpretation.business_lines} /><Scope label="产品班型" values={interpretation.product_types} /><Scope label="班级范围" values={interpretation.class_business_ids} /><Scope label="日期范围" values={[interpretation.date_from, interpretation.date_to].filter(Boolean) as string[]} /><Scope label="日期调整窗口" values={[`${interpretation.date_window_days} 天`]} /><Scope label="识别规则" values={interpretation.recognized_rules} /></div><div className="mt-4 flex flex-wrap items-end gap-5 border-t border-blue-200 pt-4"><label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700"><input aria-label="以此为目标跟踪" className="accent-blue-600" type="checkbox" checked={trackGoal} onChange={(event) => setTrackGoal(event.target.checked)} /><span className="inline-flex items-center gap-1.5">以此为目标跟踪<InfoTooltip label="以此为目标跟踪">把这次指令登记成持久目标：每次求解结束后按课次覆盖、禁排复核、硬冲突、只出草稿等清单逐项验收，缺口与建议下一步会显示在下方报告中；发布永远不会被自动执行。</InfoTooltip></span></label>{trackGoal ? <label className="block text-sm text-zinc-700"><span className="inline-flex items-center gap-1.5">基准版本<InfoTooltip label="基准版本">用于「尽量少改」类验收：对比本次结果与所选版本的变更数并只设上限。「尽量少改」是优化目标，不会被升级为「绝不能改」。</InfoTooltip></span><Select aria-label="基准版本" selectSize="sm" containerClassName="mt-1 w-52" value={baselineId} onChange={(event) => setBaselineId(event.target.value)}><option value="">不设基准</option>{scheduleList.map((item) => <option key={item.id} value={item.id}>v{item.version_no} {item.name}{item.status === "published" ? "（已发布）" : ""}</option>)}</Select></label> : null}{trackGoal && baselineId ? <div className="flex flex-wrap items-center gap-3 text-sm text-zinc-700"><label className="block"><span className="inline-flex items-center gap-1.5">验收上限（变更数）<InfoTooltip label="验收上限">创建目标清单会自动附带 max_changes 项：相对所选基准的变更数超过这个上限时验收不通过；只设上限，不改变求解行为。</InfoTooltip></span><input aria-label="变更数验收上限" className="mt-1 h-9 w-24 rounded-md border border-zinc-300 bg-white px-2 text-sm tabular-nums outline-none focus:border-blue-500" type="number" min={0} max={100000} step={5} value={maxChangesLimit} onChange={(event) => setMaxChangesLimit(Math.max(0, Math.round(Number(event.target.value)) || 0))} /></label><Badge tone="blue">已选基准：清单将附带变更数验收项</Badge></div> : null}</div><div className="mt-3 space-y-2 text-xs text-amber-900">{interpretation.coverage_warnings?.map((warning) => <p key={warning}>{warning}</p>)}{interpretation.unsupported_requirements?.length ? <div role="alert" className="border-l-2 border-amber-500 bg-amber-50 p-3"><strong>以下要求尚未进入求解：</strong><ul>{interpretation.unsupported_requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul><p>请先在规则管理中补充已支持的结构化规则，并修订指令后重新解析。</p></div> : null}</div></> : null}{goalId && goalNotice ? <p role="status" className="mt-3 border-l-2 border-blue-400 bg-blue-50/60 px-3 py-2 text-xs text-zinc-700">{goalNotice}</p> : null}</section>
+    <section className="border border-blue-200 bg-blue-50/40 p-5"><div className="flex flex-wrap items-center gap-2"><Bot className="size-4 text-blue-600" /><h2 className="font-semibold">一句话排课</h2><Badge tone={assistantReady === true ? "green" : "yellow"}>{assistantReady === true ? `${assistantEngine} 已接入` : assistantReady === false ? "AI 模型待配置" : assistantProbeError ? "AI 配置读取失败" : "正在读取 AI 配置"}</Badge>{assistantProbeError ? <Button size="sm" variant="outline" onClick={probeAssistant}>重试</Button> : null}</div><p className="mt-2 text-xs text-zinc-500">自然语言 → AI 解析业务范围与规则 → 教务确认 → CP-SAT 确定性求解 → 课表与日历下发</p><textarea aria-label="一句话排课指令" className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500 disabled:bg-zinc-50 disabled:text-zinc-400" value={instruction} disabled={phase === "thinking"} onChange={(event) => { setInstruction(event.target.value); setInterpretation(null); if (phase === "failed") { setPhase("idle"); setInterpretError(""); } }} /><div className="mt-3 flex flex-wrap gap-2"><Button onClick={interpret} disabled={assistantReady !== true || interpreting || instruction.trim().length < 2}><Sparkles className="size-4" />{interpreting ? "AI 正在理解指令" : "让 AI 解析排课指令"}</Button>{interpreting ? <Button variant="outline" onClick={cancelInterpret}>取消解析</Button> : null}{interpretation ? <Button variant="outline" onClick={solveFromInterpretation} disabled={Boolean(interpretation.unsupported_requirements?.length) || goalBusy || Boolean(scopeExpansion)}><Play className="size-4" />{goalBusy ? "正在登记目标…" : "确认并开始求解"}</Button> : null}</div>{assistantReady === false ? <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><div>普通集成应用继续负责外部表格和日历；一句话理解改由独立 AI 模型接口完成，不再要求 Aily 应用标识和技能标识。</div><Button className="mt-3" size="sm" variant="outline" onClick={() => navigate("/integrations?section=ai")}><Settings2 className="size-4" />配置一句话排课 AI</Button></div> : null}{phase === "thinking" ? <InterpretProgress stageIndex={stageIndex} elapsedSeconds={elapsedSeconds} liveText={liveThinking} /> : null}{phase === "failed" ? <div role="alert" className="mt-4 border-l-2 border-red-500 bg-red-50 px-4 py-3 text-sm text-red-800"><div>AI 解析失败：{interpretError}</div>{elapsedSeconds > 30 ? <p className="mt-1 text-xs text-amber-800">本次解析超过 30 秒仍未返回，可稍后重试，或改用手动参数求解。</p> : null}<Button className="mt-2" size="sm" variant="outline" onClick={() => void interpret()} disabled={assistantReady !== true || instruction.trim().length < 2}><RefreshCw className="size-3.5" />重试解析</Button></div> : null}{interpretation ? <><p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-xs text-zinc-600">{interpretation.summary}；解析来源：{interpretation.source === "feishu_aily" ? "Aily（可选通道）" : assistantEngine}。</p><InterpretThought thinking={interpretation.thinking ?? ""} seconds={parsedSeconds} /><div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3"><Scope label="业务线" values={params.business_lines} /><Scope label="产品班型" values={params.product_types} /><Scope label="班级范围" values={params.class_business_ids} /><Scope label="日期范围" values={[params.date_from, params.date_to].filter(Boolean) as string[]} /><Scope label="日期调整窗口" values={[`${params.date_window_days} 天`]} /><Scope label="识别规则" values={interpretation.recognized_rules} /></div><div className="mt-4 flex flex-wrap items-end gap-5 border-t border-blue-200 pt-4"><label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700"><input aria-label="以此为目标跟踪" className="accent-blue-600" type="checkbox" checked={trackGoal} onChange={(event) => setTrackGoal(event.target.checked)} /><span className="inline-flex items-center gap-1.5">以此为目标跟踪<InfoTooltip label="以此为目标跟踪">把这次指令登记成持久目标：每次求解结束后按课次覆盖、禁排复核、硬冲突、只出草稿等清单逐项验收，缺口与建议下一步会显示在下方报告中；发布永远不会被自动执行。</InfoTooltip></span></label>{trackGoal ? <label className="block text-sm text-zinc-700"><span className="inline-flex items-center gap-1.5">基准版本<InfoTooltip label="基准版本">记录所选基准版本，用于对比本次结果的变更明细与数量；默认不设变更上限，勾选「设置变更上限」后才会按上限验收。「尽量少改」是优化目标，不会被升级为「绝不能改」。</InfoTooltip></span><Select aria-label="基准版本" selectSize="sm" containerClassName="mt-1 w-52" value={baselineId} onChange={(event) => setBaselineId(event.target.value)}><option value="">不设基准</option>{scheduleList.map((item) => <option key={item.id} value={item.id}>v{item.version_no} {item.name}{item.status === "published" ? "（已发布）" : ""}</option>)}</Select></label> : null}{trackGoal && baselineId ? <div className="flex flex-wrap items-center gap-3 text-sm text-zinc-700"><label className="flex cursor-pointer items-center gap-2"><input aria-label="设置变更上限" className="accent-blue-600" type="checkbox" checked={changeLimitEnabled} onChange={(event) => setChangeLimitEnabled(event.target.checked)} /><span className="inline-flex items-center gap-1.5">设置变更上限<InfoTooltip label="设置变更上限">默认不设上限：基准版本只用于记录变更明细与数量对比。勾选后创建目标清单才会附带 max_changes 项——相对所选基准的变更数超过上限时验收不通过；只设上限，不改变求解行为。</InfoTooltip></span></label>{changeLimitEnabled ? <label className="block"><span className="inline-flex items-center gap-1.5">验收上限（变更数）<InfoTooltip label="验收上限">已开启变更上限：创建目标清单会附带 max_changes 项，相对所选基准的变更数超过这个上限时验收不通过；只设上限，不改变求解行为。</InfoTooltip></span><input aria-label="变更数验收上限" className="mt-1 h-9 w-24 rounded-md border border-zinc-300 bg-white px-2 text-sm tabular-nums outline-none focus:border-blue-500" type="number" min={0} max={100000} step={5} value={maxChangesLimit} onChange={(event) => setMaxChangesLimit(Math.max(0, Math.round(Number(event.target.value)) || 0))} /></label> : null}<Badge tone="blue">{changeLimitEnabled ? "已选基准：清单将附带变更数验收项" : "已选基准：仅记录基准用于变更对比，未设变更上限"}</Badge></div> : null}</div><div className="mt-3 space-y-2 text-xs text-amber-900">{interpretation.coverage_warnings?.map((warning) => <p key={warning}>{warning}</p>)}{interpretation.unsupported_requirements?.length ? <div role="alert" className="border-l-2 border-amber-500 bg-amber-50 p-3"><strong>以下要求尚未进入求解：</strong><ul>{interpretation.unsupported_requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul><p>请先在规则管理中补充已支持的结构化规则，并修订指令后重新解析。</p></div> : null}</div></> : null}{goalId && goalNotice ? <p role="status" className="mt-3 border-l-2 border-blue-400 bg-blue-50/60 px-3 py-2 text-xs text-zinc-700">{goalNotice}</p> : null}</section>
     <div className="grid gap-2 xl:grid-cols-[360px_minmax(0,1fr)]">
       {showParams ? <div className="animate-fade-in"><SolverParams
         params={params}
@@ -441,6 +538,10 @@ export function SolverPage() {
         onManualEdit={markManualEdit}
         linkedGoalId={goalId}
         onClearGoal={() => { setGoalId(""); setGoalNotice(""); goalParamBound.current = true; }}
+        scopeExpansion={scopeExpansion}
+        onScopeFieldChange={handleScopeFieldChange}
+        onConfirmScopeExpansion={confirmScopeExpansion}
+        onRevertScopeExpansion={revertScopeExpansion}
         onSubmit={() => submit.mutate({ data: { ...params, solver_rules: [...new Set([...params.solver_rules, ...SYSTEM_RULE_KEYS])], goal_id: goalId || null, wait: false } })}
       /></div> : null}
       <div className={showParams ? undefined : "xl:col-span-2"}>
@@ -560,7 +661,7 @@ function InterpretThought({ thinking, seconds }: { thinking: string; seconds: nu
   );
 }
 
-function SolverParams({ params, setParams, scope, selectedCount, pending, aiWindowBadge, onManualEdit, linkedGoalId, onClearGoal, onSubmit }: { params: SolverParamValues; setParams: React.Dispatch<React.SetStateAction<SolverParamValues>>; scope: { businessLines: string[]; classes: string[] }; selectedCount: number; pending: boolean; aiWindowBadge?: boolean; onManualEdit?: (field: "date_from" | "date_to" | "date_window_days") => void; linkedGoalId?: string; onClearGoal?: () => void; onSubmit: () => void }) {
+function SolverParams({ params, setParams, scope, selectedCount, pending, aiWindowBadge, onManualEdit, linkedGoalId, onClearGoal, scopeExpansion, onScopeFieldChange, onConfirmScopeExpansion, onRevertScopeExpansion, onSubmit }: { params: SolverParamValues; setParams: React.Dispatch<React.SetStateAction<SolverParamValues>>; scope: { businessLines: string[]; classes: string[] }; selectedCount: number; pending: boolean; aiWindowBadge?: boolean; onManualEdit?: (field: "date_from" | "date_to" | "date_window_days") => void; linkedGoalId?: string; onClearGoal?: () => void; scopeExpansion?: { business_lines?: string[]; class_business_ids?: string[] } | null; onScopeFieldChange?: (field: "business_lines" | "class_business_ids", value: string[]) => void; onConfirmScopeExpansion?: () => void; onRevertScopeExpansion?: () => void; onSubmit: () => void }) {
   const toggleRule = (key: SolverRule) =>
     setParams((current) => ({
       ...current,
@@ -579,11 +680,8 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, aiWind
         <div className="text-xs font-medium text-zinc-500">求解范围</div>
         <label className="block text-sm text-zinc-700">
           业务线
-          <Select selectSize="md" containerClassName="mt-1.5" value={params.business_lines[0] ?? ""} onChange={(event) =>
-              setParams((current) => ({
-                ...current,
-                business_lines: event.target.value ? [event.target.value] : [],
-              }))
+          <Select aria-label="业务线" selectSize="md" containerClassName="mt-1.5" value={params.business_lines[0] ?? ""} onChange={(event) =>
+              onScopeFieldChange?.("business_lines", event.target.value ? [event.target.value] : [])
             }
           >
             <option value="">全部业务线</option>
@@ -594,11 +692,8 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, aiWind
         </label>
         <label className="block text-sm text-zinc-700">
           班级
-          <Select selectSize="md" containerClassName="mt-1.5" value={params.class_business_ids[0] ?? ""} onChange={(event) =>
-              setParams((current) => ({
-                ...current,
-                class_business_ids: event.target.value ? [event.target.value] : [],
-              }))
+          <Select aria-label="班级" selectSize="md" containerClassName="mt-1.5" value={params.class_business_ids[0] ?? ""} onChange={(event) =>
+              onScopeFieldChange?.("class_business_ids", event.target.value ? [event.target.value] : [])
             }
           >
             <option value="">全部班级</option>
@@ -640,6 +735,20 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, aiWind
           {selectedCount > 1500 ? "课次过多时求解会超时，建议按班级或按周分批。" : ""}
         </p>
       </fieldset>
+      {/* 问题2（扩大范围单独确认）：把范围从限定改成「全部」时，必须在这里明确
+          确认后求解入口才会恢复；确认前如实说明扩大尚未生效。 */}
+      {scopeExpansion ? (
+        <div role="alert" className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <div>
+            范围将要扩大：{[scopeExpansion.business_lines ? "业务线" : null, scopeExpansion.class_business_ids ? "班级范围" : null].filter(Boolean).join("、")}
+            将从限定范围改为「全部」，超出解析确认的范围。扩大范围需要单独确认，确认前不能开始求解。
+          </div>
+          <div className="mt-2 flex gap-2">
+            <Button size="sm" variant="outline" onClick={onConfirmScopeExpansion}>确认扩大范围</Button>
+            <Button size="sm" variant="outline" onClick={onRevertScopeExpansion}>恢复原范围</Button>
+          </div>
+        </div>
+      ) : null}
       <div className="mt-4 grid gap-4">
         <NumberField label="求解时限（秒）" hint="CP-SAT 最多运行多久。超时可能返回已有可行解，或 UNKNOWN（尚未找到解，不代表无解）；课次范围越大，通常需要越长时间。" value={params.time_limit_seconds} min={1} max={900} step={5} onChange={(value) => setParams((current) => ({ ...current, time_limit_seconds: value }))} />
         <NumberField label="日期调整窗口（天）" hint="每节课相对原日期最多可前后挪动几天。实际新日期还必须落在起始日期与结束日期设定的边界内；设为 0 表示不调日期。" labelExtra={aiWindowBadge ? <Badge tone="blue">来自 AI 解析</Badge> : undefined} value={params.date_window_days} min={0} max={31} step={1} onChange={(value) => { onManualEdit?.("date_window_days"); setParams((current) => ({ ...current, date_window_days: value })); }} />
@@ -689,7 +798,7 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, aiWind
           </button>
         </div>
       ) : null}
-      <Button className="mt-6 w-full" onClick={onSubmit} disabled={pending}>
+      <Button className="mt-6 w-full" onClick={onSubmit} disabled={pending || Boolean(scopeExpansion)}>
         <Play className="size-4" />
         按参数开始求解
       </Button>
@@ -843,7 +952,11 @@ async function copyInstruction(value: string) {
   }
 }
 
-/** 偏好记忆使用情况（MEM-C1）：读创建任务时冻结的 memory_usage，不依赖解释生成。 */
+/** 偏好记忆使用情况（MEM-C1）：读创建任务时冻结的 memory_usage，不依赖解释生成。
+
+第七轮口径收口：这里展示的是编译资格段（创建时点、方案级），标题与 headline
+都按编译口径表述；对本次课程的实际匹配与结果满足情况由解释层计算
+（解释面板的「偏好记忆」相关行），本组件不再用编译状态冒充本次使用结论。 */
 function MemoryUsageSection({ memory }: { memory: MemoryUsageSnapshot | null | undefined }) {
   if (!memory?.status) return null;
   const headline = memoryHeadline(memory);
@@ -854,7 +967,7 @@ function MemoryUsageSection({ memory }: { memory: MemoryUsageSnapshot | null | u
   );
   return (
     <section className="mt-3 rounded-md border border-zinc-200 bg-zinc-50/60 px-4 py-3 text-sm">
-      <div className="text-xs font-medium text-zinc-500">偏好记忆使用情况</div>
+      <div className="text-xs font-medium text-zinc-500">偏好记忆（创建时编译口径）</div>
       {failed ? (
         <p className="mt-1.5 border-l-2 border-red-400 bg-red-50 px-3 py-2 text-red-900">
           {headline}
