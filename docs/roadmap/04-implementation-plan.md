@@ -1,6 +1,6 @@
 # 04 · 实施计划与进度
 
-> 状态：✅ 七期第六轮复审修订侧收口完成 · VER-7 通过（2026-09-25：后端 ruff/mypy 全过 + pytest 369 passed；前端 tsc 0 错误 + vitest 132 passed / 19 文件；e2e 未在本地运行，待推送后 CI 覆盖）
+> 状态：✅ 八期第七轮复审第一批正确性与口径收口完成 · VER-8 通过（2026-09-25：后端 ruff/mypy 全过 + pytest 377 passed；前端 tsc 0 错误 + vitest 138 passed / 19 文件；e2e 未在本地运行，CI 因账户 billing 仍未启动，runners 未分配）；第七轮第二批任务上下文主线批次待启动
 > 批次策略遵循工作区 AGENTS.md：按模块分批、实现代理自检 + 局部验证、里程碑统一全量验证、每批一个原子提交。
 
 ## 勘察修正（重要）
@@ -103,6 +103,18 @@ VER-1 收口
 | --- | --- | --- | --- |
 | MEM-H | 清单修订侧并发复位保护：修订落库只走单条数据库条件 UPDATE（`apply_goal_checklist_revision`）——历史快照追加、清单替换、版本自增（SQL 表达式取库中当前值）与验收复位在同一语句里，SET 无条件把 acceptance_status 复位 pending 并用 CASE 按数据库当时状态把 achieved 回退 open，WHERE 携带读取时 checklist_revision 与 status<>'abandoned'，rowcount=0 时回滚、按库中状态返回 409 冲突且不留修订审计记录；先验收后修订等反向交错进入回归测试 | ✅ 完成（后端 ruff/mypy 全过 + pytest 369 passed，3b3ef96） | 3b3ef96 |
 | VER-7 | 终验：后端 ruff/mypy 全过 + pytest 369 passed；前端 tsc 0 错误 + vitest 132 passed（19 文件）；e2e 未在本地运行（CI 的 e2e job 将在推送后覆盖，CI 因账户 billing 仍未启动，runners 未分配） | ✅ | — |
+
+## 八期「第七轮复审正确性与口径收口」批次（2026-09-25，第一批）
+
+| 批次 | 内容 | 状态 | 提交 |
+| --- | --- | --- | --- |
+| MEM-I1 | 解释层方案隔离与历史快照：解释的是「求解当时」的规则——用户规则优先读 run 对应 DataSnapshot.payload["rules"] 的冻结原文（source=snapshot），冻结缺失才回退现库，且回退查询强制携带 schedule_set_id（Rule 唯一约束为 (schedule_set_id, business_id)，只按 business_id 查会把其它方案的同名规则混进来；无方案上下文不做现库查询，宁缺毋错）；_scope_candidates 课次候选与 build_explanation_facts 的 active_rules 同样按 run.schedule_set_id 过滤，消除多方案同名实体串味与规则改后旧解释漂移；三处读现库缺陷进入回归测试 | ✅ 完成（后端 ruff/mypy 全过 + pytest 377 passed，e36d8ff） | e36d8ff |
+| MEM-I2 | AI→手动共享求解草稿：解析回填直接写入手动求解的单一参数草稿（日期三元组 + business_lines/product_types/class_business_ids），用户手动改过的字段不被下一次解析覆盖；以解析写入草稿时的范围为基线判断扩大，从限定改成「全部」的扩大范围暂存单独确认——确认前两个求解入口禁用并提供「恢复原范围」回滚，只调时间预算不清空范围的重试不再误判扩大 | ✅ 完成（前端 vitest 新增回归用例，1a24181） | 1a24181 |
+| MEM-I3 | 异常写回版本保护：验收异常/求解失败的 acceptance_status 写回不再用 ORM 对象直接赋值（那会绕过版本保护），唯一入口改为条件 UPDATE——WHERE 携带创建时冻结的 goal_checklist_version（旧任务无该字段时回退当前 checklist_revision）与 status<>'abandoned'，rowcount=0（版本已前移或目标已放弃）时目标当前结论一字不改，失败只留在该 run 自己的 goal_report；版本已前移、目标已放弃、版本匹配三类交错进入回归测试 | ✅ 完成（后端 ruff/mypy 全过 + pytest 377 passed，bb2281c） | bb2281c |
+| MEM-I4 | 基准与变更上限解耦：选基准版本只记录 baselineId 用于变更明细/数量对比与优化配置，不再静默附带 max_changes=50 项；只有用户显式开启「设置变更上限」才把 max_changes 项写进目标清单（默认 50、可改），选基准后在确认卡同步提示验收口径 | ✅ 完成（前端 vitest 新增回归用例，1a24181） | 1a24181 |
+| MEM-I5 | 记忆使用口径三段化：compilation（创建时点方案级编译资格）/ match（按本次任务课程范围算的匹配）/ satisfaction（结果满足）三段分开表述——outcome=applied 徽标改「已获准编译」，记忆页列名「最近使用」改「最近编译结果」，headline 明示 summary 是创建时点的编译资格统计、是否作用于本次课程以解释层的范围核对为准；「已获准编译但按任务范围永不匹配」的偏好有专门回归用例 | ✅ 完成（后端 pytest 新增三段口径用例 + 前端文案用例，e36d8ff） | e36d8ff |
+| MEM-I6 | AI 就绪探测解耦：通用 AI 与飞书 Aily 是两条相互独立的通道——分别请求、分别记账，任一条读取失败不拖垮另一条（此前 Promise.all 会让飞书读取失败连坐已配置好的通用 AI），仅飞书读取失败时通用 AI 入口仍可用；两条都失败时显示探测错误并提供重试 | ✅ 完成（前端 vitest 新增回归用例，1a24181） | 1a24181 |
+| VER-8 | 终验：后端 ruff/mypy 全过 + pytest 377 passed；前端 tsc 0 错误 + vitest 138 passed（19 文件）；e2e 未在本地运行（CI 因账户 billing 仍未启动，runners 未分配） | ✅ | — |
 
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 
