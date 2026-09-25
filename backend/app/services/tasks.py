@@ -24,7 +24,7 @@ from ..models import (
 )
 
 # 偏好记忆已在创建任务时冻结进快照，执行路径只读 snapshot.payload["memory"]。
-# (见 _attach_memory_preferences；本模块不再现场编译偏好。)
+# (见 _merge_frozen_extras；本模块不再现场编译偏好。)
 from ..timezone import shanghai_now
 from .solver import solve_problem
 
@@ -479,6 +479,23 @@ def _evaluate_goal_for_run(run_id: str, goal_id: str) -> None:
             evaluated_version = _goal_version_anchor(run.request_payload)
             if evaluated_version is None:
                 evaluated_version = int(goal.checklist_revision)
+            # TC-4 写入点②（docs/roadmap/07-task-context.md §4.2）：run completed
+            # 产出草稿 → 按 ScheduleVersion.solver_run_id（unique）反查本次产物，
+            # 版本仍为 draft 时写 goal.context.work_draft_schedule_id。与验收
+            # 同一独立事务；发布/回滚不改这个指针——「正在调整」语义由
+            # api.create_solver_run 的三级基准选择按「仍为 draft」惰性校验保证。
+            if goal.status != "abandoned":
+                draft_version = db.scalar(
+                    select(ScheduleVersion).where(ScheduleVersion.solver_run_id == run.id)
+                )
+                if draft_version is not None and draft_version.status == "draft":
+                    context = dict(goal.context or {})
+                    context.setdefault("schema_version", 1)
+                    context["work_draft_schedule_id"] = draft_version.id
+                    goal.context = context
+                    # 立即 flush：apply_goal_evaluation 的事务内重读（db.refresh）
+                    # 会丢弃未 flush 的 ORM 赋值——先落库（事务内可见）再验收。
+                    db.flush()
             apply_goal_evaluation(db, run)
             db.commit()
     except Exception as exc:  # noqa: BLE001 - 验收失败不影响求解结果落库
@@ -574,26 +591,36 @@ def _persist_failure(run_id: str, message: str) -> None:
             db.commit()
 
 
-def _attach_memory_preferences(payload: dict[str, Any], schedule_set_id: str, db: Any) -> None:
-    """求解前把快照里冻结的偏好记忆规则并入同一条规则管线（MEM-C1）。
+def _merge_frozen_extras(payload: dict[str, Any], schedule_set_id: str, db: Any) -> None:
+    """求解前把快照里冻结的「额外规则」并入同一条规则管线（MEM-C1 + TC-3）。
 
-    偏好永远不会替换或覆盖显式规则：编译产物是 hardness=soft 的规则对象，
-    与快照里的规则一起走 _normalized_rules 的现有路径。编译产物在创建任务时
-    就冻结进 snapshot.payload["memory"]——这里只读快照，不再现场读库，改记忆
-    不影响在途求解的可复现性。status=compile_failed 或旧快照没有 memory 节时
-    无偏好求解：记忆是加分项，不能变成排课主链路的故障点，但编译失败必须由
-    解释层显式提示（explain.py / 前端），不得无声出课表。
+    两类冻结产物，都只在执行侧并入、永不替换或覆盖显式规则：
+    1. 偏好记忆（snapshot.payload["memory"].compiled_rules）：编译产物是
+       hardness=soft 的规则对象，与快照里的规则一起走 _normalized_rules 的现有
+       路径。编译产物在创建任务时就冻结进快照——这里只读快照，不再现场读库，
+       改记忆不影响在途求解的可复现性。status=compile_failed 或旧快照没有
+       memory 节时无偏好求解：记忆是加分项，不能变成排课主链路的故障点，但
+       编译失败必须由解释层显式提示（explain.py / 前端），不得无声出课表。
+    2. 任务级约束（payload["task_constraint_rules"]，api.create_solver_run 冻进
+       request_payload 的独立键，docs/roadmap/07-task-context.md §2.4）：goal
+       清单/软约束/请求直调约束编译成的规则对象。**不要**把它们写进
+       request_payload["rules"]——execute_solver_run 与 enqueue_solver_run 的
+       ``payload.update(run.request_payload)``（本模块两处）会用请求键整体覆盖
+       快照冻结的规则全集，独立键正是为躲开这个覆盖陷阱而存在。
     """
     memory = payload.get("memory") or {}
-    if memory.get("status") != "ok":
+    if memory.get("status") == "ok":
+        compiled = memory.get("compiled_rules") or []
+    else:
+        compiled = []
         if memory.get("status") == "compile_failed":
             logger.warning(
                 "偏好记忆编译失败，本次求解将在无偏好状态下进行：%s", memory.get("detail")
             )
-        return
     payload["rules"] = [
         *(payload.get("rules") or []),
-        *(memory.get("compiled_rules") or []),
+        *compiled,
+        *(payload.get("task_constraint_rules") or []),
     ]
 
 
@@ -611,7 +638,7 @@ def execute_solver_run(run_id: str) -> dict[str, Any]:
         db.commit()
         payload = dict(snapshot.payload)
         payload.update(run.request_payload)
-        _attach_memory_preferences(payload, run.schedule_set_id, db)
+        _merge_frozen_extras(payload, run.schedule_set_id, db)
     try:
         result = solve_problem(payload)
         _persist_result(run_id, result)
@@ -635,7 +662,7 @@ def enqueue_solver_run(run_id: str) -> None:
         db.commit()
         payload = dict(snapshot.payload)
         payload.update(run.request_payload)
-        _attach_memory_preferences(payload, run.schedule_set_id, db)
+        _merge_frozen_extras(payload, run.schedule_set_id, db)
 
     future: Future[dict[str, Any]] = _get_executor().submit(solve_problem, payload)
 

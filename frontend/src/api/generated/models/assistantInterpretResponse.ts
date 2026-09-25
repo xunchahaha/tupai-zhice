@@ -10,6 +10,9 @@ import type { AssistantInterpretResponseDateFrom } from './assistantInterpretRes
 import type { AssistantInterpretResponseDateTo } from './assistantInterpretResponseDateTo';
 import type { AssistantInterpretResponseSolverRulesItem } from './assistantInterpretResponseSolverRulesItem';
 import type { GoalChecklistItem } from './goalChecklistItem';
+import type { AssistantTaskConstraint } from './assistantTaskConstraint';
+import type { AssistantMemoryAction } from './assistantMemoryAction';
+import type { AssistantMemoryActionReceipt } from './assistantMemoryActionReceipt';
 import type { AssistantInterpretResponseThinking } from './assistantInterpretResponseThinking';
 
 export interface AssistantInterpretResponse {
@@ -33,6 +36,9 @@ export interface AssistantInterpretResponse {
   coverage_warnings?: string[];
   goal_checklist_draft?: GoalChecklistItem[];
   checklist_warnings?: string[];
+  task_constraints?: AssistantTaskConstraint[];
+  memory_actions?: AssistantMemoryAction[];
+  memory_action_receipts?: AssistantMemoryActionReceipt[];
   summary: string;
   thinking?: AssistantInterpretResponseThinking;
 }

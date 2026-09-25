@@ -16,6 +16,11 @@ from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..models import AIProviderConfiguration
+from .task_context import (
+    EXPLICIT_CORRECT_WORDS,
+    EXPLICIT_EXPIRE_WORDS,
+    EXPLICIT_SAVE_WORDS,
+)
 
 
 class AIServiceError(RuntimeError):
@@ -619,6 +624,20 @@ class AIService:
             "recognized_rules 只能从 fixed_rule_labels 中选择。"
             "逐项核对原指令，把结构化字段和固定标签未覆盖的要求原文列入 unsupported_requirements；"
             "尤其是具体教师禁排、指定教室、连续几节等要求，禁止用通用标签冒充已实现。"
+            "task_constraints 把【本次任务】的具体禁排/指定要求结构化：subject_type 只能取"
+            " teacher|classroom|cohort；subject_ids 与 slot_business_ids 只能使用候选值"
+            "（teachers/time_slots）；「这次不能上」「这次避开」这类本次要求输出 hardness=hard；"
+            "长期偏好不要放进 task_constraints，改输出 memory_actions。"
+            "memory_actions 判定：用户原话出现明确命令式声明且主体与时段可从候选唯一确定 →"
+            ' basis="explicit"；其余（归纳口吻、主体模糊、需要跨句推断）→ basis="inferred"。'
+            "显式声明词表（原话出现才算 explicit）：记录类 "
+            f"{'｜'.join(EXPLICIT_SAVE_WORDS)}；撤销/失效类 {'｜'.join(EXPLICIT_EXPIRE_WORDS)}；"
+            f"纠正类 {'｜'.join(EXPLICIT_CORRECT_WORDS)}。"
+            "save_preference 的 subject_id/predicate/constraint 按候选口径填写"
+            "（predicate 如 avoid_slot，constraint 如 {\"slot_ids\":[\"S05\"]}）；"
+            "expire_preference/update_preference 的 target_entry_id 只能取输入上下文"
+            " active_preferences 里出现的 id，禁止编造；纠正为「只是临时请假」时"
+            " target_status=rejected 且 rejection_reason=temporary_leave。"
             "业务事实：不同产品线并行运营；课程教师（教研组）与固定开始/结束时间保持原数据；"
             "日期与教室允许重新编排；同一教室和同一具体日程账号的真实时间区间不可重叠；"
             "每个班级的课次号独立编号且允许跳号。\n"
@@ -628,7 +647,8 @@ class AIService:
             "输出结构："
             '{"business_lines":[],"product_types":[],"class_business_ids":[],'
             '"date_from":null,"date_to":null,"date_window_days":7,'
-            '"recognized_rules":[],"unsupported_requirements":[]}'
+            '"recognized_rules":[],"task_constraints":[],"memory_actions":[],'
+            '"unsupported_requirements":[]}'
         )
 
     def interpret_instruction(

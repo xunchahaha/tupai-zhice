@@ -39,7 +39,7 @@ from app.services.memory_solver import (
     effective_weight,
 )
 from app.services.solver import solve_problem
-from app.services.tasks import _attach_memory_preferences
+from app.services.tasks import _merge_frozen_extras
 from app.timezone import shanghai_now
 
 
@@ -533,7 +533,7 @@ def test_compile_preferences_decay_expiry_and_unsupported_predicate() -> None:
     payload: dict[str, Any] = {"rules": [{"business_id": "RL-1"}]}
     with SessionLocal() as db:
         payload["memory"] = compile_memory_state(db, "default")
-        _attach_memory_preferences(payload, "default", db)
+        _merge_frozen_extras(payload, "default", db)
     assert payload["rules"][0]["business_id"] == "RL-1"
     assert any(rule.get("memory_entry_id") == confirmed.id for rule in payload["rules"])
 

@@ -6950,6 +6950,17 @@
             "maxLength": 2000,
             "minLength": 2,
             "title": "Instruction"
+          },
+          "goal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal Id"
           }
         },
         "type": "object",
@@ -7081,6 +7092,27 @@
             "type": "array",
             "title": "Checklist Warnings"
           },
+          "task_constraints": {
+            "items": {
+              "$ref": "#/components/schemas/AssistantTaskConstraint"
+            },
+            "type": "array",
+            "title": "Task Constraints"
+          },
+          "memory_actions": {
+            "items": {
+              "$ref": "#/components/schemas/AssistantMemoryAction"
+            },
+            "type": "array",
+            "title": "Memory Actions"
+          },
+          "memory_action_receipts": {
+            "items": {
+              "$ref": "#/components/schemas/AssistantMemoryActionReceipt"
+            },
+            "type": "array",
+            "title": "Memory Action Receipts"
+          },
           "summary": {
             "type": "string",
             "title": "Summary"
@@ -7106,6 +7138,196 @@
           "summary"
         ],
         "title": "AssistantInterpretResponse"
+      },
+      "AssistantMemoryAction": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "save_preference",
+              "expire_preference",
+              "update_preference"
+            ],
+            "title": "Action"
+          },
+          "basis": {
+            "type": "string",
+            "enum": [
+              "explicit",
+              "inferred"
+            ],
+            "title": "Basis"
+          },
+          "source_text": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Source Text",
+            "default": ""
+          },
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "teacher",
+              "classroom",
+              "cohort",
+              "course"
+            ],
+            "title": "Subject Type",
+            "default": "teacher"
+          },
+          "subject_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Id"
+          },
+          "predicate": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 40
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predicate"
+          },
+          "constraint": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Constraint"
+          },
+          "weight": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Weight",
+            "default": 50
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Until"
+          },
+          "target_entry_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 36
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Entry Id"
+          },
+          "target_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "expired",
+                  "rejected"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Status"
+          },
+          "rejection_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "temporary_leave",
+                  "subject_misidentified",
+                  "wrong_generalization",
+                  "preference_changed",
+                  "other"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejection Reason"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "action",
+          "basis"
+        ],
+        "title": "AssistantMemoryAction",
+        "description": "解析产物中的记忆动作（TC-2，docs/roadmap/07-task-context.md §3.1）。\n\nbasis 是模型的提名，不是授权结论：explicit 必须再过代码三条复核\n（主体/谓词/参数候选校验、target_entry_id 必须命中上下文注入的真实条目、\n原话命中显式声明词表），任何一条不过即按 inferred 降级——两种授权绝不混用\n（§3.2）。Aily 通道的输出一律按 inferred 处理（§3.2，外部通道授权降级）。"
+      },
+      "AssistantMemoryActionReceipt": {
+        "properties": {
+          "action_id": {
+            "type": "string",
+            "title": "Action Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "executed",
+              "pending_confirmation",
+              "failed_degraded"
+            ],
+            "title": "Status"
+          },
+          "entry_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry Id"
+          },
+          "receipt": {
+            "type": "string",
+            "title": "Receipt"
+          }
+        },
+        "type": "object",
+        "required": [
+          "action_id",
+          "status",
+          "receipt"
+        ],
+        "title": "AssistantMemoryActionReceipt",
+        "description": "记忆动作执行回执（§3.1）：确认卡逐条展示。\n\nexecuted=已直接执行（entry_id 回填，附可修改/可撤销提示）；\npending_confirmation=降级为收件箱候选（推测或 explicit 复核未过）；\nfailed_degraded=无法降级为候选的动作（推测的失效/修订）——请人工处置。"
       },
       "AssistantSolveRequest": {
         "properties": {
@@ -7204,10 +7426,76 @@
               }
             ],
             "title": "Goal Id"
+          },
+          "task_constraints": {
+            "items": {
+              "$ref": "#/components/schemas/AssistantTaskConstraint"
+            },
+            "type": "array",
+            "title": "Task Constraints"
+          },
+          "unsupported_requirements": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unsupported Requirements"
           }
         },
         "type": "object",
         "title": "AssistantSolveRequest"
+      },
+      "AssistantTaskConstraint": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 80,
+            "title": "Id",
+            "default": ""
+          },
+          "source_text": {
+            "type": "string",
+            "maxLength": 500,
+            "title": "Source Text",
+            "default": ""
+          },
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "teacher",
+              "classroom",
+              "cohort"
+            ],
+            "title": "Subject Type",
+            "default": "teacher"
+          },
+          "subject_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Subject Ids"
+          },
+          "slot_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Slot Business Ids"
+          },
+          "hardness": {
+            "type": "string",
+            "enum": [
+              "hard",
+              "soft"
+            ],
+            "title": "Hardness",
+            "default": "hard"
+          }
+        },
+        "type": "object",
+        "title": "AssistantTaskConstraint",
+        "description": "解析产物中的任务级约束（TC-1，docs/roadmap/07-task-context.md §2.1）：\n只作用于本次任务，不落全局规则库（§2.5 红线：永不创建 Rule 行、不进快照\nchecksum，转长期偏好/正式规则都是人的显式动作）。\n\nid 由解析侧生成（如 \"tc-1\"）；API 直调 /assistant/solve 时客户端必须提供，\n后端对缺失 id 按列表序号兜底生成并去重（§2.4）。字段给默认值而非必填：\n模型输出缺字段时由 _finalize 逐条降级（§2.2），不让一条坏数据废掉整次解析。"
       },
       "AuditLogResponse": {
         "properties": {
@@ -9378,6 +9666,18 @@
             ],
             "title": "Latest Report Meta"
           },
+          "context": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
           "created_by": {
             "anyOf": [
               {
@@ -9550,6 +9850,18 @@
               }
             ],
             "title": "Latest Report Meta"
+          },
+          "context": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
           },
           "created_by": {
             "anyOf": [

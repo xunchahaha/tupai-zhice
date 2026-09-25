@@ -9,6 +9,7 @@ import type { AssistantSolveRequestDateFrom } from './assistantSolveRequestDateF
 import type { AssistantSolveRequestDateTo } from './assistantSolveRequestDateTo';
 import type { AssistantSolveRequestSolverRulesItem } from './assistantSolveRequestSolverRulesItem';
 import type { AssistantSolveRequestGoalId } from './assistantSolveRequestGoalId';
+import type { AssistantTaskConstraint } from './assistantTaskConstraint';
 
 export interface AssistantSolveRequest {
   /**
@@ -34,4 +35,6 @@ export interface AssistantSolveRequest {
   solver_rules?: AssistantSolveRequestSolverRulesItem[];
   wait?: boolean;
   goal_id?: AssistantSolveRequestGoalId;
+  task_constraints?: AssistantTaskConstraint[];
+  unsupported_requirements?: string[];
 }

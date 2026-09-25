@@ -5,6 +5,7 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { AssistantInterpretRequestGoalId } from './assistantInterpretRequestGoalId';
 
 export interface AssistantInterpretRequest {
   /**
@@ -12,4 +13,5 @@ export interface AssistantInterpretRequest {
    * @maxLength 2000
    */
   instruction: string;
+  goal_id?: AssistantInterpretRequestGoalId;
 }

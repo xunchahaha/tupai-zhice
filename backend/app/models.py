@@ -641,6 +641,20 @@ class SolveGoal(TimestampMixin, Base):
         String(20), default="pending", server_default="pending"
     )
     acceptance_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 任务上下文（TC-4，docs/roadmap/07-task-context.md §4.1）：当前工作状态
+    # 的唯一持久归宿，schema_version=1。三键——
+    # scope：最近一次求解确认的范围草稿（决策时点快照，整体覆盖）；
+    # soft_task_constraints：软任务约束 [{id, subject_type, subject_ids,
+    #   slot_business_ids, source_text}]（编译见 api._compile_task_constraints
+    #   的 goal 来源 soft 分支；硬约束不在这里，唯一归宿是 checklist）；
+    # work_draft_schedule_id：该目标正在调整的工作草稿版本指针（写入点②=
+    #   run completed 反查 ScheduleVersion.solver_run_id；发布/回滚不改指针，
+    #   使用方按「仍为 draft」惰性校验——api.create_solver_run 三级基准）。
+    # 不设 decisions 字段（决策明细由 AuditLog 全量承载，无声明消费者）；不设
+    # 独立版本列、不参与验收乐观锁（口径保护由 checklist_revision 全套覆盖）；
+    # 并发写风险由决策点单写者 + 审计（action="update_context"）兜底。
+    # NULL = 旧目标「无上下文」，续办时惰性初始化回填。
+    context: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class IntegrationSync(TimestampMixin, Base):

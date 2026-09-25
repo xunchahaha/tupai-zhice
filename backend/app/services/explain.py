@@ -92,6 +92,10 @@ def describe_conflict_rule(
             "actor_type": frozen.get("actor_type"),
             "actor_ids": list(frozen.get("actor_ids") or []),
             "scope": dict(frozen.get("scope") or {}),
+            # 任务级约束（TC-3 §2.4）：TASK- 规则永不建 Rule 行，来源只在
+            # source_doc——goal:<id> 前缀表示「本次任务要求（goal 来源）」，
+            # request:task_constraint 表示请求直调来源；前端据此转述。
+            "source_doc": frozen.get("source_doc"),
             # 冻结原文来自求解时点的快照，改规则不影响旧解释。
             "source": "snapshot",
         }
@@ -607,8 +611,18 @@ def build_explanation_facts(db: Session, run: SolverRun) -> dict[str, Any]:
     # 冻结数据按「键真的在快照里」判断：键存在但为空列表也是如实的求解时点
     # 状态（当时的方案里就是没有 active 规则/课次），不能拿现库数据冒充；
     # 键缺失（旧格式快照）说明快照没记录这一段，只能回退现库并强制方案过滤。
+    # 任务级约束（TC-3 §2.4）：TASK- 规则不进快照（不参与 checksum），冻结在
+    # run.request_payload["task_constraint_rules"]——仍是求解时点的冻结值，
+    # 追加进 frozen_rules 让 describe_conflict_rule 能转述其原文与来源。
     frozen_rules = (
-        [item for item in snapshot_payload.get("rules") or [] if isinstance(item, dict)]
+        [
+            item
+            for item in [
+                *(snapshot_payload.get("rules") or []),
+                *dict(run.request_payload or {}).get("task_constraint_rules", []),
+            ]
+            if isinstance(item, dict)
+        ]
         if snapshot_payload is not None and "rules" in snapshot_payload
         else None
     )

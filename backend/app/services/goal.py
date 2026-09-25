@@ -238,6 +238,17 @@ def build_checklist(
         subject_type = str(entry.get("subject_type") or "teacher")
         subject_ids = [str(v) for v in entry.get("subject_ids") or [] if str(v).strip()]
         slots = [str(v) for v in entry.get("slot_business_ids") or [] if str(v).strip()]
+        params = {
+            "subject_type": subject_type,
+            "subject_ids": subject_ids,
+            "slot_business_ids": slots,
+        }
+        # 任务级约束（TC-1 §2.1b）：解析侧 constraint id 随项带进 params，供
+        # 确认卡/编译侧回溯原话（api._compile_task_constraints 与
+        # draft_checklist_from_interpretation 的对应关系锚点）。
+        task_constraint_id = str(entry.get("task_constraint_id") or "").strip()
+        if task_constraint_id:
+            params["task_constraint_id"] = task_constraint_id
         items.append(
             _item(
                 f"forbidden_slot_free-{index}",
@@ -247,11 +258,7 @@ def build_checklist(
                     f"（{'、'.join(slots) or '（未指定时段）'}）——独立复核，不信任求解器自报"
                 ),
                 "forbidden_slot_free",
-                {
-                    "subject_type": subject_type,
-                    "subject_ids": subject_ids,
-                    "slot_business_ids": slots,
-                },
+                params,
             )
         )
     items.append(
@@ -304,7 +311,35 @@ def draft_checklist_from_interpretation(
     业务范围→coverage、日期→date_range_match、禁排语→forbidden_slot_free 占位。
     占位项带 needs_params=True：参数未量化前验收器判不通过——解析通道给不出
     具体时段，与其虚放一个恒真检查，不如明示「待教务补充」。
+
+    TC-1 §2.1b（硬任务约束写入 goal.checklist 的唯一写入者）：消费
+    parsed["task_constraints"]（_finalize 规范化产物）——hardness=hard 且
+    主体/时段齐备的约束经 build_checklist(forbidden_slots=…) 生成**带参**
+    forbidden_slot_free 项（params.task_constraint_id 回溯原话）；参数不齐的
+    维持现状占位项。hardness=soft 不进清单（软约束无验收意义），经确认后随
+    求解请求体回到后端、由 api.create_solver_run 写入点①落
+    goal.context.soft_task_constraints。禁排语 regex 占位保留为兜底：有禁排语
+    但没有任何对应 task_constraints 时行为与旧版完全一致。
     """
+    normalized_constraints = [
+        item for item in parsed.get("task_constraints") or [] if isinstance(item, dict)
+    ]
+    hard_forbidden_slots: list[dict[str, Any]] = []
+    for constraint in normalized_constraints:
+        if str(constraint.get("hardness") or "hard") != "hard":
+            continue  # soft 约束不进清单（无验收意义），见 docstring。
+        subject_ids = [str(v) for v in constraint.get("subject_ids") or [] if str(v).strip()]
+        slots = [str(v) for v in constraint.get("slot_business_ids") or [] if str(v).strip()]
+        if not subject_ids or not slots:
+            continue  # 参数不齐：交给禁排语占位兜底（needs_params 口径）。
+        hard_forbidden_slots.append(
+            {
+                "subject_type": str(constraint.get("subject_type") or "teacher"),
+                "subject_ids": subject_ids,
+                "slot_business_ids": slots,
+                "task_constraint_id": str(constraint.get("id") or "").strip(),
+            }
+        )
     items = build_checklist(
         instruction,
         business_lines=parsed.get("business_lines") or [],
@@ -313,9 +348,10 @@ def draft_checklist_from_interpretation(
         course_business_ids=parsed.get("course_business_ids") or [],
         date_from=parsed.get("date_from"),
         date_to=parsed.get("date_to"),
+        forbidden_slots=hard_forbidden_slots or None,
     )
     warnings: list[str] = []
-    if _FORBIDDEN_CUES.search(instruction):
+    if _FORBIDDEN_CUES.search(instruction) and not hard_forbidden_slots:
         items.append(
             _item(
                 "forbidden_slot_free-draft",

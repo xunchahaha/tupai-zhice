@@ -87,7 +87,10 @@ from .schemas import (
     AssignmentResponse,
     AssistantInterpretRequest,
     AssistantInterpretResponse,
+    AssistantMemoryAction,
+    AssistantMemoryActionReceipt,
     AssistantSolveRequest,
+    AssistantTaskConstraint,
     AuditLogResponse,
     BatchOperationResponse,
     CalendarConflict,
@@ -279,6 +282,10 @@ from .services.public_projection import (
 )
 from .services.snapshot import build_snapshot_payload, create_snapshot, version_course_map
 from .services.solver import _has_date_information, _selected_sessions, _session_matches_rule
+
+# 显式声明词表的代码复核入口（TC-2 §3.1/§3.2）：词表常量单一事实源在
+# services.task_context，提示词（services/ai.py）与这里共用同一组词。
+from .services.task_context import explicit_word_hits, predicate_label
 from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
 from .services.xlsx_io import export_schedule_xlsx
 from .timezone import SHANGHAI_TZ, as_utc, shanghai_now
@@ -3408,21 +3415,27 @@ def list_preferences(
     )
 
 
-@router.post(
-    "/memory/preferences",
-    response_model=PreferenceResponse,
-    status_code=201,
-    tags=["memory"],
-)
-def create_preference(
-    payload: PreferenceCreate, db: Db, user: AdminOrScheduler, scope: SchedulerScope
+def create_preference_entry(
+    db: Session,
+    *,
+    actor: User | None,
+    schedule_set_id: str,
+    payload: PreferenceCreate,
 ) -> PreferenceEntry:
+    """创建一条显式偏好（status=confirmed 的主路径逻辑）。
+
+    TC-2 §3.2：从 POST /memory/preferences 抽出的生命周期 service 函数——
+    API 端点与解析通道的记忆动作执行器（_execute_memory_actions）共用同一份
+    创建逻辑（谓词白名单、主体校验、默认有效期、冲突消解、审计），端点只留
+    提交（薄壳）。不 commit：调用方决定事务边界（端点与 interpret 的
+    审计/回执需在同一事务里落库）。
+    """
     if payload.predicate not in ALL_PREDICATES:
         raise HTTPException(status_code=422, detail=f"未知的偏好谓词：{payload.predicate}")
-    _validate_preference_subject(db, payload.subject_type, payload.subject_id, scope.id)
+    _validate_preference_subject(db, payload.subject_type, payload.subject_id, schedule_set_id)
     today = shanghai_now().date()
     entry = PreferenceEntry(
-        schedule_set_id=scope.id,
+        schedule_set_id=schedule_set_id,
         subject_type=payload.subject_type,
         subject_id=payload.subject_id,
         predicate=payload.predicate,
@@ -3437,10 +3450,10 @@ def create_preference(
         valid_from=today,
         # MEM-C1：默认有效期优先取本方案主数据最大上课日期（随学期失效），
         # 方案内没有任何课次时回落「今天 + 180 天」。
-        valid_until=payload.valid_until or default_valid_until_for_scope(db, scope.id),
+        valid_until=payload.valid_until or default_valid_until_for_scope(db, schedule_set_id),
         provenance={
             "origin": "api",
-            "created_by": user.id,
+            "created_by": actor.id if actor else None,
             "note": payload.note,
             "created_at": shanghai_now().isoformat(),
         },
@@ -3449,17 +3462,29 @@ def create_preference(
     # 矛盾消解（MEM-C2 修正 4）：手工创建同样做三分支消解（替代/分时段/存疑冲突）。
     db.flush()  # 先取 id，供旧条目 provenance 记 superseded_by / conflict_with
     resolve_conflicts_for_new_entry(db, entry)
-    audit(db, user, "create", "preference_entry", entry.id, payload.model_dump(mode="json"))
+    audit(db, actor, "create", "preference_entry", entry.id, payload.model_dump(mode="json"))
+    return entry
+
+
+@router.post(
+    "/memory/preferences",
+    response_model=PreferenceResponse,
+    status_code=201,
+    tags=["memory"],
+)
+def create_preference(
+    payload: PreferenceCreate, db: Db, user: AdminOrScheduler, scope: SchedulerScope
+) -> PreferenceEntry:
+    entry = create_preference_entry(db, actor=user, schedule_set_id=scope.id, payload=payload)
     db.commit()
     db.refresh(entry)
     return entry
 
 
-@router.patch("/memory/preferences/{entry_id}", response_model=PreferenceResponse, tags=["memory"])
-def update_preference(
-    entry_id: str, payload: PreferenceUpdate, db: Db, user: AdminOrScheduler, scope: SchedulerScope
+def update_preference_entry(
+    db: Session, *, entry: PreferenceEntry, actor: User | None, payload: PreferenceUpdate
 ) -> PreferenceEntry:
-    entry = get_scoped_or_404(db, PreferenceEntry, entry_id, scope)
+    """修订一条 probation/confirmed 偏好的内容（PATCH 端点与解析通道共用）。"""
     if entry.status not in {"probation", "confirmed"}:
         # rejected/expired 是历史审计记录，改内容会让记忆链不可信。
         raise HTTPException(status_code=409, detail=f"{entry.status} 状态的偏好不能编辑")
@@ -3480,10 +3505,10 @@ def update_preference(
         entry.constraint = merged
     entry.provenance = {
         **(entry.provenance or {}),
-        "last_edited_by": user.id,
+        "last_edited_by": actor.id if actor else None,
         "last_edited_at": shanghai_now().isoformat(),
     }
-    audit(db, user, "update", "preference_entry", entry.id, payload.model_dump(mode="json"))
+    audit(db, actor, "update", "preference_entry", entry.id, payload.model_dump(mode="json"))
     # 唯一冲突重算入口（MEM-D1 D2 / MEM-E1a）：编辑约束/有效期/谓词后重算
     # proposed_conflict 标——编辑把互斥改兼容（或窗口错开）时自动清标，改出
     # 互斥时标记落提出方（按授权状态判定：未授权条目永远是提出方，同级取
@@ -3497,24 +3522,24 @@ def update_preference(
             entry.subject_id,
             entry.predicate,
         )
-    db.commit()
-    db.refresh(entry)
     return entry
 
 
-@router.post(
-    "/memory/preferences/{entry_id}/transition",
-    response_model=PreferenceResponse,
-    tags=["memory"],
-)
-def transition_preference(
-    entry_id: str,
-    payload: PreferenceTransition,
-    db: Db,
-    user: AdminOrScheduler,
-    scope: SchedulerScope,
+@router.patch("/memory/preferences/{entry_id}", response_model=PreferenceResponse, tags=["memory"])
+def update_preference(
+    entry_id: str, payload: PreferenceUpdate, db: Db, user: AdminOrScheduler, scope: SchedulerScope
 ) -> PreferenceEntry:
     entry = get_scoped_or_404(db, PreferenceEntry, entry_id, scope)
+    updated = update_preference_entry(db, entry=entry, actor=user, payload=payload)
+    db.commit()
+    db.refresh(updated)
+    return updated
+
+
+def transition_preference_entry(
+    db: Session, *, entry: PreferenceEntry, actor: User | None, payload: PreferenceTransition
+) -> PreferenceEntry:
+    """偏好状态迁移/授权试用（transition 端点与解析通道共用的主路径逻辑）。"""
     if payload.action == "authorize_trial":
         # 三态拆分（MEM-C1）：授权试用只对 probation 条目可用；条目保持 probation，
         # 以小权重参与求解，trial_until 到期自动退出。这是教务显式动作，不是自动行为。
@@ -3527,7 +3552,7 @@ def transition_preference(
         entry.trial_until = today + timedelta(days=payload.trial_days)
         provenance = {
             **(entry.provenance or {}),
-            "trial_authorized_by": user.id,
+            "trial_authorized_by": actor.id if actor else None,
             "trial_authorized_at": shanghai_now().isoformat(),
             "trial_days": payload.trial_days,
             "trial_reason": payload.reason,
@@ -3550,14 +3575,12 @@ def transition_preference(
         )
         audit(
             db,
-            user,
+            actor,
             "authorize_trial",
             "preference_entry",
             entry.id,
             payload.model_dump(mode="json"),
         )
-        db.commit()
-        db.refresh(entry)
         return entry
     assert payload.target_status is not None  # schema validator 已保证
     if payload.target_status not in PREFERENCE_TRANSITIONS.get(entry.status, set()):
@@ -3582,7 +3605,7 @@ def transition_preference(
         entry.conflict = False
     provenance = {
         **(entry.provenance or {}),
-        "last_transition_by": user.id,
+        "last_transition_by": actor.id if actor else None,
         "last_transition_at": shanghai_now().isoformat(),
         "last_transition_reason": payload.reason,
     }
@@ -3611,17 +3634,34 @@ def transition_preference(
             entry=entry,
             reason=payload.rejection_reason or "other",
             note=payload.reason,
-            rejected_by=user.id,
+            rejected_by=actor.id if actor else None,
         )
     # 矛盾消解（MEM-C2 修正 4 / MEM-D1）：条目状态变化（confirmed/rejected/expired）
     # 后重算同组 proposed_conflict 标——提出方的对方离开活跃集即自动清标。
     refresh_conflict_flags(
         db, entry.schedule_set_id, entry.subject_type, entry.subject_id, entry.predicate
     )
-    audit(db, user, "transition", "preference_entry", entry.id, payload.model_dump(mode="json"))
-    db.commit()
-    db.refresh(entry)
+    audit(db, actor, "transition", "preference_entry", entry.id, payload.model_dump(mode="json"))
     return entry
+
+
+@router.post(
+    "/memory/preferences/{entry_id}/transition",
+    response_model=PreferenceResponse,
+    tags=["memory"],
+)
+def transition_preference(
+    entry_id: str,
+    payload: PreferenceTransition,
+    db: Db,
+    user: AdminOrScheduler,
+    scope: SchedulerScope,
+) -> PreferenceEntry:
+    entry = get_scoped_or_404(db, PreferenceEntry, entry_id, scope)
+    transitioned = transition_preference_entry(db, entry=entry, actor=user, payload=payload)
+    db.commit()
+    db.refresh(transitioned)
+    return transitioned
 
 
 def _record_preference_rejection(
@@ -4149,6 +4189,214 @@ def _resolve_goal_for_run(
     return goal
 
 
+def _validated_task_constraints(
+    db: Session, constraints: list[AssistantTaskConstraint], schedule_set_id: str
+) -> None:
+    """请求侧任务约束的存在性校验（TC-1 §2.1 请求侧载体的服务端把关）。
+
+    /assistant/solve 直调没有解析前置的候选收敛，主体/时段必须真实存在——
+    与 `_validated_assistant_scope` 对范围未知实体同一处置（422），不允许把
+    不存在的对象静默喂进求解输入（那会编译成永不命中的空规则）。
+    """
+    if not constraints:
+        return
+    subject_candidates: dict[str, set[str]] = {
+        "teacher": set(
+            db.scalars(
+                select(Teacher.business_id).where(Teacher.schedule_set_id == schedule_set_id)
+            ).all()
+        ),
+        "classroom": set(
+            db.scalars(
+                select(Room.business_id).where(
+                    Room.schedule_set_id == schedule_set_id,
+                    Room.is_active.is_(True),
+                )
+            ).all()
+        ),
+        "cohort": set(
+            db.scalars(
+                select(ClassGroup.business_id).where(
+                    ClassGroup.schedule_set_id == schedule_set_id
+                )
+            ).all()
+        ),
+    }
+    slot_candidates = set(
+        db.scalars(
+            select(TimeSlot.business_id).where(TimeSlot.schedule_set_id == schedule_set_id)
+        ).all()
+    )
+    unknown_subjects: set[str] = set()
+    unknown_slots: set[str] = set()
+    for constraint in constraints:
+        unknown_subjects.update(
+            set(constraint.subject_ids)
+            - subject_candidates.get(constraint.subject_type, set())
+        )
+        unknown_slots.update(set(constraint.slot_business_ids) - slot_candidates)
+    if unknown_subjects or unknown_slots:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "任务约束包含未知主体或时段",
+                **({"unknown_subjects": sorted(unknown_subjects)} if unknown_subjects else {}),
+                **({"unknown_slots": sorted(unknown_slots)} if unknown_slots else {}),
+            },
+        )
+
+
+def _compile_task_constraints(
+    *,
+    goal: SolveGoal | None = None,
+    request_constraints: list[AssistantTaskConstraint] | None = None,
+) -> list[dict[str, Any]]:
+    """把任务级约束编译成规则对象，与 snapshot.payload["rules"] 同构（TC-3 §2.4）。
+
+    任务级约束进入求解的唯一编译函数，两个来源可并存（goal 优先），
+    business_id 命名空间区分来源，解释层 source_doc 据此识别：
+
+    - goal 来源（单一事实源 = goal.checklist，§2.1b）：
+      * hard：checklist 中 kind=forbidden_slot_free 且参数齐备（needs_params
+        非真、subject_ids 与 slot_business_ids 均非空）的项
+        → business_id=「TASK-{goal.id[:8]}-{item_key}」；
+      * soft：goal.context.soft_task_constraints
+        → business_id=「TASK-{goal.id[:8]}-soft-{约束 id}」，hardness=soft、
+        weight=30；
+      * source_doc 一律 f"goal:{goal.id}"，source_text 取清单 requirement /
+        约束原话。
+    - 请求来源（API 直调或确认卡带回，§2.1 请求侧载体）：
+      * business_id=「TASK-req-{constraint.id}」（id 由解析侧生成、请求直调时
+        客户端必须提供；调用方对缺失 id 按列表序号兜底生成），
+        source_doc="request:task_constraint"，一次性生效不落库（request_payload
+        冻结即全部痕迹，§2.5）。
+
+    同键（subject_type+subject_ids+slot_business_ids）去重：请求项撞上 goal
+    清单项时保留清单侧（单一事实源），请求项之间也按序去重（含 business_id
+    撞名兜底）。任务级约束**永不**创建 Rule 行、不进快照 checksum（§2.5 红线）。
+    """
+    rules: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, tuple[str, ...], tuple[str, ...]]] = set()
+    seen_business_ids: set[str] = set()
+
+    def _append(
+        *,
+        business_id: str,
+        source_text: str,
+        subject_type: str,
+        subject_ids: list[str],
+        slots: list[str],
+        hardness: str,
+        weight: int,
+        source_doc: str,
+        key: tuple[str, tuple[str, ...], tuple[str, ...]],
+    ) -> None:
+        if business_id in seen_business_ids:
+            return
+        seen_business_ids.add(business_id)
+        seen_keys.add(key)
+        rules.append(
+            {
+                "business_id": business_id,
+                "source_text": source_text,
+                "actor_type": RULE_ACTOR_TYPES.get(subject_type, subject_type),
+                "actor_ids": subject_ids,
+                "constraint_type": "forbidden_slot",
+                "scope": {"slot_ids": slots},
+                "hardness": hardness,
+                "weight": weight,
+                "source_doc": source_doc,
+            }
+        )
+
+    if goal is not None:
+        prefix = goal.id[:8]
+        for item in goal.checklist or []:
+            if str(item.get("kind")) != "forbidden_slot_free":
+                continue
+            params = dict(item.get("params") or {})
+            if params.get("needs_params"):
+                continue
+            subject_type = str(params.get("subject_type") or "teacher")
+            subject_ids = [str(v) for v in params.get("subject_ids") or [] if str(v).strip()]
+            slots = [str(v) for v in params.get("slot_business_ids") or [] if str(v).strip()]
+            if not subject_ids or not slots:
+                continue
+            key = (
+                subject_type,
+                tuple(sorted(subject_ids)),
+                tuple(sorted(slots)),
+            )
+            if key in seen_keys:
+                continue
+            _append(
+                business_id=f"TASK-{prefix}-{item.get('key')}",
+                source_text=str(item.get("requirement") or ""),
+                subject_type=subject_type,
+                subject_ids=subject_ids,
+                slots=slots,
+                hardness="hard",
+                weight=100,
+                source_doc=f"goal:{goal.id}",
+                key=key,
+            )
+        for soft in (goal.context or {}).get("soft_task_constraints") or []:
+            if not isinstance(soft, dict):
+                continue
+            subject_type = str(soft.get("subject_type") or "teacher")
+            subject_ids = [str(v) for v in soft.get("subject_ids") or [] if str(v).strip()]
+            slots = [str(v) for v in soft.get("slot_business_ids") or [] if str(v).strip()]
+            if not subject_ids or not slots:
+                continue
+            key = (
+                subject_type,
+                tuple(sorted(subject_ids)),
+                tuple(sorted(slots)),
+            )
+            if key in seen_keys:
+                continue
+            soft_id = str(soft.get("id") or "").strip() or str(len(rules))
+            _append(
+                business_id=f"TASK-{prefix}-soft-{soft_id}",
+                source_text=str(soft.get("source_text") or ""),
+                subject_type=subject_type,
+                subject_ids=subject_ids,
+                slots=slots,
+                hardness="soft",
+                weight=30,
+                source_doc=f"goal:{goal.id}",
+                key=key,
+            )
+    for constraint_index, constraint in enumerate(request_constraints or [], start=1):
+        subject_type = str(constraint.subject_type)
+        subject_ids = [str(v) for v in constraint.subject_ids if str(v).strip()]
+        slots = [str(v) for v in constraint.slot_business_ids if str(v).strip()]
+        if not subject_ids or not slots:
+            continue
+        key = (
+            subject_type,
+            tuple(sorted(subject_ids)),
+            tuple(sorted(slots)),
+        )
+        if key in seen_keys:
+            continue  # 与 goal 清单项同键 → 保留清单侧（单一事实源）。
+        # 缺失 id 按列表序号兜底生成（§2.4；调用方 create_solver_run 的
+        # 预兜底与其保持同一序号口径，两条路径产物一致）。
+        constraint_id = str(constraint.id or "").strip() or str(constraint_index)
+        _append(
+            business_id=f"TASK-req-{constraint_id}",
+            source_text=str(constraint.source_text or ""),
+            subject_type=subject_type,
+            subject_ids=subject_ids,
+            slots=slots,
+            hardness=str(constraint.hardness),
+            weight=30 if constraint.hardness == "soft" else 100,
+            source_doc="request:task_constraint",
+            key=key,
+        )
+    return rules
+
+
 def create_solver_run(
     db: Session,
     user_id: str | None,
@@ -4184,21 +4432,66 @@ def create_solver_run(
     if isinstance(request, AilySolveRequest):
         payload["instruction"] = request.instruction
     run_extra = dict(extra or {})
-    if "parent_schedule_id" not in run_extra:
-        parent = db.scalar(
-            select(ScheduleVersion)
-            .where(
-                ScheduleVersion.schedule_set_id == schedule_set_id,
-                ScheduleVersion.status == "published",
+    # 目标关联（TC-3/TC-4/TC-5）：一次读取，供版本冻结、任务约束编译、
+    # 三级基准选择与 context 写入点①共用。
+    goal_row: SolveGoal | None = None
+    if goal_id:
+        goal_row = db.get(SolveGoal, goal_id)
+    # 任务级约束编译（TC-3 §2.4）：goal 来源（清单带参项 + context 软约束）
+    # 与请求来源（AssistantSolveRequest.task_constraints，缺失 id 按序号兜底）
+    # 双来源合并，产物存独立键 task_constraint_rules——不写 request_payload
+    # ["rules"]，避免执行侧 payload.update 用请求键覆盖快照冻结的规则全集。
+    request_task_constraints: list[AssistantTaskConstraint] = []
+    if isinstance(request, AssistantSolveRequest) and request.task_constraints:
+        for index, constraint in enumerate(request.task_constraints, start=1):
+            if str(constraint.id or "").strip():
+                request_task_constraints.append(constraint)
+            else:
+                request_task_constraints.append(
+                    constraint.model_copy(update={"id": str(index)})
+                )
+    task_constraint_rules = _compile_task_constraints(
+        goal=goal_row, request_constraints=request_task_constraints
+    )
+    if task_constraint_rules:
+        payload["task_constraint_rules"] = task_constraint_rules
+    # 基准三级选择（TC-5 §4.6）：显式 parent > goal 工作草稿（仍为 draft）>
+    # 最新已发布。续办目标的「最少变更」应相对该目标上一轮产出，相对已发布
+    # 版本会把上一轮草稿的全部调整都算成变更、诱导求解器回退已确认的成果。
+    baseline_source: str | None = None
+    parent_version: ScheduleVersion | None = None
+    if "parent_schedule_id" in run_extra:
+        baseline_source = "explicit_parent"
+    else:
+        if goal_row is not None:
+            draft_id = str((goal_row.context or {}).get("work_draft_schedule_id") or "")
+            if draft_id:
+                candidate = db.get(ScheduleVersion, draft_id)
+                if (
+                    candidate is not None
+                    and candidate.schedule_set_id == schedule_set_id
+                    and candidate.status == "draft"
+                ):
+                    parent_version = candidate
+                    baseline_source = "goal_work_draft"
+        if parent_version is None:
+            parent_version = db.scalar(
+                select(ScheduleVersion)
+                .where(
+                    ScheduleVersion.schedule_set_id == schedule_set_id,
+                    ScheduleVersion.status == "published",
+                )
+                .order_by(ScheduleVersion.version_no.desc())
             )
-            .order_by(ScheduleVersion.version_no.desc())
-        )
-        if parent:
-            parent_response = schedule_response(db, parent)
-            run_extra["parent_schedule_id"] = parent.id
+            baseline_source = "latest_published" if parent_version is not None else None
+        if parent_version is not None:
+            parent_response = schedule_response(db, parent_version)
+            run_extra["parent_schedule_id"] = parent_version.id
             run_extra["previous_assignments"] = [
                 item.model_dump(mode="json") for item in parent_response.assignments
             ]
+    if baseline_source is not None:
+        payload["baseline_source"] = baseline_source
     payload.update(run_extra)
     inactive_ids = {item["id"] for item in snapshot.payload.get("course_sessions", [])
                     if not item.get("is_active", True)}
@@ -4208,15 +4501,71 @@ def create_solver_run(
                                            if item["course_session_id"] not in inactive_ids]
     if payload.get("assistant_entry") and not _selected_sessions({**snapshot.payload, **payload}):
         raise HTTPException(status_code=422, detail="确认的排课范围没有匹配到课次")
-    _validate_rule_coverage({**snapshot.payload, **payload})
+    # 覆盖性校验 = 校验侧局部合并视图（TC-3 §2.4，不落库）：task_constraint_rules
+    # 在独立键下对 _validate_rule_coverage 的 payload["rules"] 不可见，而把规则
+    # 对象真并进 payload 会随 request_payload 落库并触发执行侧覆盖陷阱——合并
+    # 结果只进校验函数、不进任何持久字段。
+    _validate_rule_coverage({
+        **snapshot.payload,
+        **payload,
+        "rules": [
+            *(snapshot.payload.get("rules") or []),
+            *(payload.get("task_constraint_rules") or []),
+        ],
+    })
     # MEM-E2/E2a：创建任务时冻结关联目标当时的清单版本——验收若晚于清单修订，
     # 报告 meta 会注明「求解参数基于 v{m} 清单生成，验收按 v{n}」，可解释。
-    if goal_id:
-        goal_for_version = db.get(SolveGoal, goal_id)
-        if goal_for_version is not None:
-            # 版本号以持久化计数列为准（MEM-F/F2 收口），与验收写回的
-            # 条件 UPDATE 用同一计数。
-            payload["goal_checklist_version"] = int(goal_for_version.checklist_revision)
+    if goal_row is not None:
+        # 版本号以持久化计数列为准（MEM-F/F2 收口），与验收写回的
+        # 条件 UPDATE 用同一计数。
+        payload["goal_checklist_version"] = int(goal_row.checklist_revision)
+        # TC-4 写入点①（§4.2）：创建求解 = 用户决策点，本次请求的范围整体覆盖
+        # context.scope，soft 任务约束按 id 幂等合并（来源=请求约束中
+        # hardness=soft 的项，无请求项时维持现值）；同事务 + 审计
+        # action="update_context"。硬约束不进 context（单一事实源在 checklist）。
+        context = dict(goal_row.context or {})
+        context.setdefault("schema_version", 1)
+        context["scope"] = {
+            "business_lines": list(request.business_lines),
+            "product_types": list(request.product_types),
+            "class_business_ids": list(request.class_business_ids),
+            "date_from": request.date_from.isoformat() if request.date_from else None,
+            "date_to": request.date_to.isoformat() if request.date_to else None,
+            "date_window_days": request.date_window_days,
+        }
+        soft_merged = {
+            str(item.get("id")): dict(item)
+            for item in context.get("soft_task_constraints") or []
+            if isinstance(item, dict) and item.get("id")
+        }
+        for constraint in request_task_constraints:
+            if constraint.hardness != "soft":
+                continue
+            soft_merged[str(constraint.id)] = {
+                "id": constraint.id,
+                "subject_type": constraint.subject_type,
+                "subject_ids": list(constraint.subject_ids),
+                "slot_business_ids": list(constraint.slot_business_ids),
+                "source_text": constraint.source_text,
+            }
+        context["soft_task_constraints"] = list(soft_merged.values())
+        goal_row.context = context
+        db.add(
+            AuditLog(
+                actor_id=user_id,
+                action="update_context",
+                resource_type="solve_goal",
+                resource_id=goal_row.id,
+                detail={
+                    "run_baseline_source": baseline_source,
+                    "scope": context["scope"],
+                    "soft_task_constraint_ids": sorted(soft_merged),
+                    "task_constraint_rule_ids": [
+                        str(rule.get("business_id")) for rule in task_constraint_rules
+                    ],
+                },
+            )
+        )
     run = SolverRun(
         schedule_set_id=schedule_set_id,
         snapshot_id=snapshot.id,
@@ -6855,9 +7204,70 @@ def _validated_assistant_scope(
     return parsed
 
 
-def _interpret_context(db: Session, schedule_set_id: str) -> dict[str, Any]:
-    """AI 解析用的业务候选值上下文，同步与流式两条 interpret 通道共用。"""
+def _goal_task_context(
+    db: Session, goal_id: str, schedule_set_id: str
+) -> dict[str, Any] | None:
+    """续办增量解析（TC-4 §4.3）注入的既有任务上下文。
+
+    goal_id 无效/跨方案时返回 None（上下文缺省，解析退化为全新指令）；
+    原文（instruction）、当前范围（context.scope）、活跃任务约束（清单
+    forbidden_slot_free 项 + context.soft_task_constraints）与最近一次求解
+    输入摘要（latest_run 的范围/日期/规则键）让模型按「对既有状态的增量
+    修改」解释这句话。此节只读，解析不写 context（§4.2 决策点单写者）。
+    """
+    goal = db.get(SolveGoal, goal_id)
+    if goal is None or goal.schedule_set_id != schedule_set_id:
+        return None
+    context = dict(goal.context or {})
+    latest_run: SolverRun | None = None
+    if goal.latest_run_id:
+        latest_run = db.get(SolverRun, goal.latest_run_id)
+    if latest_run is None:
+        latest_run = db.scalar(
+            select(SolverRun)
+            .where(SolverRun.goal_id == goal.id)
+            .order_by(SolverRun.created_at.desc())
+            .limit(1)
+        )
+    request = dict(latest_run.request_payload or {}) if latest_run is not None else {}
+    checklist_constraints = [
+        {"key": str(item.get("key")), "params": dict(item.get("params") or {})}
+        for item in goal.checklist or []
+        if item.get("kind") == "forbidden_slot_free"
+    ]
+    soft_constraints = [
+        dict(item) for item in context.get("soft_task_constraints") or [] if isinstance(item, dict)
+    ]
     return {
+        "goal_id": goal.id,
+        "instruction": goal.instruction,
+        "scope": context.get("scope"),
+        "active_task_constraints": [*checklist_constraints, *soft_constraints],
+        "latest_run": {
+            "run_id": latest_run.id if latest_run is not None else None,
+            "business_lines": list(request.get("business_lines") or []),
+            "product_types": list(request.get("product_types") or []),
+            "class_business_ids": list(request.get("class_business_ids") or []),
+            "date_from": request.get("date_from"),
+            "date_to": request.get("date_to"),
+            "date_window_days": request.get("date_window_days"),
+            "solver_rules": list(request.get("solver_rules") or []),
+        },
+    }
+
+
+def _interpret_context(
+    db: Session, schedule_set_id: str, goal_id: str | None = None
+) -> dict[str, Any]:
+    """AI 解析用的业务候选值上下文，同步与流式两条 interpret 通道共用。
+
+    TC-1 §2.1 追加 teachers/time_slots 两组候选（任务级约束的主体/时段只能取
+    候选值）；TC-2 §3.4 追加 active_preferences（记忆动作的 target_entry_id
+    只能取这里出现的 id，列表外的 id 视为幻觉降级候选，按 created_at 倒序
+    上限 50 条防 token 膨胀）；TC-4 §4.3 goal_id 有值时追加 task_context 节
+    （既有任务的增量解析口径）。
+    """
+    context: dict[str, Any] = {
         "business_lines": sorted(
             {
                 item
@@ -6881,8 +7291,542 @@ def _interpret_context(db: Session, schedule_set_id: str) -> dict[str, Any]:
                 ).all()
             )
         ),
+        "teachers": [
+            {"business_id": item.business_id, "name": item.name}
+            for item in db.scalars(
+                select(Teacher)
+                .where(Teacher.schedule_set_id == schedule_set_id)
+                .order_by(Teacher.business_id)
+            ).all()
+        ],
+        "time_slots": [
+            {
+                "business_id": item.business_id,
+                "weekday": item.weekday,
+                "start_time": item.start_time,
+                "end_time": item.end_time,
+            }
+            for item in db.scalars(
+                select(TimeSlot)
+                .where(TimeSlot.schedule_set_id == schedule_set_id)
+                .order_by(TimeSlot.business_id)
+            ).all()
+        ],
+        "active_preferences": [
+            {
+                "id": item.id,
+                "subject_type": item.subject_type,
+                "subject_id": item.subject_id,
+                "predicate": item.predicate,
+                "constraint": dict(item.constraint or {}),
+                "modality": item.modality,
+                "status": item.status,
+                "valid_until": item.valid_until.isoformat() if item.valid_until else None,
+            }
+            for item in db.scalars(
+                select(PreferenceEntry)
+                .where(
+                    PreferenceEntry.schedule_set_id == schedule_set_id,
+                    PreferenceEntry.status.in_(["confirmed", "probation"]),
+                )
+                .order_by(PreferenceEntry.created_at.desc(), PreferenceEntry.id)
+                .limit(50)
+            ).all()
+        ],
         "fixed_rule_labels": list(SOLVER_RULE_LABELS.values()),
     }
+    if goal_id:
+        task_context = _goal_task_context(db, goal_id, schedule_set_id)
+        if task_context is not None:
+            context["task_context"] = task_context
+    return context
+
+
+def _normalize_assistant_task_constraints(
+    db: Session,
+    raw_constraints: Any,
+    schedule_set_id: str,
+    *,
+    unsupported: list[str],
+    warnings: list[str],
+) -> list[AssistantTaskConstraint]:
+    """把模型输出的任务级约束逐条校验/降级（TC-1 §2.2）。
+
+    与范围未知实体的整响应 422 不同：任务约束坏一条只降级该条——subject/
+    slot 里有未知值（或为空）的条目被剔除，原文追加进 unsupported（复用调用方
+    的去重写回路径）并附 coverage_warnings；同键（subject_type+subject_ids+
+    slot_business_ids）去重保留一条；缺失 id 按「tc-{序号}」兜底生成（§2.4）。
+    """
+    if not isinstance(raw_constraints, list):
+        return []
+    subject_candidates: dict[str, set[str]] = {
+        "teacher": set(
+            db.scalars(
+                select(Teacher.business_id).where(Teacher.schedule_set_id == schedule_set_id)
+            ).all()
+        ),
+        "classroom": set(
+            db.scalars(
+                select(Room.business_id).where(
+                    Room.schedule_set_id == schedule_set_id,
+                    Room.is_active.is_(True),
+                )
+            ).all()
+        ),
+        "cohort": set(
+            db.scalars(
+                select(ClassGroup.business_id).where(
+                    ClassGroup.schedule_set_id == schedule_set_id
+                )
+            ).all()
+        ),
+    }
+    slot_candidates = set(
+        db.scalars(
+            select(TimeSlot.business_id).where(TimeSlot.schedule_set_id == schedule_set_id)
+        ).all()
+    )
+    normalized: list[AssistantTaskConstraint] = []
+    seen_keys: set[tuple[str, tuple[str, ...], tuple[str, ...]]] = set()
+    for index, raw in enumerate(raw_constraints, start=1):
+        if not isinstance(raw, dict):
+            continue
+        source_text = str(raw.get("source_text") or "").strip()
+        try:
+            constraint = AssistantTaskConstraint.model_validate(
+                {**raw, "id": str(raw.get("id") or "").strip() or f"tc-{index}"}
+            )
+        except ValidationError:
+            unsupported.append(source_text or f"第 {index} 条任务约束（原文缺失）")
+            warnings.append(
+                f"任务约束『{source_text or index}』结构无法识别，"
+                "未进入结构化结果，请在清单中补参。"
+            )
+            continue
+        unknown_subjects = sorted(
+            set(constraint.subject_ids) - subject_candidates.get(constraint.subject_type, set())
+        )
+        unknown_slots = sorted(set(constraint.slot_business_ids) - slot_candidates)
+        if (
+            unknown_subjects
+            or unknown_slots
+            or not constraint.subject_ids
+            or not constraint.slot_business_ids
+        ):
+            unsupported.append(source_text or constraint.id)
+            warnings.append(
+                f"任务约束『{source_text or constraint.id}』因主体/时段无法确认未进入"
+                "结构化结果，请在清单中补参。"
+            )
+            continue
+        key = (
+            constraint.subject_type,
+            tuple(sorted(constraint.subject_ids)),
+            tuple(sorted(constraint.slot_business_ids)),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        normalized.append(constraint)
+    return normalized
+
+
+def _memory_subject_label(subject_type: str) -> str:
+    from .services.goal import _SUBJECT_TYPE_LABELS  # 局部导入避免模块加载顺序耦合
+
+    return _SUBJECT_TYPE_LABELS.get(subject_type, subject_type)
+
+
+def _constraint_refs_exist(db: Session, constraint: dict[str, Any], schedule_set_id: str) -> bool:
+    """explicit 复核①的参数存在性：constraint 引用的 slot/room id 必须真实存在。"""
+    slot_ids = [str(v) for v in (constraint or {}).get("slot_ids") or [] if str(v).strip()]
+    room_ids = [str(v) for v in (constraint or {}).get("room_ids") or [] if str(v).strip()]
+    if slot_ids:
+        known = set(
+            db.scalars(
+                select(TimeSlot.business_id).where(
+                    TimeSlot.schedule_set_id == schedule_set_id,
+                    TimeSlot.business_id.in_(slot_ids),
+                )
+            ).all()
+        )
+        if set(slot_ids) - known:
+            return False
+    if room_ids:
+        known = set(
+            db.scalars(
+                select(Room.business_id).where(
+                    Room.schedule_set_id == schedule_set_id,
+                    Room.business_id.in_(room_ids),
+                )
+            ).all()
+        )
+        if set(room_ids) - known:
+            return False
+    return True
+
+
+def _verify_explicit_memory_action(
+    db: Session,
+    action: AssistantMemoryAction,
+    *,
+    instruction: str,
+    schedule_set_id: str,
+    injected_ids: set[str],
+    word_hits: dict[str, list[str]],
+) -> tuple[bool, str | None, PreferenceEntry | None]:
+    """explicit 三条代码复核（TC-2 §3.2）：模型自报不算数，三条全过才执行。
+
+    ① 主体/谓词/参数候选校验（save：主体在候选集、predicate ∈ ALL_PREDICATES、
+       constraint 引用的 slot/room 存在；expire/update：目标条目存在且属于本方案）；
+    ② target_entry_id 必须命中 _interpret_context 注入的真实活跃条目（§3.4，
+       列表外的 id 一律视为幻觉，降级候选）；
+    ③ 原指令命中显式声明词表（services.task_context 单一事实源，与提示词同表）。
+    返回 (是否通过, 不通过原因, expire/update 的目标条目)。
+    """
+    if action.action == "save_preference":
+        if not word_hits.get("save"):
+            return False, "原话未命中显式声明词表（记录类），按推测处理", None
+        if not action.subject_id or not action.predicate:
+            return False, "主体或谓词缺失", None
+        if action.predicate not in ALL_PREDICATES:
+            return False, f"未知的偏好谓词：{action.predicate}", None
+        try:
+            _validate_preference_subject(
+                db, action.subject_type, action.subject_id, schedule_set_id
+            )
+        except HTTPException as exc:
+            return False, str(exc.detail), None
+        if not _constraint_refs_exist(db, action.constraint, schedule_set_id):
+            return False, "约束引用的时段/教室在本方案中不存在", None
+        return True, None, None
+    if not (word_hits.get("expire") or word_hits.get("correct")):
+        return False, "原话未命中显式声明词表（撤销/失效或纠正类），按推测处理", None
+    target_id = str(action.target_entry_id or "").strip()
+    if not target_id or target_id not in injected_ids:
+        return False, "目标条目 id 未出现在本次解析注入的活跃记忆中（疑似幻觉）", None
+    entry = db.get(PreferenceEntry, target_id)
+    if entry is None or entry.schedule_set_id != schedule_set_id:
+        return False, "目标条目不存在或不属于当前方案", None
+    return True, None, entry
+
+
+def _create_probation_memory_candidate(
+    db: Session,
+    action: AssistantMemoryAction,
+    *,
+    instruction: str,
+    schedule_set_id: str,
+    actor: User | None,
+) -> tuple[PreferenceEntry | None, str | None]:
+    """推测/降级的 save 动作落 probation 候选（TC-2 §3.2 候选审批路径）。
+
+    未授权 probation 永不进求解（memory_solver 编译只认 confirmed+授权试用），
+    本设计不新增任何「候选直接生效」路径；来源按 §10.4 的二选一复用
+    induced_from_adjustment（天然继承红线①的 hard 升级限制），原话回链与
+    通道标注放 provenance。
+    """
+    if not action.subject_id or not action.predicate:
+        return None, "主体或谓词缺失，未创建候选"
+    if action.predicate not in ALL_PREDICATES:
+        return None, f"未知的偏好谓词：{action.predicate}，未创建候选"
+    try:
+        _validate_preference_subject(db, action.subject_type, action.subject_id, schedule_set_id)
+    except HTTPException as exc:
+        return None, str(exc.detail)
+    entry = PreferenceEntry(
+        schedule_set_id=schedule_set_id,
+        subject_type=action.subject_type,
+        subject_id=action.subject_id,
+        predicate=action.predicate,
+        constraint=action.constraint or {},
+        modality="soft",
+        confidence=MINED_DEFAULT_CONFIDENCE,
+        source="induced_from_adjustment",
+        evidence=[action.source_text] if action.source_text else [],
+        weight=action.weight,
+        status="probation",
+        trial_authorized=False,
+        valid_from=shanghai_now().date(),
+        valid_until=action.valid_until or default_valid_until_for_scope(db, schedule_set_id),
+        provenance={
+            "origin": "assistant_interpret",
+            "via": "assistant_interpret",
+            "instruction": instruction[:500],
+            "note": action.note,
+            "created_at": shanghai_now().isoformat(),
+        },
+    )
+    db.add(entry)
+    db.flush()
+    resolve_conflicts_for_new_entry(db, entry)
+    audit(
+        db,
+        actor,
+        "create",
+        "preference_entry",
+        entry.id,
+        {
+            "via": "assistant_interpret",
+            "basis": action.basis,
+            "status": "probation",
+            "source_text": action.source_text,
+        },
+    )
+    return entry, None
+
+
+def _assistant_provenance(entry: PreferenceEntry, instruction: str) -> dict[str, Any]:
+    """给经解析通道执行的记忆动作补原话回链（TC-2 §3.2）。"""
+    return {
+        **(entry.provenance or {}),
+        "via": "assistant_interpret",
+        "instruction": instruction[:500],
+    }
+
+
+def _degraded_receipt(action_id: str, reason: str) -> AssistantMemoryActionReceipt:
+    """failed_degraded 回执（TC-2 §3.1）：无法降级为候选的动作，请人工处置。"""
+    return AssistantMemoryActionReceipt(
+        action_id=action_id,
+        status="failed_degraded",
+        receipt=f"{reason}。请前往「记忆」页人工处置。",
+    )
+
+
+def _pending_receipt(
+    action_id: str, source_line: str, reason: str | None = None
+) -> AssistantMemoryActionReceipt:
+    """pending_confirmation 回执：已放入记忆收件箱待确认。"""
+    suffix = f"（{reason}）" if reason else ""
+    return AssistantMemoryActionReceipt(
+        action_id=action_id,
+        status="pending_confirmation",
+        receipt=f"已放入记忆收件箱待确认{suffix}：{source_line}。请前往「记忆」页处置。",
+    )
+
+
+def _execute_memory_actions(
+    db: Session,
+    *,
+    raw_actions: Any,
+    context: dict[str, Any],
+    instruction: str,
+    source: Literal["openai_compatible", "feishu_aily"],
+    schedule_set_id: str,
+    actor: User | None,
+) -> tuple[list[AssistantMemoryAction], list[AssistantMemoryActionReceipt]]:
+    """解析响应的记忆动作执行器（TC-2 §3.2）：explicit 直接执行、其余进候选。
+
+    两种授权绝不混用的机器保证：explicit 复核不过或执行抛 4xx 一律降级
+    （save → probation 候选，expire/update → failed_degraded 回执），不存在
+    「半执行」；inferred 永不直接执行；Aily 通道（source="feishu_aily"）一律按
+    inferred 处理。执行复用既有生命周期 service 函数（create/update/transition
+    _*_entry），审计与冲突消解随之复用。单条动作的任何异常都被隔离成回执，
+    不拖垮整次解析。
+    """
+    actions: list[AssistantMemoryAction] = []
+    receipts: list[AssistantMemoryActionReceipt] = []
+    raw_list = raw_actions if isinstance(raw_actions, list) else []
+    injected_ids = {
+        str(item.get("id"))
+        for item in context.get("active_preferences") or []
+        if isinstance(item, dict) and item.get("id")
+    }
+    word_hits = explicit_word_hits(instruction)
+    for index, raw in enumerate(raw_list, start=1):
+        action_id = f"ma-{index}"
+        if not isinstance(raw, dict):
+            continue
+        normalized = dict(raw)
+        if source == "feishu_aily":
+            # 外部通道输出未经过我方授权判定链，授权降级更安全（§3.2）。
+            normalized["basis"] = "inferred"
+        try:
+            action = AssistantMemoryAction.model_validate(normalized)
+        except ValidationError:
+            receipts.append(
+                AssistantMemoryActionReceipt(
+                    action_id=action_id,
+                    status="failed_degraded",
+                    receipt="记忆动作参数无法识别（动作/主体/目标条目不合法），"
+                    "请前往「记忆」页人工处置。",
+                )
+            )
+            continue
+        actions.append(action)
+
+        if action.basis != "explicit":
+            # inferred 永不直接执行（§3.2）。
+            if action.action == "save_preference":
+                entry, reason = _create_probation_memory_candidate(
+                    db,
+                    action,
+                    instruction=instruction,
+                    schedule_set_id=schedule_set_id,
+                    actor=actor,
+                )
+                if entry is None:
+                    receipts.append(_degraded_receipt(action_id, reason or "候选创建失败"))
+                else:
+                    receipts.append(
+                        _pending_receipt(action_id, action.source_text or instruction[:60])
+                    )
+            else:
+                receipts.append(
+                    _degraded_receipt(
+                        action_id, "推测的失效/修订动作不自动执行（仅显式声明可直接生效）"
+                    )
+                )
+            continue
+
+        verified, reason, target = _verify_explicit_memory_action(
+            db,
+            action,
+            instruction=instruction,
+            schedule_set_id=schedule_set_id,
+            injected_ids=injected_ids,
+            word_hits=word_hits,
+        )
+        if not verified:
+            # explicit 复核不过 = 不是真正的显式声明 → 降级（§3.2）。
+            if action.action == "save_preference":
+                entry, degraded = _create_probation_memory_candidate(
+                    db,
+                    action,
+                    instruction=instruction,
+                    schedule_set_id=schedule_set_id,
+                    actor=actor,
+                )
+                if entry is not None:
+                    receipts.append(
+                        _pending_receipt(action_id, action.source_text or instruction[:60], reason)
+                    )
+                else:
+                    receipts.append(_degraded_receipt(action_id, degraded or "候选创建失败"))
+            else:
+                receipts.append(_degraded_receipt(action_id, reason or "explicit 复核未通过"))
+            continue
+
+        try:
+            if action.action == "save_preference":
+                entry = create_preference_entry(
+                    db,
+                    actor=actor,
+                    schedule_set_id=schedule_set_id,
+                    payload=PreferenceCreate(
+                        subject_type=action.subject_type,
+                        subject_id=action.subject_id or "",
+                        predicate=action.predicate or "",
+                        constraint=action.constraint or {},
+                        modality="soft",
+                        source="explicit_stated",
+                        evidence=[action.source_text] if action.source_text else [],
+                        weight=action.weight,
+                        valid_until=action.valid_until,
+                        note=action.note,
+                    ),
+                )
+                entry.provenance = _assistant_provenance(entry, instruction)
+                valid_until = entry.valid_until.isoformat() if entry.valid_until else "长期"
+                receipts.append(
+                    AssistantMemoryActionReceipt(
+                        action_id=action_id,
+                        status="executed",
+                        entry_id=entry.id,
+                        receipt=(
+                            f"已记住：{_memory_subject_label(action.subject_type)} "
+                            f"{action.subject_id}（{predicate_label(action.predicate)}，"
+                            f"有效期至 {valid_until}）。可在「记忆」页修改或撤销。"
+                        ),
+                    )
+                )
+            elif action.action == "expire_preference":
+                assert target is not None  # _verify_explicit_memory_action 已保证
+                transitioned = transition_preference_entry(
+                    db,
+                    entry=target,
+                    actor=actor,
+                    payload=PreferenceTransition(
+                        action="transition",
+                        target_status=action.target_status or "expired",
+                        rejection_reason=action.rejection_reason,
+                        reason=action.note,
+                    ),
+                )
+                transitioned.provenance = _assistant_provenance(transitioned, instruction)
+                status_label = "拒绝（临时请假等纠正）" if (
+                    transitioned.status == "rejected"
+                ) else "失效"
+                receipts.append(
+                    AssistantMemoryActionReceipt(
+                        action_id=action_id,
+                        status="executed",
+                        entry_id=transitioned.id,
+                        receipt=(
+                            f"已将记忆条目（{transitioned.subject_id}，"
+                            f"{predicate_label(transitioned.predicate)}）标记为{status_label}。"
+                            "可在「记忆」页查看历史。"
+                        ),
+                    )
+                )
+            else:  # update_preference
+                fields: dict[str, Any] = {}
+                if action.predicate and action.predicate in ALL_PREDICATES:
+                    fields["predicate"] = action.predicate
+                if action.constraint:
+                    fields["constraint"] = action.constraint
+                if action.valid_until is not None:
+                    fields["valid_until"] = action.valid_until
+                if not fields:
+                    receipts.append(
+                        _degraded_receipt(
+                            action_id, "修订动作未提供任何可更新内容（谓词/约束/有效期）"
+                        )
+                    )
+                    continue
+                assert target is not None  # _verify_explicit_memory_action 已保证
+                updated = update_preference_entry(
+                    db,
+                    entry=target,
+                    actor=actor,
+                    payload=PreferenceUpdate(**fields),
+                )
+                updated.provenance = _assistant_provenance(updated, instruction)
+                receipts.append(
+                    AssistantMemoryActionReceipt(
+                        action_id=action_id,
+                        status="executed",
+                        entry_id=updated.id,
+                        receipt=(
+                            f"已更新记忆条目（{updated.subject_id}，"
+                            f"{predicate_label(updated.predicate)}）。可在「记忆」页修改或撤销。"
+                        ),
+                    )
+                )
+        except HTTPException as exc:
+            # explicit 执行失败一律降级，绝不半执行（§3.2）。
+            if action.action == "save_preference":
+                entry, degraded = _create_probation_memory_candidate(
+                    db,
+                    action,
+                    instruction=instruction,
+                    schedule_set_id=schedule_set_id,
+                    actor=actor,
+                )
+                if entry is not None:
+                    receipts.append(
+                        _pending_receipt(
+                            action_id,
+                            action.source_text or instruction[:60],
+                            f"直接执行失败：{exc.detail}",
+                        )
+                    )
+                else:
+                    receipts.append(_degraded_receipt(action_id, degraded or "候选创建失败"))
+            else:
+                receipts.append(_degraded_receipt(action_id, f"直接执行失败：{exc.detail}"))
+    return actions, receipts
 
 
 def _finalize_assistant_interpret(
@@ -6895,10 +7839,17 @@ def _finalize_assistant_interpret(
     ai_configured: bool,
     aily_configured: bool,
     thinking: str | None,
+    context: dict[str, Any] | None = None,
+    actor: User | None = None,
 ) -> AssistantInterpretResponse:
     """把模型输出规范化为 AssistantInterpretResponse，同步与流式 interpret 共用。
 
     字段缺失/未知实体/结构不合法沿用同步接口的状态码与文案（502/422）。
+
+    TC-1/TC-2 扩展：task_constraints 逐条校验降级（§2.2，坏一条不废整次解析）、
+    memory_actions 经代码复核后执行（§3.2，explicit 直接执行并回执、推测走
+    候选审批）——记忆动作是「解析不写 context」的唯一已声明例外（§4.2）：用户
+    原话「记住/不要用了」本身即显式指令，决策已发生，有审计回链与可逆路径。
     """
     required_fields = {
         "business_lines",
@@ -6937,16 +7888,43 @@ def _finalize_assistant_interpret(
     parsed["recognized_rules"] = [
         label for label in parsed["recognized_rules"] if label in known_labels
     ]
+    # 任务级约束（TC-1 §2.2）：逐条校验降级——未知主体/时段（或参数为空）的条目
+    # 剔除并把原文追加进 unsupported（与上面的标签剔除共用同一去重写回路径）；
+    # 通过校验的条目按解析序号兜底 id 后随响应返回。
+    task_warnings: list[str] = []
+    task_constraints = _normalize_assistant_task_constraints(
+        db,
+        output.get("task_constraints"),
+        schedule_set_id,
+        unsupported=unsupported,
+        warnings=task_warnings,
+    )
     parsed["unsupported_requirements"] = list(dict.fromkeys(unsupported))
     parsed["coverage_warnings"] = [
         "仅下列结构化范围和规则开关进入求解；本接口不会自动创建教师、教室或连续课次规则。",
         "教研组未落实到个人教师时，零冲突仅代表已建模对象的检查结果。",
+        *task_warnings,
     ]
     if "unsupported_requirements" not in output:
         parsed["coverage_warnings"].append("模型未返回逐项需求覆盖检查，请逐项核对原指令。")
     parsed["solver_rules"] = _solver_rules_from_labels(parsed["recognized_rules"])
+    # 任务约束以 dict 形态随 parsed 传给 draft 生成器（§2.1b hard 带参项的唯一
+    # 写入者）并原样进响应（pydantic 再收敛为 AssistantTaskConstraint）。
+    parsed["task_constraints"] = [item.model_dump(mode="json") for item in task_constraints]
     try:
         parsed = _validated_assistant_scope(db, parsed, schedule_set_id)
+        # 记忆动作执行（TC-2 §3.2）：explicit 复核通过直接执行（复用既有生命周期
+        # service 函数，含审计与冲突消解），推测/降级进收件箱候选，逐条回执。
+        # Aily 通道在执行器内强制按 inferred 处理。
+        memory_actions, memory_receipts = _execute_memory_actions(
+            db,
+            raw_actions=output.get("memory_actions"),
+            context=context or {},
+            instruction=request.instruction,
+            source=source,
+            schedule_set_id=schedule_set_id,
+            actor=actor,
+        )
         # 目标验收闭环（MEM-C3）：解析成功即按结构化范围预填清单草稿，前端可
         # 增删项后再创建 goal。草稿由代码确定性生成，不依赖模型措辞。
         checklist_draft, checklist_warnings = draft_checklist_from_interpretation(
@@ -6962,6 +7940,8 @@ def _finalize_assistant_interpret(
                 GoalChecklistItem.model_validate(item) for item in checklist_draft
             ],
             checklist_warnings=checklist_warnings,
+            memory_actions=memory_actions,
+            memory_action_receipts=memory_receipts,
             thinking=thinking,
             summary=(
                 "通用 AI 模型已解析排课范围和固定业务规则"
@@ -6991,6 +7971,19 @@ AILY_INTERPRET_CONTRACT = {
         "solver_rules": (
             "fixed_time|room_no_overlap|calendar_no_overlap|minimize_changes[]"
         ),
+        # TC-1/TC-2 契约同步（docs/roadmap/07-task-context.md §2.1）：Aily 通道
+        # 产出同一结构，继续走 _finalize_assistant_interpret 统一收口；记忆动作
+        # 在 Aily 通道一律按 inferred 处理（§3.2，外部通道授权降级）。
+        "task_constraints": (
+            "[{id, source_text, subject_type: teacher|classroom|cohort, "
+            "subject_ids[], slot_business_ids[], hardness: hard|soft}]"
+        ),
+        "memory_actions": (
+            "[{action: save_preference|expire_preference|update_preference, "
+            "basis, source_text, subject_type, subject_id, predicate, constraint, "
+            "weight, valid_until, target_entry_id, target_status, "
+            "rejection_reason, note}]"
+        ),
     }
 }
 
@@ -7015,10 +8008,14 @@ def assistant_interpret(
     source: Literal["openai_compatible", "feishu_aily"]
     output: dict[str, Any]
     thinking: str | None = None
+    # 解析上下文一次性构建（TC-1 §2.1 候选 + TC-2 §3.4 active_preferences +
+    # TC-4 §4.3 goal_id 有值时的 task_context），Aily 分支同样需要（记忆动作的
+    # explicit 复核校验 target_entry_id 命中注入列表）。
+    context = _interpret_context(db, schedule_scope.id, request.goal_id)
     if ai_configuration["configured"]:
         try:
             output, thinking = ai_service.interpret_instruction(
-                request.instruction, context=_interpret_context(db, schedule_scope.id)
+                request.instruction, context=context
             )
         except AIServiceError as exc:
             raise HTTPException(status_code=502, detail=f"AI 指令解析失败：{exc}") from exc
@@ -7049,6 +8046,8 @@ def assistant_interpret(
         ai_configured=bool(ai_configuration["configured"]),
         aily_configured=aily_configured,
         thinking=thinking,
+        context=context,
+        actor=user,
     )
     audit(
         db,
@@ -7099,12 +8098,15 @@ async def assistant_interpret_stream(
 
         # 首包立即发送：客户端据此确认连接，不会被反代缓冲卡到请求结束。
         yield _sse_event("stage", {"stage": "connect"})
+        # 解析上下文一次性构建（候选 + active_preferences + goal_id 的
+        # task_context），与同步端点同一口径。
+        context = _interpret_context(db, schedule_scope.id, request.goal_id)
         if ai_configuration["configured"]:
             try:
                 yield _sse_event("stage", {"stage": "read"})
                 async for kind, payload in ai_service.stream_interpret_instruction(
                     request.instruction,
-                    context=_interpret_context(db, schedule_scope.id),
+                    context=context,
                 ):
                     if kind == "thinking":
                         yield _sse_event(
@@ -7121,6 +8123,8 @@ async def assistant_interpret_stream(
                         ai_configured=True,
                         aily_configured=aily_configured,
                         thinking=payload["thinking"],
+                        context=context,
+                        actor=user,
                     )
                     audit(
                         db,
@@ -7162,6 +8166,8 @@ async def assistant_interpret_stream(
                     ai_configured=False,
                     aily_configured=True,
                     thinking=None,
+                    context=context,
+                    actor=user,
                 )
                 audit(
                     db,
@@ -7207,7 +8213,25 @@ def assistant_solve(
     filters/rules. The instruction is persisted for traceability, while the
     same CP-SAT path as the regular solver is used for deterministic execution.
     """
+    # 服务端契约拦截（TC-3 §2.3）：unsupported_requirements 非空即 422——该字段
+    # 是「显式知悉记录」而非豁免口：AI 客户端把解析响应里的 unsupported 原样带回
+    # 即被拒绝，留空数组=「本次指令没有未实现要求」。措辞边界（如实陈述强度）：
+    # 这是契约层拦截而非硬保证——调用方静默省略该字段即绕过（服务端无法区分
+    # 「没见过」与「隐瞒」）；人面向的主防线仍是前端确认卡闸。用户真想放弃某条
+    # 要求，唯一路径是修订目标清单（PATCH checklist，人工显式动作）。
+    if request.unsupported_requirements:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "存在未进入求解的要求："
+                + "、".join(request.unsupported_requirements)
+                + "；请先在确认卡处置（补参或明确放弃）"
+            ),
+        )
     _validated_assistant_scope(db, request.model_dump(), schedule_scope.id)
+    # 请求侧任务约束（TC-1 §2.1）：主体/时段必须真实存在——与范围未知实体同一
+    # 处置（422），不允许 API 直调把不存在的对象喂进求解输入。
+    _validated_task_constraints(db, request.task_constraints, schedule_scope.id)
     goal = _resolve_goal_for_run(db, request.goal_id, schedule_scope.id)
     run = create_solver_run(
         db,
@@ -7223,7 +8247,12 @@ def assistant_solve(
         "assistant_solve",
         "solver_run",
         run.id,
-        {"instruction": request.instruction, "goal_id": run.goal_id},
+        {
+            "instruction": request.instruction,
+            "goal_id": run.goal_id,
+            # §2.3：审计记录「本次提交声明了多少未实现要求」（恒 0：非空已 422）。
+            "unsupported_count": len(request.unsupported_requirements),
+        },
     )
     db.commit()
     if request.wait:

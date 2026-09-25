@@ -796,6 +796,11 @@ class GoalResponse(ORMModel):
     # latest_run 报告所属的清单版本（is_current_version=False，前端展示
     # 「历史版本 v{n} 的结论」而非当成当前口径）。
     latest_report_meta: dict[str, Any] | None = None
+    # 任务上下文（TC-4 §4.1）：当前工作状态（scope/soft_task_constraints/
+    # work_draft_schedule_id，schema_version=1）。旧目标为 null=「无上下文」，
+    # 续办按惰性初始化回填。context 是工作状态而非验收口径——不参与验收
+    # 乐观锁（口径保护由 checklist_version 承担），决策明细在 AuditLog。
+    context: dict[str, Any] | None = None
     created_by: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -1469,14 +1474,95 @@ class AilySolveRequest(BaseModel):
         return self
 
 
+class AssistantTaskConstraint(BaseModel):
+    """解析产物中的任务级约束（TC-1，docs/roadmap/07-task-context.md §2.1）：
+    只作用于本次任务，不落全局规则库（§2.5 红线：永不创建 Rule 行、不进快照
+    checksum，转长期偏好/正式规则都是人的显式动作）。
+
+    id 由解析侧生成（如 "tc-1"）；API 直调 /assistant/solve 时客户端必须提供，
+    后端对缺失 id 按列表序号兜底生成并去重（§2.4）。字段给默认值而非必填：
+    模型输出缺字段时由 _finalize 逐条降级（§2.2），不让一条坏数据废掉整次解析。
+    """
+
+    id: str = Field(default="", max_length=80)
+    source_text: str = Field(default="", max_length=500)
+    subject_type: Literal["teacher", "classroom", "cohort"] = "teacher"
+    subject_ids: list[str] = Field(default_factory=list)
+    slot_business_ids: list[str] = Field(default_factory=list)
+    hardness: Literal["hard", "soft"] = "hard"
+
+
+class AssistantMemoryAction(BaseModel):
+    """解析产物中的记忆动作（TC-2，docs/roadmap/07-task-context.md §3.1）。
+
+    basis 是模型的提名，不是授权结论：explicit 必须再过代码三条复核
+    （主体/谓词/参数候选校验、target_entry_id 必须命中上下文注入的真实条目、
+    原话命中显式声明词表），任何一条不过即按 inferred 降级——两种授权绝不混用
+    （§3.2）。Aily 通道的输出一律按 inferred 处理（§3.2，外部通道授权降级）。
+    """
+
+    action: Literal["save_preference", "expire_preference", "update_preference"]
+    basis: Literal["explicit", "inferred"]
+    source_text: str = Field(default="", max_length=500)
+    # save_preference：长期偏好主体与参数（同 PreferenceCreate 口径）。
+    subject_type: PreferenceSubjectType = "teacher"
+    subject_id: str | None = Field(default=None, max_length=50)
+    predicate: str | None = Field(default=None, max_length=40)  # ∈ ALL_PREDICATES
+    constraint: dict[str, Any] = Field(default_factory=dict)
+    weight: int = Field(default=50, ge=0, le=100)
+    # 缺省走 default_valid_until_for_scope（随学期失效）。
+    valid_until: date | None = None
+    # expire/update_preference：目标条目 id——只能来自上下文注入的真实条目。
+    target_entry_id: str | None = Field(default=None, max_length=36)
+    # 纠正为「只是那两天请假」时 rejected。
+    target_status: Literal["expired", "rejected"] | None = None
+    rejection_reason: Literal[
+        "temporary_leave",
+        "subject_misidentified",
+        "wrong_generalization",
+        "preference_changed",
+        "other",
+    ] | None = None
+    note: str | None = Field(default=None, max_length=500)
+
+
+class AssistantMemoryActionReceipt(BaseModel):
+    """记忆动作执行回执（§3.1）：确认卡逐条展示。
+
+    executed=已直接执行（entry_id 回填，附可修改/可撤销提示）；
+    pending_confirmation=降级为收件箱候选（推测或 explicit 复核未过）；
+    failed_degraded=无法降级为候选的动作（推测的失效/修订）——请人工处置。
+    """
+
+    action_id: str
+    status: Literal["executed", "pending_confirmation", "failed_degraded"]
+    entry_id: str | None = None  # executed 时回填
+    receipt: str  # 一句话回执文案（可修改/可撤销提示固定后缀）
+
+
 class AssistantSolveRequest(AilySolveRequest):
     wait: bool = False
     # 目标验收闭环（MEM-C3）：一句话排课确认后可关联持久目标跟踪验收。
     goal_id: str | None = None
+    # 任务级约束的请求侧载体（TC-1 §2.1）：API 直调 /assistant/solve（无解析
+    # 前置）时任务约束的入口；编译见 api._compile_task_constraints 的请求来源
+    # 分支（TASK-req-* 命名空间，一次性生效不落库）。确认卡链路也经此字段把
+    # 全量解析约束带回（§6.5），后端同键去重兜底。SolveRequest（手动路径）
+    # 不加——手动求解的任务约束只能经由 goal 清单（单一事实源），不允许绕过
+    # 确认卡直传；AilySolveRequest 不加（外部通道维持现状）。
+    task_constraints: list[AssistantTaskConstraint] = Field(default_factory=list)
+    # 服务端契约拦截（TC-3 §2.3）：仅用于显式声明「已知悉未实现要求」——非空
+    # 即 422。这不是豁免口：AI 客户端把解析响应里的 unsupported 原样带回即被
+    # 拒绝，留空数组=「本次指令没有未实现要求」。契约层拦截而非硬保证（调用方
+    # 静默省略即绕过），人面向的主防线仍是前端确认卡闸。
+    unsupported_requirements: list[str] = Field(default_factory=list)
 
 
 class AssistantInterpretRequest(BaseModel):
     instruction: str = Field(min_length=2, max_length=2000)
+    # 续办增量解析（TC-4 §4.3）：携带 goal_id 时 _interpret_context 注入既有
+    # 任务上下文，提示词按「对既有状态的增量修改」解释这句话。
+    goal_id: str | None = None
 
 
 class AssistantInterpretResponse(BaseModel):
@@ -1499,6 +1585,15 @@ class AssistantInterpretResponse(BaseModel):
     # 后再创建 goal。草稿项的 params 结构同 GoalChecklistItem.params。
     goal_checklist_draft: list[GoalChecklistItem] = Field(default_factory=list)
     checklist_warnings: list[str] = Field(default_factory=list)
+    # 任务级约束（TC-1 §2.1）：只作用于本次任务；hard 带参项已由 draft 生成器
+    # 写进 goal_checklist_draft（§2.1b），soft 经确认后随 /assistant/solve 请求体
+    # 回到后端落 goal.context.soft_task_constraints（§4.2 写入点①）。
+    task_constraints: list[AssistantTaskConstraint] = Field(default_factory=list)
+    # 记忆动作与执行回执（TC-2 §3.1）：explicit 已直接执行（回执 executed），
+    # inferred/降级进收件箱候选（pending_confirmation），无法降级的动作
+    # failed_degraded——逐条回执，绝不混用两种授权。
+    memory_actions: list[AssistantMemoryAction] = Field(default_factory=list)
+    memory_action_receipts: list[AssistantMemoryActionReceipt] = Field(default_factory=list)
     summary: str
     # 模型思考过程（reasoning_content 与 <think> 块拼接）；Aily 通道与无思考模型为 None。
     thinking: str | None = None
