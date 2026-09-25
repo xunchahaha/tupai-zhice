@@ -1,6 +1,6 @@
 // 偏好记忆使用情况的前端视图模型（MEM-C1）。后端在创建求解任务时把
 // memory_usage 冻结进 SolverRun（结构同 snapshot.payload["memory"]），
-// 求解页解释面板与记忆页「最近使用」列共用这里的状态与文案。
+// 求解页解释面板与记忆页「最近编译结果」列共用这里的状态与文案。
 
 export interface MemoryOutcome {
   entry_id: string;
@@ -21,7 +21,9 @@ export interface MemoryUsageSnapshot {
 }
 
 const OUTCOME_LABELS: Record<string, string> = {
-  applied: "已应用",
+  // 第七轮口径收口：outcome=applied 的含义是「编译进求解输入」（编译资格），
+  // 不是「对本次课程实际匹配」更不是「结果满足」，文案按编译口径表述。
+  applied: "已获准编译",
   not_authorized: "未授权试用",
   expired: "已过期",
   unsupported_predicate: "暂不支持求解",
@@ -41,6 +43,9 @@ export function memoryHeadline(memory: MemoryUsageSnapshot | null | undefined): 
   if (!memory?.status) return null;
   if (memory.status === "compile_failed") return "本次未使用偏好记忆：编译失败";
   const considered = memory.summary?.considered ?? 0;
-  if (!considered) return "本次没有可用的偏好记忆";
-  return `本次参考 ${considered} 条偏好记忆（已应用 ${memory.summary?.applied ?? 0} / 未使用 ${memory.summary?.unused ?? 0}）`;
+  if (!considered) return "创建任务时没有可用的偏好记忆";
+  // 第七轮口径收口：summary 是「创建时点、方案级」的编译资格统计，不代表这些
+  // 偏好作用于本次求解的课次；「已应用」改说「编译进求解输入」，是否作用于
+  // 本次课程以解释层按任务范围算出的匹配核对为准。
+  return `创建任务时 ${considered} 条偏好记忆获准编译（编译进求解输入 ${memory.summary?.applied ?? 0} / 未编译 ${memory.summary?.unused ?? 0}）；是否作用于本次课程，以解释层的范围核对为准`;
 }

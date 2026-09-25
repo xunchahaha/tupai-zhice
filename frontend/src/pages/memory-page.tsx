@@ -164,7 +164,11 @@ function validityLabel(entry: PreferenceResponse): string {
   return `${from || "…"} ~ ${until || "长期"}`;
 }
 
-/** 最新一次求解里各偏好条目的使用结果：runs 按时间倒序，先见者为最新。 */
+/** 最新一次求解里各偏好条目的编译结果：runs 按时间倒序，先见者为最新。
+
+第七轮口径收口：outcome 是创建任务时点的编译资格判定（已获准编译/未授权/
+过期…），不代表该偏好作用于那次求解的课次，也不代表结果满足——列名与
+徽标文案按编译口径表述。 */
 function useLatestOutcomes(runs: SolverRunResponse[]): Map<string, MemoryOutcome> {
   return useMemo(() => {
     const map = new Map<string, MemoryOutcome>();
@@ -200,7 +204,7 @@ export function MemoryPage() {
   const classes = useListClassGroupsApiV1ClassGroupsGet();
   const courses = useListCourseSessionsApiV1CourseSessionsGet();
   const slots = useListTimeSlotsApiV1TimeSlotsGet();
-  // 「最近使用」反查最近求解任务冻结的逐条结果；查不到就不显示，不编造。
+  // 「最近编译结果」反查最近求解任务冻结的逐条编译判定；查不到就不显示，不编造。
   const runs = useListSolverRunsApiV1SolverRunsGet();
   // Hook 顺序敏感：所有 use* 必须在下面的 loading/error 早退之前调用。
   const latestOutcomes = useLatestOutcomes(asArray<SolverRunResponse>(runs.data));
@@ -401,7 +405,7 @@ export function MemoryPage() {
       accessorFn: (row) => validityLabel(row),
     },
     {
-      header: "最近使用",
+      header: "最近编译结果",
       accessorFn: (row) => latestOutcomes.get(row.id)?.outcome ?? "",
       cell: ({ row }) => {
         const usage = latestOutcomes.get(row.original.id);

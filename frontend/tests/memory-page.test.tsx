@@ -218,11 +218,13 @@ describe("MemoryPage", () => {
     expect(screen.getByText("该教师多次在周三晚间调课")).toBeVisible();
     // MEM-C1：候选在采纳或授权试用前不影响排课——页面文案必须如实承诺。
     expect(screen.getByText(/待确认候选在您采纳或授权试用前不会影响排课/)).toBeVisible();
-    // 全部偏好表同时渲染：最近使用列来自最近求解任务的 memory_usage 反查。
+    // 全部偏好表同时渲染：最近编译结果列来自最近求解任务的 memory_usage 反查。
     expect(screen.getAllByText("301 教室").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByRole("button", { name: "停用" }).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("最近使用")).toBeVisible();
-    expect(screen.getByText("已应用")).toBeVisible();
+    // 第七轮口径收口：列名与徽标按编译资格口径表述（outcome=applied 的含义是
+    // 「编译进求解输入」，不是对本次课程的实际匹配，更不是结果满足）。
+    expect(screen.getByText("最近编译结果")).toBeVisible();
+    expect(screen.getByText("已获准编译")).toBeVisible();
   });
 
   it("authorizes a trial with the default 30 days and keeps the entry on probation", async () => {

@@ -38,6 +38,7 @@ from app.models import (
     TimeSlot,
 )
 from app.schemas import SolveRequest
+from app.services.explain import build_explanation_facts
 from app.services.memory_solver import (
     compile_memory_state,
     resolve_conflicts_for_new_entry,
@@ -573,3 +574,144 @@ def test_session_matches_rule_requires_type_and_id_alignment() -> None:
     assert _session_matches_rule(session, "R1", {"actor_type": "room", "actor_ids": ["R1"]})
     # 无 actor_ids 的全局规则仍然全匹配。
     assert _session_matches_rule(session, "", {"actor_type": "system", "actor_ids": []})
+
+
+# ------------------------------------------------- 第七轮收口：记忆使用三段口径
+
+
+def _make_two_teacher_scope_entries_and_courses(
+    client: TestClient, auth_headers: dict[str, str]
+) -> dict[str, Any]:
+    """两个 confirmed 偏好（T9 回避 S1 / T8 偏好 S1）+ 两门课（B1/T9、B2/T9）。
+
+    T8 是不存在课次的教师：它的偏好编译成功（编译资格）但永远不匹配 B1 范围
+    的课程——用来区分「已获准编译」与「对本次课程实际匹配」。
+    """
+    scope = _make_scope(client, auth_headers)
+    entry_t9 = _add_entry(
+        scope["scope_id"],
+        subject_id="T9",
+        predicate="avoid_slot",
+        constraint={"slot_ids": ["S1"]},
+    )
+    entry_t8 = _add_entry(
+        scope["scope_id"],
+        subject_id="T8",
+        predicate="prefer_slot",
+        constraint={"slot_ids": ["S1"]},
+    )
+    _add_session(scope["scope_id"], "C1", date(2026, 10, 5))  # B1 / T9
+    with SessionLocal() as db:
+        campus_id = db.scalar(select(Campus.id).where(Campus.schedule_set_id == scope["scope_id"]))
+        assert campus_id is not None
+        db.add(
+            CourseSession(
+                schedule_set_id=scope["scope_id"],
+                campus_id=campus_id,
+                business_id="C2",
+                class_business_id="B2",
+                teacher_business_id="T9",
+                lesson_date=date(2026, 10, 6),
+                fixed_start_time="08:30",
+                fixed_end_time="11:30",
+            )
+        )
+        db.commit()
+    return {"scope": scope, "entry_t9": entry_t9, "entry_t8": entry_t8}
+
+
+def test_memory_usage_without_result_has_no_satisfaction_claim(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """无求解结果时 usage 事实不得包含「满足」结论，也不把编译资格说成使用。
+
+    三段口径：compilation=创建时点方案级编译资格；match=按本次任务课程范围
+    （B1）核对；satisfaction=None 且 headline 明说「尚无使用证据」。"""
+    setup = _make_two_teacher_scope_entries_and_courses(client, auth_headers)
+    scope_id = setup["scope"]["scope_id"]
+    with SessionLocal() as db:
+        run = api.create_solver_run(db, None, SolveRequest(class_business_ids=["B1"]), scope_id)
+        run_id = run.id
+
+    with SessionLocal() as db:
+        run_row = db.get(SolverRun, run_id)
+        assert run_row is not None
+        facts = build_explanation_facts(db, run_row)
+    usage = facts["memory_usage"]
+    # 第一段：已获准编译（创建时点、方案级——两条都编译成功）。
+    assert usage["status"] == "ok"
+    assert usage["compilation"] == {"considered": 2, "admitted": 2, "excluded": 0}
+    # 第二段：按本次任务课程范围（B1，只有 C1 一节课）核对匹配。
+    assert usage["match"]["scope_sessions"] == 1
+    assert usage["match"]["admitted"] == 2
+    assert usage["match"]["matched"] == 1
+    matched_by_rule = {
+        row["business_id"]: row["matched_sessions"] for row in usage["match"]["rules"]
+    }
+    assert matched_by_rule[f"MEMORY-{setup['entry_t9'].id}"] == 1
+    assert matched_by_rule[f"MEMORY-{setup['entry_t8'].id}"] == 0
+    # 第三段：没有结果证据 → 无满足结论。
+    assert usage["satisfaction"] is None
+    assert "尚无使用证据" in usage["headline"]
+    # 编译资格不得被表述成本次使用结论。
+    assert "本次参考" not in usage["headline"]
+    assert "已应用" not in usage["headline"]
+    assert "创建任务时 2 条偏好记忆获准编译" in usage["headline"]
+    assert "1 条与本次课程实际匹配" in usage["headline"]
+
+
+def test_memory_usage_match_and_evidence_computed_by_run_scope(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """有求解结果时：匹配数按本次课程范围计算，满足情况按结果证据计算。
+
+    T9 的 C1 被排在它回避的 S1 → 结果证据记 1 次触碰；T8 的偏好没有作用
+    对象（B1 范围内没有 T8 的课），不产生任何证据。"""
+    setup = _make_two_teacher_scope_entries_and_courses(client, auth_headers)
+    scope_id = setup["scope"]["scope_id"]
+    with SessionLocal() as db:
+        run = api.create_solver_run(db, None, SolveRequest(class_business_ids=["B1"]), scope_id)
+        run_id = run.id
+    with SessionLocal() as db:
+        run_row = db.get(SolverRun, run_id)
+        assert run_row is not None
+        course_id = db.scalar(
+            select(CourseSession.id).where(
+                CourseSession.schedule_set_id == scope_id,
+                CourseSession.business_id == "C1",
+            )
+        )
+        assert course_id is not None
+        run_row.status = "completed"
+        run_row.model_status = "OPTIMAL"
+        run_row.result_payload = {
+            "assignments": [
+                {
+                    "course_session_id": course_id,
+                    "course_business_id": "C1",
+                    "class_business_id": "B1",
+                    "teacher_business_id": "T9",
+                    "lesson_date": "2026-10-05",
+                    "slot_business_id": "S1",
+                    "room_business_id": "R1",
+                    "change_kind": "assigned",
+                }
+            ]
+        }
+        db.commit()
+        facts = build_explanation_facts(db, run_row)
+    usage = facts["memory_usage"]
+    # 匹配数仍按本次课程范围（B1）计算，与无结果时一致。
+    assert usage["match"]["scope_sessions"] == 1
+    assert usage["match"]["matched"] == 1
+    # 第三段：结果存在 → 证据可算：T9 的 avoid_slot S1 被触碰 1 次。
+    satisfaction = usage["satisfaction"]
+    assert satisfaction is not None
+    assert satisfaction["evaluated_assignments"] == 1
+    assert satisfaction["avoid_violations"] == 1
+    assert satisfaction["prefer_hits"] == 0
+    rows = {row["business_id"]: row for row in satisfaction["rules"]}
+    assert rows[f"MEMORY-{setup['entry_t9'].id}"]["avoid_violations"] == 1
+    assert rows[f"MEMORY-{setup['entry_t8'].id}"]["matched_assignments"] == 0
+    # 有证据后 headline 不再说「尚无使用证据」。
+    assert "尚无使用证据" not in usage["headline"]
