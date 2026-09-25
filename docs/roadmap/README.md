@@ -30,6 +30,7 @@
 - [04-implementation-plan.md](04-implementation-plan.md) — 分阶段实施计划与进度
 - [05-ux-sop.md](05-ux-sop.md) — 求解页交互闭环与全局 SOP 重排
 - [06-public-showcase.md](06-public-showcase.md) — 公开展示层设计（免登录课表门户）
+- [07-task-context.md](07-task-context.md) — 任务上下文主线贯通设计（第七轮复审第二批）
 
 ## 决策记录（ADR 摘要）
 

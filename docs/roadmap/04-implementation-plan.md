@@ -1,6 +1,6 @@
 # 04 · 实施计划与进度
 
-> 状态：✅ 八期第七轮复审第一批正确性与口径收口完成 · VER-8 通过（2026-09-25：后端 ruff/mypy 全过 + pytest 377 passed；前端 tsc 0 错误 + vitest 138 passed / 19 文件；e2e 未在本地运行，CI 因账户 billing 仍未启动，runners 未分配）；第七轮第二批任务上下文主线批次待启动
+> 状态：✅ 九期第七轮复审第二批任务上下文主线贯通完成 · VER-9 通过（2026-09-25：后端 ruff/mypy 全过 + pytest 398 passed；前端 tsc 0 错误 + vitest 155 passed（20 文件）；playwright 3 passed（含固定解析结果的业务场景）；CI 因账户 billing 仍未启动，runners 未分配）
 > 批次策略遵循工作区 AGENTS.md：按模块分批、实现代理自检 + 局部验证、里程碑统一全量验证、每批一个原子提交。
 
 ## 勘察修正（重要）
@@ -115,6 +115,16 @@ VER-1 收口
 | MEM-I5 | 记忆使用口径三段化：compilation（创建时点方案级编译资格）/ match（按本次任务课程范围算的匹配）/ satisfaction（结果满足）三段分开表述——outcome=applied 徽标改「已获准编译」，记忆页列名「最近使用」改「最近编译结果」，headline 明示 summary 是创建时点的编译资格统计、是否作用于本次课程以解释层的范围核对为准；「已获准编译但按任务范围永不匹配」的偏好有专门回归用例 | ✅ 完成（后端 pytest 新增三段口径用例 + 前端文案用例，e36d8ff） | e36d8ff |
 | MEM-I6 | AI 就绪探测解耦：通用 AI 与飞书 Aily 是两条相互独立的通道——分别请求、分别记账，任一条读取失败不拖垮另一条（此前 Promise.all 会让飞书读取失败连坐已配置好的通用 AI），仅飞书读取失败时通用 AI 入口仍可用；两条都失败时显示探测错误并提供重试 | ✅ 完成（前端 vitest 新增回归用例，1a24181） | 1a24181 |
 | VER-8 | 终验：后端 ruff/mypy 全过 + pytest 377 passed；前端 tsc 0 错误 + vitest 138 passed（19 文件）；e2e 未在本地运行（CI 因账户 billing 仍未启动，runners 未分配） | ✅ | — |
+
+## 九期「第七轮复审第二批：任务上下文主线贯通」批次（2026-09-25）
+
+| 批次 | 内容 | 状态 | 提交 |
+| --- | --- | --- | --- |
+| MEM-J0 | 设计与设计评审：docs/roadmap/07-task-context.md 定稿（TC-1..TC-8），v2/v3 两轮修订把设计评审 10 条 + 第二轮评审 3 条意见逐条落进设计——硬任务约束写入 goal.checklist 的写入者指定为 draft 生成器、_compile_task_constraints 双来源（goal/请求）business_id 与 source_doc 规则、求解请求体携带 task_constraints（§6.5）、加预算路径改独立提交函数（§5.2）、显式词表与 e2e 场景原话锁定、砍除无消费者的 context.decisions | ✅ 完成（设计定稿，两轮评审意见全部吸收） | — |
+| MEM-J1 | 后端：任务上下文持久化 + 契约扩展 + 编译 + 记忆动作——SolveGoal.context JSON 列 + Alembic 迁移 a7c9e1f3b5d7（scope/soft_task_constraints/work_draft_schedule_id，schema_version=1，旧目标 NULL=「无上下文」续办惰性回填；硬约束唯一归宿仍是 goal.checklist，本列不参与验收乐观锁）；解析契约新增 AssistantTaskConstraint/AssistantMemoryAction/回执与请求侧 task_constraints、unsupported_requirements（非空即 422 契约拦截），_finalize 逐条降级；draft 生成器消费 task_constraints（硬约束→带参 forbidden_slot_free 项进清单草稿）；记忆动作 explicit 三条复核（显式词表命中、候选校验、target_entry_id 命中上下文真实条目）直接执行，inferred/复核未过降级收件箱候选，Aily 通道强制 inferred；_compile_task_constraints 双来源（goal 来源 TASK-{goal.id[:8]}-* / 请求来源 TASK-req-*）统一编译进 payload["rules"] 管线，解释层接入 task_constraint_rules 并透出 source_doc；未指定基准默认取 goal.context.work_draft_schedule_id（仍为 draft 惰性校验） | ✅ 完成（后端 ruff/mypy 全过 + pytest 398 passed） | 68c43d3 |
+| MEM-J2 | 前端：确认卡回执 + 续办恢复 + URL 同步 + 基准默认草稿——确认卡逐条展示任务约束（hard/soft 徽标 + 仅作用本次任务说明）与记忆动作回执（executed 带可修改/可撤销提示、pending 带收件箱说明，无约束/无回执时保持原样）；/solver?goal= 恢复完整上下文（指令 + context 范围 + 工作草稿基准回填），goal_id 新建目标后写入 URL、解除关联时移除；streamInterpretInstruction 流式主通道与同步回退均携带 goal_id；求解请求体携带全量 task_constraints（hard+soft）；缺口 remedy 动作化——raise_budget 挂载即加预算重跑（绕过解析守卫、上限 900）、fix_checklist 直达清单补参、resolve_scope 回求解页，await_admin 保持文本；视觉冻结合规（复用现有组件与动效） | ✅ 完成（前端 tsc 0 错误 + vitest 新增回归用例） | 8da6414 |
+| MEM-J3 | 业务场景端到端回归：vitest 三套场景（确认卡约束/回执渲染与空态、求解请求体契约含 hard+soft 与 goal_id 流式/同步双通道、续办恢复与 URL 同步及旧目标兼容、加预算重跑与上限）+ playwright 业务场景（固定解析结果 stub，本地 3 passed） | ✅ 完成（vitest 155 passed（20 文件）+ playwright 3 passed） | d34aa41 |
+| VER-9 | 终验：后端 ruff/mypy 全过 + pytest 398 passed；前端 tsc 0 错误 + vitest 155 passed（20 文件）；playwright 3 passed（含固定解析结果的业务场景）；CI 因账户 billing 仍未启动（runners 未分配），e2e 待 CI 恢复后覆盖 | ✅ | — |
 
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 
