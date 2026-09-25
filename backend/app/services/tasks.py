@@ -5,7 +5,7 @@ from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from ..config import get_settings
 from ..db import SessionLocal
@@ -423,31 +423,94 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
         _evaluate_goal_for_run(run_id, str(run_goal_id))
 
 
+def _goal_version_anchor(request_payload: dict[str, Any] | None) -> int | None:
+    """目标写回的版本锚点：任务创建时冻结的 goal_checklist_version。
+
+    MEM-E2/E2a 在创建任务时把目标当时的清单版本冻进 request_payload
+    （api.create_solver_run）；验收异常/求解失败的写回一律以它为乐观锁——
+    即便写回前另一会话已修订清单并完成新版验收，条件 UPDATE 的
+    `checklist_revision = 锚点` 也不匹配，旧失败不会改写新结论。
+    """
+    raw = (request_payload or {}).get("goal_checklist_version")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mark_goal_acceptance_failed(db: Any, goal_id: str, *, version: int, detail: str) -> bool:
+    """异常/失败路径的目标写回：唯一入口是带版本守卫的条件 UPDATE。
+
+    与 goal.apply_goal_evaluation 的结论写回同构（MEM-F/F2 第五轮复审模式）：
+    WHERE id + checklist_revision = 版本锚点 + status <> 'abandoned'（abandoned
+    是人工终态，验收异常与求解失败同样不得越权改写），rowcount 判定。行数=0
+    = 版本已前移或目标已放弃——**目标当前结论一字不改**，失败只留在该 run
+    自己的 goal_report 上（由调用方记录 run 与清单版本）。
+    """
+    result = db.execute(
+        update(SolveGoal)
+        .where(
+            SolveGoal.id == goal_id,
+            SolveGoal.checklist_revision == version,
+            SolveGoal.status != "abandoned",
+        )
+        .values(acceptance_status="failed", acceptance_detail=detail)
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0) == 1
+
+
 def _evaluate_goal_for_run(run_id: str, goal_id: str) -> None:
     # 延迟导入：goal.py 验收器复用本模块的 count_hard_conflicts，顶层互相引用成环。
     from .goal import apply_goal_evaluation
 
+    evaluated_version: int | None = None
     try:
         with SessionLocal() as db:
             run = db.get(SolverRun, run_id)
             goal = db.get(SolveGoal, goal_id)
             if run is None or goal is None:
                 return
+            # 评估时点版本：优先创建时冻结的 goal_checklist_version；旧任务没有
+            # 该字段时退回此刻读到的持久化 checklist_revision。评估失败写回时
+            # 以它做条件 UPDATE 的版本守卫。
+            evaluated_version = _goal_version_anchor(run.request_payload)
+            if evaluated_version is None:
+                evaluated_version = int(goal.checklist_revision)
             apply_goal_evaluation(db, run)
             db.commit()
     except Exception as exc:  # noqa: BLE001 - 验收失败不影响求解结果落库
         # MEM-D2/D6：验收异常不再只打日志——acceptance_status 置 failed，原因
         # 同时落 goal.acceptance_detail 与 run.goal_report 失败标记，API 可见、
         # 前端可停轮询并显示「验收失败：原因」。
+        # 第七轮复审收口：写回不再用 ORM 对象直接赋值（那会绕过版本保护、
+        # 且漏掉 abandoned 守卫），统一走 _mark_goal_acceptance_failed 的条件
+        # UPDATE；rowcount=0（评估到写回之间清单已修订且新版本已完成验收/
+        # 目标已放弃）时目标当前结论一字不改，失败只留在旧任务自己的报告上。
         logger.exception("目标验收执行失败：求解结果不受影响，目标验收状态置 failed")
         try:
             with SessionLocal() as db:
                 run = db.get(SolverRun, run_id)
-                goal = db.get(SolveGoal, goal_id)
                 detail = f"{type(exc).__name__}: {exc}"[:1000]
-                if goal is not None:
-                    goal.acceptance_status = "failed"
-                    goal.acceptance_detail = detail
+                anchor = None
+                if run is not None:
+                    anchor = _goal_version_anchor(run.request_payload)
+                    if anchor is None:
+                        anchor = evaluated_version
+                    if anchor is None:
+                        # 连评估时点版本都没有（异常发生在读取之前）：退回此刻
+                        # 持久化版本做兜底锚点。
+                        current = db.scalar(
+                            select(SolveGoal.checklist_revision).where(SolveGoal.id == goal_id)
+                        )
+                        anchor = int(current) if current is not None else None
+                landed = False
+                if anchor is not None:
+                    landed = _mark_goal_acceptance_failed(
+                        db, goal_id, version=anchor, detail=detail
+                    )
                 if run is not None:
                     run.goal_report = {
                         "goal_id": goal_id,
@@ -459,6 +522,9 @@ def _evaluate_goal_for_run(run_id: str, goal_id: str) -> None:
                         "gaps": [],
                         "decision": None,
                         "evaluated_at": shanghai_now().isoformat(),
+                        # 审计：本次失败写回对应的清单版本与目标写回结果。
+                        "checklist_version": anchor,
+                        "goal_writeback": "applied" if landed else "skipped",
                     }
                 db.commit()
         except Exception:  # noqa: BLE001 - 兜底落库也失败时只能记日志
@@ -474,21 +540,36 @@ def _persist_failure(run_id: str, message: str) -> None:
             # MEM-D2/D6：run 失败 = 不会有验收报告。若挂着目标，同步把验收
             # 状态置 failed 并落失败标记，避免目标永远停在 pending、前端永远
             # 轮询不到报告。
+            # 第七轮复审收口：写回走带版本守卫的条件 UPDATE（锚点 = 创建时
+            # 冻结的 goal_checklist_version，旧任务退回当前持久化版本）；
+            # rowcount=0（求解期间清单已修订至新版本/目标已放弃）时不动目标
+            # 当前结论，失败只留在 run.goal_report 上。
             if run.goal_id:
-                goal = db.get(SolveGoal, run.goal_id)
-                if goal is not None and goal.status != "abandoned":
-                    goal.acceptance_status = "failed"
-                    goal.acceptance_detail = f"求解失败，未进入验收：{message}"[:1000]
+                detail = f"求解失败，未进入验收：{message}"[:1000]
+                anchor = _goal_version_anchor(run.request_payload)
+                if anchor is None:
+                    current = db.scalar(
+                        select(SolveGoal.checklist_revision).where(SolveGoal.id == run.goal_id)
+                    )
+                    anchor = int(current) if current is not None else None
+                landed = False
+                if anchor is not None:
+                    landed = _mark_goal_acceptance_failed(
+                        db, run.goal_id, version=anchor, detail=detail
+                    )
                 run.goal_report = {
                     "goal_id": run.goal_id,
                     "run_id": run.id,
                     "acceptance_status": "failed",
-                    "acceptance_error": f"求解失败，未进入验收：{message}"[:1000],
+                    "acceptance_error": detail,
                     "all_passed": False,
                     "items": [],
                     "gaps": [],
                     "decision": None,
                     "evaluated_at": shanghai_now().isoformat(),
+                    # 审计：本次失败写回对应的清单版本与目标写回结果。
+                    "checklist_version": anchor,
+                    "goal_writeback": "applied" if landed else "skipped",
                 }
             db.commit()
 

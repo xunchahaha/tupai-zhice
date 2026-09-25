@@ -1458,3 +1458,240 @@ def test_continued_runs_after_scope_revision_stay_bound_to_goal(
         assert goal_row is not None
         assert goal_row.latest_run_id == second_body["id"]
         assert goal_row.acceptance_status == "completed"
+
+
+# ------- 第七轮复审收口：异常/失败回调统一走版本约束写回（不再 ORM 直赋值）
+
+
+def _make_old_run_with_frozen_version(
+    scope_id: str,
+    goal_id: str,
+    course: CourseSession,
+    *,
+    status: str = "completed",
+) -> SolverRun:
+    """直接落一条旧任务：request_payload 冻结 goal_checklist_version=1。"""
+    with SessionLocal() as db:
+        snapshot = DataSnapshot(
+            schedule_set_id=scope_id,
+            revision=1,
+            checksum=f"v7-old-{uuid4().hex[:8]}",
+            payload={
+                "course_sessions": [
+                    {"business_id": "C1", "is_active": True, "class_business_id": "B1"}
+                ]
+            },
+        )
+        db.add(snapshot)
+        db.flush()
+        run = SolverRun(
+            schedule_set_id=scope_id,
+            snapshot_id=snapshot.id,
+            run_type="initial",
+            status=status,
+            model_status="OPTIMAL" if status == "completed" else None,
+            request_payload={"goal_checklist_version": 1},
+            result_payload={
+                "assignments": [_assignment(course)],
+                "solved_course_business_ids": ["C1"],
+            },
+            goal_id=goal_id,
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        return run
+
+
+def test_acceptance_exception_writeback_blocked_by_newer_version_and_acceptance(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第七轮复审交错（验收异常路径）：旧任务按 v1 验收 → 回调写回前另一会话
+    修订清单至 v2 并完成新版验收（通过）→ 旧任务验收抛异常。
+
+    异常回调的目标写回必须带版本守卫（WHERE checklist_revision = 评估时点
+    版本 AND status <> 'abandoned'）：行数=0 时新结论一字不改，旧失败只留在
+    旧任务自己的报告上（记录对应 run 与清单版本）。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    course = _add_course(scope["scope_id"], "C1", lesson_date=date(2026, 10, 5))
+    old_run = _make_old_run_with_frozen_version(scope["scope_id"], goal_id, course)
+
+    # 新任务：稍后按 v2 完成验收（在异常回调内部交错执行）。
+    new_run = _make_run(
+        scope["scope_id"],
+        goal_id,
+        [_assignment(course)],
+        snapshot_sessions=[{"business_id": "C1", "is_active": True, "class_business_id": "B1"}],
+    )
+    real_apply = goal_module.apply_goal_evaluation
+
+    def _revise_accept_then_boom(*args: Any, **kwargs: Any) -> None:
+        # 另一会话：修订清单至 v2 并完成新版验收——都发生在旧回调放行之前。
+        patched = client.patch(
+            f"/api/v1/goals/{goal_id}/checklist", headers=headers, json=_V2_COVERAGE_BODY
+        )
+        assert patched.status_code == 200, patched.text
+        assert patched.json()["checklist_version"] == 2
+        with SessionLocal() as db2:
+            assert real_apply(db2, db2.get(SolverRun, new_run.id)) is not None
+            db2.commit()
+        raise RuntimeError("旧任务验收器炸了")
+
+    monkeypatch.setattr(goal_module, "apply_goal_evaluation", _revise_accept_then_boom)
+    _evaluate_goal_for_run(old_run.id, goal_id)
+    monkeypatch.undo()
+
+    # v2 的新结论不被旧回调改写。
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        assert goal_row.checklist_revision == 2
+        assert goal_row.status == "achieved"
+        assert goal_row.acceptance_status == "completed"
+        assert goal_row.acceptance_detail is None
+        assert goal_row.latest_run_id == new_run.id
+        # 旧失败留在旧任务自己的报告上，并记录 run 与清单版本、写回被拦截。
+        old_row = db.get(SolverRun, old_run.id)
+        assert old_row is not None and old_row.goal_report is not None
+        report = old_row.goal_report
+        assert report["acceptance_status"] == "failed"
+        assert "旧任务验收器炸了" in str(report["acceptance_error"])
+        assert report["run_id"] == old_run.id
+        assert report["checklist_version"] == 1
+        assert report["goal_writeback"] == "skipped"
+
+    detail = client.get(f"/api/v1/goals/{goal_id}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["acceptance_status"] == "completed"
+
+
+def test_run_failure_writeback_blocked_by_newer_version_and_acceptance(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """第七轮复审交错（求解失败路径）：run 失败时目标还停在 v1，写回前清单已
+    修订至 v2 且新版验收完成——失败标记同样不得改写新结论。"""
+    scope = _make_scope(client, auth_headers)
+    headers = scope["headers"]
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    course = _add_course(scope["scope_id"], "C1", lesson_date=date(2026, 10, 5))
+    old_run = _make_old_run_with_frozen_version(scope["scope_id"], goal_id, course, status="queued")
+
+    # 交错：修订 v2 + 新任务完成 v2 验收（achieved/completed）。
+    new_run = _make_run(
+        scope["scope_id"],
+        goal_id,
+        [_assignment(course)],
+        snapshot_sessions=[{"business_id": "C1", "is_active": True, "class_business_id": "B1"}],
+    )
+    patched = client.patch(
+        f"/api/v1/goals/{goal_id}/checklist", headers=headers, json=_V2_COVERAGE_BODY
+    )
+    assert patched.status_code == 200, patched.text
+    with SessionLocal() as db:
+        assert apply_goal_evaluation(db, db.get(SolverRun, new_run.id)) is not None
+        db.commit()
+
+    # 求解失败的写回发生在修订与新版验收之后。
+    _persist_failure(old_run.id, "求解器崩溃")
+
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        assert goal_row.checklist_revision == 2
+        assert goal_row.status == "achieved"
+        assert goal_row.acceptance_status == "completed"
+        assert goal_row.acceptance_detail is None
+        old_row = db.get(SolverRun, old_run.id)
+        assert old_row is not None and old_row.goal_report is not None
+        report = old_row.goal_report
+        assert report["acceptance_status"] == "failed"
+        assert "求解失败" in str(report["acceptance_error"])
+        assert report["checklist_version"] == 1
+        assert report["goal_writeback"] == "skipped"
+
+
+def test_acceptance_exception_writeback_skips_abandoned_goal(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """验收异常分支同样不得越权改写人工终态（abandoned 守卫）。"""
+    scope = _make_scope(client, auth_headers)
+    created = client.post(
+        "/api/v1/goals",
+        headers=scope["headers"],
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    course = _add_course(scope["scope_id"], "C1", lesson_date=date(2026, 10, 5))
+    run = _make_old_run_with_frozen_version(scope["scope_id"], goal_id, course)
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        goal_row.status = "abandoned"
+        db.commit()
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("验收器炸了")
+
+    monkeypatch.setattr(goal_module, "apply_goal_evaluation", _boom)
+    _evaluate_goal_for_run(run.id, goal_id)
+    monkeypatch.undo()
+
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        assert goal_row.status == "abandoned"
+        assert goal_row.acceptance_status == "pending"
+        assert goal_row.acceptance_detail is None
+        run_row = db.get(SolverRun, run.id)
+        assert run_row is not None and run_row.goal_report is not None
+        assert run_row.goal_report["acceptance_status"] == "failed"
+        assert run_row.goal_report["goal_writeback"] == "skipped"
+
+
+def test_acceptance_exception_writeback_lands_on_matching_version(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """无竞争时异常写回照常生效（版本未前移、未放弃）：failed 可见可停轮询，
+    且报告记录本次写回的清单版本。"""
+    scope = _make_scope(client, auth_headers)
+    created = client.post(
+        "/api/v1/goals",
+        headers=scope["headers"],
+        json={"instruction": "排好 B1 班的课", "class_business_ids": ["B1"]},
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    course = _add_course(scope["scope_id"], "C1", lesson_date=date(2026, 10, 5))
+    run = _make_old_run_with_frozen_version(scope["scope_id"], goal_id, course)
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("验收器炸了")
+
+    monkeypatch.setattr(goal_module, "apply_goal_evaluation", _boom)
+    _evaluate_goal_for_run(run.id, goal_id)
+    monkeypatch.undo()
+
+    with SessionLocal() as db:
+        goal_row = db.get(SolveGoal, goal_id)
+        assert goal_row is not None
+        assert goal_row.acceptance_status == "failed"
+        assert goal_row.acceptance_detail and "验收器炸了" in goal_row.acceptance_detail
+        run_row = db.get(SolverRun, run.id)
+        assert run_row is not None and run_row.goal_report is not None
+        assert run_row.goal_report["checklist_version"] == 1
+        assert run_row.goal_report["goal_writeback"] == "applied"
