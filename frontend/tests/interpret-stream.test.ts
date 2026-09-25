@@ -107,6 +107,20 @@ describe("streamInterpretInstruction", () => {
     expect(result.thinking).toBe("先核对业务线。");
   });
 
+  it("posts goal_id in the body when a bound goal is provided (07 §6.4)", async () => {
+    // 续办增量解析：流式主路径请求体必须携带 goal_id（与同步回退口径一致）。
+    const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toEqual({ instruction: "三天内重排", goal_id: "goal-77" });
+      return new Response(
+        sseBody(['event: result\ndata: {"instruction":"三天内重排"}\n\n']),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await streamInterpretInstruction("三天内重排", new AbortController().signal, {}, "goal-77");
+    expect(result.instruction).toBe("三天内重排");
+  });
+
   it("re-throws the backend detail carried by an error event", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(
       sseBody(['event: error\ndata: {"detail":"AI 指令解析失败：模型输出不是合法 JSON"}\n\n']),

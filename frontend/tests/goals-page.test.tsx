@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GoalsPage } from "@/pages/goals-page";
@@ -406,5 +406,112 @@ describe("GoalsPage version alignment (MEM-E2)", () => {
     expect(
       await screen.findByText(/求解参数基于 v2 清单生成，验收按当前最新版 v3/),
     ).toBeInTheDocument();
+  });
+});
+
+// TC-6 §5.2：缺口 remedy 动作化——raise_budget/fix_checklist/resolve_scope 出按钮，
+// await_admin 保持文本（人的裁决）。
+describe("GoalsPage remedy actions (TC-6)", () => {
+  const user = userEvent.setup();
+  afterEach(cleanup);
+  beforeEach(() => {
+    mocks.abandon.mockClear();
+    mocks.patch.mockClear();
+    mocks.detail = undefined;
+  });
+
+  function LocationProbe() {
+    const location = useLocation();
+    return <div data-testid="location-probe">{location.pathname}{location.search}</div>;
+  }
+
+  function renderWithProbe(initialEntry = "/goals") {
+    return render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <Routes>
+            <Route path="/goals" element={<GoalsPage />} />
+            <Route path="*" element={<LocationProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  function detailWithGaps(gaps: Array<Record<string, unknown>>, checklist: Array<Record<string, unknown>> = goalFixture().checklist as Array<Record<string, unknown>>) {
+    return {
+      ...goalFixture(),
+      checklist_version: 1,
+      checklist_history: [],
+      runs: [],
+      checklist,
+      latest_report: {
+        goal_id: "goal-1",
+        all_passed: false,
+        passed_count: 0,
+        failed_count: gaps.length,
+        items: gaps.map((gap) => ({ key: gap.key, requirement: gap.summary, kind: gap.kind, passed: false, detail: String(gap.summary) })),
+        gaps,
+        decision: { status: "awaiting_decision", reason: "存在待处理缺口" },
+      },
+    };
+  }
+
+  it("renders a raise-budget remedy button that deep-links to the solver page", async () => {
+    mocks.goals = [goalFixture()];
+    mocks.detail = detailWithGaps([
+      { key: "coverage", kind: "coverage", summary: "求解未安置全部课次", next_step: "加大时间预算后重跑", remedy: "raise_budget" },
+    ]);
+    renderWithProbe();
+    await user.click(await screen.findByRole("button", { name: "详情" }));
+    await user.click(await screen.findByRole("button", { name: "加大时间预算重跑" }));
+    // 跳 /solver?goal=<id>&action=raise_budget：由求解页挂载解析 action 一键重跑。
+    expect(screen.getByTestId("location-probe")).toHaveTextContent("/solver?goal=goal-1&action=raise_budget");
+  });
+
+  it("opens the checklist param form from a fix_checklist remedy button", async () => {
+    mocks.goals = [goalFixture({ status: "open" })];
+    mocks.detail = detailWithGaps(
+      [
+        { key: "forbidden_slot_free-draft", kind: "forbidden_slot_free", summary: "禁排参数缺失", next_step: "在目标清单中补齐参数后重跑", remedy: "fix_checklist" },
+      ],
+      [
+        {
+          key: "forbidden_slot_free-draft",
+          requirement: "禁排要求待量化：补充主体与具体时段后才能独立复核",
+          kind: "forbidden_slot_free",
+          params: { subject_type: "teacher", subject_ids: [], slot_business_ids: [], needs_params: true },
+        },
+      ],
+    );
+    renderWithProbe();
+    await user.click(await screen.findByRole("button", { name: "详情" }));
+    await user.click(await screen.findByRole("button", { name: "修订目标清单" }));
+    // 复用 goals-page 既有清单补参锚点：needs_params 项的表单展开。
+    expect(screen.getByLabelText("禁排主体类型")).toBeInTheDocument();
+  });
+
+  it("deep-links a resolve_scope remedy back to the solver page", async () => {
+    mocks.goals = [goalFixture()];
+    mocks.detail = detailWithGaps([
+      { key: "coverage", kind: "coverage", summary: "范围与目标清单不一致", next_step: "回求解页修正范围后重跑", remedy: "resolve_scope" },
+    ]);
+    renderWithProbe();
+    await user.click(await screen.findByRole("button", { name: "详情" }));
+    await user.click(await screen.findByRole("button", { name: "回求解页修正范围" }));
+    expect(screen.getByTestId("location-probe")).toHaveTextContent("/solver?goal=goal-1&action=resolve_scope");
+  });
+
+  it("keeps await_admin gaps as text without any action button", async () => {
+    mocks.goals = [goalFixture()];
+    mocks.detail = detailWithGaps([
+      { key: "forbidden_slot_free-1", kind: "forbidden_slot_free", summary: "禁排时段仍被占用", next_step: "等待教务放宽或调整排课", remedy: "await_admin" },
+    ]);
+    renderWithProbe();
+    await user.click(await screen.findByRole("button", { name: "详情" }));
+    expect(await screen.findByText(/等待教务放宽或调整排课/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "加大时间预算重跑" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "回求解页修正范围" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "修订目标清单" })).not.toBeInTheDocument();
   });
 });
