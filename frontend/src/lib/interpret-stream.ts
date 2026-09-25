@@ -1,5 +1,6 @@
 import { type AssistantInterpretResponse } from "@/api/generated/models";
 import { API_BASE_URL, authStore, scheduleSetStore } from "@/api/http";
+import { type AssistantMemoryActionReceipt, type AssistantTaskConstraint } from "@/lib/task-context";
 
 /** thinking 由后端流式接口透出，orval 生成模型尚未包含，按后端契约就地扩展。 */
 export type Interpretation = AssistantInterpretResponse & {
@@ -10,6 +11,10 @@ export type Interpretation = AssistantInterpretResponse & {
   recognized_rules: string[];
   solver_rules: string[];
   date_window_days: number;
+  /** 任务级约束（07 §2.1）：确认卡展示与求解请求体同源（同一 interpretation 状态）。 */
+  task_constraints?: AssistantTaskConstraint[];
+  /** 记忆动作回执（07 §3.1）：explicit 已执行 / 候选降级的结论。 */
+  memory_action_receipts?: AssistantMemoryActionReceipt[];
 };
 
 /** 与后端 SSE 事件一一对应（stage/thinking/result/error）。 */
@@ -59,11 +64,14 @@ export function parseSseFrames(buffer: string): { events: SseEvent[]; rest: stri
  * 流式解析一句话排课指令：POST fetch + 手写 SSE 读帧（EventSource 不支持 POST）。
  * 失败（网络 / 非 200 / 协议中断）一律抛出，由调用方回退到同步接口；
  * signal 同时承担取消职责：abort 后端通过断开连接感知并取消上游模型请求。
+ * goalId 有值时随请求体携带 goal_id（07 §6.4）：续办场景后端据此注入既有任务
+ * 上下文做增量解析；同步回退通道必须携带同一字段（两通道口径一致）。
  */
 export async function streamInterpretInstruction(
   instruction: string,
   signal: AbortSignal,
   handlers: InterpretStreamHandlers = {},
+  goalId?: string,
 ): Promise<Interpretation> {
   const token = authStore.get();
   const scheduleSetId = scheduleSetStore.get();
@@ -74,7 +82,7 @@ export async function streamInterpretInstruction(
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(scheduleSetId ? { "X-Schedule-Set-Id": scheduleSetId } : {}),
     },
-    body: JSON.stringify({ instruction }),
+    body: JSON.stringify({ instruction, ...(goalId ? { goal_id: goalId } : {}) }),
     signal,
   });
   if (!response.ok) {

@@ -419,8 +419,25 @@ function GoalDetailDialog({
                     </ul>
                     {report.gaps.length ? (
                       <div className="mt-2 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                        {/* 07 §5.2：remedy 动作化——raise_budget 跳求解页由挂载 action
+                            一键加预算重跑（不重选范围）；fix_checklist 复用清单补参锚点；
+                            resolve_scope 回求解页聚焦范围区；await_admin 是人的裁决，
+                            保持文本、无按钮。 */}
                         <ul className="list-disc space-y-0.5 pl-4">
-                          {report.gaps.map((gap) => <li key={gap.key}>{gap.next_step}</li>)}
+                          {report.gaps.map((gap) => (
+                            <li key={gap.key} className="flex flex-wrap items-center gap-2">
+                              <span>{gap.next_step}</span>
+                              {gap.remedy === "raise_budget" ? (
+                                <Button size="sm" variant="outline" onClick={() => navigate(`/solver?goal=${goal.id}&action=raise_budget`)}>加大时间预算重跑</Button>
+                              ) : null}
+                              {gap.remedy === "fix_checklist" && needParamItems.length ? (
+                                <Button size="sm" variant="outline" onClick={() => setParamFormKeys(needParamItems.map((item) => String(item.key ?? "")))}>修订目标清单</Button>
+                              ) : null}
+                              {gap.remedy === "resolve_scope" ? (
+                                <Button size="sm" variant="outline" onClick={() => navigate(`/solver?goal=${goal.id}&action=resolve_scope`)}>回求解页修正范围</Button>
+                              ) : null}
+                            </li>
+                          ))}
                         </ul>
                       </div>
                     ) : null}

@@ -20,6 +20,15 @@ import { diffKindLabel, modelStatusLabel, statusLabel } from "@/lib/labels";
 import { type MemoryOutcome, type MemoryUsageSnapshot, memoryHeadline, memoryOutcomeLabel } from "@/lib/memory-usage";
 import { preferredSchedule, scheduleForRun } from "@/lib/schedule";
 import { modelStatusTone, statusTone } from "@/lib/status";
+import {
+  type AssistantMemoryActionReceipt,
+  type AssistantTaskConstraint,
+  memoryReceiptStatusLabel,
+  parseGoalContext,
+  raisedBudgetSeconds,
+  TASK_CONSTRAINT_SOURCE_NOTE,
+  taskConstraintHardnessLabel,
+} from "@/lib/task-context";
 
 /** 解析过程状态机：thinking=请求在途，parsed=成功（参数面板门控），failed=页内错误条。 */
 type InterpretPhase = "idle" | "thinking" | "parsed" | "failed";
@@ -130,8 +139,9 @@ export function SolverPage() {
   const [changeLimitEnabled, setChangeLimitEnabled] = useState(false);
   // MEM-D3（目标连续性）：goalId 绑定状态/口径提示条文案（确认卡内展示）。
   const [goalNotice, setGoalNotice] = useState("");
-  // MEM-D3（继续处理入口）：goals 页跳转 /solver?goal=<id> 时挂载即绑定。
-  const [searchParams] = useSearchParams();
+  // MEM-D3（继续处理入口）：goals 页跳转 /solver?goal=<id> 时挂载即绑定；
+  // setSearchParams 供 §4.5 的 URL 同步（新建目标写入 goal、清除关联删除）。
+  const [searchParams, setSearchParams] = useSearchParams();
   const goalParamBound = useRef(false);
   // MEM-D2/D6：验收报告在 run completed 之后于独立事务里异步落库。这里记录
   // 「带 goal 的 run 已完成但报告未就绪」的轮询截止时刻，防止验收层挂掉时
@@ -187,6 +197,9 @@ export function SolverPage() {
   useEffect(probeAssistant, [probeAssistant]);
   // MEM-D3（继续处理入口）：goals 页「修正范围后重新求解」跳转 /solver?goal=<id>，
   // 本页挂载即读取并绑定该目标——之后确认求解与手动求解都会带上同一 goal_id。
+  // 07 §4.4 续办恢复：不只绑 id——goal.instruction 与 context.scope（范围/日期
+  // 草稿）一并回填，基准默认该目标的工作草稿（§4.6）；context 为空的旧目标只
+  // 回填 instruction，范围留空照旧；恢复失败不阻塞绑定（降级为现状只绑 id）。
   useEffect(() => {
     const goalParam = searchParams.get("goal");
     if (!goalParam || goalParamBound.current) return;
@@ -195,8 +208,25 @@ export function SolverPage() {
     http.get<GoalResponse>(`/api/v1/goals/${goalParam}`)
       .then(({ data: goal }) => {
         setGoalId(goal.id);
+        setInstruction(goal.instruction);
+        const context = parseGoalContext((goal as GoalResponse & { context?: unknown }).context);
+        const scope = context?.scope;
+        if (scope) {
+          const restored = {
+            business_lines: scope.business_lines ?? [],
+            product_types: scope.product_types ?? [],
+            class_business_ids: scope.class_business_ids ?? [],
+            date_from: scope.date_from ?? null,
+            date_to: scope.date_to ?? null,
+            date_window_days: scope.date_window_days ?? defaultParams.date_window_days,
+          };
+          setParams((current) => ({ ...current, ...restored }));
+          // 恢复的范围成为「扩大范围」判定的草稿基线（MEM-I2 共享草稿之上续办）。
+          parsedScopeBaseline.current = { business_lines: restored.business_lines, class_business_ids: restored.class_business_ids };
+        }
+        if (context?.work_draft_schedule_id) setBaselineId(context.work_draft_schedule_id);
         const instruction = goal.instruction.length > 40 ? `${goal.instruction.slice(0, 40)}…` : goal.instruction;
-        setGoalNotice(`已关联目标 #${goal.id.slice(0, 8)}「${instruction}」：修正范围后重新求解，验收仍回灌同一目标。`);
+        setGoalNotice(`已关联目标 #${goal.id.slice(0, 8)}「${instruction}」：${scope ? "已恢复该目标的范围与指令上下文，" : ""}修正范围后重新求解，验收仍回灌同一目标。`);
         toast.success("已关联待继续的目标，求解结束后自动验收");
       })
       .catch((error) => {
@@ -240,6 +270,56 @@ export function SolverPage() {
     },
   });
   const submit = useSubmitSolverRunApiV1SolverRunsPost({ mutation: { onSuccess: (result) => { setRunId(result.id); setCurrent(result); toast.success("求解任务已创建"); }, onError: (error) => toast.error(errorMessage(error)) } });
+  /**
+   * 07 §5.2 加预算重跑的独立提交函数：刻意不经过 solveFromInterpretation——该函数
+   * 开头的 interpretation/unsupported 守卫在「goals-page 报告区、刷新后的求解页」
+   * 等无解析状态场景必然提前返回。这里直接复用手动求解提交路径（SolverParams
+   * onSubmit → submit.mutate）：只把时限按 min(max(当前×3, 90), 900) 抬升，
+   * 范围/日期/规则键全部沿用共享参数草稿（MEM-I2），不重新解析、不重选范围。
+   * options 供挂载 action 场景显式传入回填后的草稿与 goalId（绕过闭包时序）。
+   */
+  const submitBudgetRetry = (options: { params?: SolverParamValues; goalId?: string } = {}) => {
+    const base = options.params ?? params;
+    const boundGoalId = options.goalId ?? goalId;
+    const nextParams = { ...base, time_limit_seconds: raisedBudgetSeconds(base.time_limit_seconds) };
+    setParams(nextParams);
+    toast.success(`时间预算已加大至 ${nextParams.time_limit_seconds} 秒，正在重新提交求解`);
+    submit.mutate({
+      data: {
+        ...nextParams,
+        solver_rules: [...new Set([...nextParams.solver_rules, ...SYSTEM_RULE_KEYS])],
+        goal_id: boundGoalId || null,
+        wait: false,
+      },
+    });
+  };
+  // 07 §5.2：goals-page 的「加大时间预算重跑」按钮跳转 /solver?goal=<id>&action=raise_budget，
+  // 挂载时解析 action 参数——等目标绑定与上下文回填完成（goalId 就位）后执行同一
+  // submitBudgetRetry，「一键」语义不依赖解析状态。执行后摘掉 action 参数，防止刷新重复提交。
+  const mountActionHandled = useRef(false);
+  useEffect(() => {
+    const actionParam = searchParams.get("action");
+    if (!actionParam || mountActionHandled.current) return;
+    if (actionParam === "raise_budget") {
+      if (!goalId) return; // 目标尚未绑定完成，等绑定 effect 完成后的下一轮执行。
+      mountActionHandled.current = true;
+      submitBudgetRetry();
+      const next = new URLSearchParams(searchParams);
+      next.delete("action");
+      setSearchParams(next, { replace: true });
+      return;
+    }
+    if (actionParam === "resolve_scope") {
+      // 回求解页聚焦范围区：参数面板按既有展示规则渲染时滚动到范围字段组
+      // （未展示或测试环境无滚动实现时安全跳过，行为退化为普通续办绑定）。
+      mountActionHandled.current = true;
+      document.getElementById("solver-scope-fieldset")?.scrollIntoView?.({ block: "start" });
+      const next = new URLSearchParams(searchParams);
+      next.delete("action");
+      setSearchParams(next, { replace: true });
+    }
+    // eslint 不在本页校验依赖完整性（沿用文件内其它 effect 的既有风格）。
+  }, [goalId, searchParams, setSearchParams, submitBudgetRetry]);
   useEffect(() => { if (progress.data) { setCurrent(progress.data); if (progress.data.status === "completed" || progress.data.status === "failed") { void Promise.all([client.invalidateQueries({ queryKey: getListSchedulesApiV1SchedulesGetQueryKey() }), client.invalidateQueries({ queryKey: getListSolverRunsApiV1SolverRunsGetQueryKey() }), client.invalidateQueries({ queryKey: getOverviewApiV1OverviewGetQueryKey() })]); } } }, [client, progress.data]);
   const courseRows = asArray<CourseSessionResponse>(courses.data);
   const scopeOptions = {
@@ -371,6 +451,7 @@ export function SolverPage() {
     setPhase("thinking");
     try {
       // 优先走 SSE 流式接口：thinking 增量实时上屏，result 与同步接口同构。
+      // 07 §6.4：已绑定目标时两条通道都必须携带 goal_id（续办增量解析的前置条件）。
       const data = await streamInterpretInstruction(instruction, controller.signal, {
         onThinking: (delta) => setLiveThinking((current) => current + delta),
         onStage: (stage) => {
@@ -380,7 +461,7 @@ export function SolverPage() {
             setStageIndex(index);
           }
         },
-      });
+      }, goalId || undefined);
       applyInterpretation(data);
     } catch {
       // 用户主动取消不算失败，安静回到初始态等下一次解析。
@@ -389,8 +470,13 @@ export function SolverPage() {
         return;
       }
       try {
-        // 流式通道不可用（网络/网关缓冲/协议中断）时回退老接口，降级路径必须保留。
-        const { data } = await http.post<Interpretation>("/api/v1/assistant/interpret", { instruction }, { signal: controller.signal });
+        // 流式通道不可用（网络/网关缓冲/协议中断）时回退老接口，降级路径必须保留；
+        // 同步回退的请求体与流式主路径口径一致（同样带 goal_id）。
+        const { data } = await http.post<Interpretation>(
+          "/api/v1/assistant/interpret",
+          { instruction, ...(goalId ? { goal_id: goalId } : {}) },
+          { signal: controller.signal },
+        );
         applyInterpretation(data);
       } catch (error) {
         if (controller.signal.aborted) {
@@ -479,6 +565,14 @@ export function SolverPage() {
         });
         activeGoalId = goal.id;
         setGoalId(goal.id);
+        // 07 §4.5：新建目标成功即把 goal_id 同步进 URL（replace 不新增历史记录），
+        // 刷新/分享链接可回到同一任务上下文；绑定守卫同步置位，避免 URL 变化
+        // 触发绑定 effect 重复拉取与回填。
+        goalParamBound.current = true;
+        const nextSearchParams = new URLSearchParams(searchParams);
+        nextSearchParams.set("goal", goal.id);
+        nextSearchParams.delete("action");
+        setSearchParams(nextSearchParams, { replace: true });
         setGoalNotice(`已登记目标 #${goal.id.slice(0, 8)}${baselineId ? (changeLimitEnabled ? "，按所选基准的变更数验收" : "，已记录基准版本用于变更对比（未设变更上限）") : ""}。`);
       }
       const { data } = await http.post<SolverRunResponse>("/api/v1/assistant/solve", {
@@ -493,6 +587,10 @@ export function SolverPage() {
         date_window_days: params.date_window_days,
         solver_rules: interpretation.solver_rules,
         time_limit_seconds: params.time_limit_seconds,
+        // 07 §6.5：任务级约束随请求体全量携带（软约束链的前端填充——goal.context.
+        // soft_task_constraints 的唯一来源），与确认卡展示同源；hard 约束走清单
+        // 编译（§2.4），请求体带全量由后端同键去重兜底。
+        task_constraints: interpretation.task_constraints ?? [],
         goal_id: trackGoal ? activeGoalId : null,
         wait: false,
       });
@@ -526,7 +624,7 @@ export function SolverPage() {
       aiConfigured={assistantReady}
       publishedScheduleCount={scheduleList.filter((item) => item.status === "published").length}
     />
-    <section className="border border-blue-200 bg-blue-50/40 p-5"><div className="flex flex-wrap items-center gap-2"><Bot className="size-4 text-blue-600" /><h2 className="font-semibold">一句话排课</h2><Badge tone={assistantReady === true ? "green" : "yellow"}>{assistantReady === true ? `${assistantEngine} 已接入` : assistantReady === false ? "AI 模型待配置" : assistantProbeError ? "AI 配置读取失败" : "正在读取 AI 配置"}</Badge>{assistantProbeError ? <Button size="sm" variant="outline" onClick={probeAssistant}>重试</Button> : null}</div><p className="mt-2 text-xs text-zinc-500">自然语言 → AI 解析业务范围与规则 → 教务确认 → CP-SAT 确定性求解 → 课表与日历下发</p><textarea aria-label="一句话排课指令" className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500 disabled:bg-zinc-50 disabled:text-zinc-400" value={instruction} disabled={phase === "thinking"} onChange={(event) => { setInstruction(event.target.value); setInterpretation(null); if (phase === "failed") { setPhase("idle"); setInterpretError(""); } }} /><div className="mt-3 flex flex-wrap gap-2"><Button onClick={interpret} disabled={assistantReady !== true || interpreting || instruction.trim().length < 2}><Sparkles className="size-4" />{interpreting ? "AI 正在理解指令" : "让 AI 解析排课指令"}</Button>{interpreting ? <Button variant="outline" onClick={cancelInterpret}>取消解析</Button> : null}{interpretation ? <Button variant="outline" onClick={solveFromInterpretation} disabled={Boolean(interpretation.unsupported_requirements?.length) || goalBusy || Boolean(scopeExpansion)}><Play className="size-4" />{goalBusy ? "正在登记目标…" : "确认并开始求解"}</Button> : null}</div>{assistantReady === false ? <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><div>普通集成应用继续负责外部表格和日历；一句话理解改由独立 AI 模型接口完成，不再要求 Aily 应用标识和技能标识。</div><Button className="mt-3" size="sm" variant="outline" onClick={() => navigate("/integrations?section=ai")}><Settings2 className="size-4" />配置一句话排课 AI</Button></div> : null}{phase === "thinking" ? <InterpretProgress stageIndex={stageIndex} elapsedSeconds={elapsedSeconds} liveText={liveThinking} /> : null}{phase === "failed" ? <div role="alert" className="mt-4 border-l-2 border-red-500 bg-red-50 px-4 py-3 text-sm text-red-800"><div>AI 解析失败：{interpretError}</div>{elapsedSeconds > 30 ? <p className="mt-1 text-xs text-amber-800">本次解析超过 30 秒仍未返回，可稍后重试，或改用手动参数求解。</p> : null}<Button className="mt-2" size="sm" variant="outline" onClick={() => void interpret()} disabled={assistantReady !== true || instruction.trim().length < 2}><RefreshCw className="size-3.5" />重试解析</Button></div> : null}{interpretation ? <><p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-xs text-zinc-600">{interpretation.summary}；解析来源：{interpretation.source === "feishu_aily" ? "Aily（可选通道）" : assistantEngine}。</p><InterpretThought thinking={interpretation.thinking ?? ""} seconds={parsedSeconds} /><div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3"><Scope label="业务线" values={params.business_lines} /><Scope label="产品班型" values={params.product_types} /><Scope label="班级范围" values={params.class_business_ids} /><Scope label="日期范围" values={[params.date_from, params.date_to].filter(Boolean) as string[]} /><Scope label="日期调整窗口" values={[`${params.date_window_days} 天`]} /><Scope label="识别规则" values={interpretation.recognized_rules} /></div><div className="mt-4 flex flex-wrap items-end gap-5 border-t border-blue-200 pt-4"><label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700"><input aria-label="以此为目标跟踪" className="accent-blue-600" type="checkbox" checked={trackGoal} onChange={(event) => setTrackGoal(event.target.checked)} /><span className="inline-flex items-center gap-1.5">以此为目标跟踪<InfoTooltip label="以此为目标跟踪">把这次指令登记成持久目标：每次求解结束后按课次覆盖、禁排复核、硬冲突、只出草稿等清单逐项验收，缺口与建议下一步会显示在下方报告中；发布永远不会被自动执行。</InfoTooltip></span></label>{trackGoal ? <label className="block text-sm text-zinc-700"><span className="inline-flex items-center gap-1.5">基准版本<InfoTooltip label="基准版本">记录所选基准版本，用于对比本次结果的变更明细与数量；默认不设变更上限，勾选「设置变更上限」后才会按上限验收。「尽量少改」是优化目标，不会被升级为「绝不能改」。</InfoTooltip></span><Select aria-label="基准版本" selectSize="sm" containerClassName="mt-1 w-52" value={baselineId} onChange={(event) => setBaselineId(event.target.value)}><option value="">不设基准</option>{scheduleList.map((item) => <option key={item.id} value={item.id}>v{item.version_no} {item.name}{item.status === "published" ? "（已发布）" : ""}</option>)}</Select></label> : null}{trackGoal && baselineId ? <div className="flex flex-wrap items-center gap-3 text-sm text-zinc-700"><label className="flex cursor-pointer items-center gap-2"><input aria-label="设置变更上限" className="accent-blue-600" type="checkbox" checked={changeLimitEnabled} onChange={(event) => setChangeLimitEnabled(event.target.checked)} /><span className="inline-flex items-center gap-1.5">设置变更上限<InfoTooltip label="设置变更上限">默认不设上限：基准版本只用于记录变更明细与数量对比。勾选后创建目标清单才会附带 max_changes 项——相对所选基准的变更数超过上限时验收不通过；只设上限，不改变求解行为。</InfoTooltip></span></label>{changeLimitEnabled ? <label className="block"><span className="inline-flex items-center gap-1.5">验收上限（变更数）<InfoTooltip label="验收上限">已开启变更上限：创建目标清单会附带 max_changes 项，相对所选基准的变更数超过这个上限时验收不通过；只设上限，不改变求解行为。</InfoTooltip></span><input aria-label="变更数验收上限" className="mt-1 h-9 w-24 rounded-md border border-zinc-300 bg-white px-2 text-sm tabular-nums outline-none focus:border-blue-500" type="number" min={0} max={100000} step={5} value={maxChangesLimit} onChange={(event) => setMaxChangesLimit(Math.max(0, Math.round(Number(event.target.value)) || 0))} /></label> : null}<Badge tone="blue">{changeLimitEnabled ? "已选基准：清单将附带变更数验收项" : "已选基准：仅记录基准用于变更对比，未设变更上限"}</Badge></div> : null}</div><div className="mt-3 space-y-2 text-xs text-amber-900">{interpretation.coverage_warnings?.map((warning) => <p key={warning}>{warning}</p>)}{interpretation.unsupported_requirements?.length ? <div role="alert" className="border-l-2 border-amber-500 bg-amber-50 p-3"><strong>以下要求尚未进入求解：</strong><ul>{interpretation.unsupported_requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul><p>请先在规则管理中补充已支持的结构化规则，并修订指令后重新解析。</p></div> : null}</div></> : null}{goalId && goalNotice ? <p role="status" className="mt-3 border-l-2 border-blue-400 bg-blue-50/60 px-3 py-2 text-xs text-zinc-700">{goalNotice}</p> : null}</section>
+    <section className="border border-blue-200 bg-blue-50/40 p-5"><div className="flex flex-wrap items-center gap-2"><Bot className="size-4 text-blue-600" /><h2 className="font-semibold">一句话排课</h2><Badge tone={assistantReady === true ? "green" : "yellow"}>{assistantReady === true ? `${assistantEngine} 已接入` : assistantReady === false ? "AI 模型待配置" : assistantProbeError ? "AI 配置读取失败" : "正在读取 AI 配置"}</Badge>{assistantProbeError ? <Button size="sm" variant="outline" onClick={probeAssistant}>重试</Button> : null}</div><p className="mt-2 text-xs text-zinc-500">自然语言 → AI 解析业务范围与规则 → 教务确认 → CP-SAT 确定性求解 → 课表与日历下发</p><textarea aria-label="一句话排课指令" className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500 disabled:bg-zinc-50 disabled:text-zinc-400" value={instruction} disabled={phase === "thinking"} onChange={(event) => { setInstruction(event.target.value); setInterpretation(null); if (phase === "failed") { setPhase("idle"); setInterpretError(""); } }} /><div className="mt-3 flex flex-wrap gap-2"><Button onClick={interpret} disabled={assistantReady !== true || interpreting || instruction.trim().length < 2}><Sparkles className="size-4" />{interpreting ? "AI 正在理解指令" : "让 AI 解析排课指令"}</Button>{interpreting ? <Button variant="outline" onClick={cancelInterpret}>取消解析</Button> : null}{interpretation ? <Button variant="outline" onClick={solveFromInterpretation} disabled={Boolean(interpretation.unsupported_requirements?.length) || goalBusy || Boolean(scopeExpansion)}><Play className="size-4" />{goalBusy ? "正在登记目标…" : "确认并开始求解"}</Button> : null}</div>{assistantReady === false ? <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><div>普通集成应用继续负责外部表格和日历；一句话理解改由独立 AI 模型接口完成，不再要求 Aily 应用标识和技能标识。</div><Button className="mt-3" size="sm" variant="outline" onClick={() => navigate("/integrations?section=ai")}><Settings2 className="size-4" />配置一句话排课 AI</Button></div> : null}{phase === "thinking" ? <InterpretProgress stageIndex={stageIndex} elapsedSeconds={elapsedSeconds} liveText={liveThinking} /> : null}{phase === "failed" ? <div role="alert" className="mt-4 border-l-2 border-red-500 bg-red-50 px-4 py-3 text-sm text-red-800"><div>AI 解析失败：{interpretError}</div>{elapsedSeconds > 30 ? <p className="mt-1 text-xs text-amber-800">本次解析超过 30 秒仍未返回，可稍后重试，或改用手动参数求解。</p> : null}<Button className="mt-2" size="sm" variant="outline" onClick={() => void interpret()} disabled={assistantReady !== true || instruction.trim().length < 2}><RefreshCw className="size-3.5" />重试解析</Button></div> : null}{interpretation ? <><p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-xs text-zinc-600">{interpretation.summary}；解析来源：{interpretation.source === "feishu_aily" ? "Aily（可选通道）" : assistantEngine}。</p><InterpretThought thinking={interpretation.thinking ?? ""} seconds={parsedSeconds} /><div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3"><Scope label="业务线" values={params.business_lines} /><Scope label="产品班型" values={params.product_types} /><Scope label="班级范围" values={params.class_business_ids} /><Scope label="日期范围" values={[params.date_from, params.date_to].filter(Boolean) as string[]} /><Scope label="日期调整窗口" values={[`${params.date_window_days} 天`]} /><Scope label="识别规则" values={interpretation.recognized_rules} /></div>{interpretation.task_constraints?.length ? <TaskConstraintsPanel constraints={interpretation.task_constraints} /> : null}{interpretation.memory_action_receipts?.length ? <MemoryReceiptsPanel receipts={interpretation.memory_action_receipts} /> : null}<div className="mt-4 flex flex-wrap items-end gap-5 border-t border-blue-200 pt-4"><label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-700"><input aria-label="以此为目标跟踪" className="accent-blue-600" type="checkbox" checked={trackGoal} onChange={(event) => setTrackGoal(event.target.checked)} /><span className="inline-flex items-center gap-1.5">以此为目标跟踪<InfoTooltip label="以此为目标跟踪">把这次指令登记成持久目标：每次求解结束后按课次覆盖、禁排复核、硬冲突、只出草稿等清单逐项验收，缺口与建议下一步会显示在下方报告中；发布永远不会被自动执行。</InfoTooltip></span></label>{trackGoal ? <label className="block text-sm text-zinc-700"><span className="inline-flex items-center gap-1.5">基准版本<InfoTooltip label="基准版本">记录所选基准版本，用于对比本次结果的变更明细与数量；默认不设变更上限，勾选「设置变更上限」后才会按上限验收。「尽量少改」是优化目标，不会被升级为「绝不能改」。</InfoTooltip></span><Select aria-label="基准版本" selectSize="sm" containerClassName="mt-1 w-52" value={baselineId} onChange={(event) => setBaselineId(event.target.value)}><option value="">不设基准</option>{scheduleList.map((item) => <option key={item.id} value={item.id}>v{item.version_no} {item.name}{item.status === "published" ? "（已发布）" : ""}</option>)}</Select></label> : null}{trackGoal && baselineId ? <div className="flex flex-wrap items-center gap-3 text-sm text-zinc-700"><label className="flex cursor-pointer items-center gap-2"><input aria-label="设置变更上限" className="accent-blue-600" type="checkbox" checked={changeLimitEnabled} onChange={(event) => setChangeLimitEnabled(event.target.checked)} /><span className="inline-flex items-center gap-1.5">设置变更上限<InfoTooltip label="设置变更上限">默认不设上限：基准版本只用于记录变更明细与数量对比。勾选后创建目标清单才会附带 max_changes 项——相对所选基准的变更数超过上限时验收不通过；只设上限，不改变求解行为。</InfoTooltip></span></label>{changeLimitEnabled ? <label className="block"><span className="inline-flex items-center gap-1.5">验收上限（变更数）<InfoTooltip label="验收上限">已开启变更上限：创建目标清单会附带 max_changes 项，相对所选基准的变更数超过这个上限时验收不通过；只设上限，不改变求解行为。</InfoTooltip></span><input aria-label="变更数验收上限" className="mt-1 h-9 w-24 rounded-md border border-zinc-300 bg-white px-2 text-sm tabular-nums outline-none focus:border-blue-500" type="number" min={0} max={100000} step={5} value={maxChangesLimit} onChange={(event) => setMaxChangesLimit(Math.max(0, Math.round(Number(event.target.value)) || 0))} /></label> : null}<Badge tone="blue">{changeLimitEnabled ? "已选基准：清单将附带变更数验收项" : "已选基准：仅记录基准用于变更对比，未设变更上限"}</Badge></div> : null}</div><div className="mt-3 space-y-2 text-xs text-amber-900">{interpretation.coverage_warnings?.map((warning) => <p key={warning}>{warning}</p>)}{interpretation.unsupported_requirements?.length ? <div role="alert" className="border-l-2 border-amber-500 bg-amber-50 p-3"><strong>以下要求尚未进入求解（待补充）：</strong><ul>{interpretation.unsupported_requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul><p>两条出路：在目标清单中为该要求补齐参数（补参后重新求解即可编译进求解），或修订目标清单明确放弃该要求——不支持带着未实现的要求开始求解。</p></div> : null}</div></> : null}{goalId && goalNotice ? <p role="status" className="mt-3 border-l-2 border-blue-400 bg-blue-50/60 px-3 py-2 text-xs text-zinc-700">{goalNotice}</p> : null}</section>
     <div className="grid gap-2 xl:grid-cols-[360px_minmax(0,1fr)]">
       {showParams ? <div className="animate-fade-in"><SolverParams
         params={params}
@@ -537,7 +635,16 @@ export function SolverPage() {
         aiWindowBadge={aiWindowFilled && params.date_window_days !== defaultParams.date_window_days}
         onManualEdit={markManualEdit}
         linkedGoalId={goalId}
-        onClearGoal={() => { setGoalId(""); setGoalNotice(""); goalParamBound.current = true; }}
+        onClearGoal={() => {
+          setGoalId("");
+          setGoalNotice("");
+          goalParamBound.current = true;
+          // 07 §4.5：清除目标关联时把 goal 参数从 URL 一并删除（action 同步摘除）。
+          const next = new URLSearchParams(searchParams);
+          next.delete("goal");
+          next.delete("action");
+          setSearchParams(next, { replace: true });
+        }}
         scopeExpansion={scopeExpansion}
         onScopeFieldChange={handleScopeFieldChange}
         onConfirmScopeExpansion={confirmScopeExpansion}
@@ -545,7 +652,7 @@ export function SolverPage() {
         onSubmit={() => submit.mutate({ data: { ...params, solver_rules: [...new Set([...params.solver_rules, ...SYSTEM_RULE_KEYS])], goal_id: goalId || null, wait: false } })}
       /></div> : null}
       <div className={showParams ? undefined : "xl:col-span-2"}>
-        <RunPanel run={activeRun} onUseInstruction={applySuggestedInstruction} />
+        <RunPanel run={activeRun} onUseInstruction={applySuggestedInstruction} onRaiseBudget={goalId ? () => submitBudgetRetry() : undefined} />
       </div>
     </div>
     <ScheduleChangePanel
@@ -675,7 +782,8 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, aiWind
         <SlidersHorizontal className="size-4 text-blue-600" />
         <h2 className="font-semibold">手动求解参数</h2>
       </div>
-      <fieldset className="mt-5 grid gap-3 border-b border-zinc-100 pb-4">
+      {/* 07 §5.2：resolve_scope 补救动作「回求解页聚焦范围区」的滚动锚点。 */}
+      <fieldset id="solver-scope-fieldset" className="mt-5 grid gap-3 border-b border-zinc-100 pb-4">
         <legend className="sr-only">求解范围</legend>
         <div className="text-xs font-medium text-zinc-500">求解范围</div>
         <label className="block text-sm text-zinc-700">
@@ -808,6 +916,58 @@ function SolverParams({ params, setParams, scope, selectedCount, pending, aiWind
 
 function Scope({ label, values }: { label: string; values: string[] }) { return <div><div className="text-xs text-zinc-400">{label}</div><div className="mt-1 flex flex-wrap gap-1">{values.length ? values.map((value) => <Badge key={value} tone="blue">{value}</Badge>) : <span className="text-xs text-zinc-500">全部</span>}</div></div>; }
 
+const TASK_SUBJECT_LABELS: Record<string, string> = { teacher: "教师", classroom: "教室", cohort: "班级" };
+
+/**
+ * 确认卡「本次任务要求」区（07 §6.1）：解析产出的任务级约束逐条展示
+ * （主体×时段 + hard/soft 徽标），固定文案声明作用域——仅本次任务、不进规则库。
+ * 与 solveFromInterpretation 请求体的 task_constraints 同源（同一 interpretation 状态）。
+ */
+function TaskConstraintsPanel({ constraints }: { constraints: AssistantTaskConstraint[] }) {
+  return (
+    <div aria-label="本次任务要求" className="mt-4 border-t border-blue-200 pt-4">
+      <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-zinc-500">
+        本次任务要求
+        <Badge tone="neutral">{TASK_CONSTRAINT_SOURCE_NOTE}</Badge>
+      </div>
+      <ul className="mt-2 space-y-1.5">
+        {constraints.map((item, index) => (
+          <li key={item.id || `${item.source_text}-${index}`} className="flex flex-wrap items-center gap-2 border-l-2 border-zinc-200 pl-3 text-xs leading-5 text-zinc-700">
+            <Badge tone={item.hardness === "soft" ? "neutral" : "blue"}>{taskConstraintHardnessLabel(item.hardness)}</Badge>
+            <span>{item.source_text}</span>
+            <span className="text-zinc-400">
+              {TASK_SUBJECT_LABELS[item.subject_type] ?? item.subject_type} {item.subject_ids.join("、")}
+              {item.slot_business_ids.length ? ` × 时段 ${item.slot_business_ids.join("、")}` : " × 时段待补充"}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * 确认卡「记忆动作回执」区（07 §6.1）：explicit 动作已直接执行→绿色徽标 +
+ * 文案（含「可在记忆页修改或撤销」的固定提示，即修改/撤销入口）；推测或降级→
+ * 黄色徽标 + 「已放入记忆收件箱待确认」，按既有流程在记忆页审批。
+ */
+function MemoryReceiptsPanel({ receipts }: { receipts: AssistantMemoryActionReceipt[] }) {
+  return (
+    <div aria-label="记忆动作回执" className="mt-4 border-t border-blue-200 pt-4">
+      <div className="text-xs font-medium text-zinc-500">记忆动作回执</div>
+      <ul className="mt-2 space-y-1.5">
+        {receipts.map((item, index) => (
+          <li key={item.action_id || `${item.receipt}-${index}`} className="flex flex-wrap items-center gap-2 border-l-2 border-zinc-200 pl-3 text-xs leading-5 text-zinc-700">
+            <Badge tone={item.status === "executed" ? "green" : "yellow"}>{memoryReceiptStatusLabel(item.status)}</Badge>
+            <span>{item.receipt}</span>
+            {item.status !== "executed" ? <span className="text-amber-800">已放入记忆收件箱待确认</span> : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function ScheduleChangePanel({
   base,
   target,
@@ -889,7 +1049,7 @@ function ScheduleChangePanel({
   );
 }
 
-function RunPanel({ run, onUseInstruction }: { run: SolverRunResponse | null; onUseInstruction?: (value: string) => void }) {
+function RunPanel({ run, onUseInstruction, onRaiseBudget }: { run: SolverRunResponse | null; onUseInstruction?: (value: string) => void; onRaiseBudget?: () => void }) {
   const presolved = Boolean(run?.presolve_infeasible);
   const finished = run?.status === "completed";
   return (
@@ -929,7 +1089,7 @@ function RunPanel({ run, onUseInstruction }: { run: SolverRunResponse | null; on
         </div>
       ) : null}
       {run?.error_message ? <div className="mt-4 text-sm text-red-700">{run.error_message}</div> : null}
-      <GoalReportSection run={run} />
+      <GoalReportSection run={run} onRaiseBudget={onRaiseBudget} />
       <ExplanationPanel run={run} onUseInstruction={onUseInstruction} />
     </section>
   );
@@ -1150,7 +1310,7 @@ function Value({ label, value }: { label: string; value: string }) { return <div
  * - 验收执行失败（acceptance_status=failed 的失败标记）→ amber「验收失败：原因」；
  * - 报告就绪 → 逐项结论，unverifiable（无法验证）单独标注，绝不与通过混同。
  */
-function GoalReportSection({ run }: { run: SolverRunResponse | null }) {
+function GoalReportSection({ run, onRaiseBudget }: { run: SolverRunResponse | null; onRaiseBudget?: () => void }) {
   const report = parseGoalReport(run?.goal_report);
   if (!report) {
     if (run?.goal_id && run.status === "completed") {
@@ -1207,7 +1367,15 @@ function GoalReportSection({ run }: { run: SolverRunResponse | null }) {
         <div role="status" className="mt-2 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-amber-900">
           <div className="text-xs font-medium">目标未完成：{report.failed_count} 项缺口，建议的下一步</div>
           <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs">
-            {report.gaps.map((gap) => <li key={gap.key}>{gap.next_step}</li>)}
+            {report.gaps.map((gap) => (
+              <li key={gap.key} className="flex flex-wrap items-center gap-2">
+                <span>{gap.next_step}</span>
+                {/* 07 §5.2：remedy=raise_budget 的缺口动作化——按钮直接走独立提交路径。 */}
+                {gap.remedy === "raise_budget" && onRaiseBudget ? (
+                  <Button size="sm" variant="outline" onClick={onRaiseBudget}>加大时间预算重跑</Button>
+                ) : null}
+              </li>
+            ))}
           </ul>
           {report.decision?.reason ? <p className="mt-1 text-xs text-amber-800">{report.decision.reason}。</p> : null}
         </div>
