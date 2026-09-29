@@ -354,7 +354,7 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
       <DialogContent className="max-w-4xl">
         <DialogTitle className="text-base font-semibold">智能导入</DialogTitle>
         <DialogDescription className="mt-1 text-sm text-zinc-500">
-          上传任意教务导出的 Excel / CSV，自动识别表头并映射到 14 个规范字段；确认校验通过后才会写入主数据。
+          上传任意教务导出的 Excel / CSV，自动识别表头并映射到 14 个规范字段；确认校验通过后才会写入基础资料。
         </DialogDescription>
         <StepIndicator step={step} />
 
@@ -696,7 +696,7 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
                 : "insert 只新增不更新：与现有课次冲突的行会原样保留，已存在的数据不做改动。"}
             </p>
             <div className="border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-              即将把 {stats.rows_valid} 行数据写入主数据，导入会生成新的草稿课表版本，不影响当前已发布版本。
+              即将把 {stats.rows_valid} 行数据写入基础资料，导入会生成新的草稿课表版本，不影响当前已发布版本。
             </div>
             {commit.isPending ? <AnalysisPlaceholder label="正在导入" /> : null}
             {commit.isError ? (

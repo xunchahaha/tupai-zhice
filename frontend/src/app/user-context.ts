@@ -7,6 +7,8 @@ export interface AppOutletContext {
   user: UserResponse;
   scheduleAccessRole?: ScheduleAccessRole;
   scheduleSet?: ScheduleSet;
+  /** 课表方案列表是否仍在加载：加载期间 scheduleAccessRole 为空，不能据此判定「无权限」。 */
+  scheduleSetLoading: boolean;
 }
 
 export function useAppUser(): UserResponse {
@@ -34,4 +36,16 @@ export function canScheduleCurrentSet(
   scheduleAccessRole?: ScheduleAccessRole,
 ): boolean {
   return user.role === "admin" || (user.role === "scheduler" && scheduleAccessRole === "scheduler");
+}
+
+/**
+ * 发布/回滚/删除版本的判定（原 versions-page 内联口径的单一来源）：
+ * 全局角色须为管理员或审批人，且对当前课表方案持有审批权限。
+ * 排课员生成草稿后只能等待有权限的人发布。
+ */
+export function canPublishCurrentSet(
+  user: UserResponse,
+  scheduleAccessRole?: ScheduleAccessRole,
+): boolean {
+  return (user.role === "admin" || user.role === "approver") && scheduleAccessRole === "approver";
 }

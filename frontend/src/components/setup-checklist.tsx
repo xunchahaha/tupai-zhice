@@ -1,20 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, Circle, ListChecks } from "lucide-react";
 import { Link } from "react-router-dom";
 
-import { http } from "@/api/http";
 import { cn } from "@/lib/cn";
-
-export interface SetupChecklistState {
-  /** course-sessions 总数大于 0 即视为主数据已导入。 */
-  masterDataImported: boolean;
-  /** status=active 的规则数量。 */
-  activeRuleCount: number;
-  /** AI 配置探测结果；null 表示探测中或探测失败。 */
-  aiConfigured: boolean | null;
-  /** status=published 的课表版本数量。 */
-  publishedScheduleCount: number;
-}
+import { ROUTES, schedulePath, settingsPath } from "@/lib/routes";
+import { type SetupChecklistState } from "@/lib/setup-state";
 
 interface ChecklistItem {
   key: string;
@@ -28,29 +17,15 @@ interface ChecklistItem {
 
 function checklistItems(state: SetupChecklistState): ChecklistItem[] {
   return [
-    { key: "master-data", label: "主数据已导入", to: "/master-data", actionLabel: "去导入", done: state.masterDataImported },
-    { key: "rules", label: "已确认排课规则", to: "/rules", actionLabel: "去配规则", done: state.activeRuleCount > 0 },
-    { key: "ai", label: "一句话排课 AI", to: "/settings?section=ai", actionLabel: "去配置", done: state.aiConfigured === true, optional: true },
-    { key: "publish", label: "已发布课表版本", to: "/versions", actionLabel: "去发布", done: state.publishedScheduleCount > 0 },
+    { key: "master-data", label: "基础资料已导入", to: ROUTES.masterData, actionLabel: "先导入课程资料", done: state.masterDataImported },
+    { key: "rules", label: "已确认排课规则", to: ROUTES.rules, actionLabel: "去配规则", done: state.activeRuleCount > 0 },
+    { key: "ai", label: "一句话排课 AI", to: settingsPath("ai"), actionLabel: "去配置", done: state.aiConfigured === true, optional: true },
+    { key: "publish", label: "已发布课表版本", to: schedulePath({ view: "history" }), actionLabel: "去发布", done: state.publishedScheduleCount > 0 },
   ];
 }
 
 /**
- * 探测一句话排课 AI 是否已配置；探测中与探测失败都按「可选」呈现，不弹错误。
- */
-export function useAiConfigurationProbe(): boolean | null {
-  const probe = useQuery({
-    queryKey: ["integrations", "ai-configuration"],
-    queryFn: async () => (await http.get<{ configured: boolean }>("/api/v1/integrations/ai/configuration")).data,
-    retry: false,
-    staleTime: 5 * 60_000,
-  });
-  if (probe.isPending) return null;
-  return probe.isError ? false : Boolean(probe.data?.configured);
-}
-
-/**
- * 排课就绪度清单：overview 完整版（独立卡片）+ solver 页紧凑版（单行四点）。
+ * 排课就绪度清单：完整版（独立卡片）+ 助手首页的紧凑版（单行四点，只在有未完成项时出现）。
  * 数据全部来自调用方已就绪的查询，组件自身不发列表请求。
  */
 export function SetupChecklist({ variant = "full", ...state }: SetupChecklistState & { variant?: "full" | "compact" }) {
@@ -78,6 +53,8 @@ export function SetupChecklist({ variant = "full", ...state }: SetupChecklistSta
             )}
             <span className={cn(item.done && "text-zinc-600")}>{item.label}</span>
             {item.optional && !item.done ? <span className="text-zinc-400">可选</span> : null}
+            {/* 首次使用：资料还没导入时明确提示先做这一步。 */}
+            {item.key === "master-data" && !item.done ? <span className="font-medium text-amber-700">{item.actionLabel}</span> : null}
           </Link>
         ))}
       </div>

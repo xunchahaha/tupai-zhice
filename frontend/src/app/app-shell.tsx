@@ -1,9 +1,9 @@
-import { Menu, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
+import { CalendarDays, Database, Menu, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck, Sparkles, type LucideIcon } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { NavLink, Outlet, useNavigate, useOutletContext } from "react-router-dom";
+import { Link, Outlet, useLocation, useNavigate, useOutletContext } from "react-router-dom";
 
-import { type UserResponse } from "@/api/generated/models";
+import { type UserResponse, type UserResponseRole } from "@/api/generated/models";
 import { scheduleSetApi, type ScheduleAccessRole, type ScheduleSet } from "@/api/schedule-sets";
 import { authStore, scheduleSetStore } from "@/api/http";
 import { type AppOutletContext, isReadOnlyMember } from "@/app/user-context";
@@ -13,75 +13,65 @@ import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/format";
 import { roleLabel } from "@/lib/labels";
+import { NAV_OWNER, ROUTES } from "@/lib/routes";
 import { toast } from "sonner";
 
-// 分组顺序即 SOP 时序：工作台 → 排课流程 → 变更 → 设置（集成语义并入设置，账号管理同属管理域）。
-const navigation = [
-  { to: "/overview", label: "总览", group: "工作台", memberVisible: true },
-  { to: "/master-data", label: "主数据", group: "工作台", memberVisible: true },
-  { to: "/rules", label: "规则工作台", group: "排课流程", memberVisible: true },
-  { to: "/solver", label: "排课求解", group: "排课流程", memberVisible: false, roles: ["admin", "scheduler"] },
-  { to: "/schedule", label: "课表视图", group: "排课流程", memberVisible: true },
-  { to: "/diagnostics", label: "无解诊断", group: "排课流程", memberVisible: true },
-  { to: "/reschedule", label: "局部调课", group: "变更", memberVisible: false, roles: ["admin", "scheduler"] },
-  { to: "/memory", label: "记忆与偏好", group: "变更", memberVisible: false, roles: ["admin", "scheduler"] },
-  { to: "/goals", label: "目标跟踪", group: "变更", memberVisible: false, roles: ["admin", "scheduler"] },
-  { to: "/versions", label: "版本与回滚", group: "变更", memberVisible: true },
-  { to: "/public-links", label: "公开链接", group: "变更", memberVisible: false, roles: ["admin", "scheduler"] },
-  { to: "/settings", label: "设置", group: "设置", memberVisible: false, roles: ["admin", "scheduler"], icon: Settings },
-  { to: "/accounts", label: "账号管理", group: "设置", memberVisible: false, adminOnly: true },
+// 侧栏只有三个业务入口 + 底部「设置」；规则/偏好/账号等低频管理页从设置进入，不占左侧入口。
+interface NavItem {
+  key: (typeof NAV_OWNER)[number]["owner"];
+  to: string;
+  label: string;
+  icon: LucideIcon;
+  /** 仅这些角色可见；只读成员即使角色符合也不可见（与 RoleRoute 同口径）。 */
+  roles?: readonly UserResponseRole[];
+}
+
+const primaryNavigation: NavItem[] = [
+  { key: "assistant", to: ROUTES.assistant, label: "排课助手", icon: Sparkles },
+  { key: "schedule", to: ROUTES.schedule, label: "课表", icon: CalendarDays },
+  { key: "masterData", to: ROUTES.masterData, label: "基础资料", icon: Database },
 ];
+const settingsNavigation: NavItem = { key: "settings", to: ROUTES.settings, label: "设置", icon: Settings, roles: ["admin", "scheduler"] };
+
+function NavEntry({ item, active, collapsed, close }: { item: NavItem; active: boolean; collapsed?: boolean; close?: () => void }) {
+  const Icon = item.icon;
+  return (
+    <Link
+      to={item.to}
+      title={collapsed ? item.label : undefined}
+      aria-label={collapsed ? item.label : undefined}
+      aria-current={active ? "page" : undefined}
+      onClick={close}
+      className={cn(
+        "flex h-9 items-center rounded-md text-sm text-zinc-600 transition-all duration-150 hover:bg-zinc-100 hover:text-zinc-950 active:scale-[0.98]",
+        collapsed ? "justify-center px-0" : "gap-2 px-2.5",
+        active && "bg-zinc-100/90 text-blue-700 font-medium shadow-2xs",
+      )}
+    >
+      <Icon aria-hidden className="size-4 shrink-0" />
+      {collapsed ? null : item.label}
+    </Link>
+  );
+}
 
 function Nav({ user, scheduleAccessRole, close, collapsed }: { user: UserResponse; scheduleAccessRole?: ScheduleAccessRole; close?: () => void; collapsed?: boolean }) {
-  const visibleNavigation = navigation.filter((item) => {
-    if (item.adminOnly && user.role !== "admin") return false;
-    if (item.roles && !item.roles.includes(user.role)) return false;
-    return !isReadOnlyMember(user, scheduleAccessRole) || item.memberVisible;
-  });
-
-  const groups: { name: string; items: typeof visibleNavigation }[] = [];
-  for (const item of visibleNavigation) {
-    const lastGroup = groups[groups.length - 1];
-    if (lastGroup && lastGroup.name === item.group) {
-      lastGroup.items.push(item);
-    } else {
-      groups.push({ name: item.group, items: [item] });
-    }
-  }
+  const { pathname } = useLocation();
+  // /rules、/memory、/accounts 不在侧栏里，但仍归属「设置」；只看 pathname，query 不影响高亮。
+  const owner = NAV_OWNER.find((entry) => entry.match(pathname.replace(/\/+$/, "") || "/"))?.owner;
+  const showSettings = !!settingsNavigation.roles?.includes(user.role) && !isReadOnlyMember(user, scheduleAccessRole);
 
   return (
-    <nav className={cn("flex-1 overflow-y-auto pr-1", collapsed ? "mt-4 space-y-3" : "mt-6 space-y-4")}>
-      {groups.map((group, groupIndex) => (
-        <div key={group.name} className={groupIndex === 0 ? "" : "pt-1"}>
-          {!collapsed ? (
-            <div className="px-2.5 pb-1 text-[11px] font-semibold text-zinc-400 tracking-wider">
-              {group.name}
-            </div>
-          ) : (
-            groupIndex > 0 && <div className="my-1.5 text-center text-xs text-zinc-300">·</div>
-          )}
-          <div className="space-y-0.5">
-            {group.items.map((item) => (
-              <NavLink
-                key={item.to}
-                title={collapsed ? item.label : undefined}
-                to={item.to}
-                onClick={close}
-                className={({ isActive }) =>
-                  cn(
-                    "flex h-8 items-center rounded-md text-sm text-zinc-600 transition-all duration-150 hover:bg-zinc-100 hover:text-zinc-950 active:scale-[0.98]",
-                    collapsed ? "justify-center px-0 text-xs font-semibold" : "px-2.5",
-                    !collapsed && item.icon && "gap-1.5",
-                    isActive && "bg-zinc-100/90 text-blue-700 font-medium shadow-2xs",
-                  )
-                }
-              >
-                {collapsed ? item.label.slice(0, 1) : <>{item.icon ? <item.icon className="size-4" /> : null}{item.label}</>}
-              </NavLink>
-            ))}
-          </div>
+    <nav aria-label="主导航" className={cn("flex flex-1 flex-col overflow-y-auto pr-1", collapsed ? "mt-4" : "mt-6")}>
+      <div className="space-y-0.5">
+        {primaryNavigation.map((item) => (
+          <NavEntry key={item.key} item={item} active={owner === item.key} collapsed={collapsed} close={close} />
+        ))}
+      </div>
+      {showSettings ? (
+        <div className="mt-auto border-t border-zinc-200 pb-3 pt-3">
+          <NavEntry item={settingsNavigation} active={owner === settingsNavigation.key} collapsed={collapsed} close={close} />
         </div>
-      ))}
+      ) : null}
     </nav>
   );
 }
@@ -218,14 +208,14 @@ export function AppShell() {
   return <div className="min-h-screen bg-zinc-50/60">
     <aside className={cn("fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-zinc-200 bg-white px-3 py-5 transition-all duration-300 ease-in-out lg:flex shadow-2xs print:hidden", sidebarCollapsed ? "w-16" : "w-64")}>
       <div className={cn("flex h-8 items-center", sidebarCollapsed ? "justify-center" : "justify-between px-2.5")}>
-        <NavLink to="/overview" title="途排智策" className="flex items-center gap-2 text-base font-semibold text-zinc-950 hover:opacity-90 transition-opacity"><ShieldCheck className="size-4 text-blue-600" />{sidebarCollapsed ? null : "途排智策"}</NavLink>
+        <Link to={ROUTES.assistant} title="途排智策" className="flex items-center gap-2 text-base font-semibold text-zinc-950 hover:opacity-90 transition-opacity"><ShieldCheck className="size-4 text-blue-600" />{sidebarCollapsed ? null : "途排智策"}</Link>
         <Button size="icon" variant="ghost" title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} onClick={() => { setAccountMenuOpen(false); setSidebarCollapsed((value) => !value); }}>{sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}</Button>
       </div>
       <Nav user={user} scheduleAccessRole={selectedScheduleSet?.access_role} collapsed={sidebarCollapsed} />{identity}
     </aside>
     <header className="sticky top-0 z-20 flex h-12 items-center justify-between border-b border-zinc-200 bg-white/95 backdrop-blur-xs px-4 lg:hidden"><Button size="icon" variant="ghost" title="打开导航" onClick={() => setMobileOpen(true)}><Menu className="size-4" /></Button><div className="flex min-w-0 items-center gap-2"><span className="font-semibold text-zinc-900">途排智策</span>{validScheduleSets.length ? <Select aria-label="当前课表方案" selectSize="sm" containerClassName="w-36" value={scheduleSetId ?? ""} onChange={(event) => selectScheduleSet(event.target.value)} disabled={scheduleSetsLoading}><option value="" disabled>选择课表</option>{validScheduleSets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</Select> : null}</div><span className="w-8" /></header>
-    {mobileOpen ? <div className="fixed inset-0 z-40 bg-zinc-950/25 backdrop-blur-[2px] animate-fade-in lg:hidden" onClick={() => setMobileOpen(false)}><aside className="h-full w-72 bg-white px-3 py-5 shadow-xl animate-fade-in" onClick={(event) => event.stopPropagation()}><div className="flex h-8 items-center px-2.5 font-semibold">途排智策</div><Nav user={user} scheduleAccessRole={selectedScheduleSet?.access_role} close={() => setMobileOpen(false)} />{identity}</aside></div> : null}
-    <div className={cn("min-h-screen transition-all duration-300 ease-in-out print:pl-0", sidebarCollapsed ? "lg:pl-16" : "lg:pl-64")}><div className="sticky top-0 z-10 hidden h-12 items-center justify-between border-b border-zinc-200/80 bg-white/95 backdrop-blur-xs px-6 lg:flex print:hidden"><div className="flex min-w-0 items-center gap-2.5"><span className="text-xs font-medium text-zinc-400">当前课表</span>{validScheduleSets.length ? <Select aria-label="当前课表方案" selectSize="sm" containerClassName="w-56" value={scheduleSetId ?? ""} onChange={(event) => selectScheduleSet(event.target.value)} disabled={scheduleSetsLoading}><option value="" disabled>选择课表</option>{validScheduleSets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</Select> : <span className="text-xs text-zinc-500">{scheduleSetsLoading ? "加载中…" : scheduleSetsError ? "课表方案加载失败" : "暂无可见课表"}</span>}{user.role === "admin" ? <><Button size="sm" variant="ghost" onClick={() => { setScheduleSetName(""); setScheduleSetDialog("create"); }}>新建</Button><Button size="sm" variant="ghost" disabled={!selectedScheduleSet} onClick={() => { setScheduleSetName(selectedScheduleSet?.name ?? ""); setScheduleSetDialog("rename"); }}>重命名</Button></> : null}</div><span className="text-xs text-zinc-500">当前角色：{roleLabel(user.role)}{selectedScheduleSet ? ` · 本课表${selectedScheduleSet.access_role === "viewer" ? "只读" : selectedScheduleSet.access_role === "scheduler" ? "排课" : "审批"}` : ""}</span></div><main className="mx-auto w-full max-w-[1500px] px-4 py-5 sm:px-6 lg:px-8"><Outlet context={{ user, scheduleAccessRole: selectedScheduleSet?.access_role, scheduleSet: selectedScheduleSet }} /></main></div>
+    {mobileOpen ? <div className="fixed inset-0 z-40 bg-zinc-950/25 backdrop-blur-[2px] animate-fade-in lg:hidden" onClick={() => setMobileOpen(false)}><aside className="flex h-full w-72 flex-col bg-white px-3 py-5 shadow-xl animate-fade-in" onClick={(event) => event.stopPropagation()}><div className="flex h-8 items-center px-2.5 font-semibold">途排智策</div><Nav user={user} scheduleAccessRole={selectedScheduleSet?.access_role} close={() => setMobileOpen(false)} />{identity}</aside></div> : null}
+    <div className={cn("min-h-screen transition-all duration-300 ease-in-out print:pl-0", sidebarCollapsed ? "lg:pl-16" : "lg:pl-64")}><div className="sticky top-0 z-10 hidden h-12 items-center justify-between border-b border-zinc-200/80 bg-white/95 backdrop-blur-xs px-6 lg:flex print:hidden"><div className="flex min-w-0 items-center gap-2.5"><span className="text-xs font-medium text-zinc-400">当前课表</span>{validScheduleSets.length ? <Select aria-label="当前课表方案" selectSize="sm" containerClassName="w-56" value={scheduleSetId ?? ""} onChange={(event) => selectScheduleSet(event.target.value)} disabled={scheduleSetsLoading}><option value="" disabled>选择课表</option>{validScheduleSets.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</Select> : <span className="text-xs text-zinc-500">{scheduleSetsLoading ? "加载中…" : scheduleSetsError ? "课表方案加载失败" : "暂无可见课表"}</span>}{user.role === "admin" ? <><Button size="sm" variant="ghost" onClick={() => { setScheduleSetName(""); setScheduleSetDialog("create"); }}>新建</Button><Button size="sm" variant="ghost" disabled={!selectedScheduleSet} onClick={() => { setScheduleSetName(selectedScheduleSet?.name ?? ""); setScheduleSetDialog("rename"); }}>重命名</Button></> : null}</div><span className="text-xs text-zinc-500">当前角色：{roleLabel(user.role)}{selectedScheduleSet ? ` · 本课表${selectedScheduleSet.access_role === "viewer" ? "只读" : selectedScheduleSet.access_role === "scheduler" ? "排课" : "审批"}` : ""}</span></div><main className="mx-auto w-full max-w-[1500px] px-4 py-5 sm:px-6 lg:px-8"><Outlet context={{ user, scheduleAccessRole: selectedScheduleSet?.access_role, scheduleSet: selectedScheduleSet, scheduleSetLoading: scheduleSetsLoading }} /></main></div>
     <Dialog open={scheduleSetDialog !== null} onOpenChange={(open) => { if (!scheduleSetSaving && !open) setScheduleSetDialog(null); }}><DialogContent className="max-w-md"><DialogTitle className="text-base font-semibold">{scheduleSetDialog === "create" ? "新建课表方案" : "重命名课表方案"}</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">每套课表方案拥有独立的规则、求解、版本与外部集成同步目标；基础主数据可复用。</DialogDescription><form className="mt-5 space-y-4" onSubmit={submitScheduleSetDialog}><label className="block text-sm text-zinc-700">课表名称<input autoFocus className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 bg-white px-2.5 text-sm outline-none transition-all duration-150 focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20" value={scheduleSetName} onChange={(event) => setScheduleSetName(event.target.value)} placeholder="例如：郑州校区师范课表" /></label><div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setScheduleSetDialog(null)} disabled={scheduleSetSaving}>取消</Button><Button type="submit" disabled={scheduleSetSaving}>{scheduleSetSaving ? "保存中" : "保存"}</Button></div></form></DialogContent></Dialog>
     <Dialog open={accountDialogOpen} onOpenChange={setAccountDialogOpen}><DialogContent><DialogTitle className="text-base font-semibold">账户信息</DialogTitle><DialogDescription className="mt-1 text-sm text-zinc-500">当前登录账户与权限身份。</DialogDescription><div className="mt-5 divide-y divide-zinc-100 border-y border-zinc-200 text-sm"><AccountField label="用户名" value={user.username} /><AccountField label="角色" value={roleLabel(user.role)} /><AccountField label="账户 ID" value={user.id} mono /></div><div className="mt-5 flex justify-end"><Button variant="outline" onClick={() => setAccountDialogOpen(false)}>关闭</Button></div></DialogContent></Dialog>
   </div>;

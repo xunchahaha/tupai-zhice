@@ -19,6 +19,7 @@ import {
   type ScheduleSetMember,
 } from "@/api/schedule-sets";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { SettingsBackLink } from "@/components/settings-back-link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -30,7 +31,7 @@ import { roleLabel } from "@/lib/labels";
 
 const ROLES: Array<{ value: UserResponseRole; hint: string }> = [
   { value: "admin", hint: "全部权限，含账号与集成配置" },
-  { value: "scheduler", hint: "在获授权课表中录入规则、发起求解和局部调课" },
+  { value: "scheduler", hint: "在获授权课表中录入规则、发起排课和调课" },
   { value: "approver", hint: "在获审批权限的课表中发布、回滚与删除版本" },
   { value: "viewer", hint: "只读查看业务数据" },
 ];
@@ -217,6 +218,7 @@ export function AccountsPage() {
         title="账号管理"
         actions={
           <>
+            <SettingsBackLink />
             <Button
               variant="outline"
               size="sm"
@@ -404,7 +406,7 @@ export function AccountsPage() {
             <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
               <span>全局角色</span>
               <Badge tone="blue">{roleLabel(accessTarget.role)}</Badge>
-              <span>权限：只读可查看；排课可维护数据并发起求解；审批可发布与回滚。</span>
+              <span>权限：只读可查看；排课可维护数据并发起排课；审批可发布与回滚。</span>
             </div>
           ) : null}
           {scheduleSetsLoading ? (

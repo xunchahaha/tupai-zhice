@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LoginPage } from "@/pages/login-page";
@@ -42,6 +42,27 @@ describe("LoginPage", () => {
 
     await waitFor(() => expect(login).toHaveBeenCalledWith({ username: "admin", password: "tupai-demo-admin-2026!" }));
     expect(setToken).toHaveBeenCalledWith("test-token");
+  });
+
+  it("lands on the assistant after a successful sign-in", async () => {
+    login.mockResolvedValue({ access_token: "test-token" });
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/login"]}>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/assistant" element={<div>排课助手落点</div>} />
+            <Route path="/overview" element={<div>旧总览落点</div>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(await screen.findByText("排课助手落点")).toBeVisible();
+    expect(screen.queryByText("旧总览落点")).not.toBeInTheDocument();
   });
 
   it("shows validation feedback before an empty form is submitted", async () => {

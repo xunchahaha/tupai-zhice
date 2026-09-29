@@ -1,6 +1,9 @@
-import { expect, request, test } from "@playwright/test";
+import { expect, request, test, type Page } from "@playwright/test";
 
 const apiBaseURL = process.env.E2E_API_BASE_URL ?? "http://127.0.0.1:8001";
+
+// 页头「排课流程」里也有同名链接，侧栏入口必须限定在主导航内。
+const sidebar = (page: Page) => page.getByRole("navigation", { name: "主导航" });
 
 test("管理员完成排课、调课、回滚和集成接入引导流程", async ({ page }, testInfo) => {
   test.setTimeout(75_000);
@@ -42,10 +45,25 @@ test("管理员完成排课、调课、回滚和集成接入引导流程", async
   await page.getByLabel("用户名").fill("admin");
   await page.getByLabel("密码").fill("tupai-demo-admin-2026!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
-  await page.waitForURL("**/overview");
-  await expect(page.getByRole("heading", { name: "总览" })).toBeVisible();
+  // 登录后落在排课助手；侧栏只有 排课助手 / 课表 / 基础资料 与底部的 设置。
+  await page.waitForURL("**/assistant");
+  await expect(page.getByRole("heading", { name: "排课助手", exact: true })).toBeVisible();
 
-  await page.getByRole("link", { name: "规则工作台" }).click();
+  // 设置里先完成飞书接入引导，再从「高级管理」进入学校通用规则（规则页不在侧栏，这是真实的点击路径）。
+  await sidebar(page).getByRole("link", { name: "设置", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "飞书生产接入向导" })).toBeVisible();
+  await expect(page.getByText("管理员不需要手工创建任何飞书数据表。")).toBeVisible();
+  await page.getByRole("button", { name: "稍后继续" }).click();
+  await expect(page.getByRole("heading", { name: "飞书生产连接" })).toBeVisible();
+  await expect(page.getByText("应用配置", { exact: true })).toBeVisible();
+  await expect(page.getByText("生产接入步骤", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "一键同步当前方案" })).toBeDisabled();
+
+  await page.getByRole("link", { name: /学校通用规则/ }).click();
+  await expect(page).toHaveURL(/\/rules$/);
+  await expect(page.getByRole("heading", { name: "学校通用规则", exact: true })).toBeVisible();
+  // 规则页仍归属「设置」，侧栏的设置入口保持高亮。
+  await expect(sidebar(page).getByRole("link", { name: "设置", exact: true })).toHaveAttribute("aria-current", "page");
   await expect(page.getByText(proposalId, { exact: true })).toBeVisible();
   await page.getByText(proposalId, { exact: true }).click();
   await page.getByRole("button", { name: "确认生效" }).click();
@@ -56,31 +74,32 @@ test("管理员完成排课、调课、回滚和集成接入引导流程", async
     return rules.some((rule: { business_id: string }) => rule.business_id === proposalId);
   }).toBeTruthy();
 
-  await page.getByRole("link", { name: "设置" }).click();
-  await expect(page.getByRole("dialog", { name: "飞书生产接入向导" })).toBeVisible();
-  await expect(page.getByText("管理员不需要手工创建任何飞书数据表。")).toBeVisible();
-  await page.getByRole("button", { name: "稍后继续" }).click();
-  await expect(page.getByRole("heading", { name: "飞书生产连接" })).toBeVisible();
-  await expect(page.getByText("应用配置", { exact: true })).toBeVisible();
-  await expect(page.getByText("生产接入步骤", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "一键同步当前方案" })).toBeDisabled();
-
-  await page.getByRole("link", { name: "排课求解" }).click();
+  // 手动排课路径随时可用：助手首页展开「手动排课（自己设置参数）」，按参数提交，请求仍是 POST /api/v1/solver-runs。
+  await sidebar(page).getByRole("link", { name: "排课助手", exact: true }).click();
+  await expect(page).toHaveURL(/\/assistant$/);
+  // AI 还没配置时助手会自动展开手动排课面板（唯一入口），已配置时默认收起：先等 AI 状态读出来，按当前状态决定要不要点。
+  await expect(page.getByText(/已接入|AI 模型待配置/).first()).toBeVisible();
+  const manualToggle = page.getByRole("button", { name: "手动排课（自己设置参数）" });
+  if ((await manualToggle.getAttribute("aria-expanded")) !== "true") await manualToggle.click();
+  await expect(page.getByLabel("手动排课参数")).toBeVisible();
   const solverResponse = page.waitForResponse((response) =>
     response.url().endsWith("/api/v1/solver-runs") && response.request().method() === "POST",
   );
-  await page.getByRole("button", { name: "开始求解" }).click();
+  await page.getByRole("button", { name: "按参数开始求解" }).click();
   const solverRun = await (await solverResponse).json();
   await expect(page.getByText("求解任务已创建")).toBeVisible();
   await expect.poll(async () => {
     const response = await api.get(`/api/v1/solver-runs/${solverRun.id}`);
     return (await response.json()).model_status;
   }, { timeout: 30_000 }).toBe("OPTIMAL");
-  // 求解结论的文案在 f076b9f 已改成「已证明最优」，与任务状态区分开。
+  // 结果卡直接给出草稿；求解结论「已证明最优」是技术指标，收在「查看详情」里，与任务状态区分开。
+  await expect(page.getByRole("heading", { name: /^已生成草稿/ })).toBeVisible();
+  await expect(page.getByText("草稿 · 未发布")).toBeVisible();
+  await page.getByRole("button", { name: /^查看详情/ }).click();
   await expect(page.getByText("已证明最优", { exact: true }).first()).toBeVisible();
 
-  await page.getByRole("link", { name: "课表视图", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "课表视图", exact: true })).toBeVisible();
+  await sidebar(page).getByRole("link", { name: "课表", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "课表", exact: true })).toBeVisible();
   await expect(page.getByText(/^已安排:\s*[1-9]\d*\s*节课次$/)).toBeVisible();
   await expect(page.getByRole("heading", { name: "全部课次安排" })).toBeVisible();
 
@@ -100,7 +119,11 @@ test("管理员完成排课、调课、回滚和集成接入引导流程", async
   );
   expect(blocked).toBeTruthy();
 
-  await page.getByRole("link", { name: "局部调课" }).click();
+  // 局部调课在课表页的「调整」视图；先把课表切到刚求解出的那一版，调课的父课表随之带入。
+  await page.getByLabel("课表版本").selectOption(parentSummary.id);
+  await page.getByRole("tab", { name: "调整" }).click();
+  await expect(page).toHaveURL(/view=adjust/);
+  await expect(page.getByLabel("父课表")).toHaveValue(parentSummary.id);
   await page.getByLabel("教师").selectOption(blocked.teacher_business_id);
   await page.getByLabel("影响时段").selectOption(blocked.slot_business_id);
   await page.getByLabel("说明").fill("E2E 教师请假");
@@ -139,7 +162,9 @@ test("管理员完成排课、调课、回滚和集成接入引导流程", async
   expect(movedItem.before_slot_id).toBe(blocked.slot_business_id);
   expect(movedItem.after_slot_id).not.toBe(blocked.slot_business_id);
 
-  await page.getByRole("link", { name: "版本与回滚" }).click();
+  // 生成候选只是草稿；发布/回滚在同一页的「历史版本」里由有审批权限的人决定。
+  await page.getByRole("tab", { name: "历史版本" }).click();
+  await expect(page).toHaveURL(/view=history/);
   await page.getByLabel("基准版本").selectOption(event.parent_schedule_id);
   await page.getByLabel("目标版本").selectOption(candidateScheduleId);
   const changedSummary = page.getByText(/^变更:\s*\d+\s*节$/);
@@ -156,17 +181,21 @@ test("管理员完成排课、调课、回滚和集成接入引导流程", async
   const parentResponse = await api.get(`/api/v1/schedules/${event.parent_schedule_id}`);
   const parent = await parentResponse.json();
   const parentCard = page.getByTestId(`version-card-${parent.id}`);
+  // 发布/回滚会改变对外的当前课表，先弹二次确认，点了确认才提交。
   await parentCard.getByRole("button", { name: `发布版本 v${parent.version_no}` }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "确认发布" }).click();
   await expect(page.getByText("版本已发布")).toBeVisible();
 
   const candidateCard = page.getByTestId(`version-card-${candidate.id}`);
   await candidateCard.getByRole("button", { name: `发布版本 v${candidate.version_no}` }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "确认发布" }).click();
   await expect.poll(async () => {
     const response = await api.get(`/api/v1/schedules/${event.parent_schedule_id}`);
     return (await response.json()).status;
   }).toBe("archived");
 
   await parentCard.getByRole("button", { name: `回滚到版本 v${parent.version_no}` }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "确认回滚" }).click();
   await expect.poll(async () => {
     const response = await api.get(`/api/v1/schedules/${candidate.id}`);
     return (await response.json()).status;

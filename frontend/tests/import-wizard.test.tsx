@@ -219,7 +219,7 @@ describe("智能导入向导", () => {
 
     // 第四步确认提交：commit 带同一份 overrides
     const dialog = screen.getByRole("dialog");
-    expect(within(dialog).getByText(/即将把 10 行数据写入主数据/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/即将把 10 行数据写入基础资料/)).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: /确认导入/ }));
 
     await waitFor(() => expect(onCommitted).toHaveBeenCalledWith(commitResult));

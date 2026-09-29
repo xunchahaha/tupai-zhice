@@ -1,6 +1,8 @@
+import { ROUTES } from "@/lib/routes";
+
 // 偏好记忆使用情况的前端视图模型（MEM-C1）。后端在创建求解任务时把
 // memory_usage 冻结进 SolverRun（结构同 snapshot.payload["memory"]），
-// 求解页解释面板与记忆页「最近编译结果」列共用这里的状态与文案。
+// 助手页解释面板与记忆页「最近编译结果」列共用这里的状态与文案。
 
 export interface MemoryOutcome {
   entry_id: string;
@@ -48,4 +50,49 @@ export function memoryHeadline(memory: MemoryUsageSnapshot | null | undefined): 
   // 偏好作用于本次求解的课次；「已应用」改说「编译进求解输入」，是否作用于
   // 本次课程以解释层按任务范围算出的匹配核对为准。
   return `创建任务时 ${considered} 条偏好记忆获准编译（编译进求解输入 ${memory.summary?.applied ?? 0} / 未编译 ${memory.summary?.unused ?? 0}）；是否作用于本次课程，以解释层的范围核对为准`;
+}
+
+// 偏好条目的业务描述：助手页「参考的常用偏好」逐条列出时用。记忆页有自己的一套
+// 文案（不导出），这里只保留展示一条偏好所需的最小词表。
+const SUBJECT_TYPE_LABELS: Record<string, string> = {
+  teacher: "教师",
+  classroom: "教室",
+  cohort: "班级",
+  course: "课程",
+};
+
+const PREDICATE_LABELS: Record<string, string> = {
+  avoid_slot: "避开时段",
+  prefer_slot: "偏好时段",
+  avoid_room: "避开教室",
+  prefer_room: "偏好教室",
+  consecutive_sessions: "连续上课",
+  max_daily_load: "日负荷上限",
+};
+
+export function memoryOutcomeDescription(item: MemoryOutcome): string {
+  const subject = [SUBJECT_TYPE_LABELS[item.subject_type ?? ""] ?? item.subject_type, item.subject_id].filter(Boolean).join(" ");
+  const predicate = item.predicate ? (PREDICATE_LABELS[item.predicate] ?? item.predicate) : "";
+  return [subject, predicate].filter(Boolean).join(" · ") || "一条常用偏好";
+}
+
+/** 记忆页按 ?entry= 高亮并滚动到该偏好（设置线实现，这里只负责生成链接）。 */
+export function memoryEntryPath(entryId: string): string {
+  return `${ROUTES.memory}?${new URLSearchParams({ entry: entryId })}`;
+}
+
+export interface MemoryUsageSplit {
+  compileFailed: boolean;
+  applied: MemoryOutcome[];
+  notApplied: MemoryOutcome[];
+}
+
+/** 参与本次求解的偏好 / 未采用的偏好（编译失败单独标记，必须直接可见）。 */
+export function splitMemoryOutcomes(memory: MemoryUsageSnapshot | null | undefined): MemoryUsageSplit {
+  const outcomes = Array.isArray(memory?.outcomes) ? memory.outcomes : [];
+  return {
+    compileFailed: memory?.status === "compile_failed",
+    applied: outcomes.filter((item) => item.outcome === "applied"),
+    notApplied: outcomes.filter((item) => item.outcome !== "applied"),
+  };
 }

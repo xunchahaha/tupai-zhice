@@ -154,16 +154,17 @@ const conflictEntries = [
   },
 ];
 
-function renderPage() {
+function renderPage(initialPath = "/memory") {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/memory"]}>
+      <MemoryRouter initialEntries={[initialPath]}>
         <Routes>
           <Route element={<Outlet context={{ user: admin, scheduleAccessRole: "approver" }} />}>
             <Route path="/memory" element={<MemoryPage />} />
+            <Route path="/settings" element={<div>设置页面</div>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -546,5 +547,77 @@ describe("MemoryPage conflict adjudication (MEM-D1)", () => {
         }),
       ),
     );
+  });
+});
+
+// 页面已经不在左侧导航里：入口是「设置 → 高级管理」，助手「本次要求」面板用
+// /memory?entry=<偏好id> 直达某条偏好。
+describe("MemoryPage 深链与返回入口", () => {
+  afterEach(() => {
+    cleanup();
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+  beforeEach(() => {
+    mocks.request.mockReset();
+    mocks.request.mockImplementation(async (config: { url: string; method?: string }) => {
+      if (config.url === "/api/v1/memory/preferences") return entries;
+      if (config.url === "/api/v1/teachers") return [{ id: "t1", business_id: "T-001", name: "张老师", subject: "数学" }];
+      if (config.url === "/api/v1/rooms") return [{ id: "r1", business_id: "教室-301", name: "301 教室" }];
+      if (config.url === "/api/v1/time-slots") return [slot];
+      return [];
+    });
+  });
+
+  it("页头叫「常用偏好」，并提供返回设置的链接", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByRole("heading", { level: 1, name: "常用偏好" })).toBeVisible();
+    const back = screen.getByRole("link", { name: "返回设置" });
+    expect(back).toHaveAttribute("href", "/settings");
+    await user.click(back);
+    expect(await screen.findByText("设置页面")).toBeVisible();
+  });
+
+  it("?entry= 指向待确认的偏好：高亮收件箱卡片和表格行，并滚动到卡片", async () => {
+    const scrollIntoView = vi.fn();
+    (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView = scrollIntoView;
+    const { container } = renderPage("/memory?entry=pref-1");
+
+    await screen.findByText("该教师多次在周三晚间调课");
+    const card = container.querySelector("#pref-card-pref-1");
+    expect(card).toHaveAttribute("aria-current", "true");
+    expect(container.querySelector("#pref-row-pref-1")).toHaveAttribute("aria-current", "true");
+    // 其他偏好不应被高亮。
+    expect(container.querySelector("#pref-row-pref-2")).not.toHaveAttribute("aria-current");
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    expect(scrollIntoView.mock.contexts[0]).toBe(card);
+  });
+
+  it("?entry= 指向已确认的偏好：只有它在表格里的行高亮，并滚动到该行", async () => {
+    const scrollIntoView = vi.fn();
+    (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView = scrollIntoView;
+    const { container } = renderPage("/memory?entry=pref-2");
+
+    await screen.findByText("该教师多次在周三晚间调课");
+    const row = container.querySelector("#pref-row-pref-2");
+    expect(row).toHaveAttribute("aria-current", "true");
+    expect(container.querySelector("#pref-card-pref-1")).not.toHaveAttribute("aria-current");
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    expect(scrollIntoView.mock.contexts[0]).toBe(row);
+  });
+
+  it("运行环境没有 scrollIntoView 时不报错，高亮照常生效", async () => {
+    const { container } = renderPage("/memory?entry=pref-1");
+
+    await screen.findByText("该教师多次在周三晚间调课");
+    expect(container.querySelector("#pref-card-pref-1")).toHaveAttribute("aria-current", "true");
+  });
+
+  it("?entry= 找不到对应偏好时提示，而不是静默无反应", async () => {
+    renderPage("/memory?entry=pref-gone");
+
+    expect(await screen.findByText(/没有找到指定的偏好/)).toBeVisible();
+    expect(document.querySelector("[aria-current='true']")).toBeNull();
   });
 });

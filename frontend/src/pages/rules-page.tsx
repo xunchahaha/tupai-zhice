@@ -1,9 +1,9 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, FileText, Pencil, Plus, Search, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { z } from "zod";
 
@@ -27,9 +27,10 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
-import { SopSteps } from "@/components/sop-steps";
+import { SettingsBackLink } from "@/components/settings-back-link";
 import { actorTypeLabel, constraintLabel, hardnessLabel, statusLabel } from "@/lib/labels";
 import { asArray, errorMessage } from "@/lib/format";
+import { assistantPath } from "@/lib/routes";
 import { statusTone } from "@/lib/status";
 
 type Hardness = "hard" | "soft";
@@ -117,8 +118,13 @@ export function RulesPage() {
   const readOnly = !canScheduleCurrentSet(user, scheduleAccessRole);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  // ?rule=<business_id>：助手「本次要求」与诊断里的「查看规则」直达某条规则。
+  const ruleParam = useSearchParams()[0].get("rule");
   const [filter, setFilter] = useState("all");
-  const [selected, setSelected] = useState<RuleResponse | null>(null);
+  // 只存 id、每次渲染从最新列表取对象：确认/拒绝后详情面板才不会停在旧状态。
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [scrollToId, setScrollToId] = useState<string | null>(null);
+  const focusedParam = useRef<string | null>(null);
   const [editing, setEditing] = useState<RuleResponse | null>(null);
   const rules = useListRulesApiV1RulesGet();
   const catalog = useListConstraintCatalogApiV1RulesConstraintCatalogGet();
@@ -137,29 +143,49 @@ export function RulesPage() {
     },
   });
   const ruleList = asArray<RuleResponse>(rules.data);
+  const selected = ruleList.find((rule) => rule.id === selectedId) ?? null;
+  useEffect(() => {
+    if (!ruleParam || focusedParam.current === ruleParam) return;
+    const target = asArray<RuleResponse>(rules.data).find((rule) => rule.business_id === ruleParam);
+    if (!target) return;
+    focusedParam.current = ruleParam;
+    // 目标规则可能被当前筛选藏起来，先回到「全部」再选中。
+    setFilter("all");
+    setSelectedId(target.id);
+    setScrollToId(target.id);
+  }, [ruleParam, rules.data]);
+  useEffect(() => {
+    if (!scrollToId) return;
+    // jsdom 与个别旧浏览器没有 scrollIntoView，缺失时静默跳过，选中态仍然生效。
+    const element = document.getElementById(`rule-item-${scrollToId}`);
+    if (element && typeof element.scrollIntoView === "function") element.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [scrollToId]);
   const visible = useMemo(
     () => ruleList.filter((rule) => filter === "all" || rule.status === filter),
     [ruleList, filter],
   );
   if (rules.isPending) return <LoadingState />;
   if (rules.isError) return <ErrorState retry={() => void rules.refetch()} />;
-  // D12 断头路：已有确认规则时下一步就是求解；只读成员进不了求解页，不展示。
+  // D12 断头路：已有确认规则时下一步就是排课；只读成员不能发起排课，不展示。
   const hasActiveRule = ruleList.some((rule) => rule.status === "active");
+  const ruleParamMissing = Boolean(ruleParam) && !ruleList.some((rule) => rule.business_id === ruleParam);
   return <div className="space-y-5 animate-fade-in">
     <PageHeader
-      title="规则工作台"
+      title="学校通用规则"
       actions={<div className="flex items-center gap-2">
-        {hasActiveRule && !readOnly ? <Button size="sm" onClick={() => navigate("/solver")}>去求解</Button> : null}
+        <SettingsBackLink />
+        {hasActiveRule && !readOnly ? <Button size="sm" onClick={() => navigate(assistantPath())}>去排课助手</Button> : null}
         <div className="inline-flex h-8 items-center rounded-md border border-zinc-200 bg-white p-0.5">
           {[["all", "全部"], ["awaiting_confirmation", "待确认"], ["active", "已生效"]].map(([value, label]) => <button key={value} className={`h-6 rounded px-2 text-xs ${filter === value ? "bg-zinc-900 text-white" : "text-zinc-500 hover:bg-zinc-100"}`} onClick={() => setFilter(value)}>{label}</button>)}
         </div>
       </div>}
-    ><SopSteps /></PageHeader>
+    ><p className="mt-1 text-sm text-zinc-500">长期有效的排课规则，确认生效后排课时自动遵守。</p></PageHeader>
+    {ruleParamMissing ? <p role="status" className="border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs text-amber-900">没有找到规则 {ruleParam}，它可能已被删除；可在下方列表中查找。</p> : null}
     {readOnly ? <section className="border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">当前角色在这套课表中仅可查看规则及其生效状态。</section> : <RuleIntakeForm create={create} entries={entries} />}
     <div className="grid gap-2 xl:grid-cols-[minmax(340px,0.9fr)_minmax(0,1.6fr)]">
       <section className="border border-zinc-200 bg-white">
         <div className="border-b border-zinc-200 px-4 py-3 text-sm font-semibold">候选与正式规则 <span className="ml-1 text-xs font-normal text-zinc-400">{visible.length}</span></div>
-        <div className="max-h-[calc(100vh-360px)] overflow-y-auto">{visible.map((rule) => <button key={rule.id} onClick={() => setSelected(rule)} className={`block w-full border-b border-zinc-100 px-4 py-3 text-left hover:bg-zinc-50 ${selected?.id === rule.id ? "bg-blue-50/60" : ""}`}>
+        <div className="max-h-[calc(100vh-360px)] overflow-y-auto">{visible.map((rule) => <button key={rule.id} id={`rule-item-${rule.id}`} aria-current={selected?.id === rule.id ? "true" : undefined} onClick={() => setSelectedId(rule.id)} className={`block w-full border-b border-zinc-100 px-4 py-3 text-left hover:bg-zinc-50 ${selected?.id === rule.id ? "bg-blue-50/60" : ""}`}>
           <div className="flex items-center justify-between gap-2"><span className="font-mono text-xs text-zinc-500">{rule.business_id}</span><Badge tone={statusTone(rule.status)}>{statusLabel(rule.status)}</Badge></div>
           <p className="mt-1 line-clamp-2 text-sm text-zinc-800">{rule.source_text}</p>
           <div className="mt-2 flex gap-2 text-xs text-zinc-400"><span>{entryLabel(entries, rule.constraint_type)}</span><span>{hardnessLabel(rule.hardness)}{rule.hardness === "soft" ? `，权重 ${rule.weight ?? "-"}` : ""}</span></div>
@@ -364,7 +390,7 @@ function ConstraintFields({ entries, draft, hardness, onChange }: {
             value={draft.actor_ids}
             multiple
             loading={actorLoading}
-            emptyHint="没有可选实体，请先在基础数据里维护"
+            emptyHint="没有可选实体，请先在基础资料里维护"
             onChange={(next) => onChange({ ...draft, actor_ids: next })}
           />
           {draft.actor_ids.length ? null : <p className="mt-1 text-xs text-amber-700">未选择具体对象时，这条规则会作用于全部课次。</p>}

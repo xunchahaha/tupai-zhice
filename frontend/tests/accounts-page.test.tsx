@@ -205,12 +205,12 @@ describe("AccountsPage", () => {
                 </RoleRoute>
               }
             />
-            <Route path="/overview" element={<div>成员总览</div>} />
+            <Route path="/assistant" element={<div>成员排课助手</div>} />
           </Route>
         </Routes>
       </MemoryRouter>,
     );
-    expect(await screen.findByText("成员总览")).toBeVisible();
+    expect(await screen.findByText("成员排课助手")).toBeVisible();
     expect(screen.queryByText("管理员页面")).not.toBeInTheDocument();
   });
 });

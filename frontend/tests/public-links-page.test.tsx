@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { PublicLinksPage } from "@/pages/public-links-page";
+import { PublicLinksPage, type PublicLinksPageProps } from "@/pages/public-links-page";
 
 // 页面走 orval 生成的客户端，统一经过 customInstance，因此在这一层拦截。
 const mocks = vi.hoisted(() => ({
@@ -66,7 +66,7 @@ function secretResponse(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderPage() {
+function renderPage(props: PublicLinksPageProps = {}) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -77,7 +77,7 @@ function renderPage() {
           <Route
             element={<Outlet context={{ user: admin, scheduleAccessRole: "approver", scheduleSet: { id: "set-1", name: "主方案" } }} />}
           >
-            <Route path="/public-links" element={<PublicLinksPage />} />
+            <Route path="/public-links" element={<PublicLinksPage {...props} />} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -230,5 +230,42 @@ describe("PublicLinksPage", () => {
     await user.click(await screen.findByRole("button", { name: /新建公开链接/ }));
     expect(screen.getByRole("button", { name: "创建" })).toBeDisabled();
     expect(createdBodies).toHaveLength(0);
+  });
+
+  it("keeps its own page title when standalone and drops it when embedded", async () => {
+    renderPage();
+    expect(await screen.findByRole("heading", { name: "公开链接", level: 1 })).toBeInTheDocument();
+
+    cleanup();
+    renderPage({ embedded: true });
+    expect(await screen.findByText("三年二班")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "公开链接" })).not.toBeInTheDocument();
+    // 创建入口和说明搬进了内嵌工具条，功能不减。
+    expect(screen.getByText(/免登录课表页与日历订阅的凭证链接/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /新建公开链接/ })).toBeEnabled();
+  });
+
+  it("creates a link from the embedded toolbar exactly like the standalone page", async () => {
+    const user = userEvent.setup();
+    renderPage({ embedded: true });
+    await fillCreateDialog(user);
+
+    await user.click(screen.getByRole("button", { name: "创建" }));
+
+    expect(createdBodies).toHaveLength(1);
+    expect(createdBodies[0]).toMatchObject({ scope: "class", campus_id: "c1", resource_business_id: "CLASS-3-2" });
+    expect(await screen.findByTestId("public-secret-url")).toHaveTextContent("http://school.example.com/public/t/nw1-secret");
+  });
+
+  it("disables link creation with the given reason, e.g. before anything is published", async () => {
+    const user = userEvent.setup();
+    renderPage({ embedded: true, createDisabledReason: "还没有已发布的课表版本，先发布后再创建公开链接" });
+
+    const create = await screen.findByRole("button", { name: /新建公开链接/ });
+    expect(create).toBeDisabled();
+    expect(create).toHaveAttribute("title", "还没有已发布的课表版本，先发布后再创建公开链接");
+    // 已有链接的轮换/停用不受影响。
+    await user.click(screen.getByRole("button", { name: /轮换/ }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("旧链接立即失效");
   });
 });

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Clipboard,
   CloudUpload,
@@ -13,12 +14,16 @@ import {
   LogOut,
   Puzzle,
   RefreshCw,
+  ScrollText,
   SendHorizontal,
   Settings2,
   ShieldCheck,
+  Sparkles,
   TableProperties,
+  Users,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { toast } from "sonner";
 
 import {
@@ -35,7 +40,7 @@ import {
   useListFeishuSyncsApiV1IntegrationsFeishuSyncsGet,
   useStartFeishuOauthApiV1IntegrationsFeishuOauthStartPost,
 } from "@/api/generated/client";
-import type { FeishuBatchSyncResponse, FeishuConnectionResponse } from "@/api/generated/models";
+import type { FeishuBatchSyncResponse, FeishuConnectionResponse, UserResponseRole } from "@/api/generated/models";
 import { API_BASE_URL, authStore, http } from "@/api/http";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
@@ -51,6 +56,7 @@ import {
 import { cn } from "@/lib/cn";
 import { datetime, errorMessage } from "@/lib/format";
 import { resourceLabel, roleLabel, statusLabel } from "@/lib/labels";
+import { ROUTES } from "@/lib/routes";
 import { statusTone } from "@/lib/status";
 
 const APP_VERSION = "v0.1.0"; // 与 frontend/package.json 的 version 保持一致
@@ -452,6 +458,11 @@ export function SettingsPage() {
         </div>
       </SettingsSection>
 
+      {/* 入口页放在长长的飞书接入向导前面，否则要滚到整页最底部才找得到规则/偏好/账号。 */}
+      <SettingsSection title="高级管理" description="低频使用的完整管理页；日常排课、调课不需要进入这里。">
+        <ManagementEntries role={me.role} />
+      </SettingsSection>
+
       <SettingsSection title="AI 模型（OpenAI-compatible）" description="一句话排课的自然语言理解模型，与具体平台无关。">
         <div className="px-5 py-4">
           <AIConfigurationPanel
@@ -470,7 +481,7 @@ export function SettingsPage() {
         </div>
       </SettingsSection>
 
-      <SettingsSection title="外部集成" description="主数据与课表的外发目标通过集成适配器接入；未接入外部平台时本地模式即全部功能。">
+      <SettingsSection title="外部集成" description="基础资料与课表的外发目标通过集成适配器接入；未接入外部平台时本地模式即全部功能。">
         <div className="divide-y divide-zinc-100">
           <div>
             <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
@@ -719,7 +730,7 @@ export function SettingsPage() {
                           <div className="font-medium">同步暂不可用，原因是：</div>
                           <ul className="mt-1 list-disc pl-4">{syncBlockers.map((item) => <li key={item}>{item}</li>)}</ul>
                         </div>
-                      ) : <p className="mt-2 text-xs text-emerald-700">连接已就绪：一键同步只写入顶栏当前所选方案绑定的独立多维表格；求解必须在“排课求解”页单独点击“开始求解”。</p>}
+                      ) : <p className="mt-2 text-xs text-emerald-700">连接已就绪：一键同步只写入顶栏当前所选方案绑定的独立多维表格；排课不会因同步自动开始，需要在「排课助手」里单独发起。</p>}
                       {(syncReauthorizationPrompt || status.status === "reauthorization_required") ? (
                         <FeishuReauthorizationAction
                           authorize={() => authorize.mutate()}
@@ -866,6 +877,48 @@ function SettingsSection({ title, description, children }: { title: string; desc
       </div>
       {children}
     </section>
+  );
+}
+
+// 三个管理页的访问规则与路由一致：规则所有成员可看，常用偏好仅管理员/排课员，账号仅管理员。
+// 这里按同一口径隐藏入口，避免点进去被 RoleRoute 退回。
+const managementEntries: Array<{
+  key: string;
+  to: string;
+  icon: typeof Settings2;
+  title: string;
+  text: string;
+  roles?: readonly UserResponseRole[];
+}> = [
+  { key: "rules", to: ROUTES.rules, icon: ScrollText, title: "学校通用规则", text: "长期有效的排课规则，排课时自动遵守；可查看生效状态，有权限的成员还能录入和确认。" },
+  { key: "memory", to: ROUTES.memory, icon: Sparkles, title: "常用偏好", text: "系统从调课习惯里学到的偏好，可确认、停用或修改。", roles: ["admin", "scheduler"] },
+  { key: "accounts", to: ROUTES.accounts, icon: Users, title: "账号管理", text: "创建成员、分配角色与课表权限。", roles: ["admin"] },
+];
+
+function ManagementEntries({ role }: { role: UserResponseRole }) {
+  const visible = managementEntries.filter((item) => !item.roles || item.roles.includes(role));
+  return (
+    <ul className="divide-y divide-zinc-100">
+      {visible.map((item) => (
+        <li key={item.key}>
+          <Link
+            to={item.to}
+            className="group flex items-center justify-between gap-3 px-5 py-3.5 transition-colors duration-150 hover:bg-zinc-50/70"
+          >
+            <span className="flex min-w-0 items-start gap-3">
+              <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-md bg-zinc-100 text-zinc-600">
+                <item.icon className="size-4" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-medium text-zinc-900 group-hover:text-blue-700">{item.title}</span>
+                <span className="mt-0.5 block text-xs text-zinc-500">{item.text}</span>
+              </span>
+            </span>
+            <ChevronRight className="size-4 shrink-0 text-zinc-300 transition-transform group-hover:translate-x-0.5 group-hover:text-blue-600" />
+          </Link>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -1583,7 +1636,7 @@ function GuideFinish({ status }: { status: FeishuConnectionResponse }) {
     <div className="space-y-4">
       <GuideCompleted
         title={ready ? "飞书接入已经就绪" : "接入步骤还未完成"}
-        text={ready ? "先在“版本与回滚”发布课表，再回到设置页的飞书卡片同步课表；主数据和规则也可以分别同步。" : "返回前面的步骤完成账号授权和自动建表。"}
+        text={ready ? "先在「课表」里发布课表，再回到设置页的飞书卡片同步课表；基础资料和规则也可以分别同步。" : "返回前面的步骤完成账号授权和自动建表。"}
       />
       {status.workspace?.url ? <a href={status.workspace.url} target="_blank" rel="noreferrer"><Button variant="outline"><ExternalLink className="size-4" />打开排课多维表格</Button></a> : null}
     </div>

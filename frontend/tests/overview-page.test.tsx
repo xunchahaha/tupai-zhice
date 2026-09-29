@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { OverviewPage } from "@/pages/overview-page";
+import { OverviewInsights } from "@/pages/overview-page";
 
 const mocks = vi.hoisted(() => ({
   analytics: { current: {} as Record<string, unknown> },
@@ -27,32 +27,22 @@ vi.mock("@/api/generated/client", () => ({
     refetch: mocks.overviewRefetch,
   }),
   useOverviewAnalyticsApiV1OverviewAnalyticsGet: () => mocks.analytics.current,
-  useListRulesApiV1RulesGet: () => ({ data: [] }),
-  useListSchedulesApiV1SchedulesGet: () => ({ data: [] }),
-  useListSolverRunsApiV1SolverRunsGet: () => ({ data: [] }),
 }));
 
-type RenderUser = { id: string; username: string; role: "admin" | "viewer" };
-
-function renderPage(user: RenderUser = { id: "admin-id", username: "admin", role: "admin" }) {
+function renderPage(props: { canOpenSettings?: boolean } = {}) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  const scheduleAccessRole = user.role === "viewer" ? "viewer" : "approver";
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/overview"]}>
-        <Routes>
-          <Route element={<Outlet context={{ user, scheduleAccessRole }} />}>
-            <Route path="/overview" element={<OverviewPage />} />
-          </Route>
-        </Routes>
+      <MemoryRouter initialEntries={["/assistant"]}>
+        <OverviewInsights {...props} />
       </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
-describe("OverviewPage analytics error handling", () => {
+describe("OverviewInsights analytics error handling", () => {
   afterEach(cleanup);
 
   beforeEach(() => {
@@ -128,27 +118,54 @@ describe("OverviewPage analytics error handling", () => {
     expect(screen.queryByText("100%", { exact: true })).not.toBeInTheDocument();
   });
 
-  it("呈现排课准备清单与快捷入口，只读成员看不到求解/调课入口", () => {
+  it("展示实体统计，且不再带指向旧路径的快捷入口九宫格", () => {
     renderPage();
 
-    // 清单四项齐备；规则/发布/AI 均未就绪时保留去完成链接。
-    expect(screen.getByText("排课准备清单")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "去配规则" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "去配置" })).toBeInTheDocument();
-
-    // 管理员能看到全部快捷入口（含新增的主数据/诊断/调课）。
-    expect(screen.getByRole("link", { name: /智能求解排课/ })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /主数据管理/ })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /无解诊断/ })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /局部调课/ })).toBeInTheDocument();
+    expect(screen.getByText("教师总数")).toBeInTheDocument();
+    expect(screen.getByText("4544")).toBeInTheDocument();
+    // 左栏已收敛为三个业务入口，概览里不再重复；旧路径也不该再被链接。
+    expect(screen.queryByText("排课工作台快捷入口")).not.toBeInTheDocument();
+    const hrefs = screen.queryAllByRole("link").map((link) => link.getAttribute("href"));
+    for (const legacy of ["/solver", "/diagnostics", "/reschedule", "/versions", "/overview", "/integrations"]) {
+      expect(hrefs).not.toContain(legacy);
+    }
   });
 
-  it("只读成员的快捷入口不再有会落空的求解与调课卡", () => {
-    renderPage({ id: "viewer-id", username: "member_demo", role: "viewer" });
+  it("概览里不重复排课准备清单（助手首页自己带紧凑版）", () => {
+    renderPage();
+    expect(screen.queryByText("排课准备清单")).not.toBeInTheDocument();
+  });
 
-    expect(screen.queryByRole("link", { name: /智能求解排课/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /局部调课/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /主数据管理/ })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /无解诊断/ })).toBeInTheDocument();
+  it("同步健康度里的集成入口指向设置", () => {
+    mocks.analytics.current = {
+      data: {
+        teacher_workload: { total_teachers: 0, assigned_teachers: 0, total_hours: 0, top_teachers: [], buckets: [] },
+        room_heatmap: { period_cells: [] },
+        optimization_penalties: { solver_run_id: null, solver_status: null, objective_value: null, best_bound: null, total_soft_penalty: null, reconciliation_error: null, evaluated_assignment_count: 0, soft_constraints: [] },
+        sync_health: { total_syncs: 0, completed_syncs: 0, failed_syncs: 0, retry_count: 0, retry_samples: 0, records_read: 0, records_written: 0, average_duration_ms: null, latest_sync_at: null },
+      },
+      isPending: false,
+      isError: false,
+      refetch: mocks.analyticsRefetch,
+    };
+    renderPage();
+    expect(screen.getByRole("link", { name: /前往集成配置/ })).toHaveAttribute("href", "/settings");
+  });
+
+  it("没有设置权限的角色看不到「前往集成配置」，避免点了被弹回原地", () => {
+    mocks.analytics.current = {
+      data: {
+        teacher_workload: { total_teachers: 0, assigned_teachers: 0, total_hours: 0, top_teachers: [], buckets: [] },
+        room_heatmap: { period_cells: [] },
+        optimization_penalties: { solver_run_id: null, solver_status: null, objective_value: null, best_bound: null, total_soft_penalty: null, reconciliation_error: null, evaluated_assignment_count: 0, soft_constraints: [] },
+        sync_health: { total_syncs: 0, completed_syncs: 0, failed_syncs: 0, retry_count: 0, retry_samples: 0, records_read: 0, records_written: 0, average_duration_ms: null, latest_sync_at: null },
+      },
+      isPending: false,
+      isError: false,
+      refetch: mocks.analyticsRefetch,
+    };
+    renderPage({ canOpenSettings: false });
+    expect(screen.getByText("教师总数")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /前往集成配置/ })).not.toBeInTheDocument();
   });
 });

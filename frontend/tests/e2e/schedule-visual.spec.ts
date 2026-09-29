@@ -42,8 +42,12 @@ async function login(page: Page) {
   await page.getByLabel("用户名").fill("admin");
   await page.getByLabel("密码").fill("tupai-demo-admin-2026!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
-  await page.waitForURL("**/overview");
+  // 登录后落在排课助手；课表在侧栏「课表」。
+  await page.waitForURL("**/assistant");
 }
+
+// 页头「排课流程」里也有一个同名的「课表」链接，侧栏入口必须限定在主导航内。
+const sidebar = (page: Page) => page.getByRole("navigation", { name: "主导航" });
 
 test.beforeEach(async () => {
   const api = await createAdminApi();
@@ -54,7 +58,8 @@ test.beforeEach(async () => {
 test("renders the schedule grid at a desktop viewport", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 960 });
   await login(page);
-  await page.getByRole("link", { name: "课表视图", exact: true }).click();
+  await sidebar(page).getByRole("link", { name: "课表", exact: true }).click();
+  await expect(page).toHaveURL(/\/schedule$/);
   await expect(page.getByText(/^已安排:\s*[1-9]\d*\s*节课次$/)).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("schedule-desktop.png"), fullPage: true });
 });
@@ -63,8 +68,8 @@ test("keeps navigation and the schedule usable at a mobile viewport", async ({ p
   await page.setViewportSize({ width: 390, height: 844 });
   await login(page);
   await page.getByTitle("打开导航").click();
-  await expect(page.getByRole("link", { name: "课表视图", exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "课表视图", exact: true }).click();
+  await expect(sidebar(page).getByRole("link", { name: "课表", exact: true })).toBeVisible();
+  await sidebar(page).getByRole("link", { name: "课表", exact: true }).click();
   await expect(page.getByText(/^已安排:\s*[1-9]\d*\s*节课次$/)).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("schedule-mobile.png"), fullPage: true });
 });

@@ -80,14 +80,15 @@ const courses = Array.from({ length: COURSE_COUNT }, (_, index) => ({
   is_locked: false,
 }));
 
-function renderPage() {
+function renderPage(context: { user: { id: string; username: string; role: "admin" | "scheduler" | "approver" | "viewer" }; scheduleAccessRole?: "viewer" | "scheduler" | "approver" } = { user: admin }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter>
         <Routes>
-          <Route element={<Outlet context={{ user: admin }} />}>
+          <Route element={<Outlet context={context} />}>
             <Route path="/" element={<MasterDataPage />} />
+            <Route path="/assistant" element={<div>排课助手页面</div>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -99,7 +100,7 @@ async function openTab(name: string) {
   await userEvent.click(screen.getByRole("tab", { name }));
 }
 
-describe("主数据页", () => {
+describe("基础资料页", () => {
   afterEach(cleanup);
 
   beforeEach(() => {
@@ -115,6 +116,46 @@ describe("主数据页", () => {
       if (url === "/api/v1/course-sessions") return Promise.resolve(courses);
       return Promise.resolve([]);
     });
+  });
+
+  it("页面标题叫「基础资料」，不再叫「主数据」", async () => {
+    renderPage();
+    expect(await screen.findByRole("heading", { level: 1, name: "基础资料" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { level: 1, name: "主数据" })).not.toBeInTheDocument();
+  });
+
+  it("已有课次时「去排课」直达排课助手；原来的「去配规则」入口不再出现", async () => {
+    renderPage();
+    const goSchedule = await screen.findByRole("button", { name: "去排课" });
+    expect(screen.queryByRole("button", { name: "去配规则" })).not.toBeInTheDocument();
+    await userEvent.click(goSchedule);
+    expect(await screen.findByText("排课助手页面")).toBeInTheDocument();
+  });
+
+  it("还没有课次时不展示「去排课」", async () => {
+    mocks.request.mockImplementation(({ url }: { url: string }) => {
+      if (url === "/api/v1/campuses") return Promise.resolve(campuses);
+      if (url === "/api/v1/teachers") return Promise.resolve(teachers);
+      if (url === "/api/v1/rooms") return Promise.resolve(rooms);
+      if (url === "/api/v1/time-slots") return Promise.resolve(slots);
+      return Promise.resolve([]);
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("tab", { name: "教师" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "去排课" })).not.toBeInTheDocument();
+  });
+
+  it("排课员（基础资料只读）仍能去排课；只读成员不展示「去排课」，并看到只读提示", async () => {
+    const { unmount } = renderPage({ user: { id: "s1", username: "sched", role: "scheduler" }, scheduleAccessRole: "scheduler" });
+    expect(await screen.findByRole("button", { name: "去排课" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "智能导入" })).not.toBeInTheDocument();
+    unmount();
+
+    renderPage({ user: { id: "v1", username: "viewer", role: "viewer" }, scheduleAccessRole: "viewer" });
+    await waitFor(() => expect(screen.getByRole("tab", { name: "班级" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "去排课" })).not.toBeInTheDocument();
+    await openTab("课程场次");
+    expect(await screen.findByText("共享基础资料由管理员维护")).toBeInTheDocument();
   });
 
   it("班级列出全部班型和全部教师，多值折叠后可以展开看全量", async () => {

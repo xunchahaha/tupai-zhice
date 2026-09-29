@@ -1,19 +1,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
-import { SetupChecklist, useAiConfigurationProbe } from "@/components/setup-checklist";
-
-const mocks = vi.hoisted(() => ({ get: vi.fn() }));
-
-vi.mock("@/api/http", () => ({ http: { get: mocks.get } }));
+import { SetupChecklist } from "@/components/setup-checklist";
+import { hasPendingSetup } from "@/lib/setup-state";
 
 function renderUi(ui: ReactElement) {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <MemoryRouter initialEntries={["/overview"]}>{ui}</MemoryRouter>
+      <MemoryRouter initialEntries={["/assistant"]}>{ui}</MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -32,19 +29,8 @@ const emptyState = {
   publishedScheduleCount: 0,
 };
 
-/** useAiConfigurationProbe 的最小消费组件，把探测结果翻译成可查询文本。 */
-function ProbeConsumer() {
-  const aiConfigured = useAiConfigurationProbe();
-  if (aiConfigured === null) return <p>探测中</p>;
-  return <p>{aiConfigured ? "AI 已配置" : "AI 未配置"}</p>;
-}
-
 describe("SetupChecklist", () => {
   afterEach(cleanup);
-  beforeEach(() => {
-    mocks.get.mockReset();
-  });
-
   it("完整版全部就绪时展示 4/4，不再出现去完成链接", () => {
     renderUi(<SetupChecklist {...readyState} />);
     expect(screen.getByText("4/4 已就绪")).toBeInTheDocument();
@@ -56,9 +42,10 @@ describe("SetupChecklist", () => {
     renderUi(<SetupChecklist {...emptyState} />);
     expect(screen.getByText("0/4 已就绪")).toBeInTheDocument();
 
-    expect(screen.getByRole("link", { name: "去导入" })).toHaveAttribute("href", "/master-data");
+    // 首次使用：资料没导入时明确提示先导入课程资料；发布去课表的历史版本。
+    expect(screen.getByRole("link", { name: "先导入课程资料" })).toHaveAttribute("href", "/master-data");
     expect(screen.getByRole("link", { name: "去配规则" })).toHaveAttribute("href", "/rules");
-    expect(screen.getByRole("link", { name: "去发布" })).toHaveAttribute("href", "/versions");
+    expect(screen.getByRole("link", { name: "去发布" })).toHaveAttribute("href", "/schedule?view=history");
     // AI 未配置不是错误态：标「可选」，链接去 AI 配置区。
     expect(screen.getByText("可选")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "去配置" })).toHaveAttribute("href", "/settings?section=ai");
@@ -78,19 +65,27 @@ describe("SetupChecklist", () => {
     const links = within(row).getAllByRole("link");
     expect(links).toHaveLength(4);
     expect(links[0]).toHaveAttribute("href", "/master-data");
+    expect(links[3]).toHaveAttribute("href", "/schedule?view=history");
     // AI 探测中（null）也按可选项呈现，不算错误。
     expect(within(row).getByText("可选")).toBeInTheDocument();
+    // 资料已导入，不再出现「先导入课程资料」的首次使用提示。
+    expect(within(row).queryByText("先导入课程资料")).not.toBeInTheDocument();
   });
 
-  it("AI 探测成功时该项按已就绪显示", async () => {
-    mocks.get.mockResolvedValue({ data: { configured: true } });
-    renderUi(<ProbeConsumer />);
-    expect(await screen.findByText("AI 已配置")).toBeInTheDocument();
+  it("紧凑版在资料未导入时高亮首次使用提示，文案是「基础资料已导入」", () => {
+    renderUi(<SetupChecklist variant="compact" {...emptyState} aiConfigured={null} />);
+    const row = screen.getByLabelText("排课准备清单");
+    expect(within(row).getByText("基础资料已导入")).toBeInTheDocument();
+    expect(within(row).getByText("先导入课程资料")).toBeInTheDocument();
   });
 
-  it("AI 探测失败不算错误，回落为未配置（可选）", async () => {
-    mocks.get.mockRejectedValue(new Error("network down"));
-    renderUi(<ProbeConsumer />);
-    await waitFor(() => expect(screen.getByText("AI 未配置")).toBeInTheDocument());
+  it("hasPendingSetup 只在有未完成项时为真，AI 探测中不算未完成", () => {
+    expect(hasPendingSetup(readyState)).toBe(false);
+    expect(hasPendingSetup({ ...readyState, masterDataImported: false })).toBe(true);
+    expect(hasPendingSetup({ ...readyState, activeRuleCount: 0 })).toBe(true);
+    expect(hasPendingSetup({ ...readyState, publishedScheduleCount: 0 })).toBe(true);
+    // AI 明确未配置才算未完成；探测中（null）不让清单在结果回来前闪一下。
+    expect(hasPendingSetup({ ...readyState, aiConfigured: false })).toBe(true);
+    expect(hasPendingSetup({ ...readyState, aiConfigured: null })).toBe(false);
   });
 });

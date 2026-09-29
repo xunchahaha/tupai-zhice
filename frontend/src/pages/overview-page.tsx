@@ -1,42 +1,29 @@
 import {
-  useListRulesApiV1RulesGet,
-  useListSchedulesApiV1SchedulesGet,
-  useListSolverRunsApiV1SolverRunsGet,
   useOverviewAnalyticsApiV1OverviewAnalyticsGet,
   useOverviewApiV1OverviewGet,
 } from "@/api/generated/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ErrorState, LoadingState, PageHeader } from "@/components/page";
+import { ErrorState, LoadingState } from "@/components/page";
 import { datetime } from "@/lib/format";
 import { modelStatusLabel } from "@/lib/labels";
+import { settingsPath } from "@/lib/routes";
 import { modelStatusTone } from "@/lib/status";
 import {
-  AlertTriangle,
   ArrowRight,
   CalendarClock,
-  CalendarDays,
-  CalendarPlus,
   CheckCircle2,
-  Compass,
-  Database,
   DoorOpen,
   Flame,
-  History,
-  Play,
   RefreshCw,
   Server,
   ShieldCheck,
-  SlidersHorizontal,
   Sparkles,
   Trophy,
   Users,
   UsersRound,
 } from "lucide-react";
-import { Link, useOutletContext } from "react-router-dom";
-
-import { type AppOutletContext, isReadOnlyMember } from "@/app/user-context";
-import { SetupChecklist, useAiConfigurationProbe } from "@/components/setup-checklist";
+import { Link } from "react-router-dom";
 
 const primaryStats = [
   { key: "teachers", label: "教师总数", icon: UsersRound, color: "text-blue-600", bg: "bg-blue-50" },
@@ -57,18 +44,15 @@ function getHeatmapColor(rate: number): string {
   return "bg-blue-700 text-white border-blue-800 font-bold";
 }
 
-export function OverviewPage() {
-  const { user, scheduleAccessRole } = useOutletContext<AppOutletContext>();
-  // 与侧边栏同语义：求解/调课入口只留给可写角色，只读成员点了会被 RoleRoute 弹回总览。
-  const canOperateFlow = (user.role === "admin" || user.role === "scheduler") && !isReadOnlyMember(user, scheduleAccessRole);
+/**
+ * 数据概览：排课助手首页的折叠区（展开时才挂载并发请求），只读成员则直接展示。
+ * 统计、教师负荷、教室热力、软约束满足率、同步健康度；原「快捷入口」九宫格已收敛进左侧三个入口，不再重复。
+ */
+export function OverviewInsights({ canOpenSettings = true }: { canOpenSettings?: boolean }) {
   const overview = useOverviewApiV1OverviewGet({ query: { refetchInterval: 15_000 } });
   const analytics = useOverviewAnalyticsApiV1OverviewAnalyticsGet(undefined, {
     query: { refetchInterval: 20_000 },
   });
-  const rules = useListRulesApiV1RulesGet();
-  const schedules = useListSchedulesApiV1SchedulesGet();
-  const runs = useListSolverRunsApiV1SolverRunsGet();
-  const aiConfigured = useAiConfigurationProbe();
 
   if (overview.isPending) return <LoadingState />;
   if (overview.isError || !overview.data) return <ErrorState retry={() => void overview.refetch()} />;
@@ -82,13 +66,6 @@ export function OverviewPage() {
     course_sessions: 0,
     schedule_versions: 0,
   };
-  const rulesList = Array.isArray(rules.data) ? rules.data : [];
-  const activeRulesCount = rulesList.filter((r) => r && r.status === "active").length;
-  const versionsList = Array.isArray(schedules.data) ? schedules.data : [];
-  const publishedScheduleCount = versionsList.filter((item) => item && item.status === "published").length;
-  const runList = Array.isArray(runs.data) ? runs.data : [];
-  const infeasibleRunCount = runList.filter((item) => item && item.model_status === "INFEASIBLE").length;
-
   const analyticsData = analytics.data;
   const workload = analyticsData?.teacher_workload;
   const heatmap = analyticsData?.room_heatmap;
@@ -136,31 +113,26 @@ export function OverviewPage() {
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="总览看板"
-        actions={
-          <div className="flex items-center gap-2.5">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                void overview.refetch();
-                void analytics.refetch();
-              }}
-              className="text-xs"
-            >
-              <RefreshCw className="size-3.5" />
-              刷新数据
-            </Button>
-            <div className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs shadow-2xs">
-              <span className="text-zinc-400">最近求解:</span>
-              <Badge tone={modelStatusTone(data.latest_run?.model_status)}>
-                {data.latest_run ? modelStatusLabel(data.latest_run.model_status) : "尚未求解"}
-              </Badge>
-            </div>
-          </div>
-        }
-      />
+      <div className="flex flex-wrap items-center justify-end gap-2.5">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            void overview.refetch();
+            void analytics.refetch();
+          }}
+          className="text-xs"
+        >
+          <RefreshCw className="size-3.5" />
+          刷新数据
+        </Button>
+        <div className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs shadow-2xs">
+          <span className="text-zinc-400">最近求解:</span>
+          <Badge tone={modelStatusTone(data.latest_run?.model_status)}>
+            {data.latest_run ? modelStatusLabel(data.latest_run.model_status) : "尚未求解"}
+          </Badge>
+        </div>
+      </div>
 
       {/* 4 Main Entity Stat Cards */}
       <section className="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
@@ -179,146 +151,10 @@ export function OverviewPage() {
               <div className="text-3xl font-bold tracking-tight text-zinc-900 tabular-nums">
                 {counts[key] ?? 0}
               </div>
-              <span className="text-xs text-zinc-400">已登记主数据</span>
+              <span className="text-xs text-zinc-400">基础资料</span>
             </div>
           </div>
         ))}
-      </section>
-
-      {/* Setup Checklist (D11) */}
-      <SetupChecklist
-        masterDataImported={(counts.course_sessions ?? 0) > 0}
-        activeRuleCount={activeRulesCount}
-        aiConfigured={aiConfigured}
-        publishedScheduleCount={publishedScheduleCount}
-      />
-
-      {/* Quick Action Hub */}
-      <section className="rounded-xl border border-zinc-200/90 bg-white p-5 shadow-2xs">
-        <div className="flex items-center justify-between border-b border-zinc-100 pb-3">
-          <div className="flex items-center gap-2">
-            <Compass className="size-4 text-blue-600" />
-            <h2 className="text-sm font-semibold text-zinc-900">排课工作台快捷入口</h2>
-          </div>
-          <span className="text-xs text-zinc-400">快速前往核心功能模块</span>
-        </div>
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {canOperateFlow ? (
-            <Link
-              to="/solver"
-              className="group flex items-center justify-between rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-3.5 transition-all duration-150 hover:border-blue-300 hover:bg-blue-50/40"
-            >
-              <div className="flex items-center gap-3">
-                <div className="grid size-9 place-items-center rounded-md bg-blue-100/80 text-blue-700">
-                  <Play className="size-4 fill-current" />
-                </div>
-                <div>
-                  <div className="text-xs font-semibold text-zinc-900 group-hover:text-blue-700">智能求解排课</div>
-                  <div className="text-[11px] text-zinc-500">一句话指令或参数排课</div>
-                </div>
-              </div>
-              <ArrowRight className="size-4 text-zinc-400 transition-transform group-hover:translate-x-0.5 group-hover:text-blue-600" />
-            </Link>
-          ) : null}
-
-          <Link
-            to="/rules"
-            className="group flex items-center justify-between rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-3.5 transition-all duration-150 hover:border-indigo-300 hover:bg-indigo-50/40"
-          >
-            <div className="flex items-center gap-3">
-              <div className="grid size-9 place-items-center rounded-md bg-indigo-100/80 text-indigo-700">
-                <SlidersHorizontal className="size-4" />
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-zinc-900 group-hover:text-indigo-700">规则约束配置</div>
-                <div className="text-[11px] text-zinc-500">{activeRulesCount} 条规则已生效</div>
-              </div>
-            </div>
-            <ArrowRight className="size-4 text-zinc-400 transition-transform group-hover:translate-x-0.5 group-hover:text-indigo-600" />
-          </Link>
-
-          <Link
-            to="/schedule"
-            className="group flex items-center justify-between rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-3.5 transition-all duration-150 hover:border-emerald-300 hover:bg-emerald-50/40"
-          >
-            <div className="flex items-center gap-3">
-              <div className="grid size-9 place-items-center rounded-md bg-emerald-100/80 text-emerald-700">
-                <CalendarDays className="size-4" />
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-zinc-900 group-hover:text-emerald-700">总课表大盘</div>
-                <div className="text-[11px] text-zinc-500">双模式交互课表视图</div>
-              </div>
-            </div>
-            <ArrowRight className="size-4 text-zinc-400 transition-transform group-hover:translate-x-0.5 group-hover:text-emerald-600" />
-          </Link>
-
-          <Link
-            to="/versions"
-            className="group flex items-center justify-between rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-3.5 transition-all duration-150 hover:border-purple-300 hover:bg-purple-50/40"
-          >
-            <div className="flex items-center gap-3">
-              <div className="grid size-9 place-items-center rounded-md bg-purple-100/80 text-purple-700">
-                <History className="size-4" />
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-zinc-900 group-hover:text-purple-700">版本与发布回滚</div>
-                <div className="text-[11px] text-zinc-500">共 {versionsList.length} 个历史版本</div>
-              </div>
-            </div>
-            <ArrowRight className="size-4 text-zinc-400 transition-transform group-hover:translate-x-0.5 group-hover:text-purple-600" />
-          </Link>
-
-          <Link
-            to="/master-data"
-            className="group flex items-center justify-between rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-3.5 transition-all duration-150 hover:border-blue-300 hover:bg-blue-50/40"
-          >
-            <div className="flex items-center gap-3">
-              <div className="grid size-9 place-items-center rounded-md bg-zinc-100 text-zinc-700">
-                <Database className="size-4" />
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-zinc-900 group-hover:text-blue-700">主数据管理</div>
-                <div className="text-[11px] text-zinc-500">{counts.course_sessions ?? 0} 条课程场次</div>
-              </div>
-            </div>
-            <ArrowRight className="size-4 text-zinc-400 transition-transform group-hover:translate-x-0.5 group-hover:text-blue-600" />
-          </Link>
-
-          <Link
-            to="/diagnostics"
-            className="group flex items-center justify-between rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-3.5 transition-all duration-150 hover:border-blue-300 hover:bg-blue-50/40"
-          >
-            <div className="flex items-center gap-3">
-              <div className="grid size-9 place-items-center rounded-md bg-zinc-100 text-zinc-700">
-                <AlertTriangle className="size-4" />
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-zinc-900 group-hover:text-blue-700">无解诊断</div>
-                <div className="text-[11px] text-zinc-500">{infeasibleRunCount ? `${infeasibleRunCount} 个无解任务待处理` : "当前没有无解任务"}</div>
-              </div>
-            </div>
-            <ArrowRight className="size-4 text-zinc-400 transition-transform group-hover:translate-x-0.5 group-hover:text-blue-600" />
-          </Link>
-
-          {canOperateFlow ? (
-            <Link
-              to="/reschedule"
-              className="group flex items-center justify-between rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-3.5 transition-all duration-150 hover:border-blue-300 hover:bg-blue-50/40"
-            >
-              <div className="flex items-center gap-3">
-                <div className="grid size-9 place-items-center rounded-md bg-zinc-100 text-zinc-700">
-                  <CalendarPlus className="size-4" />
-                </div>
-                <div>
-                  <div className="text-xs font-semibold text-zinc-900 group-hover:text-blue-700">局部调课</div>
-                  <div className="text-[11px] text-zinc-500">教师请假、教室停用快速调整</div>
-                </div>
-              </div>
-              <ArrowRight className="size-4 text-zinc-400 transition-transform group-hover:translate-x-0.5 group-hover:text-blue-600" />
-            </Link>
-          ) : null}
-        </div>
       </section>
 
       {analytics.isPending ? (
@@ -445,7 +281,7 @@ export function OverviewPage() {
                 </div>
                 <div className="text-[11px] text-emerald-700 mt-0.5">
                   {!hasSolverRecord
-                    ? "需先执行排课求解"
+                    ? "先排出第一版草稿，这里才有评估"
                     : totalViolations === 0
                       ? "各项规则完全符合"
                       : `${totalViolations} 处微调偏离`}
@@ -677,9 +513,11 @@ export function OverviewPage() {
 
           <div className="mt-3 flex items-center justify-between border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-400">
             <span>最近同步: {datetime(syncHealth?.latest_sync_at)}</span>
-            <Link to="/integrations" className="text-blue-600 hover:underline flex items-center gap-0.5">
-              前往集成配置 <ArrowRight className="size-3" />
-            </Link>
+            {canOpenSettings ? (
+              <Link to={settingsPath()} className="text-blue-600 hover:underline flex items-center gap-0.5">
+                前往集成配置 <ArrowRight className="size-3" />
+              </Link>
+            ) : null}
           </div>
         </div>
       </section>

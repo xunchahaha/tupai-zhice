@@ -46,21 +46,21 @@ async function pointBackendAtFakeModel(api: APIRequestContext) {
   expect(response.ok(), await response.text()).toBeTruthy();
 }
 
-async function loginAndOpenSolver(page: Page) {
+// 登录后直接落在排课助手：一句话需求、确认、求解、验收都在这一页。
+async function loginAndOpenAssistant(page: Page) {
   await page.goto("/login");
   await page.getByLabel("用户名").fill("admin");
   await page.getByLabel("密码").fill(adminPassword);
   await page.getByRole("button", { name: "登录", exact: true }).click();
-  await page.waitForURL("**/overview");
-  await page.getByRole("link", { name: "排课求解" }).click();
-  await expect(page.getByRole("heading", { name: "排课求解" })).toBeVisible();
+  await page.waitForURL("**/assistant");
+  await expect(page.getByRole("heading", { name: "排课助手", exact: true })).toBeVisible();
 }
 
 async function parseInstruction(page: Page, instruction: string) {
-  const box = page.getByLabel("一句话排课指令");
+  const box = page.getByLabel("排课需求");
   await expect(page.getByText("已接入", { exact: false }).first()).toBeVisible();
   await box.fill(instruction);
-  await page.getByRole("button", { name: "让 AI 解析排课指令" }).click();
+  await page.getByRole("button", { name: "让 AI 解析", exact: true }).click();
 }
 
 test("核心示例句：教师本次禁排结构化后可直接求解，禁排进入求解并通过验收，刷新后续办", async ({ page }) => {
@@ -68,7 +68,7 @@ test("核心示例句：教师本次禁排结构化后可直接求解，禁排�
   const api = await adminApi();
   await pointBackendAtFakeModel(api);
 
-  await loginAndOpenSolver(page);
+  await loginAndOpenAssistant(page);
   await parseInstruction(page, FLAGSHIP_INSTRUCTION);
 
   // 确认卡：范围、本次任务要求逐条展示；模型把同一句话又抄进 unsupported_requirements，
@@ -120,15 +120,15 @@ test("核心示例句：教师本次禁排结构化后可直接求解，禁排�
   expect(forbidden, JSON.stringify(finished.goal_report)).toBeTruthy();
   expect(forbidden.passed, JSON.stringify(forbidden)).toBe(true);
 
-  const report = page.getByLabel("目标验收报告");
+  // 结果卡直接给出要求核对结论（不必进「目标」页）：所有要求已落实。
+  const report = page.getByLabel("要求核对");
   await expect(report).toBeVisible({ timeout: 30_000 });
+  await expect(report).toContainText("要求已落实");
 
-  // 续办：goal_id 已写入 URL；刷新后原指令与任务上下文恢复，不是一个空白页面。
-  await expect(page).toHaveURL(new RegExp(`goal=${run.goal_id}`));
+  // 续办：goal_id 已写入 URL；刷新后你交代的需求与任务上下文恢复，不是一个空白页面。
+  await expect(page).toHaveURL(new RegExp(`[?&]goal=${run.goal_id}`));
   await page.reload();
-  await expect(page.getByLabel("一句话排课指令")).toHaveValue(FLAGSHIP_INSTRUCTION, {
-    timeout: 20_000,
-  });
+  await expect(page.getByLabel("任务进展")).toContainText(FLAGSHIP_INSTRUCTION, { timeout: 20_000 });
 
   await api.dispose();
 });
@@ -138,7 +138,7 @@ test("显式「记住」：长期偏好直接生效并回执，不混进本次�
   const api = await adminApi();
   await pointBackendAtFakeModel(api);
 
-  await loginAndOpenSolver(page);
+  await loginAndOpenAssistant(page);
   await parseInstruction(page, MEMORY_INSTRUCTION);
 
   const receipts = page.getByLabel("记忆动作回执");
@@ -163,9 +163,10 @@ test("显式「记住」：长期偏好直接生效并回执，不混进本次�
   expect(entry.provenance.via).toBe("assistant_interpret");
   expect(entry.provenance.instruction).toContain("记住");
 
-  // 记忆页可见，可从那里修改或撤销（回执里的固定提示）；来源如实标注为一句话排课。
-  await page.getByRole("link", { name: "记忆与偏好" }).click();
-  await expect(page.getByRole("heading", { name: "记忆与偏好" })).toBeVisible();
+  // 常用偏好页可见，可从回执旁的链接直达该条修改或撤销；来源如实标注为一句话排课。
+  await receipts.getByRole("link", { name: "在常用偏好里修改或撤销" }).click();
+  await expect(page).toHaveURL(/\/memory\?.*entry=/);
+  await expect(page.getByRole("heading", { name: "常用偏好", exact: true })).toBeVisible();
   await expect(page.getByText("教师乙").first()).toBeVisible();
   await expect(page.getByText("一句话排课（明确声明）").first()).toBeVisible();
 
@@ -192,13 +193,14 @@ test("显式「不要用了」：撤销既有偏好，目标只能是上下文�
   expect(created.ok(), await created.text()).toBeTruthy();
   const seeded = await created.json();
 
-  await loginAndOpenSolver(page);
+  await loginAndOpenAssistant(page);
   await parseInstruction(page, "旧的教师乙周三晚偏好不要用了");
 
   const receipts = page.getByLabel("记忆动作回执");
   await expect(receipts).toBeVisible();
   await expect(receipts).toContainText("失效");
-  await expect(receipts).toContainText("记忆」页查看历史");
+  // 失效的偏好在「常用偏好」里仍可查看历史：回执旁给出直达入口。
+  await expect(receipts.getByRole("link", { name: "在常用偏好里修改或撤销" })).toBeVisible();
 
   // 条目状态被真实推进到 expired，撤销来自用户原话并带回链。
   const listed = await (await api.get("/api/v1/memory/preferences")).json();
@@ -211,26 +213,25 @@ test("显式「不要用了」：撤销既有偏好，目标只能是上下文�
   await api.dispose();
 });
 
-test("主体无法确认：登记目标 → 目标跟踪补参 → 回求解页再解析同一句话 → 求解并通过验收", async ({ page }) => {
+test("主体无法确认：补充条件（自动登记任务）→ 补参后自动重新解析 → 刷新续办再解析同一句话 → 求解并通过验收", async ({ page }) => {
   test.setTimeout(150_000);
   const api = await adminApi();
   await pointBackendAtFakeModel(api);
 
-  await loginAndOpenSolver(page);
+  await loginAndOpenAssistant(page);
   await parseInstruction(page, "重排初二物理A班，丙老师周五晚上不能上");
 
   // 模型没能唯一确定「丙老师」：要求没有进入求解，确认求解被拦住——但不是死路，
-  // 可以先登记目标，带着待补参的清单项去补。
+  // 直接在确认卡上「补充条件」：先登记任务，再就地补齐待补参数的清单项。
   await expect(page.getByText("以下要求尚未进入求解")).toBeVisible();
   await expect(page.getByRole("button", { name: "确认并开始求解" })).toBeDisabled();
-  await page.getByRole("button", { name: "登记为目标，稍后补充" }).click();
+  await page.getByRole("button", { name: "补充条件", exact: true }).click();
 
-  // 落地在目标详情：待量化项 + 「补齐禁排参数」入口。
-  await expect(page).toHaveURL(/\/goals\?goal=/);
+  // 任务已登记并写进 URL；补参表单直接展开（不用去别的页面）。
+  await expect(page).toHaveURL(/\/assistant\?.*goal=/);
   const goalId = new URL(page.url()).searchParams.get("goal");
   expect(goalId).toBeTruthy();
-  await expect(page.getByText("目标详情")).toBeVisible();
-  await page.getByRole("button", { name: "补齐禁排参数" }).click();
+  await expect(page.getByLabel("任务进展")).toContainText("重排初二物理A班，丙老师周五晚上不能上");
   await page.getByLabel("禁排主体", { exact: true }).selectOption({ label: "教师丙" });
   await page.getByLabel("添加禁排时段").selectOption({ label: "周五 18:30-20:00" });
   await page.getByLabel("添加禁排时段").selectOption({ label: "周五 20:10-21:40" });
@@ -243,13 +244,16 @@ test("主体无法确认：登记目标 → 目标跟踪补参 → 回求解页�
     })
     .toBe(JSON.stringify([["T03"], ["S09", "S10"], false]));
 
-  // 回求解页：原指令已恢复；重新解析同一句话，补全的禁排已在目标里 → 不再被拦。
-  await page.getByRole("button", { name: "修正范围后重新求解" }).click();
-  await expect(page).toHaveURL(new RegExp(`/solver[?]goal=${goalId}`));
-  await expect(page.getByLabel("一句话排课指令")).toHaveValue("重排初二物理A班，丙老师周五晚上不能上", {
+  // 补充保存后助手自动用同一任务重新解析：补全的禁排已在任务里 → 不再被拦。
+  await expect(page.getByRole("button", { name: "确认并开始求解" })).toBeEnabled({ timeout: 30_000 });
+  await expect(page.getByText("以下要求尚未进入求解")).toHaveCount(0);
+
+  // 续办：刷新后任务仍在（goal 在 URL 里），原指令已恢复；再解析同一句话，同样不被拦。
+  await page.reload();
+  await expect(page.getByLabel("任务需求")).toHaveValue("重排初二物理A班，丙老师周五晚上不能上", {
     timeout: 20_000,
   });
-  await page.getByRole("button", { name: "让 AI 解析排课指令" }).click();
+  await page.getByRole("button", { name: "让 AI 解析", exact: true }).click();
   const confirm = page.getByRole("button", { name: "确认并开始求解" });
   await expect(confirm).toBeEnabled();
   await expect(page.getByText("以下要求尚未进入求解")).toHaveCount(0);

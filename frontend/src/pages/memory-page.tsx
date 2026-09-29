@@ -1,7 +1,8 @@
 import { useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
 import { Check, Inbox, Pencil, ShieldCheck, Sparkles, Timer, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import {
@@ -35,7 +36,9 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DataTable } from "@/components/data-table";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
+import { SettingsBackLink } from "@/components/settings-back-link";
 import { Select } from "@/components/ui/select";
+import { cn } from "@/lib/cn";
 import { asArray, datetime, errorMessage, formatRoom, formatSlot } from "@/lib/format";
 import { type MemoryOutcome, memoryOutcomeLabel } from "@/lib/memory-usage";
 
@@ -231,6 +234,18 @@ export function MemoryPage() {
   const runs = useListSolverRunsApiV1SolverRunsGet();
   // Hook 顺序敏感：所有 use* 必须在下面的 loading/error 早退之前调用。
   const latestOutcomes = useLatestOutcomes(asArray<SolverRunResponse>(runs.data));
+  // ?entry=<偏好id>：助手「本次要求」里的「查看/修改」直达某条偏好，加载后高亮并滚动到它。
+  const entryParam = useSearchParams()[0].get("entry");
+  const scrolledEntry = useRef<string | null>(null);
+  useEffect(() => {
+    if (!entryParam || scrolledEntry.current === entryParam) return;
+    if (!asArray<PreferenceResponse>(preferences.data).some((item) => item.id === entryParam)) return;
+    scrolledEntry.current = entryParam;
+    // 待确认的偏好同时出现在收件箱卡片和全部偏好表里，优先滚到卡片（那里才有采纳/拒绝操作）。
+    // jsdom 与个别旧浏览器没有 scrollIntoView，缺失时静默跳过，高亮仍然生效。
+    const element = document.getElementById(`pref-card-${entryParam}`) ?? document.getElementById(`pref-row-${entryParam}`);
+    if (element && typeof element.scrollIntoView === "function") element.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [entryParam, preferences.data]);
 
   const [statusFilter, setStatusFilter] = useState("all");
   const [subjectFilter, setSubjectFilter] = useState("all");
@@ -352,6 +367,7 @@ export function MemoryPage() {
 
   const entries = asArray<PreferenceResponse>(preferences.data);
   const probation = entries.filter((entry) => entry.status === "probation");
+  const entryParamMissing = Boolean(entryParam) && !entries.some((entry) => entry.id === entryParam);
 
   // 冲突裁决三动作（MEM-D1，语义以 proposed_conflict 为准）：
   // - 保留旧弃新 = 拒绝提出方候选（带 rejection_reason，走既有拒绝弹窗），旧条目不动；
@@ -392,7 +408,11 @@ export function MemoryPage() {
       header: "主体",
       accessorFn: (row) => `${SUBJECT_TYPE_LABELS[row.subject_type] ?? row.subject_type} ${subjectName(row)}`,
       cell: ({ row }) => (
-        <span className="flex items-center gap-1.5">
+        <span
+          id={`pref-row-${row.original.id}`}
+          aria-current={row.original.id === entryParam ? "true" : undefined}
+          className={cn("flex items-center gap-1.5", row.original.id === entryParam && "w-fit rounded-md bg-blue-50 px-1.5 py-0.5 ring-1 ring-blue-300")}
+        >
           <Badge>{SUBJECT_TYPE_LABELS[row.original.subject_type] ?? row.original.subject_type}</Badge>
           <span className="text-zinc-800">{subjectName(row.original)}</span>
         </span>
@@ -473,18 +493,27 @@ export function MemoryPage() {
   return (
     <div className="space-y-5 animate-fade-in">
       <PageHeader
-        title="记忆与偏好"
+        title="常用偏好"
         actions={
-          <Button size="sm" onClick={() => mining.mutate()} disabled={mining.isPending}>
-            <Sparkles className="size-3.5" />
-            {mining.isPending ? "挖掘中…" : "回顾本学期调课"}
-          </Button>
+          <>
+            <SettingsBackLink />
+            <Button size="sm" onClick={() => mining.mutate()} disabled={mining.isPending}>
+              <Sparkles className="size-3.5" />
+              {mining.isPending ? "挖掘中…" : "回顾本学期调课"}
+            </Button>
+          </>
         }
       >
         <p className="mt-1 text-sm text-zinc-500">
           系统从调课行为中学习偏好；待确认候选在您采纳或授权试用前不会影响排课，授权试用到期自动退出。
         </p>
       </PageHeader>
+
+      {entryParamMissing ? (
+        <p role="status" className="border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          没有找到指定的偏好，它可能已被停用或删除；可在下方列表中查找。
+        </p>
+      ) : null}
 
       {entries.length === 0 ? (
         <div className="grid min-h-48 place-items-center rounded-lg border border-zinc-200 bg-white text-sm text-zinc-400">
@@ -495,13 +524,18 @@ export function MemoryPage() {
           <section className="rounded-lg border border-zinc-200 bg-white shadow-2xs">
             <div className="flex items-center gap-2 border-b border-zinc-200 px-4 py-3 text-sm font-semibold">
               <Inbox className="size-4 text-amber-500" />
-              待确认记忆
+              待确认的偏好
               {probation.length ? <Badge tone="yellow">{probation.length}</Badge> : null}
             </div>
             {probation.length ? (
               <div className="divide-y divide-zinc-100">
                 {probation.map((entry) => (
-                  <div key={entry.id} className="px-4 py-4">
+                  <div
+                    key={entry.id}
+                    id={`pref-card-${entry.id}`}
+                    aria-current={entry.id === entryParam ? "true" : undefined}
+                    className={cn("px-4 py-4", entry.id === entryParam && "bg-blue-50/50 ring-2 ring-inset ring-blue-300")}
+                  >
                     <div className="flex flex-wrap items-center gap-2">
                       <Badge>{SUBJECT_TYPE_LABELS[entry.subject_type] ?? entry.subject_type}</Badge>
                       <span className="text-sm font-medium text-zinc-900">{subjectName(entry)}</span>
@@ -570,7 +604,7 @@ export function MemoryPage() {
                 ))}
               </div>
             ) : (
-              <div className="grid min-h-32 place-items-center px-4 text-sm text-zinc-400">没有待确认的记忆候选</div>
+              <div className="grid min-h-32 place-items-center px-4 text-sm text-zinc-400">没有待确认的偏好候选</div>
             )}
           </section>
 

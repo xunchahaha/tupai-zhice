@@ -69,11 +69,19 @@ function expiryIso(form: CreateFormState): string {
   return `${date}T23:59:59+08:00`;
 }
 
+export interface PublicLinksPageProps {
+  /** 并入课表「分享与订阅」视图时不再渲染自己的页头；默认 false 保持独立页面行为。 */
+  embedded?: boolean;
+  /** 非空时禁用「新建公开链接」并把原因写在按钮提示上（例如还没有任何已发布版本）。 */
+  createDisabledReason?: string;
+}
+
 /**
- * 公开链接管理页（06 §3 B4）：capability-link 与 RBAC 正交，
+ * 公开链接管理（06 §3 B4）：capability-link 与 RBAC 正交，
  * 签发/轮换/停用只要求 admin/scheduler；明文链接只在创建/轮换弹窗出现一次。
+ * 链接挂在课表方案上、始终展示当前已发布版本，草稿不会经由它对外可见。
  */
-export function PublicLinksPage() {
+export function PublicLinksPage({ embedded = false, createDisabledReason }: PublicLinksPageProps = {}) {
   const { scheduleSet } = useOutletContext<AppOutletContext>();
   const scheduleSetId = scheduleSet?.id ?? "";
   const client = useQueryClient();
@@ -268,21 +276,31 @@ export function PublicLinksPage() {
   if (links.isPending || campuses.isPending || classGroups.isPending || teachers.isPending) return <LoadingState />;
   if (links.isError) return <ErrorState retry={() => void links.refetch()} />;
 
+  const createButton = (
+    <Button
+      size="sm"
+      disabled={!scheduleSetId || Boolean(createDisabledReason)}
+      title={createDisabledReason}
+      onClick={() => { setForm(EMPTY_FORM); setCreateOpen(true); }}
+    >
+      <Link2 className="size-3.5" />
+      新建公开链接
+    </Button>
+  );
+  const intro = "免登录课表页与日历订阅的凭证链接；签发/轮换/停用不进入角色权限体系，撤回即停用或轮换 token。";
+
   return (
     <div className="space-y-5 animate-fade-in">
-      <PageHeader
-        title="公开链接"
-        actions={
-          <Button size="sm" disabled={!scheduleSetId} onClick={() => { setForm(EMPTY_FORM); setCreateOpen(true); }}>
-            <Link2 className="size-3.5" />
-            新建公开链接
-          </Button>
-        }
-      >
-        <p className="mt-1 text-xs text-zinc-500">
-          免登录课表页与日历订阅的凭证链接；签发/轮换/停用不进入角色权限体系，撤回即停用或轮换 token。
-        </p>
-      </PageHeader>
+      {embedded ? (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs text-zinc-500">{intro}</p>
+          {createButton}
+        </div>
+      ) : (
+        <PageHeader title="公开链接" actions={createButton}>
+          <p className="mt-1 text-xs text-zinc-500">{intro}</p>
+        </PageHeader>
+      )}
 
       <DataTable
         columns={columns}

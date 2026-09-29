@@ -3,7 +3,7 @@
  *
  * 后端 TC-1/TC-2/TC-4 落地并重导 openapi 之前，orval 生成模型里还没有
  * task_constraints / memory_action_receipts / goal.context 字段；沿用仓库既有
- * 「按后端契约就地扩展」模式（interpret-stream.ts 的 thinking、solver-page 的
+ * 「按后端契约就地扩展」模式（interpret-stream.ts 的 thinking、排课助手页的
  * suggested_instruction），在这里集中定义本地类型，后端契约重生成后可整体收敛。
  */
 

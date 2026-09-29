@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ReschedulePage } from "@/pages/reschedule-page";
+import { ReschedulePage, type ReschedulePageProps } from "@/pages/reschedule-page";
 
 // 页面走 orval 生成的客户端，统一经过 customInstance，因此在这一层拦截。
 const mocks = vi.hoisted(() => ({
@@ -25,25 +25,61 @@ vi.mock("sonner", () => ({ toast: { success: mocks.success, error: mocks.error }
 const admin = { id: "admin-id", username: "admin", role: "admin" as const };
 
 const schedules = [{ id: "s1", version_no: 1, name: "基线课表", status: "published", parent_id: null, solver_run_id: "run-1", metrics: {}, assignment_count: 10, published_at: "2026-08-01T02:00:00Z", created_at: "2026-08-01T01:00:00Z" }];
-const teachers = [{ id: "t1", business_id: "T-001", name: "张老师" }];
-const rooms = [{ id: "r1", business_id: "教室-301", name: "301 教室" }];
+const teachers = [{ id: "t1", business_id: "T-001", name: "张老师" }, { id: "t2", business_id: "T-002", name: "李老师" }];
+const rooms = [{ id: "r1", business_id: "教室-301", name: "301 教室" }, { id: "r2", business_id: "教室-302", name: "302 教室" }];
 const slot = { id: "slot-1", business_id: "SLOT-周三-1900-2030", weekday: "周三", start_time: "19:00", end_time: "20:30" };
+const slotThursday = { id: "slot-2", business_id: "SLOT-周四-0900-1030", weekday: "周四", start_time: "09:00", end_time: "10:30" };
+const draft = { ...schedules[0], id: "s2", version_no: 2, name: "求解版本 v2", status: "draft", parent_id: "s1", published_at: null };
 
-function renderPage() {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
-  return render(
+// 生成候选方案时后端返回的草稿 id；null 表示这次没有产出候选。
+let candidateScheduleId: string | null;
+let events: Array<Record<string, unknown>>;
+
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location">{location.pathname}{location.search}</div>;
+}
+
+function tree(client: QueryClient, props: ReschedulePageProps) {
+  return (
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={["/reschedule"]}>
         <Routes>
           <Route element={<Outlet context={{ user: admin, scheduleAccessRole: "approver" }} />}>
-            <Route path="/reschedule" element={<ReschedulePage />} />
+            <Route path="/reschedule" element={<ReschedulePage {...props} />} />
           </Route>
+          <Route path="*" element={<div>其它页面</div>} />
         </Routes>
+        <LocationProbe />
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+}
+
+function renderPage(props: ReschedulePageProps = {}) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const view = render(tree(client, props));
+  return { ...view, rerenderWith: (next: ReschedulePageProps) => view.rerender(tree(client, next)) };
+}
+
+function mockBackend() {
+  candidateScheduleId = null;
+  events = [];
+  mocks.request.mockReset();
+  mocks.success.mockReset();
+  mocks.error.mockReset();
+  mocks.request.mockImplementation(async (config: { url: string; method?: string }) => {
+    const method = (config.method ?? "GET").toUpperCase();
+    if (config.url === "/api/v1/reschedule-events" && method === "POST") return { id: "evt-1", event_type: "teacher_leave", status: "candidate_ready", candidate_schedule_id: candidateScheduleId };
+    if (config.url === "/api/v1/reschedule-events") return events;
+    if (config.url === "/api/v1/schedules") return [...schedules, draft];
+    if (config.url === "/api/v1/teachers") return teachers;
+    if (config.url === "/api/v1/rooms") return rooms;
+    if (config.url === "/api/v1/time-slots") return [slot, slotThursday];
+    return [];
+  });
 }
 
 function createCalls() {
@@ -53,21 +89,7 @@ function createCalls() {
 describe("ReschedulePage declared reason chips", () => {
   afterEach(cleanup);
 
-  beforeEach(() => {
-    mocks.request.mockReset();
-    mocks.success.mockReset();
-    mocks.error.mockReset();
-    mocks.request.mockImplementation(async (config: { url: string; method?: string }) => {
-      const method = (config.method ?? "GET").toUpperCase();
-      if (config.url === "/api/v1/reschedule-events" && method === "POST") return { id: "evt-1", event_type: "teacher_leave", status: "pending" };
-      if (config.url === "/api/v1/reschedule-events") return [];
-      if (config.url === "/api/v1/schedules") return schedules;
-      if (config.url === "/api/v1/teachers") return teachers;
-      if (config.url === "/api/v1/rooms") return rooms;
-      if (config.url === "/api/v1/time-slots") return [slot];
-      return [];
-    });
-  });
+  beforeEach(mockBackend);
 
   it("submits without a declared reason when no chip is selected", async () => {
     const user = userEvent.setup();
@@ -126,5 +148,124 @@ describe("ReschedulePage declared reason chips", () => {
     await waitFor(() => expect(createCalls()).toHaveLength(1));
     const [config] = createCalls()[0];
     expect(config.data).toMatchObject({ declared_reason: "投影仪检修" });
+  });
+});
+
+describe("ReschedulePage inside the schedule hub", () => {
+  afterEach(cleanup);
+  beforeEach(mockBackend);
+
+  const location = () => screen.getByTestId("location").textContent;
+  const prefill = { lessonId: "COURSE-2", label: "B班 10月15日 周四上午，教师 李老师", teacherId: "T-002", roomId: "教室-302", slotId: slotThursday.business_id };
+
+  it("keeps its own page title when standalone and drops it when embedded", async () => {
+    renderPage();
+    expect(await screen.findByRole("heading", { name: "局部调课", level: 1 })).toBeVisible();
+
+    cleanup();
+    renderPage({ embedded: true });
+    await screen.findByText("创建变更事件");
+    expect(screen.queryByRole("heading", { name: "局部调课" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "排课流程" })).not.toBeInTheDocument();
+  });
+
+  it("prefills teacher and slot from the selected lesson and submits them", async () => {
+    const user = userEvent.setup();
+    renderPage({ embedded: true, parentScheduleId: "s2", prefill });
+
+    expect(await screen.findByText(/已按所选课次带入：B班 10月15日 周四上午，教师 李老师/)).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "父课表" })).toHaveValue("s2");
+    expect(screen.getByRole("combobox", { name: "教师" })).toHaveValue("T-002");
+    expect(screen.getByRole("combobox", { name: "影响时段" })).toHaveValue(slotThursday.business_id);
+
+    await user.click(screen.getByRole("button", { name: "生成候选方案" }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][0].data).toMatchObject({
+      event_type: "teacher_leave",
+      parent_schedule_id: "s2",
+      teacher_business_id: "T-002",
+      room_business_id: null,
+      slot_business_ids: [slotThursday.business_id],
+    });
+  });
+
+  it("uses the lesson's room for a room outage and stays editable", async () => {
+    const user = userEvent.setup();
+    renderPage({ embedded: true, prefill });
+
+    await user.selectOptions(await screen.findByRole("combobox", { name: "事件类型" }), "room_outage");
+    expect(screen.getByRole("combobox", { name: "教室" })).toHaveValue("教室-302");
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "教室" }), "教室-301");
+    await user.click(screen.getByRole("button", { name: "生成候选方案" }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][0].data).toMatchObject({ event_type: "room_outage", room_business_id: "教室-301", teacher_business_id: null });
+  });
+
+  it("does not overwrite manual edits when the same lesson stays selected, but re-prefills for another lesson", async () => {
+    const user = userEvent.setup();
+    const view = renderPage({ embedded: true, prefill });
+    await user.selectOptions(await screen.findByRole("combobox", { name: "教师" }), "T-001");
+
+    // 同一节课重新渲染（例如课表数据刷新）不应把用户刚改的老师刷回去。
+    view.rerenderWith({ embedded: true, prefill: { ...prefill } });
+    expect(screen.getByRole("combobox", { name: "教师" })).toHaveValue("T-001");
+
+    view.rerenderWith({ embedded: true, prefill: { ...prefill, lessonId: "COURSE-3", teacherId: "T-002" } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "教师" })).toHaveValue("T-002"));
+  });
+
+  it("follows the version chosen in the schedule header", async () => {
+    const view = renderPage({ embedded: true, parentScheduleId: "s1" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "父课表" })).toHaveValue("s1"));
+
+    view.rerenderWith({ embedded: true, parentScheduleId: "s2" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "父课表" })).toHaveValue("s2"));
+  });
+
+  it("points at the new draft in 历史版本 after a candidate is generated", async () => {
+    const user = userEvent.setup();
+    candidateScheduleId = "s2";
+    renderPage({ embedded: true });
+
+    await user.click(await screen.findByRole("button", { name: "生成候选方案" }));
+
+    expect(await screen.findByText(/候选方案已生成为草稿，尚未生效/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "查看版本" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "在历史版本中查看新草稿" }));
+    expect(location()).toBe("/schedule?view=history&version=s2");
+  });
+
+  it("refreshes the version list so the new draft can be found", async () => {
+    const user = userEvent.setup();
+    candidateScheduleId = "s2";
+    renderPage({ embedded: true });
+    await screen.findByRole("button", { name: "生成候选方案" });
+    const listCalls = () => mocks.request.mock.calls.filter(([config]) => config.url === "/api/v1/schedules").length;
+    const before = listCalls();
+
+    await user.click(screen.getByRole("button", { name: "生成候选方案" }));
+
+    await waitFor(() => expect(listCalls()).toBeGreaterThan(before));
+  });
+
+  it("still opens 历史版本 when no candidate was produced", async () => {
+    const user = userEvent.setup();
+    renderPage({ embedded: true });
+
+    await user.click(await screen.findByRole("button", { name: "生成候选方案" }));
+    await user.click(await screen.findByRole("button", { name: "在历史版本中查看新草稿" }));
+
+    expect(location()).toBe("/schedule?view=history");
+  });
+
+  it("links an event to its candidate draft", async () => {
+    const user = userEvent.setup();
+    events = [{ id: "evt-9-aaaa-bbbb", event_type: "teacher_leave", description: "张老师请假", status: "candidate_ready", declared_reason: null, candidate_schedule_id: "s2", created_at: "2026-08-02T01:00:00Z" }];
+    renderPage({ embedded: true });
+
+    await user.click(await screen.findByRole("button", { name: "查看候选草稿" }));
+
+    expect(location()).toBe("/schedule?view=history&version=s2");
   });
 });

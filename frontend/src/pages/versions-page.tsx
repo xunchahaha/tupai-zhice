@@ -24,7 +24,6 @@ import {
   useFeishuSyncBatchApiV1IntegrationsFeishuSyncBatchPost,
   useListAuditLogsApiV1AuditLogsGet,
   useListSchedulesApiV1SchedulesGet,
-  usePublishScheduleApiV1SchedulesScheduleIdPublishPost,
   useRollbackScheduleApiV1SchedulesScheduleIdRollbackPost,
 } from "@/api/generated/client";
 import { UserResponseRole, type ScheduleSummaryResponse } from "@/api/generated/models";
@@ -33,26 +32,33 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
-import { SopSteps } from "@/components/sop-steps";
-import { useAppUser, useScheduleAccessRole } from "@/app/user-context";
+import { canPublishCurrentSet, useAppUser, useScheduleAccessRole } from "@/app/user-context";
 import { auditActionLabel, diffKindLabel, resourceLabel, statusLabel } from "@/lib/labels";
 import { asArray, datetime, errorMessage, formatRoom, formatSlot } from "@/lib/format";
+import { schedulePath } from "@/lib/routes";
 import { preferredSchedule } from "@/lib/schedule";
+import { usePublishSchedule } from "@/lib/use-publish-schedule";
 import { statusTone } from "@/lib/status";
 import { cn } from "@/lib/cn";
 
-const VERSION_WRITE_ROLES: readonly UserResponseRole[] = [UserResponseRole.admin, UserResponseRole.approver];
 const OFFICIAL_VERSION_SUFFIX = "官方原始课表";
 const localActionLabels: Record<string, string> = { delete: "删除" };
 
 const INITIAL_CHUNK_SIZE = 200;
 const INCREMENT_CHUNK_SIZE = 150;
 
-export function VersionsPage() {
+export interface VersionsPageProps {
+  /** 并入课表页时不再渲染自己的页头，操作按钮放到内嵌工具条。默认 false 保持独立页面行为。 */
+  embedded?: boolean;
+  /** 课表页头部所选的版本：版本记录里高亮它，并默认拿它和来源版本做对比。 */
+  highlightId?: string;
+}
+
+export function VersionsPage({ embedded = false, highlightId }: VersionsPageProps = {}) {
   const user = useAppUser();
   const scheduleAccessRole = useScheduleAccessRole();
   const navigate = useNavigate();
-  const canManageVersions = VERSION_WRITE_ROLES.includes(user.role) && scheduleAccessRole === "approver";
+  const canManageVersions = canPublishCurrentSet(user, scheduleAccessRole);
   const canViewAudit = user.role === UserResponseRole.admin;
 
   const client = useQueryClient();
@@ -63,6 +69,8 @@ export function VersionsPage() {
   const [target, setTarget] = useState("");
   const [removedIds, setRemovedIds] = useState<readonly string[]>([]);
   const [pendingDelete, setPendingDelete] = useState<ScheduleSummaryResponse | null>(null);
+  // 发布/回滚都会改变对外的当前课表，和助手里的发布一样先二次确认再提交。
+  const [pendingSwitch, setPendingSwitch] = useState<{ kind: "publish" | "rollback"; item: ScheduleSummaryResponse } | null>(null);
 
   // Search & Dynamic Infinite Scroll for Diff Table
   const [diffSearch, setDiffSearch] = useState("");
@@ -86,6 +94,19 @@ export function VersionsPage() {
     setTarget((previous) => (alive(previous) ? previous : current.id));
     setBase((previous) => (alive(previous) ? previous : versions.find((item) => item.id !== current.id)?.id ?? ""));
   }, [versions]);
+
+  // 头部所选版本变化时，对比默认落到「该版本 vs 它的来源版本」，方便核对刚生成的草稿；
+  // 每个高亮版本只落一次，之后用户手动选的基准/目标不会被覆盖。
+  const primedFor = useRef("");
+  useEffect(() => {
+    if (!highlightId || primedFor.current === highlightId) return;
+    const picked = versions.find((item) => item.id === highlightId);
+    if (!picked) return;
+    primedFor.current = highlightId;
+    const parentAlive = picked.parent_id ? versions.some((item) => item.id === picked.parent_id) : false;
+    setTarget(picked.id);
+    setBase(parentAlive ? (picked.parent_id as string) : versions.find((item) => item.id !== picked.id)?.id ?? "");
+  }, [highlightId, versions]);
 
   const diff = useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet(base, target, {
     query: { enabled: Boolean(base && target && base !== target) },
@@ -112,21 +133,13 @@ export function VersionsPage() {
       data: { resources: ["schedule", "public_summary", "public_adjustment_notice", "public_class_links"] },
     });
 
-  const publish = usePublishScheduleApiV1SchedulesScheduleIdPublishPost({
-    mutation: {
-      onSuccess: () => {
-        toast.success("版本已发布为当前课表，已触发发布数据同步");
-        refresh();
-        void client.invalidateQueries({ queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey() });
-      },
-      onError: (error) => toast.error(errorMessage(error)),
-    },
-  });
+  const publish = usePublishSchedule({ onPublished: () => setPendingSwitch(null) });
 
   const rollback = useRollbackScheduleApiV1SchedulesScheduleIdRollbackPost({
     mutation: {
       onSuccess: () => {
         toast.success("已恢复到历史版本，已触发发布数据同步");
+        setPendingSwitch(null);
         refresh();
         void client.invalidateQueries({ queryKey: getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey() });
       },
@@ -212,28 +225,25 @@ export function VersionsPage() {
       />
     );
 
+  const toolbar = (
+    <div className="flex flex-wrap items-center gap-2">
+      {/* 发布或回滚后回课表确认效果；内嵌时就是切回「课表」视图。 */}
+      <Button size="sm" variant="outline" onClick={() => navigate(schedulePath({ version: highlightId }))}>
+        <CalendarDays className="size-3.5" />
+        查看课表
+      </Button>
+      {canManageVersions ? (
+        <Button size="sm" variant="outline" onClick={retryPublishedData} disabled={syncPublishedData.isPending}>
+          <Send className="size-3.5" />
+          {syncPublishedData.isPending ? "正在同步发布数据" : "重新同步发布数据"}
+        </Button>
+      ) : null}
+    </div>
+  );
+
   return (
     <div className="space-y-5 animate-fade-in">
-      <PageHeader
-        title="版本与回滚"
-        actions={
-          <div className="flex items-center gap-2">
-            {/* D12 断头路：发布或回滚后回课表视图确认效果。 */}
-            <Button size="sm" variant="outline" onClick={() => navigate("/schedule")}>
-              <CalendarDays className="size-3.5" />
-              查看课表
-            </Button>
-            {canManageVersions ? (
-              <Button size="sm" variant="outline" onClick={retryPublishedData} disabled={syncPublishedData.isPending}>
-                <Send className="size-3.5" />
-                {syncPublishedData.isPending ? "正在同步发布数据" : "重新同步发布数据"}
-              </Button>
-            ) : null}
-          </div>
-        }
-      >
-        <SopSteps />
-      </PageHeader>
+      {embedded ? <div className="flex justify-end">{toolbar}</div> : <PageHeader title="版本与回滚" actions={toolbar} />}
 
       <section
         className={
@@ -243,7 +253,7 @@ export function VersionsPage() {
         }
       >
         {canManageVersions
-          ? "发布/回滚会先更新本地当前版本，再自动同步到已启用的外部集成（如飞书多维表格），内容为当前方案的“课表”、领导展示汇总、班级链接目录和调课通知。同步失败不会撤销本地版本；可在“外部集成”逐表重试，或在此重新同步发布数据。"
+          ? "发布/回滚会先更新本地当前版本，再自动同步到已启用的外部集成（如飞书多维表格），内容为当前方案的“课表”、领导展示汇总、班级链接目录和调课通知。同步失败不会撤销本地版本；可在「设置」的外部集成里逐表重试，或在此重新同步发布数据。"
           : "当前账号可以查看和比较版本记录；发布、回滚、删除等变更操作仅由具备相应权限的账号执行。"}
       </section>
 
@@ -472,7 +482,8 @@ export function VersionsPage() {
                 <div
                   key={item.id}
                   data-testid={`version-card-${item.id}`}
-                  className="p-4 transition-colors hover:bg-zinc-50/50"
+                  data-selected={item.id === highlightId ? "true" : undefined}
+                  className={cn("p-4 transition-colors hover:bg-zinc-50/50", item.id === highlightId && "bg-blue-50/40 ring-1 ring-inset ring-blue-300")}
                 >
                   <div className="flex items-center justify-between">
                     <div>
@@ -493,12 +504,21 @@ export function VersionsPage() {
                     <span>{item.assignment_count ?? 0} 条课次</span>
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      aria-label={`查看版本 v${item.version_no} 的课表`}
+                      onClick={() => navigate(schedulePath({ version: item.id }))}
+                    >
+                      <CalendarDays className="size-3.5" />
+                      看课表
+                    </Button>
                     {canPublish ? (
                       <Button
                         size="sm"
                         variant="outline"
                         aria-label={`发布版本 v${item.version_no}`}
-                        onClick={() => publish.mutate({ scheduleId: item.id })}
+                        onClick={() => setPendingSwitch({ kind: "publish", item })}
                       >
                         <Send className="size-3.5" />
                         发布此版本
@@ -509,7 +529,7 @@ export function VersionsPage() {
                         size="sm"
                         variant="ghost"
                         aria-label={`回滚到版本 v${item.version_no}`}
-                        onClick={() => rollback.mutate({ scheduleId: item.id })}
+                        onClick={() => setPendingSwitch({ kind: "rollback", item })}
                       >
                         <RotateCcw className="size-3.5" />
                         回滚到此版本
@@ -580,6 +600,32 @@ export function VersionsPage() {
           审计日志仅管理员可见；版本列表、版本对比和当前课表状态仍可正常查看。
         </section>
       )}
+
+      {pendingSwitch ? (
+        <ConfirmDialog
+          open
+          pending={pendingSwitch.kind === "publish" ? publish.isPending : rollback.isPending}
+          title={
+            pendingSwitch.kind === "publish"
+              ? `发布草稿 v${pendingSwitch.item.version_no}？`
+              : `回滚到版本 v${pendingSwitch.item.version_no}？`
+          }
+          description={
+            pendingSwitch.kind === "publish"
+              ? "发布后成为当前课表，并同步到已启用的外部集成；不会自动下发日历。"
+              : "回滚后该版本成为当前课表，替换现在使用中的课表，并同步到已启用的外部集成；不会自动下发日历。"
+          }
+          confirmLabel={pendingSwitch.kind === "publish" ? "确认发布" : "确认回滚"}
+          onOpenChange={(open) => {
+            if (!open) setPendingSwitch(null);
+          }}
+          onConfirm={() =>
+            pendingSwitch.kind === "publish"
+              ? publish.mutate({ scheduleId: pendingSwitch.item.id })
+              : rollback.mutate({ scheduleId: pendingSwitch.item.id })
+          }
+        />
+      ) : null}
 
       {pendingDelete ? (
         <ConfirmDialog

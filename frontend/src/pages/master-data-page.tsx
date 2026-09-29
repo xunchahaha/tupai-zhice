@@ -43,7 +43,7 @@ import {
   type TimeSlotResponse,
 } from "@/api/generated/models";
 import { http } from "@/api/http";
-import { type AppOutletContext } from "@/app/user-context";
+import { type AppOutletContext, canScheduleCurrentSet } from "@/app/user-context";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DataTable } from "@/components/data-table";
 import { ImportWizard } from "@/components/import-wizard";
@@ -56,6 +56,7 @@ import { Select } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/format";
+import { assistantPath } from "@/lib/routes";
 
 /**
  * 逐条选择（object_ids）的单次上限，来自后端 schema 的 max_length=1000。
@@ -246,7 +247,7 @@ function courseRooms(course: CourseSessionResponse): string[] {
 }
 
 export function MasterDataPage() {
-  const { user } = useOutletContext<AppOutletContext>();
+  const { user, scheduleAccessRole } = useOutletContext<AppOutletContext>();
   // Teachers, classes, rooms and sessions are shared source data for every
   // timetable.  Restrict edits to administrators so a scheduler assigned to
   // only one plan cannot change another plan's future inputs.
@@ -398,7 +399,7 @@ export function MasterDataPage() {
   };
   const afterImport = (result: ImportResult) => {
     afterAnyImport(result);
-    toast.success(`主数据已导入：新建 ${result.course_sessions} 个课次；导入版本为草稿，待审核发布`);
+    toast.success(`基础资料已导入：新建 ${result.course_sessions} 个课次；导入版本为草稿，待审核发布`);
   };
   const upload = useImportXlsxApiV1ImportsXlsxPost({ mutation: { onSuccess: afterImport, onError: createError } });
   // 智能导入与模板导入共用同一套收尾（失效缓存 + 同款导入报告），只提示文案按模式区分。
@@ -718,14 +719,14 @@ export function MasterDataPage() {
   const isCreating = createTeacher.isPending || createClass.isPending || createRoom.isPending || createSlot.isPending || updateTeacher.isPending || updateClass.isPending || updateRoom.isPending || updateSlot.isPending;
   const isCourseSaving = createCourse.isPending || updateCourse.isPending;
   const isBatchSaving = batchUpdateCourses.isPending || batchDeleteCourses.isPending;
-  const entityLabel = entityDialog ? entityConfig(entityDialog.kind).label : "主数据";
-  // D12 断头路：主数据就绪后下一步是配规则，课程场次为空时配规则也无从生效。
+  const entityLabel = entityDialog ? entityConfig(entityDialog.kind).label : "基础资料";
+  // D12 断头路：基础资料就绪后下一步是排课，课程场次为空时排课也无从开始。
   const courseSessionCount = Array.isArray(courseQuery.data) ? courseQuery.data.length : 0;
 
   return (
     <div className="space-y-5">
       <input ref={file} className="hidden" type="file" accept=".xlsx" onChange={(event) => { const selected = event.target.files?.[0]; if (selected) upload.mutate({ data: { file: selected as unknown as string } }); event.target.value = ""; }} />
-      <PageHeader title="主数据" actions={<><Button size="sm" variant="outline" onClick={refresh}><RefreshCw className="size-3.5" />刷新</Button><Button size="sm" variant="outline" onClick={() => void downloadSample()}><Download className="size-3.5" />下载官方模板</Button>{!readOnly ? <><Button size="sm" variant="secondary" onClick={() => setWizardOpen(true)}><Sparkles className="size-3.5" />智能导入</Button><Button size="sm" variant="secondary" onClick={() => file.current?.click()} disabled={upload.isPending}><FileUp className="size-3.5" />导入 XLSX</Button></> : null}{courseSessionCount > 0 ? <Button size="sm" onClick={() => navigate("/rules")}>去配规则</Button> : null}</>}><SopSteps /></PageHeader>
+      <PageHeader title="基础资料" actions={<><Button size="sm" variant="outline" onClick={refresh}><RefreshCw className="size-3.5" />刷新</Button><Button size="sm" variant="outline" onClick={() => void downloadSample()}><Download className="size-3.5" />下载官方模板</Button>{!readOnly ? <><Button size="sm" variant="secondary" onClick={() => setWizardOpen(true)}><Sparkles className="size-3.5" />智能导入</Button><Button size="sm" variant="secondary" onClick={() => file.current?.click()} disabled={upload.isPending}><FileUp className="size-3.5" />导入 XLSX</Button></> : null}{courseSessionCount > 0 && canScheduleCurrentSet(user, scheduleAccessRole) ? <Button size="sm" onClick={() => navigate(assistantPath())}>去排课</Button> : null}</>}><SopSteps /></PageHeader>
       {readOnly ? <section className="border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-600">教师、班级、教室和课程场次在所有课表方案中复用；为避免影响其他方案，只有管理员可以修改或导入。</section> : null}
       {importReport ? <ImportReportPanel report={importReport} onDismiss={() => setImportReport(null)} /> : null}
       {loading ? <LoadingState /> : failed ? <ErrorState retry={refresh} /> : (
@@ -815,7 +816,7 @@ function CourseToolbar({ total, filtered, selected, allFiltered, blocked, offFil
         <span className="tabular-nums">筛选 {filtered} / {total} 条</span>
         {!readOnly ? <SelectionControls selected={selected} filtered={filtered} allFiltered={allFiltered} offFilter={offFilter} onSelectAll={onSelectAll} onClear={onClearSelection} /> : null}
       </div>
-      {!readOnly ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("date")}><CalendarDays className="size-3.5" />批量改日期</Button><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("room")}>批量改教室</Button><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd}><Plus className="size-3.5" />新增课程</Button></div> : <span className="text-xs text-zinc-400">共享主数据由管理员维护</span>}
+      {!readOnly ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("date")}><CalendarDays className="size-3.5" />批量改日期</Button><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("room")}>批量改教室</Button><Button size="sm" variant="outline" disabled={disabled} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd}><Plus className="size-3.5" />新增课程</Button></div> : <span className="text-xs text-zinc-400">共享基础资料由管理员维护</span>}
     </div>
     {blocked ? <CourseBatchBlockedNotice selected={selected} /> : null}
     <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
@@ -1037,7 +1038,7 @@ function EntityToolbar({ label, total, filtered, selected, offFilter, onSelectAl
         <span className="tabular-nums">筛选 {filtered} / {total} 条</span>
         {!readOnly ? <SelectionControls selected={selected} filtered={filtered} allFiltered={filtered > 0 && selected === filtered && offFilter === 0} offFilter={offFilter} onSelectAll={onSelectAll} onClear={onClearSelection} /> : null}
       </div>
-      {readOnly ? <span className="text-xs text-zinc-400">共享主数据由管理员维护</span> : <div className="flex flex-wrap gap-2">{actions.map((item) => <Button key={item.action} size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch(item.action)}>{item.label}</Button>)}<Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd} disabled={disabled}><Plus className="size-3.5" />新增{label}</Button></div>}
+      {readOnly ? <span className="text-xs text-zinc-400">共享基础资料由管理员维护</span> : <div className="flex flex-wrap gap-2">{actions.map((item) => <Button key={item.action} size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch(item.action)}>{item.label}</Button>)}<Button size="sm" variant="outline" disabled={selected === 0 || overLimit} onClick={() => onBatch("delete")}><Trash2 className="size-3.5 text-red-600" />批量删除</Button><Button size="sm" onClick={onAdd} disabled={disabled}><Plus className="size-3.5" />新增{label}</Button></div>}
     </div>
     {note ? <p className="text-xs leading-5 text-zinc-500">{note}</p> : null}
     {overLimit ? <BatchLimitNotice selected={selected} /> : null}
