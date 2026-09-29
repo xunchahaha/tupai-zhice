@@ -13,7 +13,7 @@
 | 求解器 | OR-Tools CP-SAT | 硬约束强制 + 软约束加权目标，进程池异步执行 |
 | 数据库 | SQLite（WAL） | 默认单文件零部署依赖；连接层启用 WAL 与 busy_timeout |
 | LLM 通道 | OpenAI-compatible `/chat/completions` | 平台无关，可接豆包 Ark、DeepSeek 或企业模型网关；可选项，未配置自动降级 |
-| 前端 | React 19 · Vite · Tailwind CSS 4 | 管理端（13 个页面）+ 公开课表页（免登录 H5） |
+| 前端 | React 19 · Vite · Tailwind CSS 4 | 管理端（排课助手 / 课表 / 基础资料三个业务入口 + 设置，另有规则、常用偏好、账号三个管理页）+ 公开课表页（免登录 H5） |
 | API Client | orval | 由 `openapi.json` 生成的 TypeScript client，单一事实源（见 §5.5） |
 | 前端数据层 | TanStack Query · react-router 7 · zod | 服务端状态与路由，表单用 zod 校验 |
 | 测试 | pytest · vitest · Playwright | 后端集成测试走真实迁移链路（见 §7） |
@@ -24,7 +24,7 @@
 ```mermaid
 flowchart TB
     subgraph FE["前端 · React 19 + Vite + Tailwind 4"]
-        ADMIN["管理端（总览 / 主数据 / 规则 / 求解 / 课表 / 诊断 / 调课 / 记忆 / 版本 / 设置 / 账号）"]
+        ADMIN["管理端（排课助手 / 课表 / 基础资料 / 设置〔学校通用规则 · 常用偏好 · 账号管理〕）"]
         PUBLIC["公开课表页 /public/t/:token（免登录 H5）"]
     end
 
@@ -189,10 +189,10 @@ backend/
 frontend/
   src/
     api/               http.ts（axios 实例）· generated/（orval 生成，勿手改）
-    app/               app-shell（侧边栏 IA 与 SOP 分组）· router · AuthBoundary · RoleRoute
-    components/        ui/ 基础组件 · data-table · import-wizard · sop-steps · setup-checklist
-    lib/               sop.ts（SOP 步骤单一事实源）· labels / format / status / schedule
-    pages/             13 个管理页（总览/主数据/规则/求解/目标/课表/诊断/调课/记忆/版本/设置/账号/登录）
+    app/               app-shell（三个业务入口 + 底部设置）· router · legacy-redirects（旧地址重定向并保留 query）· AuthBoundary · RoleRoute
+    components/        ui/ 基础组件 · assistant/（排课助手卡片与任务状态机）· goal/ · diagnosis/ · calendar-dispatch-panel · data-table · import-wizard · sop-steps · setup-checklist
+    lib/               routes.ts（URL 契约）· sop.ts（三步流程）· labels / format / status / schedule
+    pages/             8 个路由页：assistant / schedule（课表 · 调整 · 历史版本 · 分享与订阅四个视图）/ master-data / settings / rules / memory / accounts / login；旧 overview / solver / goals / diagnostics / reschedule / versions / public-links 已并入并重定向
   tests/               vitest 单测 + tests/e2e Playwright
 docs/
   roadmap/             六份设计/实施文档（导入 · 记忆 · 集成 · 实施计划 · UX · 公开层），README 含 ADR

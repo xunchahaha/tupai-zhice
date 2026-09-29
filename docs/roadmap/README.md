@@ -32,6 +32,8 @@
 - [06-public-showcase.md](06-public-showcase.md) — 公开展示层设计（免登录课表门户）
 - [07-task-context.md](07-task-context.md) — 任务上下文主线贯通设计（第七轮复审第二批）
 
+> 当前前端导航已收敛为「排课助手 / 课表 / 基础资料」三个业务入口加底部「设置」，旧地址会重定向到新位置，URL 契约见 `frontend/src/lib/routes.ts`。05、07 等文档里的页面名（总览、求解、目标等）是当时状态的记录，保持原样。
+
 ## 决策记录（ADR 摘要）
 
 - **ADR-1 导入体系**：三层管线（L1 模板保底 / L2 智能映射任意 Excel / L3 平台连接器）；L2 为开源核心卖点，不引第三方 importer UI 库（视觉冻结约束），LLM 语义层复用现有 OpenAI-compatible 通道且可关闭。详见 [01](01-data-import.md)。
