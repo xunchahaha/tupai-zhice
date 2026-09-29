@@ -352,6 +352,44 @@ describe("MemoryPage", () => {
     );
     await waitFor(() => expect(mocks.success).toHaveBeenCalledWith("挖掘出 2 条候选偏好"));
   });
+
+  it("labels sentence-derived entries by how they arrived, not by the borrowed source field", async () => {
+    // 一句话排课的推测候选为复用 hard 升级限制借用了 induced_from_adjustment；
+    // 显式「记住」落成的是 explicit_stated。两者都不是调课挖掘，也没有调课证据，
+    // 页面照写「调课挖掘 / 来自 N 次调课」会让教务去找根本不存在的调课记录。
+    const assistantEntries = [
+      {
+        ...entries[0],
+        id: "pref-sentence-inferred",
+        evidence: ["张老师好像不太愿意上晚上"],
+        provenance: { via: "assistant_interpret", instruction: "张老师好像不太愿意上晚上" },
+      },
+      {
+        ...entries[1],
+        id: "pref-sentence-explicit",
+        source: "explicit_stated",
+        evidence: ["记住，这学期张老师周三晚尽量别排"],
+        provenance: { via: "assistant_interpret", instruction: "记住，这学期张老师周三晚尽量别排" },
+      },
+    ];
+    const baseImplementation = mocks.request.getMockImplementation();
+    mocks.request.mockImplementation(async (config: { url: string; method?: string }) => {
+      if (config.url === "/api/v1/memory/preferences" && (config.method ?? "GET") === "GET") {
+        return assistantEntries;
+      }
+      return baseImplementation?.(config);
+    });
+    renderPage();
+
+    // 收件箱卡片：推测候选如实标注，证据行展示原话而不是调课次数。
+    expect(await screen.findByText("来源：一句话排课（推测）")).toBeVisible();
+    expect(screen.getByText("原话：张老师好像不太愿意上晚上")).toBeVisible();
+    expect(screen.queryByText("来源：调课挖掘")).toBeNull();
+    expect(screen.queryByText(/来自 \d+ 次调课/)).toBeNull();
+    // 全部偏好表的来源列：显式声明与推测各自标注，不再落到「手动录入」。
+    expect(screen.getAllByText("一句话排课（明确声明）").length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText("手动录入")).toBeNull();
+  });
 });
 
 // MEM-D1 冲突裁决三动作：proposed_conflict 标记落提出方（候选），provenance

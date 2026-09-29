@@ -63,6 +63,29 @@ const SOURCE_LABELS: Record<string, string> = {
   admin_directive: "行政指令",
 };
 
+/**
+ * 一句话排课（assistant_interpret）产生的条目：来源按「怎么来的」如实标注，而不是
+ * 沿用 source 字段的字面含义——推测候选为复用 hard 升级限制借用了
+ * induced_from_adjustment，页面若照写「调课挖掘」，教务会去找并不存在的调课记录。
+ */
+function isFromAssistant(entry: PreferenceResponse): boolean {
+  return (entry.provenance as { via?: unknown } | null | undefined)?.via === "assistant_interpret";
+}
+
+function sourceLabel(entry: PreferenceResponse): string {
+  if (isFromAssistant(entry)) {
+    return entry.source === "explicit_stated" ? "一句话排课（明确声明）" : "一句话排课（推测）";
+  }
+  return SOURCE_LABELS[entry.source] ?? entry.source;
+}
+
+/** 证据行：一句话来源展示原话，其余展示调课次数。 */
+function evidenceLabel(entry: PreferenceResponse): string | null {
+  if (!entry.evidence.length) return null;
+  if (isFromAssistant(entry)) return `原话：${entry.evidence[0]}`;
+  return `来自 ${entry.evidence.length} 次调课`;
+}
+
 const STATUS_LABELS: Record<string, string> = {
   probation: "试用观察",
   confirmed: "已确认",
@@ -398,7 +421,7 @@ export function MemoryPage() {
     {
       header: "来源",
       accessorKey: "source",
-      cell: ({ row }) => SOURCE_LABELS[row.original.source] ?? row.original.source,
+      cell: ({ row }) => sourceLabel(row.original),
     },
     {
       header: "生效日期范围",
@@ -490,11 +513,11 @@ export function MemoryPage() {
                       <p className="mt-1 text-xs text-zinc-500">{entry.provenance.rationale}</p>
                     ) : null}
                     <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-400">
-                      <span>来源：{SOURCE_LABELS[entry.source] ?? entry.source}</span>
+                      <span>来源：{sourceLabel(entry)}</span>
                       <span>置信度 {Math.round(entry.confidence * 100)}%</span>
                       <span>权重 {entry.weight}</span>
                       <span>{validityLabel(entry)}</span>
-                      {entry.evidence.length ? <span>来自 {entry.evidence.length} 次调课</span> : null}
+                      {evidenceLabel(entry) ? <span>{evidenceLabel(entry)}</span> : null}
                     </div>
                     {adjustingId === entry.id ? (
                       <AdjustForm
