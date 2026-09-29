@@ -390,3 +390,96 @@ describe("SolverPage budget retry (TC-6 §5.2)", () => {
     expect(submitted.data.date_from).toBeNull();
   });
 });
+
+describe("SolverPage exit for requirements that could not be resolved", () => {
+  afterEach(cleanup);
+  beforeEach(() => {
+    mocks.diff.mockClear();
+    mocks.runs = [];
+    mocks.schedules = [];
+    mocks.courses = [];
+    mocks.submitMutate.mockClear();
+    mocks.get.mockReset().mockResolvedValue({ data: { configured: false, model: null, app_configuration: { aily_configured: false } } });
+    mocks.post.mockReset().mockResolvedValue({ data: {} });
+    mocks.stream.mockReset().mockRejectedValue(new Error("stream unavailable"));
+  });
+
+  const placeholder = {
+    key: "forbidden_slot_free-draft",
+    kind: "forbidden_slot_free",
+    requirement: "禁排要求待量化：补充主体与具体时段后才能独立复核",
+    params: { subject_type: "teacher", subject_ids: [], slot_business_ids: [], needs_params: true },
+  };
+
+  it("registers the goal with its to-be-quantified item and jumps to that goal, without starting a solve", async () => {
+    // 目标要到点击「确认并开始求解」才会创建，而该按钮恰恰因未落实的要求被禁用——
+    // 没有这个出口，「到目标清单补齐参数」的提示对新任务不可达。
+    mockAiConfigured();
+    mocks.stream.mockResolvedValue(
+      interpretationFixture({
+        unsupported_requirements: ["具体教师的禁排或请假要求"],
+        goal_checklist_draft: [
+          { key: "coverage", kind: "coverage", requirement: "覆盖全部目标课次", params: {} },
+          placeholder,
+        ],
+      }),
+    );
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      if (String(args[0]) === "/api/v1/goals") return { data: { id: "goal-later", status: "open", checklist: [] } };
+      return { data: {} };
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    await screen.findByText(/已解析完成（用时/);
+    // 未落实的要求仍然拦住求解。
+    expect(screen.getByRole("button", { name: /确认并开始求解/ })).toBeDisabled();
+    expect(screen.getByText(/可以「登记为目标，稍后补充」/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "登记为目标，稍后补充" }));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
+    const [url, body] = mocks.post.mock.calls[0] as [string, { checklist: Array<{ key: string }>; instruction: string }];
+    expect(url).toBe("/api/v1/goals");
+    expect(body.instruction).toBe("请在三天内重排考研课程");
+    // 待量化占位项随目标落库——补参后验收器才有东西可核对。
+    expect(body.checklist.map((item) => item.key)).toEqual(["coverage", "forbidden_slot_free-draft"]);
+    await waitFor(() => expect(screen.getAllByTestId("location-probe")[0]).toHaveTextContent(/^\/goals\?goal=goal-later$/));
+    // 没有发起任何求解。
+    expect(mocks.post.mock.calls.some((call) => String(call[0]) === "/api/v1/assistant/solve")).toBe(false);
+  });
+
+  it("does not offer a fake exit for requirements that cannot be quantized (room / consecutive)", async () => {
+    mockAiConfigured();
+    mocks.stream.mockResolvedValue(
+      interpretationFixture({
+        unsupported_requirements: ["指定教室要求"],
+        goal_checklist_draft: [{ key: "coverage", kind: "coverage", requirement: "覆盖全部目标课次", params: {} }],
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "让 AI 解析排课指令" }));
+    await screen.findByText(/已解析完成（用时/);
+    expect(screen.getByRole("button", { name: /确认并开始求解/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "登记为目标，稍后补充" })).not.toBeInTheDocument();
+    expect(screen.getByText(/请修改指令去掉这些要求后重新解析/)).toBeInTheDocument();
+  });
+
+  it("goes straight to the bound goal instead of creating another one when resuming", async () => {
+    mockGoalRoute(goalFixture({ context: goalContext }), true);
+    mocks.stream.mockResolvedValue(
+      interpretationFixture({
+        unsupported_requirements: ["具体教师的禁排或请假要求"],
+        goal_checklist_draft: [placeholder],
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage("/solver?goal=goal-77");
+    expect(await screen.findByText(/已关联目标 #goal-77/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "让 AI 解析排课指令" }));
+    await screen.findByText(/已解析完成（用时/);
+    await user.click(screen.getByRole("button", { name: "前往目标跟踪补充" }));
+    await waitFor(() => expect(screen.getAllByTestId("location-probe")[0]).toHaveTextContent(/^\/goals\?goal=goal-77$/));
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+});

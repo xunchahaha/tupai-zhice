@@ -515,3 +515,38 @@ describe("GoalsPage remedy actions (TC-6)", () => {
     expect(screen.queryByRole("button", { name: "修订目标清单" })).not.toBeInTheDocument();
   });
 });
+
+describe("GoalsPage deep link from the solver page (later-registration exit)", () => {
+  afterEach(cleanup);
+
+  it("opens the goal named by ?goal= straight into the continue section with the param form entry", async () => {
+    // 「登记为目标，稍后补充」跳来时带 ?goal=<id>：落地就是详情里的「补齐禁排参数」，
+    // 不必在列表里找刚创建的那一行。
+    mocks.goals = [goalFixture({ id: "goal-later", status: "open" })];
+    mocks.detail = {
+      ...goalFixture({ id: "goal-later", status: "open" }),
+      checklist_version: 1,
+      checklist_history: [],
+      runs: [],
+      latest_report: null,
+      checklist: [
+        {
+          key: "forbidden_slot_free-draft",
+          requirement: "禁排要求待量化：补充主体与具体时段后才能独立复核",
+          kind: "forbidden_slot_free",
+          params: { subject_type: "teacher", subject_ids: [], slot_business_ids: [], needs_params: true },
+        },
+      ],
+    };
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter initialEntries={["/goals?goal=goal-later"]}>
+          <GoalsPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("目标详情")).toBeInTheDocument();
+    expect(await screen.findByText("继续处理")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "补齐禁排参数" })).toBeInTheDocument();
+  });
+});

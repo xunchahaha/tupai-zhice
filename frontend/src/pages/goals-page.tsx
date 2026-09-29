@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, Flag, Target } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import {
@@ -77,7 +77,10 @@ function goalSubjectTypeLabel(value: string): string {
 export function GoalsPage() {
   const client = useQueryClient();
   const goals = useListGoalsApiV1GoalsGet();
-  const [openId, setOpenId] = useState("");
+  // 「登记为目标，稍后补充」从求解页跳来时带 ?goal=<id>：直接打开该目标的详情，
+  // 用户落地就在「补齐禁排参数」的入口前，而不是在列表里找刚创建的那一行。
+  const [searchParams] = useSearchParams();
+  const [openId, setOpenId] = useState(searchParams.get("goal") ?? "");
   const [abandonTarget, setAbandonTarget] = useState<GoalResponse | null>(null);
   const abandon = useAbandonGoalApiV1GoalsGoalIdAbandonPost({
     mutation: {
