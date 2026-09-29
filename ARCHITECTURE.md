@@ -184,7 +184,7 @@ backend/
     integrations/      集成抽象层（base / registry / local / feishu / dingtalk / wecom），新增集成见包内 README
     services/          15 个业务模块，见 §2.2
   alembic/             24 个迁移；版本落后时应用拒绝启动
-  scripts/             export_openapi.py / reset_e2e_db.py / reset_to_official.py
+  scripts/             export_openapi.py / reset_e2e_db.py / reset_to_official.py / fake_model_server.py（e2e 固定输出假模型）
   tests/               pytest 集成测试（真实迁移链路建库）
 frontend/
   src/
@@ -211,7 +211,7 @@ docs/
 ## 6. 测试与质量
 
 - **后端 pytest**：集成测试的数据库由真实 Alembic 链路构建（`conftest.py` 执行 `command.upgrade head`，与全新部署同一路径），再注入种子数据；`test_database_schema.py` 同时守护「测试库在 head」与「从旧版本升级到 head」两条链路。测试库工件（WAL/SHM）在会话开始时清理，避免上次运行留下假失败。
-- **前端 vitest + Playwright**：页面与组件单测在 `frontend/tests/`；端到端流程在 `tests/e2e/`（排课主流程 + 课表视觉）。
+- **前端 vitest + Playwright**：页面与组件单测在 `frontend/tests/`；端到端流程在 `tests/e2e/`（排课主流程 + 课表视觉 + 任务上下文业务场景）。任务上下文场景走真实前端、真实解析收口、真实 CP-SAT 与验收，只把模型输出固定成 `backend/scripts/fake_model_server.py`（OpenAI-compatible，由 playwright.config.ts 的 webServer 起在 8002）——stub 放在浏览器里会绕过后端的解析收口层。
 - **静态检查**：ruff（`E,F,I,UP,B,SIM`，line-length 100，target py311）；mypy（pydantic 插件，`check_untyped_defs`，Alembic 迁移文件豁免，缺 stub 的第三方依赖逐个显式 override 而非全局放宽）。
 - **openapi.json 同步规则**：接口变更后必须重新导出 `openapi.json` 并再生成 orval client，两者不允许手改；里程碑验证要求再生成后无 diff。
 - **迁移纪律**：Schema 变更只经 Alembic 迁移，应用启动守卫会拒绝未迁移/超前/落后的数据库，保证各环境行为可预期。

@@ -551,6 +551,14 @@ animate-fade-in），**不新增任何样式语言**：
 
 ## 7. e2e 方案（TC-8）
 
+> **实施说明（2026-09-29）**：本节方案在 MEM-J3 时没有落地（当时只做了 vitest），已由 MEM-K5 以另一种实现补齐：
+> 假模型是 `backend/scripts/fake_model_server.py`（Python 标准库，而非下文的 `ai-stub.mjs`），playwright.config.ts
+> 的 webServer 起在 8002；用例经 `POST /api/v1/integrations/ai/configuration` 把后端指向它，而不是给后端 webServer
+> 设 `AI_*` 环境变量（那会改变其它 e2e 用例的 AI 状态）。落地的场景在
+> `frontend/tests/e2e/task-context-flow.spec.ts`：核心示例句、显式「记住」、显式「不要用了」、
+> 主体无法确认（登记目标→补参→再解析→求解→验收），与下文 S1–S7 的对应与取舍见 04 十期 MEM-K5。
+> 下文保留为设计当时的方案记录。
+
 ### 7.1 解析替身注入：环境配置 + 本地 OpenAI-compatible stub（零生产代码改动）
 
 勘察结论：e2e 无任何 AI 配置（playwright.config.ts:36-42 未设 AI_*，e2e 库无 AIProviderConfiguration

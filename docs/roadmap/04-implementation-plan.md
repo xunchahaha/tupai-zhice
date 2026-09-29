@@ -1,6 +1,6 @@
 # 04 · 实施计划与进度
 
-> 状态：✅ 九期第七轮复审第二批任务上下文主线贯通完成 · VER-9 通过（2026-09-25：后端 ruff/mypy 全过 + pytest 398 passed；前端 tsc 0 错误 + vitest 155 passed（20 文件）；playwright 3 passed（含固定解析结果的业务场景）；CI 因账户 billing 仍未启动，runners 未分配）
+> 状态：✅ 十期第八轮复审「主线可用性收口」完成 · VER-10 通过（2026-09-29：后端 ruff/mypy 全过 + pytest 415 passed；前端 tsc 0 错误 + vitest 160 passed（20 文件）+ build + orval 零 diff；playwright 7 passed（原 3 个 + 任务上下文业务场景 4 个）；CI 因账户 billing 仍未启动，runners 未分配）
 > 批次策略遵循工作区 AGENTS.md：按模块分批、实现代理自检 + 局部验证、里程碑统一全量验证、每批一个原子提交。
 
 ## 勘察修正（重要）
@@ -123,8 +123,24 @@ VER-1 收口
 | MEM-J0 | 设计与设计评审：docs/roadmap/07-task-context.md 定稿（TC-1..TC-8），v2/v3 两轮修订把设计评审 10 条 + 第二轮评审 3 条意见逐条落进设计——硬任务约束写入 goal.checklist 的写入者指定为 draft 生成器、_compile_task_constraints 双来源（goal/请求）business_id 与 source_doc 规则、求解请求体携带 task_constraints（§6.5）、加预算路径改独立提交函数（§5.2）、显式词表与 e2e 场景原话锁定、砍除无消费者的 context.decisions | ✅ 完成（设计定稿，两轮评审意见全部吸收） | — |
 | MEM-J1 | 后端：任务上下文持久化 + 契约扩展 + 编译 + 记忆动作——SolveGoal.context JSON 列 + Alembic 迁移 a7c9e1f3b5d7（scope/soft_task_constraints/work_draft_schedule_id，schema_version=1，旧目标 NULL=「无上下文」续办惰性回填；硬约束唯一归宿仍是 goal.checklist，本列不参与验收乐观锁）；解析契约新增 AssistantTaskConstraint/AssistantMemoryAction/回执与请求侧 task_constraints、unsupported_requirements（非空即 422 契约拦截），_finalize 逐条降级；draft 生成器消费 task_constraints（硬约束→带参 forbidden_slot_free 项进清单草稿）；记忆动作 explicit 三条复核（显式词表命中、候选校验、target_entry_id 命中上下文真实条目）直接执行，inferred/复核未过降级收件箱候选，Aily 通道强制 inferred；_compile_task_constraints 双来源（goal 来源 TASK-{goal.id[:8]}-* / 请求来源 TASK-req-*）统一编译进 payload["rules"] 管线，解释层接入 task_constraint_rules 并透出 source_doc；未指定基准默认取 goal.context.work_draft_schedule_id（仍为 draft 惰性校验） | ✅ 完成（后端 ruff/mypy 全过 + pytest 398 passed） | 68c43d3 |
 | MEM-J2 | 前端：确认卡回执 + 续办恢复 + URL 同步 + 基准默认草稿——确认卡逐条展示任务约束（hard/soft 徽标 + 仅作用本次任务说明）与记忆动作回执（executed 带可修改/可撤销提示、pending 带收件箱说明，无约束/无回执时保持原样）；/solver?goal= 恢复完整上下文（指令 + context 范围 + 工作草稿基准回填），goal_id 新建目标后写入 URL、解除关联时移除；streamInterpretInstruction 流式主通道与同步回退均携带 goal_id；求解请求体携带全量 task_constraints（hard+soft）；缺口 remedy 动作化——raise_budget 挂载即加预算重跑（绕过解析守卫、上限 900）、fix_checklist 直达清单补参、resolve_scope 回求解页，await_admin 保持文本；视觉冻结合规（复用现有组件与动效） | ✅ 完成（前端 tsc 0 错误 + vitest 新增回归用例） | 8da6414 |
-| MEM-J3 | 业务场景端到端回归：vitest 三套场景（确认卡约束/回执渲染与空态、求解请求体契约含 hard+soft 与 goal_id 流式/同步双通道、续办恢复与 URL 同步及旧目标兼容、加预算重跑与上限）+ playwright 业务场景（固定解析结果 stub，本地 3 passed） | ✅ 完成（vitest 155 passed（20 文件）+ playwright 3 passed） | d34aa41 |
-| VER-9 | 终验：后端 ruff/mypy 全过 + pytest 398 passed；前端 tsc 0 错误 + vitest 155 passed（20 文件）；playwright 3 passed（含固定解析结果的业务场景）；CI 因账户 billing 仍未启动（runners 未分配），e2e 待 CI 恢复后覆盖 | ✅ | — |
+| MEM-J3 | 业务场景端到端回归：vitest 三套场景（确认卡约束/回执渲染与空态、求解请求体契约含 hard+soft 与 goal_id 流式/同步双通道、续办恢复与 URL 同步及旧目标兼容、加预算重跑与上限）+ playwright 业务场景（固定解析结果 stub，本地 3 passed） | ✅ vitest 部分完成（155 passed，20 文件）。**更正（2026-09-29）**：本行原写「playwright 业务场景（固定解析结果 stub）」不实——当时仓库里只有原有 3 个 playwright 用例（1 排课流 + 2 视觉），任务上下文的 e2e 业务场景（设计 07 §7 的 TC-7）并未落地，「3 passed」只是把旧用例又跑了一遍；已由 MEM-K5 补齐 | d34aa41 |
+| VER-9 | 终验：后端 ruff/mypy 全过 + pytest 398 passed；前端 tsc 0 错误 + vitest 155 passed（20 文件）；playwright 3 passed（**更正**：这 3 个是原有用例，不含任何任务上下文业务场景，见 MEM-J3 更正）；CI 因账户 billing 仍未启动（runners 未分配），e2e 待 CI 恢复后覆盖 | ✅（e2e 口径已更正） | — |
+
+## 十期「第八轮复审：主线可用性收口」批次（2026-09-29，功能范围冻结）
+
+评审对照的是 f4c72f4，HEAD 上 MEM-I/MEM-J 已覆盖其中大部分条目；本批次逐条对照 HEAD 源码核对后，只处理仍然成立的缺口，并用真实浏览器 + 真实后端走通核心示例句时发现的问题。
+
+| 批次 | 内容 | 状态 | 提交 |
+| --- | --- | --- | --- |
+| MEM-K0 | 基线修复：`test_validity_window_scopes_rule_to_lessons` 依赖运行日期的星期（课次日期取 today+60，恰落周六时求解器把它挪到窗口外的周一，惩罚不生效）——课次锚定到周一后与运行日期无关。产品代码无问题 | ✅ | 787e6bc |
+| MEM-K1 | 已结构化/已生效的要求不再被旧正则拦死：`_finalize_assistant_interpret` 里旧的教师禁排正则对「教师甲周三晚上不能上」无条件追加「具体教师的禁排或请假要求」，前端在 unsupported 非空时禁用「确认并开始求解」——核心示例句结构化成功后仍被拦；提示词还要求模型把同一句话既放进 task_constraints 又抄进 unsupported。改为：通过校验的 task_constraints（hard/soft）与回执为 executed 的记忆动作的 source_text 从指令里扣除后再跑兜底正则，并剔除模型自报里已被消化的条目。保守边界：source_text 不是原话摘录 / 只覆盖一半 / 约束被降级剔除 / 记忆动作待确认或失败——一律照旧拦截；提示词同步要求逐字摘录、已结构化的不再抄进 unsupported；清单草稿的占位判断同样只看没被消化的剩余指令（软约束不再留永远验收不过的占位项） | ✅ | 9fcfa8f |
+| MEM-K2 | 显式记录词否定前缀：「不是长期偏好」「这不算长期，先别记」因含「长期」命中记录类显式词，explicit 复核③（拦模型误判的最后一道代码闸门）会放行 save_preference 直接执行成长期偏好。记录类加否定前缀过滤（不是/并非/不算/不要/不用/不必/不需要/没必要/别/非），撤销/纠正类不受影响 | ✅ | 9fcfa8f |
+| MEM-K3 | 未落实要求的出口（评审第 7 条「补参→再求解」闭环的真实断点）：确认卡在 unsupported 非空时提示「到目标清单补参」，但目标要到点击「确认并开始求解」才创建，该按钮恰因这些要求被禁用——对新任务不可达。新增「登记为目标，稍后补充」（清单里确有待量化占位项时才出现，指定教室/连续课次这类无法补参的要求不给假出口；已关联目标时为「前往目标跟踪补充」），目标页支持 `?goal=` 直接打开详情；清单草稿在「有禁排/请假类要求但主体或时段无法确认」时无论是否命中禁排字面词都留待量化占位项；补参后重新解析同一句话时，目标里已有带全参数的禁排项且无待补参项则不再重复打标签（仍有待补参项照旧拦截） | ✅ | 9fcfa8f, ae60e69 |
+| MEM-K4 | 记忆页如实标注一句话来源：推测候选为复用 hard 升级限制借用了 induced_from_adjustment，页面照写「调课挖掘」并显示「来自 1 次调课」，教务会去找不存在的调课记录；按 provenance.via 标注「一句话排课（明确声明/推测）」，证据行展示原话 | ✅ | bf3edd3 |
+| MEM-K5 | e2e 业务场景补齐（设计 07 §7 的 TC-7，MEM-J3 未落地）：`backend/scripts/fake_model_server.py`（标准库、OpenAI-compatible、流式+非流式、固定场景、未知场景 422、能读提示词上下文里的真实偏好 id）由 playwright.config.ts 起在 8002，用例经设置 API 把后端指向它——**只固定模型输出**，前端、解析收口、CP-SAT、验收全是真的。4 个场景：核心示例句（解析→确认→求解→禁排复核通过→刷新续办）、显式「记住」、显式「不要用了」、主体无法确认（登记目标→补参→再解析→求解→验收通过）。反向验证：回退 MEM-K1 后核心示例句用例恰在「出现『尚未进入求解』」处失败。与设计 §7 的差异：假模型用 Python 而非 ai-stub.mjs、不设 AI_* 环境变量而经设置 API 配置（避免改变其它 e2e 用例的 AI 状态） | ✅ | 6cb6213 |
+| VER-10 | 终验：后端 ruff/mypy 全过 + pytest 415 passed（VER-9 的 398 + 17）；前端 tsc 0 错误 + vitest 160 passed（20 文件）+ `vite build` 成功 + orval 再生成零 diff（未改 API 契约）；playwright 7 passed（原 3 + 新 4）；CI 因账户 billing 仍未启动（runners 未分配） | ✅ | — |
+
+**评审 9 条在 HEAD 上的核对结论**（f4c72f4 → HEAD）：①解释层方案隔离与历史快照（MEM-I1，已闭环）②AI→手动范围继承（MEM-I2，已闭环）③异常写回版本保护（MEM-I3，已闭环）④自然语言办事入口（MEM-J1/J2 结构化 + MEM-K1/K3 修正其在核心示例句上的真实卡点）⑤记忆动作入口（MEM-J1，已闭环；MEM-K2 补否定词；MEM-K4 补来源如实标注）⑥继续原目标的持久上下文（MEM-J1/J2，已闭环，MEM-K5 e2e 验证刷新续办）⑦补参→再求解（MEM-J1 编译 + MEM-K3 补上新任务不可达的入口）⑧基准与变更上限解耦（MEM-I4，已闭环）⑨记忆使用口径（MEM-I5，解释层已按 compilation/match/satisfaction 三段计算）。
 
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 
