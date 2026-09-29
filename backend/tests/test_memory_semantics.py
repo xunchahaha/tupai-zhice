@@ -298,7 +298,11 @@ def test_validity_window_scopes_rule_to_lessons(
     assert rule["scope"]["date_to"] == (today + timedelta(days=30)).isoformat()
 
     # 窗口外课次 + 只有周一一个可选时段：惩罚是否生效完全由日期窗口决定。
-    outside_date = (today + timedelta(days=60)).isoformat()
+    # 课次日期必须锚定在周一：否则求解器会把它挪到 ±date_window_days 内的周一，
+    # 挪动后的日期可能越过 date_to，断言随运行日期的星期漂移。
+    lesson_day = today + timedelta(days=60)
+    lesson_day -= timedelta(days=lesson_day.weekday())
+    outside_date = lesson_day.isoformat()
     payload: dict[str, Any] = {
         "teachers": [{"business_id": "T9", "name": "教师九", "is_group": False}],
         "rooms": [{"business_id": "R1", "name": "教室1", "is_active": True}],
@@ -336,7 +340,7 @@ def test_validity_window_scopes_rule_to_lessons(
 
     inside_rule = {
         **rule,
-        "scope": {**rule["scope"], "date_to": (today + timedelta(days=60)).isoformat()},
+        "scope": {**rule["scope"], "date_to": lesson_day.isoformat()},
     }
     inside = solve_problem({**payload, "rules": [inside_rule]})
     assert inside["model_status"] in {"OPTIMAL", "FEASIBLE"}
