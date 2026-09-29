@@ -191,19 +191,452 @@ def test_interpret_task_constraints_validated_deduped_and_degraded(
     assert "张老师避开不存在时段" in payload["unsupported_requirements"]
     assert any("因主体/时段无法确认" in warning for warning in payload["coverage_warnings"])
     # §2.1b：hard 带参项由 draft 生成器写入 goal_checklist_draft，
-    # params.task_constraint_id 回溯解析侧 constraint id；有带参项时不再追加
-    # needs_params 占位项。
+    # params.task_constraint_id 回溯解析侧 constraint id。
     forbidden = [
         item for item in payload["goal_checklist_draft"] if item["kind"] == "forbidden_slot_free"
     ]
-    assert len(forbidden) == 1
-    params = forbidden[0]["params"]
+    with_params = [item for item in forbidden if not item["params"].get("needs_params")]
+    assert len(with_params) == 1
+    params = with_params[0]["params"]
     assert params["subject_ids"] == ["T01"]
     assert params["slot_business_ids"] == ["S05", "S06"]
     assert params["task_constraint_id"] == "tc-1"
-    assert not params.get("needs_params")
+    # 另两条被降级剔除的要求（主体/时段无法确认）没有可验收的参数，但也不能凭空消失：
+    # 清单里留一条待量化占位项，登记目标后到「目标跟踪」补参。
+    placeholders = [item for item in forbidden if item["params"].get("needs_params")]
+    assert len(placeholders) == 1
+    assert len(forbidden) == 2
     # soft 约束不进清单（无验收意义），仍留在 task_constraints 随请求体回传。
-    assert forbidden[0]["params"]["subject_ids"] != ["T02"]
+    assert all(item["params"]["subject_ids"] != ["T02"] for item in forbidden)
+
+
+_FLAGSHIP_INSTRUCTION = (
+    "把下周 A 班重新排一下。张老师周三晚上不能上，尽量少动其他课程，先给我草稿。"
+)
+_LEGACY_TEACHER_LABEL = "具体教师的禁排或请假要求"
+
+
+def _teacher_constraint(source_text: str, **overrides: Any) -> dict[str, Any]:
+    return {
+        "id": "tc-1",
+        "source_text": source_text,
+        "subject_type": "teacher",
+        "subject_ids": ["T01"],
+        "slot_business_ids": ["S05", "S06"],
+        "hardness": "hard",
+        **overrides,
+    }
+
+
+def _interpret_unsupported(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    instruction: str,
+    **output_overrides: Any,
+) -> dict[str, Any]:
+    _mock_interpret(
+        monkeypatch, _interpret_output(class_business_ids=["B01"], **output_overrides)
+    )
+    response = client.post(
+        "/api/v1/assistant/interpret",
+        headers=auth_headers,
+        json={"instruction": instruction},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_interpret_flagship_sentence_is_not_blocked_by_legacy_teacher_label(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """核心示例句：教师禁排已被结构化为 task_constraints 就不再算「未进入求解」。
+
+    前端在 unsupported_requirements 非空时禁用「确认并开始求解」——旧的教师禁排
+    正则对这句话无条件追加标签，会让已经结构化成功的要求把自己拦在求解之外；
+    模型按提示词把同一句原话又列进 unsupported_requirements 时同理。
+    """
+    payload = _interpret_unsupported(
+        client,
+        auth_headers,
+        monkeypatch,
+        _FLAGSHIP_INSTRUCTION,
+        task_constraints=[_teacher_constraint("张老师周三晚上不能上")],
+        unsupported_requirements=["张老师周三晚上不能上"],
+    )
+    assert payload["unsupported_requirements"] == []
+    assert [item["id"] for item in payload["task_constraints"]] == ["tc-1"]
+
+
+def test_interpret_partial_teacher_coverage_still_blocks_uncovered_restriction(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只结构化了张老师、李老师请假没有落到任何通道 → 旧标签保留（不许悄悄放行）。"""
+    payload = _interpret_unsupported(
+        client,
+        auth_headers,
+        monkeypatch,
+        "重排 B01，张老师周三晚上不能上，李老师下周请假",
+        task_constraints=[_teacher_constraint("张老师周三晚上不能上")],
+    )
+    assert _LEGACY_TEACHER_LABEL in payload["unsupported_requirements"]
+
+
+def test_interpret_paraphrased_source_text_keeps_legacy_label(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """source_text 不是原话摘录（无法证明覆盖了哪句）→ 保守保留标签而不是放行。"""
+    payload = _interpret_unsupported(
+        client,
+        auth_headers,
+        monkeypatch,
+        "重排 B01，张老师周三晚上不能上",
+        task_constraints=[_teacher_constraint("教师T01周三晚间禁排")],
+    )
+    assert _LEGACY_TEACHER_LABEL in payload["unsupported_requirements"]
+
+
+def test_interpret_rejected_constraint_text_still_listed_as_unsupported(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """被降级剔除的约束不算覆盖：原话仍在 unsupported，旧标签同样保留。"""
+    payload = _interpret_unsupported(
+        client,
+        auth_headers,
+        monkeypatch,
+        "重排 B01，张老师周三晚上不能上",
+        task_constraints=[
+            _teacher_constraint("张老师周三晚上不能上", subject_ids=["T_NOPE"]),
+        ],
+    )
+    assert "张老师周三晚上不能上" in payload["unsupported_requirements"]
+    assert _LEGACY_TEACHER_LABEL in payload["unsupported_requirements"]
+
+
+def test_interpret_executed_memory_action_covers_teacher_restriction_wording(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式「记住」已直接落成长期偏好并回执 → 同一句话不再被旧标签拦住求解。"""
+    payload = _interpret_unsupported(
+        client,
+        auth_headers,
+        monkeypatch,
+        "记住，这学期张老师周三晚都不排课，另外重排 B01",
+        memory_actions=[
+            {
+                "action": "save_preference",
+                "basis": "explicit",
+                "source_text": "记住，这学期张老师周三晚都不排课",
+                "subject_type": "teacher",
+                "subject_id": "T01",
+                "predicate": "avoid_slot",
+                "constraint": {"slot_ids": ["S05", "S06"]},
+            }
+        ],
+    )
+    assert payload["memory_action_receipts"][0]["status"] == "executed"
+    assert payload["unsupported_requirements"] == []
+
+
+def test_interpret_failed_memory_action_does_not_cover_restriction_wording(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """记忆动作没能落地（回执 failed_degraded）不算覆盖，旧标签保留。"""
+    payload = _interpret_unsupported(
+        client,
+        auth_headers,
+        monkeypatch,
+        "旧的张老师周三晚不排课偏好不要用了",
+        memory_actions=[
+            {
+                "action": "expire_preference",
+                "basis": "explicit",
+                "source_text": "旧的张老师周三晚不排课偏好不要用了",
+                "target_entry_id": "not-an-injected-id",
+            }
+        ],
+    )
+    assert payload["memory_action_receipts"][0]["status"] == "failed_degraded"
+    assert _LEGACY_TEACHER_LABEL in payload["unsupported_requirements"]
+
+
+def test_interpret_pending_memory_candidate_does_not_cover_restriction_wording(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """待确认候选未授权、不进本次求解 → 不算覆盖：本次禁排被误判成推测偏好时不放行。"""
+    payload = _interpret_unsupported(
+        client,
+        auth_headers,
+        monkeypatch,
+        "张老师好像不太愿意上晚上",
+        memory_actions=[
+            {
+                "action": "save_preference",
+                "basis": "inferred",
+                "source_text": "张老师好像不太愿意上晚上",
+                "subject_type": "teacher",
+                "subject_id": "T01",
+                "predicate": "avoid_slot",
+                "constraint": {"slot_ids": ["S05", "S06"]},
+            }
+        ],
+    )
+    assert payload["memory_action_receipts"][0]["status"] == "pending_confirmation"
+    assert _LEGACY_TEACHER_LABEL in payload["unsupported_requirements"]
+
+
+def test_interpret_structured_soft_constraint_does_not_leave_placeholder_item(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """软约束已结构化（随请求体进求解）→ 清单里不再有永远验收不过的待量化占位项。"""
+    payload = _interpret_unsupported(
+        client,
+        auth_headers,
+        monkeypatch,
+        "重排 B01，乙老师周三晚尽量避开",
+        task_constraints=[
+            _teacher_constraint(
+                "乙老师周三晚尽量避开",
+                id="tc-soft",
+                subject_ids=["T02"],
+                slot_business_ids=["S05"],
+                hardness="soft",
+            )
+        ],
+    )
+    assert payload["unsupported_requirements"] == []
+    assert not [
+        item for item in payload["goal_checklist_draft"] if item["kind"] == "forbidden_slot_free"
+    ]
+    assert payload["checklist_warnings"] == []
+
+
+def test_interpret_uncovered_forbidden_cue_beside_structured_constraint_keeps_placeholder(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一句话里另有没被消化的禁排语 → 占位项兜底不因别的约束成功而消失。"""
+    payload = _interpret_unsupported(
+        client,
+        auth_headers,
+        monkeypatch,
+        "重排 B01，乙老师周三晚尽量避开，B01 周五晚不排",
+        task_constraints=[
+            _teacher_constraint(
+                "乙老师周三晚尽量避开",
+                id="tc-soft",
+                subject_ids=["T02"],
+                slot_business_ids=["S05"],
+                hardness="soft",
+            )
+        ],
+    )
+    placeholders = [
+        item
+        for item in payload["goal_checklist_draft"]
+        if item["kind"] == "forbidden_slot_free" and item["params"].get("needs_params")
+    ]
+    assert len(placeholders) == 1
+
+
+def _placeholder_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in payload["goal_checklist_draft"]
+        if item["kind"] == "forbidden_slot_free" and item["params"].get("needs_params")
+    ]
+
+
+def test_interpret_unresolved_teacher_restriction_leaves_placeholder_without_cue_word(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """「教师甲周三晚上不能上」没有命中任何禁排字面词、模型又没给结构化产物：
+
+    要求既进不了求解也验收不了——清单必须留一条待量化占位项，登记目标后才能在
+    「目标跟踪」补参；否则这条要求登记后就凭空消失，验收也不会提醒。
+    """
+    payload = _interpret_unsupported(
+        client, auth_headers, monkeypatch, "重排 B01，教师甲周三晚上不能上"
+    )
+    assert _LEGACY_TEACHER_LABEL in payload["unsupported_requirements"]
+    placeholders = _placeholder_items(payload)
+    assert len(placeholders) == 1
+    assert placeholders[0]["params"]["subject_ids"] == []
+    assert any("待量化项" in warning for warning in payload["checklist_warnings"])
+
+
+def test_interpret_rejected_constraint_leaves_placeholder_beside_resolved_one(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一条约束通过、另一条因主体未知被剔除：通过的那条带参进清单，被剔除的留占位项。"""
+    payload = _interpret_unsupported(
+        client,
+        auth_headers,
+        monkeypatch,
+        "重排 B01，教师甲周三晚上不能上，某某老师周五晚不能上",
+        task_constraints=[
+            _teacher_constraint("教师甲周三晚上不能上"),
+            _teacher_constraint(
+                "某某老师周五晚不能上", id="tc-2", subject_ids=["T_NOPE"], slot_business_ids=["S09"]
+            ),
+        ],
+    )
+    assert "某某老师周五晚不能上" in payload["unsupported_requirements"]
+    with_params = [
+        item
+        for item in payload["goal_checklist_draft"]
+        if item["kind"] == "forbidden_slot_free" and not item["params"].get("needs_params")
+    ]
+    assert [item["params"]["subject_ids"] for item in with_params] == [["T01"]]
+    assert len(_placeholder_items(payload)) == 1
+
+
+def test_interpret_fully_resolved_restriction_leaves_no_placeholder(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全部结构化成功 → 不留占位项（占位项只代表「确实没落实」）。"""
+    payload = _interpret_unsupported(
+        client,
+        auth_headers,
+        monkeypatch,
+        _FLAGSHIP_INSTRUCTION,
+        task_constraints=[_teacher_constraint("张老师周三晚上不能上")],
+    )
+    assert _placeholder_items(payload) == []
+
+
+_RESUMED_INSTRUCTION = "重排 B01，教师甲周三晚上不能上"
+
+
+def _interpret_bound_to_goal(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    goal_id: str,
+    instruction: str,
+) -> dict[str, Any]:
+    _mock_interpret(monkeypatch, _interpret_output(class_business_ids=["B01"]))
+    response = client.post(
+        "/api/v1/assistant/interpret",
+        headers=auth_headers,
+        json={"instruction": instruction, "goal_id": goal_id},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _forbidden_item(key: str, **params: Any) -> dict[str, Any]:
+    return {
+        "key": key,
+        "requirement": "禁排项",
+        "kind": "forbidden_slot_free",
+        "params": {"subject_type": "teacher", **params},
+    }
+
+
+def test_resumed_goal_with_quantized_restriction_is_not_relabelled_unsupported(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """补参后回求解页重新解析同一句原话：目标里已有带全参数的禁排项 → 不再拦。
+
+    「登记为目标，稍后补充」→ 目标跟踪补齐主体与时段 → 重新求解，用户重新解析的
+    仍是「教师甲周三晚上不能上」；旧正则会再次命中，把刚补完参数的人又拦在门外。
+    """
+    goal = _make_goal(
+        instruction=_RESUMED_INSTRUCTION,
+        checklist=[
+            _forbidden_item(
+                "forbidden_slot_free-draft",
+                subject_ids=["T01"],
+                slot_business_ids=["S05", "S06"],
+            )
+        ],
+    )
+    payload = _interpret_bound_to_goal(
+        client, auth_headers, monkeypatch, goal.id, _RESUMED_INSTRUCTION
+    )
+    assert _LEGACY_TEACHER_LABEL not in payload["unsupported_requirements"]
+    assert payload["unsupported_requirements"] == []
+
+
+def test_resumed_goal_only_forgives_its_own_sentence_not_newly_appended_restrictions(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """目标里补全过一条禁排，只说明「原句」落实了；用户续办时新追加的教师请假不能被顺带放行。"""
+    goal = _make_goal(
+        instruction=_RESUMED_INSTRUCTION,
+        checklist=[
+            _forbidden_item(
+                "forbidden_slot_free-draft",
+                subject_ids=["T01"],
+                slot_business_ids=["S05", "S06"],
+            )
+        ],
+    )
+    # 原句照旧 + 用户在输入框里追加了一句新的教师请假。
+    payload = _interpret_bound_to_goal(
+        client, auth_headers, monkeypatch, goal.id, f"{_RESUMED_INSTRUCTION}，李老师下周请假"
+    )
+    assert _LEGACY_TEACHER_LABEL in payload["unsupported_requirements"]
+
+
+def test_resumed_goal_with_pending_placeholder_still_blocks(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """目标里还有待补参的占位项 = 要求仍未落实：照旧拦截，不因为绑了目标就放行。"""
+    goal = _make_goal(
+        instruction=_RESUMED_INSTRUCTION,
+        checklist=[
+            _forbidden_item(
+                "forbidden_slot_free-quantized",
+                subject_ids=["T01"],
+                slot_business_ids=["S05"],
+            ),
+            _forbidden_item(
+                "forbidden_slot_free-draft",
+                subject_ids=[],
+                slot_business_ids=[],
+                needs_params=True,
+            ),
+        ]
+    )
+    payload = _interpret_bound_to_goal(
+        client, auth_headers, monkeypatch, goal.id, _RESUMED_INSTRUCTION
+    )
+    assert _LEGACY_TEACHER_LABEL in payload["unsupported_requirements"]
+
+
+def test_resumed_goal_without_any_forbidden_item_still_blocks(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """绑了目标但清单里根本没有禁排项：要求没落实过，照旧拦截。"""
+    goal = _make_goal(
+        instruction=_RESUMED_INSTRUCTION,
+        checklist=[{"key": "coverage", "requirement": "覆盖", "kind": "coverage", "params": {}}],
+    )
+    payload = _interpret_bound_to_goal(
+        client, auth_headers, monkeypatch, goal.id, _RESUMED_INSTRUCTION
+    )
+    assert _LEGACY_TEACHER_LABEL in payload["unsupported_requirements"]
+
+
+def test_covered_text_helpers_are_conservative() -> None:
+    """扣除口径：短片段/改写不扣，标点空白差异不影响匹配，扣除处不拼接成新句。"""
+    covered = api_module._instruction_without_covered
+    assert covered("张老师周三晚上不能上，B01 周五晚不排", ["张老师周三晚上不能上"]) == (
+        "\n，B01 周五晚不排"
+    )
+    # 模型摘录时补/丢了标点、空白 → 仍能对上。
+    assert covered("张老师 周三晚上，不能上", ["张老师周三晚上不能上"]) == "\n"
+    # 太短的片段不参与扣除（否则一个「上」字会删掉整句里所有的「上」）。
+    assert covered("张老师不能上", ["不排"]) == "张老师不能上"
+    # 改写过的 source_text 对不上原话 → 什么都不扣。
+    assert covered("张老师周三晚上不能上", ["教师T01周三晚间禁排"]) == "张老师周三晚上不能上"
+    # unsupported 条目只有完整落在已消化片段里才剔除。
+    drop = api_module._drop_covered_unsupported
+    assert drop(["张老师周三晚上不能上"], ["张老师周三晚上不能上，尽量别换教室"]) == []
+    assert drop(["张老师周三晚上不能上，并且不要换教室"], ["张老师周三晚上不能上"]) == [
+        "张老师周三晚上不能上，并且不要换教室"
+    ]
 
 
 def test_interpret_forbidden_cue_without_constraints_keeps_placeholder(
@@ -239,6 +672,9 @@ def test_interpret_prompt_declares_new_fields_and_word_list() -> None:
     for word in EXPLICIT_CORRECT_WORDS:
         assert word in prompt
     assert "active_preferences" in prompt
+    # 已结构化的要求不再抄进 unsupported；source_text 逐字摘录（覆盖判定依赖它）。
+    assert "不要】再抄一份进 unsupported_requirements" in prompt
+    assert "逐字摘录" in prompt
 
 
 # ------------------------------------------------- TC-2 记忆动作
@@ -495,6 +931,27 @@ def test_explicit_word_list_locks_e2e_scenario_phrases() -> None:
         assert explicit_word_hits(word).get("correct"), word
     # 无显式声明词 → 不得命中任何类别（explicit 复核③的否决侧）。
     assert explicit_word_hits("张老师好像不太愿意上晚上") == {}
+
+
+def test_explicit_save_words_are_not_hit_when_negated() -> None:
+    """记录词前带否定（不是/不算/不用/别…）是在拒绝记录，不得算显式「记录」声明。
+
+    explicit 复核③是拦住模型误判 basis 的最后一道代码闸门：「这不算长期，先别记」
+    若仍命中记录类，模型一旦误出 save_preference 就会被直接执行成长期偏好。
+    """
+    for text in (
+        "这不算长期，先别记",
+        "不是长期偏好，只是那两天请假",
+        "并非长期安排，临时的",
+        "不用记住这个",
+        "别记住，只是这周",
+    ):
+        assert not explicit_word_hits(text).get("save"), text
+    # 纠正类不受影响：「不是长期」本身就是纠正声明。
+    assert explicit_word_hits("不是长期偏好，只是那两天请假").get("correct")
+    # 正向话术照常命中（含否定词出现在别处的情形）。
+    for text in ("记住，这学期张老师周三晚尽量别排", "长期都别排周三晚", "以后都不要排晚课"):
+        assert explicit_word_hits(text).get("save"), text
 
 
 # ------------------------------------------------- TC-3 任务约束编译

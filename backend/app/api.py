@@ -285,7 +285,11 @@ from .services.solver import _has_date_information, _selected_sessions, _session
 
 # 显式声明词表的代码复核入口（TC-2 §3.1/§3.2）：词表常量单一事实源在
 # services.task_context，提示词（services/ai.py）与这里共用同一组词。
-from .services.task_context import explicit_word_hits, predicate_label
+from .services.task_context import (
+    TEACHER_RESTRICTION_LABEL,
+    explicit_word_hits,
+    predicate_label,
+)
 from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
 from .services.xlsx_io import export_schedule_xlsx
 from .timezone import SHANGHAI_TZ, as_utc, shanghai_now
@@ -7615,7 +7619,7 @@ def _execute_memory_actions(
     source: Literal["openai_compatible", "feishu_aily"],
     schedule_set_id: str,
     actor: User | None,
-) -> tuple[list[AssistantMemoryAction], list[AssistantMemoryActionReceipt]]:
+) -> tuple[list[AssistantMemoryAction], list[AssistantMemoryActionReceipt], list[str]]:
     """解析响应的记忆动作执行器（TC-2 §3.2）：explicit 直接执行、其余进候选。
 
     两种授权绝不混用的机器保证：explicit 复核不过或执行抛 4xx 一律降级
@@ -7624,9 +7628,15 @@ def _execute_memory_actions(
     inferred 处理。执行复用既有生命周期 service 函数（create/update/transition
     _*_entry），审计与冲突消解随之复用。单条动作的任何异常都被隔离成回执，
     不拖垮整次解析。
+
+    第三个返回值是「已被记忆通道消化的原话片段」：仅回执为 executed（已真正
+    生效）的动作的 source_text。pending_confirmation 的候选未授权、不会进入
+    本次求解，failed_degraded 没有去向——两者都不算覆盖，调用方仍须把对应
+    原话当成「未进入求解的要求」，不能靠一张待确认回执悄悄放行。
     """
     actions: list[AssistantMemoryAction] = []
     receipts: list[AssistantMemoryActionReceipt] = []
+    action_by_id: dict[str, AssistantMemoryAction] = {}
     raw_list = raw_actions if isinstance(raw_actions, list) else []
     injected_ids = {
         str(item.get("id"))
@@ -7655,6 +7665,7 @@ def _execute_memory_actions(
             )
             continue
         actions.append(action)
+        action_by_id[action_id] = action
 
         if action.basis != "explicit":
             # inferred 永不直接执行（§3.2）。
@@ -7826,7 +7837,98 @@ def _execute_memory_actions(
                     receipts.append(_degraded_receipt(action_id, degraded or "候选创建失败"))
             else:
                 receipts.append(_degraded_receipt(action_id, f"直接执行失败：{exc.detail}"))
-    return actions, receipts
+    handled_texts = [
+        action_by_id[receipt.action_id].source_text or ""
+        for receipt in receipts
+        if receipt.status == "executed" and receipt.action_id in action_by_id
+    ]
+    return actions, receipts, [text for text in handled_texts if text.strip()]
+
+
+# 旧版兜底正则：指令里出现下列话术但结构化通道没有对应产物时，把它标成「未进入
+# 求解的要求」。标签只是兜底——话已被 task_constraints / 已生效的记忆动作消化
+# 时不得再拦住求解（前端在 unsupported 非空时禁用「确认并开始求解」）。
+_TEACHER_RESTRICTION_PATTERN = r"(?:老师|教师).*(?:请假|不.{0,4}(?:排|上|课)|只能|只上)"
+_LEGACY_UNSUPPORTED_PATTERNS: tuple[tuple[str, str], ...] = (
+    (_TEACHER_RESTRICTION_PATTERN, TEACHER_RESTRICTION_LABEL),
+    (r"(?:只能用|指定|固定|只用).{0,12}(?:教室|房间)", "指定教室要求"),
+    (r"连续|连排", "精确连续课次要求"),
+)
+# 短于此长度的片段无法证明自己覆盖了哪句话，不参与扣除（防「上」「不排」误删）。
+_MIN_COVERED_TEXT_CHARS = 4
+
+
+def _text_signature(text: str) -> str:
+    """去掉空白与标点后的比较口径（模型摘录原话时常带走或补上标点）。"""
+    return re.sub(r"[\W_]+", "", text)
+
+
+def _covered_span_pattern(text: str) -> re.Pattern[str] | None:
+    chars = [ch for ch in text if re.match(r"[^\W_]", ch)]
+    if len(chars) < _MIN_COVERED_TEXT_CHARS:
+        return None
+    return re.compile(r"[\W_]*".join(re.escape(ch) for ch in chars))
+
+
+def _instruction_without_covered(instruction: str, covered_texts: list[str]) -> str:
+    """把已被结构化通道消化的原话片段从指令里扣掉。
+
+    被扣掉的片段换成换行——旧正则里的 ``.`` 不匹配换行，扣除前后两段话不会被
+    误拼成一句新话。source_text 不是原话摘录（模型改写过）时匹配不到、什么都
+    不扣，旧标签照旧保留：无法证明覆盖了哪句话，就不放行。
+    """
+    remainder = instruction
+    for text in covered_texts:
+        pattern = _covered_span_pattern(text)
+        if pattern is not None:
+            remainder = pattern.sub("\n", remainder)
+    return remainder
+
+
+def _drop_covered_unsupported(items: list[str], covered_texts: list[str]) -> list[str]:
+    """剔除模型自己列进 unsupported_requirements、但已被结构化通道消化的条目。
+
+    提示词要求模型把具体教师禁排结构化进 task_constraints，同一句话它也可能
+    又抄一份进 unsupported。只有条目**完整落在**某个已消化片段里才剔除——条目
+    比片段多出来的部分是没被消化的内容，必须保留。
+    """
+    covered = [
+        signature
+        for signature in (_text_signature(text) for text in covered_texts)
+        if len(signature) >= _MIN_COVERED_TEXT_CHARS
+    ]
+    kept: list[str] = []
+    for item in items:
+        signature = _text_signature(item)
+        if signature and any(signature in cover for cover in covered):
+            continue
+        kept.append(item)
+    return kept
+
+
+def _goal_resolves_teacher_restriction(task_context: dict[str, Any] | None) -> bool:
+    """续办目标是否已经把教师禁排要求量化落实了。
+
+    「登记为目标，稍后补充」→ 在目标跟踪补齐主体与时段 → 回求解页重新解析：用户
+    重新解析的仍是同一句原话（「教师甲周三晚上不能上」），旧正则会再次命中并把它
+    判成「尚未进入求解」，把刚补完参数的用户又拦在门外。目标清单里已有带全参数的
+    forbidden_slot_free 项（求解时会编译进规则）、且没有仍待补参的占位项，说明
+    这条要求已被用户明确落实——不再重复打标签。只要还有一条待补参就照旧拦截。
+    调用方只把目标的**原句**当作已落实，用户续办时新追加的话仍照常检查。
+    """
+    if not task_context:
+        return False
+    quantized = False
+    for item in task_context.get("active_task_constraints") or []:
+        # 清单来源项形如 {key, params}；context 里的软约束没有 key，不参与判断。
+        if not isinstance(item, dict) or "key" not in item:
+            continue
+        params = item.get("params") or {}
+        if params.get("needs_params"):
+            return False
+        if params.get("subject_ids") and params.get("slot_business_ids"):
+            quantized = True
+    return quantized
 
 
 def _finalize_assistant_interpret(
@@ -7875,33 +7977,29 @@ def _finalize_assistant_interpret(
         "date_window_days": output["date_window_days"],
         "recognized_rules": _string_list(output["recognized_rules"]),
     }
-    unsupported = _string_list(output.get("unsupported_requirements"))
-    for pattern, label in (
-        (r"(?:老师|教师).*(?:请假|不.{0,4}(?:排|上|课)|只能|只上)", "具体教师的禁排或请假要求"),
-        (r"(?:只能用|指定|固定|只用).{0,12}(?:教室|房间)", "指定教室要求"),
-        (r"连续|连排", "精确连续课次要求"),
-    ):
-        if re.search(pattern, request.instruction):
-            unsupported.append(label)
+    model_unsupported = _string_list(output.get("unsupported_requirements"))
     known_labels = set(SOLVER_RULE_LABELS.values())
-    unsupported.extend(label for label in parsed["recognized_rules"] if label not in known_labels)
+    unknown_rule_labels = [
+        label for label in parsed["recognized_rules"] if label not in known_labels
+    ]
     parsed["recognized_rules"] = [
         label for label in parsed["recognized_rules"] if label in known_labels
     ]
     # 任务级约束（TC-1 §2.2）：逐条校验降级——未知主体/时段（或参数为空）的条目
-    # 剔除并把原文追加进 unsupported（与上面的标签剔除共用同一去重写回路径）；
-    # 通过校验的条目按解析序号兜底 id 后随响应返回。
+    # 剔除并把原文记进 rejected_texts（随后并入 unsupported）；通过校验的条目按
+    # 解析序号兜底 id 后随响应返回。
     task_warnings: list[str] = []
+    rejected_texts: list[str] = []
     task_constraints = _normalize_assistant_task_constraints(
         db,
         output.get("task_constraints"),
         schedule_set_id,
-        unsupported=unsupported,
+        unsupported=rejected_texts,
         warnings=task_warnings,
     )
-    parsed["unsupported_requirements"] = list(dict.fromkeys(unsupported))
     parsed["coverage_warnings"] = [
-        "仅下列结构化范围和规则开关进入求解；本接口不会自动创建教师、教室或连续课次规则。",
+        "仅下列结构化范围、规则开关和已确认的任务约束进入求解；本接口不会自动创建"
+        "教师、教室或连续课次规则。",
         "教研组未落实到个人教师时，零冲突仅代表已建模对象的检查结果。",
         *task_warnings,
     ]
@@ -7916,7 +8014,7 @@ def _finalize_assistant_interpret(
         # 记忆动作执行（TC-2 §3.2）：explicit 复核通过直接执行（复用既有生命周期
         # service 函数，含审计与冲突消解），推测/降级进收件箱候选，逐条回执。
         # Aily 通道在执行器内强制按 inferred 处理。
-        memory_actions, memory_receipts = _execute_memory_actions(
+        memory_actions, memory_receipts, memory_handled_texts = _execute_memory_actions(
             db,
             raw_actions=output.get("memory_actions"),
             context=context or {},
@@ -7925,10 +8023,54 @@ def _finalize_assistant_interpret(
             schedule_set_id=schedule_set_id,
             actor=actor,
         )
+        # 「未进入求解的要求」= 兜底正则命中 + 模型自报 + 被剔除的约束原话，但
+        # 已经被结构化通道消化的原话不算：通过校验的 task_constraints（hard/soft
+        # 都会随请求体进入求解）与已真正生效的记忆动作。否则核心示例句
+        # 「张老师周三晚上不能上」结构化成功后仍被旧正则拦在求解之外。
+        covered_texts = [
+            *(item.source_text for item in task_constraints if item.source_text),
+            *memory_handled_texts,
+        ]
+        residual_instruction = _instruction_without_covered(request.instruction, covered_texts)
+        legacy_labels = [
+            label
+            for pattern, label in _LEGACY_UNSUPPORTED_PATTERNS
+            if re.search(pattern, residual_instruction)
+        ]
+        goal_task_context = (context or {}).get("task_context")
+        if TEACHER_RESTRICTION_LABEL in legacy_labels and _goal_resolves_teacher_restriction(
+            goal_task_context
+        ):
+            # 只把目标的原句本身视为已落实：用户在续办时新追加的话（「，李老师请假」）
+            # 仍然照常检查，不能因为目标里有过一条补全的禁排就整体放行。
+            fresh_text = _instruction_without_covered(
+                residual_instruction, [str((goal_task_context or {}).get("instruction") or "")]
+            )
+            if not re.search(_TEACHER_RESTRICTION_PATTERN, fresh_text):
+                legacy_labels = [
+                    label for label in legacy_labels if label != TEACHER_RESTRICTION_LABEL
+                ]
+        parsed["unsupported_requirements"] = list(
+            dict.fromkeys(
+                [
+                    *_drop_covered_unsupported(model_unsupported, covered_texts),
+                    *legacy_labels,
+                    *unknown_rule_labels,
+                    *rejected_texts,
+                ]
+            )
+        )
         # 目标验收闭环（MEM-C3）：解析成功即按结构化范围预填清单草稿，前端可
-        # 增删项后再创建 goal。草稿由代码确定性生成，不依赖模型措辞。
+        # 增删项后再创建 goal。草稿由代码确定性生成，不依赖模型措辞；禁排语
+        # 占位判断同样只看没被消化的剩余指令（否则已结构化的软约束「尽量避开」
+        # 也会生成一条永远验收不过的待量化占位项）。
+        # 被剔除的任务约束、或命中教师禁排话术却没被任何通道消化 = 有一条没法验收
+        # 也没法进求解的要求：清单留待量化占位项，登记目标后到「目标跟踪」补参。
+        unresolved_restriction = bool(rejected_texts) or TEACHER_RESTRICTION_LABEL in legacy_labels
         checklist_draft, checklist_warnings = draft_checklist_from_interpretation(
-            request.instruction, parsed
+            residual_instruction,
+            parsed,
+            unresolved_restriction=unresolved_restriction,
         )
         return AssistantInterpretResponse(
             instruction=request.instruction,

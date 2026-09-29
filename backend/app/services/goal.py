@@ -304,7 +304,10 @@ def build_checklist(
 
 
 def draft_checklist_from_interpretation(
-    instruction: str, parsed: dict[str, Any]
+    instruction: str,
+    parsed: dict[str, Any],
+    *,
+    unresolved_restriction: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """/assistant/interpret 的响应预填清单草稿（前端可增删项后再创建 goal）。
 
@@ -320,6 +323,12 @@ def draft_checklist_from_interpretation(
     求解请求体回到后端、由 api.create_solver_run 写入点①落
     goal.context.soft_task_constraints。禁排语 regex 占位保留为兜底：有禁排语
     但没有任何对应 task_constraints 时行为与旧版完全一致。
+
+    unresolved_restriction=True 表示解析确认了「有一条禁排/请假类要求，但主体
+    或时段无法在候选值里唯一确定」（约束被降级剔除，或命中教师禁排话术却没有
+    任何结构化产物）。这类要求没有可验收的参数，也不会进入求解——无论指令里有没有
+    命中 _FORBIDDEN_CUES 的字面词（「张老师周三晚上不能上」就没有），都要留一条
+    待量化占位项，让登记目标后能在「目标跟踪」补齐参数，而不是让要求凭空消失。
     """
     normalized_constraints = [
         item for item in parsed.get("task_constraints") or [] if isinstance(item, dict)
@@ -351,7 +360,8 @@ def draft_checklist_from_interpretation(
         forbidden_slots=hard_forbidden_slots or None,
     )
     warnings: list[str] = []
-    if _FORBIDDEN_CUES.search(instruction) and not hard_forbidden_slots:
+    cue_without_params = bool(_FORBIDDEN_CUES.search(instruction)) and not hard_forbidden_slots
+    if cue_without_params or unresolved_restriction:
         items.append(
             _item(
                 "forbidden_slot_free-draft",
@@ -368,6 +378,9 @@ def draft_checklist_from_interpretation(
         warnings.append(
             "识别到禁排类要求，但解析通道给不出具体时段；清单里已放一条待量化项，"
             "请在创建目标前补充主体与时段，否则该项验收不会通过。"
+            if cue_without_params
+            else "有禁排/请假类要求的主体或时段无法确认；清单里已放一条待量化项，"
+            "可先登记目标，再到「目标跟踪」补齐主体与时段后重新求解，否则该项验收不会通过。"
         )
     return items, warnings
 

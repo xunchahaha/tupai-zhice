@@ -13,6 +13,11 @@ from __future__ import annotations
 
 import re
 
+# 旧版兜底正则命中「具体教师禁排/请假」话术时追加进 unsupported_requirements 的标签
+# （api._LEGACY_UNSUPPORTED_PATTERNS 生成，确认卡展示，清单草稿据此判断是否需要
+# 待量化占位项）——两处必须是同一个字符串，集中在这里避免各写一份。
+TEACHER_RESTRICTION_LABEL = "具体教师的禁排或请假要求"
+
 # 显式声明词表（设计 §3.1）：三组话术类别，提示词与代码复核共用。
 # 记录类：用户明确要求把偏好记下来（save_preference 的 explicit 判定词）。
 EXPLICIT_SAVE_WORDS: tuple[str, ...] = (
@@ -47,11 +52,34 @@ _EXPLICIT_WORD_GROUPS: dict[str, tuple[str, ...]] = {
     "correct": EXPLICIT_CORRECT_WORDS,
 }
 
-# 每组一个正则（按词长倒序拼 alternation，避免「不要用」截胡「不要用了」），
-# 三组共用同一个匹配口径：提示词里展示原词，代码侧用本函数复核。
+# 记录类词表前缀否定：「不是长期偏好」「这不算长期」「不用记住」里的记录词不是
+# 记录声明，反而是在拒绝记录。只作用于记录类——撤销/纠正类的词本身就带否定
+# （「不要用了」「不是长期」），套否定前缀会把它们自己否掉。
+_SAVE_NEGATORS: tuple[str, ...] = (
+    "不是",
+    "并非",
+    "不算",
+    "不要",
+    "不用",
+    "不必",
+    "不需要",
+    "没必要",
+    "别",
+    "非",
+)
+_SAVE_NEGATION_GUARD = "".join(f"(?<!{re.escape(word)})" for word in _SAVE_NEGATORS)
+
+
+def _group_pattern(group: str, words: tuple[str, ...]) -> re.Pattern[str]:
+    # 按词长倒序拼 alternation，避免「不要用」截胡「不要用了」。
+    alternation = "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True))
+    guard = _SAVE_NEGATION_GUARD if group == "save" else ""
+    return re.compile(f"{guard}(?:{alternation})")
+
+
+# 每组一个正则，三组共用同一个匹配口径：提示词里展示原词，代码侧用本函数复核。
 _EXPLICIT_PATTERNS: dict[str, re.Pattern[str]] = {
-    group: re.compile("|".join(re.escape(word) for word in sorted(words, key=len, reverse=True)))
-    for group, words in _EXPLICIT_WORD_GROUPS.items()
+    group: _group_pattern(group, words) for group, words in _EXPLICIT_WORD_GROUPS.items()
 }
 
 
