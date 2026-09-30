@@ -9596,6 +9596,17 @@
             ],
             "title": "Baseline Schedule Version Id"
           },
+          "base_schedule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Schedule Id"
+          },
           "forbid_publish": {
             "type": "boolean",
             "title": "Forbid Publish",

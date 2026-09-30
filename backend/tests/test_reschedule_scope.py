@@ -429,6 +429,21 @@ def test_retry_after_a_run_without_a_draft_keeps_the_lesson_and_the_original_bas
     assert context["scope"]["course_business_ids"] == ["L1"]
     assert context["base_schedule_id"] == draft_id
 
+    # 第一次求解真的落库为「超时、没有候选」（注入确定的 UNKNOWN 结果，其余落库/验收流程照常）。
+    from app.services import tasks
+    from app.services.solver import _empty_result
+
+    tasks._persist_result(first.json()["id"], _empty_result("UNKNOWN"))
+    with SessionLocal() as db:
+        finished = db.get(SolverRun, first.json()["id"])
+        assert finished.status == "completed" and finished.model_status == "UNKNOWN"
+        assert (
+            db.scalar(select(func.count()).select_from(ScheduleVersion).where(
+                ScheduleVersion.solver_run_id == first.json()["id"]
+            ))
+            == 0
+        )
+
     # 第一次求解没有产出草稿（超时/无解），教务只点「加大时间预算重跑」——手动提交路径，
     # 请求里没有显式基准；后端仍要用任务记下的原始基准，而不是当前已发布版本。
     retry = client.post(
@@ -501,3 +516,76 @@ def test_manual_solve_without_a_goal_honours_an_explicit_base(client, weekly_sch
     payload = _run_payload(response.json()["id"])
     assert payload["parent_schedule_id"] == draft_id
     assert payload["baseline_source"] == "explicit_parent"
+
+
+# ---- 登记任务时就持久化实际执行基准（复审 R3 #1）----
+
+
+def test_base_registered_with_the_goal_survives_until_the_first_solve(client, weekly_schedule):
+    """登记任务（如「补充条件」）之后、首次求解之前，基准已经落库；之后的求解不回退到已发布版本。"""
+    headers, draft_id = weekly_schedule
+    with SessionLocal() as db:
+        scope_id = db.get(ScheduleVersion, draft_id).schedule_set_id
+    published_id = _add_published_version(scope_id)
+
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={
+            "instruction": "把周一上午这节课挪到别处",
+            "course_business_ids": ["L1"],
+            "base_schedule_id": draft_id,
+        },
+    )
+    assert created.status_code == 201, created.text
+    goal_id = created.json()["id"]
+    # 还没有任何求解任务，基准已经在任务上下文里。
+    assert _goal_context(goal_id)["base_schedule_id"] == draft_id
+
+    # 前端刷新后不再带交接参数；首次求解（这里走手动提交路径，不带显式基准）仍以所记基准为准。
+    first = client.post(
+        "/api/v1/solver-runs",
+        headers=headers,
+        json={"goal_id": goal_id, "course_business_ids": ["L1"]},
+    )
+    assert first.status_code == 202, first.text
+    payload = _run_payload(first.json()["id"])
+    assert payload["parent_schedule_id"] == draft_id != published_id
+    assert payload["baseline_source"] == "goal_base"
+    assert len(payload["previous_assignments"]) == 3
+
+
+def test_goal_base_must_exist_in_the_scope(client, weekly_schedule):
+    headers, _ = weekly_schedule
+    response = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "把周一上午这节课挪到别处", "base_schedule_id": "no-such-version"},
+    )
+    assert response.status_code == 422, response.text
+    assert "基准课表版本" in response.json()["detail"]
+
+
+def test_comparison_baseline_does_not_become_the_execution_base(client, weekly_schedule):
+    """baseline_schedule_version_id 只是变更数对比的基准，不决定求解从哪份课表出发。"""
+    headers, draft_id = weekly_schedule
+    with SessionLocal() as db:
+        scope_id = db.get(ScheduleVersion, draft_id).schedule_set_id
+    published_id = _add_published_version(scope_id)
+    created = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={
+            "instruction": "把周一上午这节课挪到别处",
+            "course_business_ids": ["L1"],
+            "baseline_schedule_version_id": draft_id,
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert "base_schedule_id" not in _goal_context(created.json()["id"])
+    run = client.post(
+        "/api/v1/solver-runs",
+        headers=headers,
+        json={"goal_id": created.json()["id"], "course_business_ids": ["L1"]},
+    )
+    assert _run_payload(run.json()["id"])["parent_schedule_id"] == published_id

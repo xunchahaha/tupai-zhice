@@ -4839,12 +4839,21 @@ def create_goal(
         baseline = db.get(ScheduleVersion, payload.baseline_schedule_version_id)
         if baseline is None or baseline.schedule_set_id != scope.id:
             raise HTTPException(status_code=422, detail="基准版本不存在或不属于当前方案")
+    # 实际执行基准在登记任务时就持久化：登记之后、首次求解之前刷新页面或换个入口继续，
+    # 求解仍以它为基准，而不是悄悄退回当前已发布版本（选择顺序见 create_solver_run）。
+    base_context: dict[str, Any] | None = None
+    if payload.base_schedule_id:
+        base_version = db.get(ScheduleVersion, payload.base_schedule_id)
+        if base_version is None or base_version.schedule_set_id != scope.id:
+            raise HTTPException(status_code=422, detail="指定的基准课表版本不存在或不属于当前方案")
+        base_context = {"schema_version": 1, "base_schedule_id": payload.base_schedule_id}
     goal = SolveGoal(
         schedule_set_id=scope.id,
         instruction=payload.instruction,
         checklist=checklist,
         status="open",
         created_by=user.id,
+        context=base_context,
     )
     db.add(goal)
     db.flush()

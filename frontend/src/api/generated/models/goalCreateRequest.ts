@@ -11,6 +11,7 @@ import type { GoalCreateRequestDateTo } from './goalCreateRequestDateTo';
 import type { GoalForbiddenSlot } from './goalForbiddenSlot';
 import type { GoalCreateRequestMaxChanges } from './goalCreateRequestMaxChanges';
 import type { GoalCreateRequestBaselineScheduleVersionId } from './goalCreateRequestBaselineScheduleVersionId';
+import type { GoalCreateRequestBaseScheduleId } from './goalCreateRequestBaseScheduleId';
 
 /**
  * 创建持久目标。
@@ -35,5 +36,6 @@ export interface GoalCreateRequest {
   forbidden_slots?: GoalForbiddenSlot[];
   max_changes?: GoalCreateRequestMaxChanges;
   baseline_schedule_version_id?: GoalCreateRequestBaselineScheduleVersionId;
+  base_schedule_id?: GoalCreateRequestBaseScheduleId;
   forbid_publish?: boolean;
 }

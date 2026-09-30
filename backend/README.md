@@ -446,7 +446,7 @@ RBAC 正交：链接的签发/轮换/停用复用 `admin/scheduler` 角色，撤
   `POST /api/v1/memory/preferences/{id}/convert-to-rule`（hard 条目转正式规则，仅管理员）
 - 偏好挖掘：`POST /api/v1/memory/mining-runs`
 - 调课范围：`POST /api/v1/reschedule-events` 带 `course_business_id`（课次业务号）时，范围就是这一节课（配合 `date_from`/`date_to` 限定到具体那一天），不会因教师/教室相同扩大到其他课次；`include_neighbors`（默认 true，只调整选中课次时前端显式传 false）决定是否把前后 `neighborhood_days` 天内同班/同教室的课次也纳入可挪动范围；指定的课次不在父课表或日期范围内时 422，不会退化成全量重排。事件状态：pending（求解中）→ candidate_ready（有候选）/ no_candidate（无可行候选）/ failed（求解失败）
-- 助手求解基准：`POST /api/v1/assistant/solve` 与 `POST /api/v1/solver-runs` 可选 `parent_schedule_id`（显式基准版本）与 `course_business_ids`（目标课次），课表页「交给助手继续处理」据此带上所选版本与课次。关联目标时二者是**任务约定**：课次限定写进 `goal.context.scope.course_business_ids`，显式基准写进 `goal.context.base_schedule_id`；基准选择顺序为 显式请求 > 目标工作草稿（仍为 draft）> 记下的原始基准（`baseline_source=goal_base`）> 最新已发布版本，所以第一次求解没产出草稿（超时/无解）时，加预算重跑、刷新续办仍以原始基准为准，有了工作草稿后基准才前进；课次限定不会因基准前进而清空，取消它是前端的扩大范围决定
+- 助手求解基准：`POST /api/v1/assistant/solve` 与 `POST /api/v1/solver-runs` 可选 `parent_schedule_id`（显式基准版本）与 `course_business_ids`（目标课次），课表页「交给助手继续处理」据此带上所选版本与课次。关联目标时二者是**任务约定**：课次限定写进 `goal.context.scope.course_business_ids`，显式基准写进 `goal.context.base_schedule_id`（`POST /api/v1/goals` 的 `base_schedule_id` 在**登记任务时**就落库，早于任何求解；它与只用于变更数对比的 `baseline_schedule_version_id` 是两回事）；基准选择顺序为 显式请求 > 目标工作草稿（仍为 draft）> 记下的原始基准（`baseline_source=goal_base`）> 最新已发布版本，所以第一次求解没产出草稿（超时/无解）时，加预算重跑、刷新续办仍以原始基准为准，有了工作草稿后基准才前进；课次限定不会因基准前进而清空，取消它是前端的扩大范围决定
 - 调课归因：`POST /api/v1/reschedule-events` 请求体可选 `declared_reason`
 - 课表方案：`GET/POST /api/v1/schedule-sets`、`PATCH /api/v1/schedule-sets/{id}`
 - 课表方案成员：`GET /api/v1/schedule-sets/{id}/members`，`PUT/DELETE /api/v1/schedule-sets/{id}/members/{user_id}`

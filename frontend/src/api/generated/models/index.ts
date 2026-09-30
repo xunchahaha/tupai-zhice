@@ -169,6 +169,7 @@ export * from './goalChecklistItemParams';
 export * from './goalChecklistReplaceRequest';
 export * from './goalChecklistReplaceRequestScope';
 export * from './goalCreateRequest';
+export * from './goalCreateRequestBaseScheduleId';
 export * from './goalCreateRequestBaselineScheduleVersionId';
 export * from './goalCreateRequestChecklist';
 export * from './goalCreateRequestDateFrom';

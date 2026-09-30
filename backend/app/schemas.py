@@ -768,6 +768,10 @@ class GoalCreateRequest(BaseModel):
     forbidden_slots: list[GoalForbiddenSlot] = Field(default_factory=list)
     max_changes: int | None = Field(default=None, ge=0, le=100000)
     baseline_schedule_version_id: str | None = None
+    # 实际从哪份课表继续调整（例如从课表选中某份草稿的课次交给助手）：登记任务时就记进
+    # goal.context.base_schedule_id。与上面的 baseline_schedule_version_id 含义不同——
+    # 后者只是「变更数验收/对比」用的基准，不决定求解从哪份课表出发。
+    base_schedule_id: str | None = None
     forbid_publish: bool = True
 
     @model_validator(mode="after")
