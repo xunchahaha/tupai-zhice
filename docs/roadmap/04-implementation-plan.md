@@ -142,6 +142,24 @@ VER-1 收口
 
 **评审 9 条在 HEAD 上的核对结论**（f4c72f4 → HEAD）：①解释层方案隔离与历史快照（MEM-I1，已闭环）②AI→手动范围继承（MEM-I2，已闭环）③异常写回版本保护（MEM-I3，已闭环）④自然语言办事入口（MEM-J1/J2 结构化 + MEM-K1/K3 修正其在核心示例句上的真实卡点）⑤记忆动作入口（MEM-J1，已闭环；MEM-K2 补否定词；MEM-K4 补来源如实标注）⑥继续原目标的持久上下文（MEM-J1/J2，已闭环，MEM-K5 e2e 验证刷新续办）⑦补参→再求解（MEM-J1 编译 + MEM-K3 补上新任务不可达的入口）⑧基准与变更上限解耦（MEM-I4，已闭环）⑨记忆使用口径（MEM-I5，解释层已按 compilation/match/satisfaction 三段计算）。
 
+## 十一期「第九轮复审：续办忠实性与写回一致性」批次（2026-09-30，功能范围冻结）
+
+评审对照 48e928b（即当时 HEAD）。探针指向实际 checkout 复现：软压硬、同 id 换时段新旧并存、续办硬要求
+刷新后丢失、整句「记住」借权四条命中。设计见 07-task-context.md §11。
+
+| 批次 | 内容 | 状态 | 提交 |
+| --- | --- | --- | --- |
+| MEM-L1 | 任务要求修订链（R1）：确认过的 task_constraints 先合并成任务新版要求（硬要求进清单并原子升版本、旧验收失效；软要求按内容身份合并，同 id 同主体换时段=修改；硬要求永不静默放宽，kept_hard 留痕），再只从任务编译；编译契约改为硬压软 | ✅ | — |
+| MEM-L2 | 加预算 = 按原求解重放（R2）：`POST /solver-runs/{id}/rerun` 沿用冻结的范围/规则/权重/快照/记忆/基准，只改预算；前端只发 `{}`，不读参数草稿；`SolverRunResponse` 暴露 time_limit_seconds/task_revision/rerun_of | ✅ | — |
+| MEM-L3 | 工作草稿指针写回保护（R3）：任务行写锁下核对未放弃、求解冻结的清单版本=当前版本、指针现指草稿非更晚创建的求解所出；拒绝原因留在报告 meta | ✅ | — |
+| MEM-L4 | 解析幂等（R4）：`request_id` + `assistant_interpret_receipts`（迁移 b4d8f2a6c1e3），同事务写回执，重试原样返回；并发撞唯一约束输家回滚；前端同一句话的流式/回退/重试沿用同一标识 | ✅ | — |
+| MEM-L5 | 动作级授权绑定（R5）：按动作原话所在分句判显式词，词前否定窗口与「不要记」拒绝短语否决，同类型他主体矛盾检测；绑不上降级为待确认候选 | ✅ | — |
+| MEM-L6 | 记忆检索（R6）：`active_preferences` 按原话提到的主体优先、新近补足，过期条目不占位 | ✅ | — |
+| VER-11 | 终验：后端 ruff/mypy 全过 + pytest 463 passed（基线 434 + 新增 29：`test_task_revision.py`，评审探针与六项缺口的回归）；前端 eslint/tsc 0 错误 + vitest 484 passed（基线 478 + 新增 6，33 文件）+ `vite build` + orval 再生成零 diff；playwright 11 passed（含 `?action=raise_budget` 重放断言） | ✅ | — |
+
+**评审 7 条的处置**：R1（MEM-L1）、R2（MEM-L2）、R3（MEM-L3）、R4（MEM-L4）、R5（MEM-L5）、R6（MEM-L6）已修复；CI #23
+无步骤执行属账户计费问题，不在代码范围。已知缺口见设计 §11.7。
+
 ## 里程碑验证清单（VER-1）✅ 已通过（2026-09-20）
 
 - [x] `uv run pytest` 全量 **258 passed, 0 failed**（基线 208 → 新增 50）+ ruff 全过 + mypy 0 issues（31 files）

@@ -359,6 +359,17 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
 - **关联求解**：`POST /api/v1/solver-runs` 与 `POST /api/v1/assistant/solve` 可选
   `goal_id`；自动验收钩子在 `services/tasks.py::_persist_result` 的事务之外单独
   提交——验收层任何异常都不影响求解结果落库。已放弃目标拒绝再关联新任务（409）。
+- **任务要求修订（MEM-L1）**：带 `goal_id` 的 `/assistant/solve` 把用户确认过的
+  `task_constraints` 先合并成任务的新版要求、再只从任务编译求解（`plan_task_constraint_revision`）。
+  身份是内容（主体+时段），不是 id（解析侧 id 按序号生成，跨轮次会撞）：新硬要求追加进清单并
+  **原子升清单版本**（同 `PATCH checklist` 的条件 UPDATE：achieved 回退 open、验收回 pending、旧清单进
+  历史，并发修订 409 整体回滚）；同内容的旧软要求随之收紧；同 id 同主体换时段 = 修改那一条；
+  **硬要求永不被请求里的「尽量」静默放宽**（保留并在 `task_revision.kept_hard` 留痕，放宽只能在清单
+  里人工保存）。修订摘要随 run 留档（`task_revision`）与审计。
+- **工作草稿指针保护（MEM-L3）**：run 产出草稿后接管 `goal.context.work_draft_schedule_id` 要过
+  三关——任务未放弃、求解创建时冻结的 `goal_checklist_version` 仍是当前清单版本、指针现指草稿不是
+  由更晚创建的求解产出的；读-改-写在任务行写锁下完成。被拒绝的产物只进历史，原因写进
+  `goal_report.meta.work_draft`。
 - **清单修订与历史（MEM-D3，MEM-E2/E2a 修订）**：`PATCH /api/v1/goals/{id}/checklist`
   整体替换验收清单——body 为完整 checklist 数组，校验复用创建口径（key 唯一、
   kind 白名单、`ensure_bottom_line_items` 强制并入底线；可选 `scope` 显式给新
@@ -432,6 +443,15 @@ RBAC 正交：链接的签发/轮换/停用复用 `admin/scheduler` 角色，撤
 - 集成凭据配置：`GET/PUT /api/v1/integrations/{id}/configuration`（钉钉/企业微信；GET 管理员/排课员脱敏回读，PUT 管理员加密落库）
 - 一句话解析：`POST /api/v1/assistant/interpret`
 - 一句话解析（流式）：`POST /api/v1/assistant/interpret/stream`（SSE：`stage`/`thinking`/`result`/`error`）
+- 解析幂等（MEM-L4）：解析会直接执行「记住…」这类显式授权的记忆动作，请求体可选 `request_id`
+  （客户端每条用户指令一个，流式、同步回退、失败重试沿用同一个）。有副作用的解析在动作执行的
+  同一事务里写 `assistant_interpret_receipts`（方案 + `request_id` 唯一，存完整响应），重试直接
+  返回原响应、不再调用模型；同标识配另一句话 409；并发两次撞唯一约束，输家整体回滚后读回回执
+- 按原参数重跑：`POST /api/v1/solver-runs/{id}/rerun`（MEM-L2；只改时间预算，缺省按
+  `min(max(原预算×3, 90), 900)` 加大）。范围/日期/课次、规则开关、变更权重、数据快照、偏好记忆、
+  基准都取原求解冻结的那一份；有关联任务时任务要求取任务当前版本，无任务的一句话求解沿用当时冻结的
+  任务约束；求解未结束 409、任务已放弃 409、调课/导入求解不支持 409。`SolverRunResponse` 新增
+  `time_limit_seconds` / `task_revision` / `rerun_of`
 - 求解进度：`GET /api/v1/solver-runs/{id}/events`
 - 版本差异：`GET /api/v1/schedules/{base_id}/diff/{target_id}`，逐课次返回 `added`、`removed`、`moved`、`unchanged` 及调整前后日期/时段/教室
 - 发布/回滚：`POST /api/v1/schedules/{id}/publish`、`POST /api/v1/schedules/{id}/rollback`（审批人权限）
