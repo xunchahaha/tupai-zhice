@@ -5552,6 +5552,86 @@
         ]
       }
     },
+    "/api/v1/integrations/ai/presets": {
+      "get": {
+        "tags": [
+          "integrations",
+          "ai"
+        ],
+        "summary": "Ai Provider Presets",
+        "description": "设置页「添加供应商」的预设卡片：接口地址、常用模型、申请 Key 的入口与接入要点。",
+        "operationId": "ai_provider_presets_api_v1_integrations_ai_presets_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AIProviderPresetResponse"
+                  },
+                  "type": "array",
+                  "title": "Response Ai Provider Presets Api V1 Integrations Ai Presets Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/integrations/ai/test": {
+      "post": {
+        "tags": [
+          "integrations",
+          "ai"
+        ],
+        "summary": "Test Ai Provider",
+        "description": "用尚未保存的配置发一次最小请求；失败也返回 200 + ok=false，原因写在 message 里。\n\n同时探非流式与流式两条通道；管理员才能调用，并留审计（它会向配置里的地址发真实请求）。",
+        "operationId": "test_ai_provider_api_v1_integrations_ai_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AIProviderConfigurationInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AIConnectionTestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/integrations/{integration_id}/configuration": {
       "get": {
         "tags": [
@@ -6686,6 +6766,108 @@
   },
   "components": {
     "schemas": {
+      "AIConnectionTestResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "family": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "deepseek",
+                  "glm",
+                  "generic"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "official": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Official"
+          },
+          "thinking_returned": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thinking Returned"
+          },
+          "stream_ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Ok"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "message"
+        ],
+        "title": "AIConnectionTestResponse",
+        "description": "连接测试结果：失败也返回 200 + ok=false，让页面就地显示原因。"
+      },
       "AIProviderConfigurationInput": {
         "properties": {
           "provider": {
@@ -6717,6 +6899,17 @@
             "maxLength": 200,
             "minLength": 1,
             "title": "Model"
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "low",
+              "high",
+              "max"
+            ],
+            "title": "Reasoning Effort",
+            "default": "auto"
           }
         },
         "type": "object",
@@ -6777,6 +6970,49 @@
               }
             ],
             "title": "Model"
+          },
+          "preset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset"
+          },
+          "family": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "deepseek",
+                  "glm",
+                  "generic"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family"
+          },
+          "official": {
+            "type": "boolean",
+            "title": "Official",
+            "default": false
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "low",
+              "high",
+              "max"
+            ],
+            "title": "Reasoning Effort",
+            "default": "auto"
           }
         },
         "type": "object",
@@ -6789,6 +7025,66 @@
           "model"
         ],
         "title": "AIProviderConfigurationResponse"
+      },
+      "AIProviderPresetResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "family": {
+            "type": "string",
+            "enum": [
+              "deepseek",
+              "glm",
+              "generic"
+            ],
+            "title": "Family"
+          },
+          "base_url": {
+            "type": "string",
+            "title": "Base Url"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Models"
+          },
+          "key_url": {
+            "type": "string",
+            "title": "Key Url"
+          },
+          "docs_url": {
+            "type": "string",
+            "title": "Docs Url"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Notes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "family",
+          "base_url",
+          "models",
+          "key_url",
+          "docs_url",
+          "notes"
+        ],
+        "title": "AIProviderPresetResponse",
+        "description": "设置页「添加供应商」的一张预设卡片。"
       },
       "AilyContextResponse": {
         "properties": {

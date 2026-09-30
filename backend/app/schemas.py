@@ -1277,6 +1277,8 @@ class AIProviderConfigurationInput(BaseModel):
     base_url: str = Field(min_length=8, max_length=500)
     api_key: str | None = Field(default=None, max_length=1000)
     model: str = Field(min_length=1, max_length=200)
+    # 官方端点（DeepSeek / 智谱）的思考强度；auto 对抽取类任务按 low。见 services/ai_providers.py。
+    reasoning_effort: Literal["auto", "low", "high", "max"] = "auto"
 
 
 class AIProviderConfigurationResponse(BaseModel):
@@ -1286,6 +1288,39 @@ class AIProviderConfigurationResponse(BaseModel):
     base_url: str | None
     api_key_configured: bool
     model: str | None
+    # 按接口地址认出的预设卡片（custom = 自定义）、模型厂商族、是否官方端点。
+    preset: str | None = None
+    family: Literal["deepseek", "glm", "generic"] | None = None
+    official: bool = False
+    reasoning_effort: Literal["auto", "low", "high", "max"] = "auto"
+
+
+class AIProviderPresetResponse(BaseModel):
+    """设置页「添加供应商」的一张预设卡片。"""
+
+    id: str
+    label: str
+    family: Literal["deepseek", "glm", "generic"]
+    base_url: str
+    models: list[str]
+    key_url: str
+    docs_url: str
+    notes: list[str]
+
+
+class AIConnectionTestResponse(BaseModel):
+    """连接测试结果：失败也返回 200 + ok=false，让页面就地显示原因。"""
+
+    ok: bool
+    message: str
+    latency_ms: int | None = None
+    model: str | None = None
+    family: Literal["deepseek", "glm", "generic"] | None = None
+    official: bool | None = None
+    thinking_returned: bool | None = None
+    # 流式通道（网页一句话排课实际走它）是否也通；失败时网页会自动回退到非流式。
+    stream_ok: bool | None = None
+    usage: dict[str, Any] | None = None
 
 
 class IntegrationManifestResponse(BaseModel):

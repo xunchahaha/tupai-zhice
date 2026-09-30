@@ -82,11 +82,13 @@ from .models import (
     User,
 )
 from .schemas import (
+    AIConnectionTestResponse,
     AilyContextResponse,
     AilyRuleBatch,
     AilySolveRequest,
     AIProviderConfigurationInput,
     AIProviderConfigurationResponse,
+    AIProviderPresetResponse,
     AssignmentResponse,
     AssistantInterpretRequest,
     AssistantInterpretResponse,
@@ -204,6 +206,7 @@ from .security import (
     verify_password,
 )
 from .services.ai import AIService, AIServiceError
+from .services.ai_providers import PRESETS as AI_PROVIDER_PRESETS
 from .services.converter_core import (
     TEMPLATE_HEADERS,
     import_canonical_rows,
@@ -6420,6 +6423,7 @@ def configure_ai_provider(
             base_url=request.base_url,
             api_key=request.api_key,
             model=request.model,
+            reasoning_effort=request.reasoning_effort,
         )
     except AIServiceError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -6433,10 +6437,66 @@ def configure_ai_provider(
             "provider": request.provider,
             "base_url": request.base_url,
             "model": request.model,
+            "reasoning_effort": request.reasoning_effort,
         },
     )
     db.commit()
     return service.configuration_view()
+
+
+@router.get(
+    "/integrations/ai/presets",
+    response_model=list[AIProviderPresetResponse],
+    tags=["integrations", "ai"],
+)
+def ai_provider_presets(user: CurrentUser) -> list[dict[str, Any]]:
+    """设置页「添加供应商」的预设卡片：接口地址、常用模型、申请 Key 的入口与接入要点。"""
+    return [
+        {
+            "id": item.id,
+            "label": item.label,
+            "family": item.family,
+            "base_url": item.base_url,
+            "models": list(item.models),
+            "key_url": item.key_url,
+            "docs_url": item.docs_url,
+            "notes": list(item.notes),
+        }
+        for item in AI_PROVIDER_PRESETS
+    ]
+
+
+@router.post(
+    "/integrations/ai/test",
+    response_model=AIConnectionTestResponse,
+    tags=["integrations", "ai"],
+)
+def test_ai_provider(
+    request: AIProviderConfigurationInput, db: Db, user: Admin
+) -> dict[str, Any]:
+    """用尚未保存的配置发一次最小请求；失败也返回 200 + ok=false，原因写在 message 里。
+
+    同时探非流式与流式两条通道；管理员才能调用，并留审计（它会向配置里的地址发真实请求）。
+    """
+    try:
+        result = AIService(settings, db).test_connection(
+            base_url=request.base_url,
+            model=request.model,
+            api_key=request.api_key,
+            reasoning_effort=request.reasoning_effort,
+        )
+    except AIServiceError as exc:
+        result = {"ok": False, "message": str(exc)}
+    audit(
+        db,
+        user,
+        "test",
+        "ai_provider",
+        None,
+        {"base_url": request.base_url, "model": request.model, "ok": result["ok"]},
+    )
+    db.commit()
+    return result
 
 
 def _configurable_integration_or_404(integration_id: str, db: Session) -> Integration:

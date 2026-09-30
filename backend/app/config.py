@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     ai_base_url: str = ""
     ai_api_key: str = ""
     ai_model: str = ""
+    # 官方端点的思考强度：auto（抽取类任务按 low）/ low / high / max，见 services/ai_providers.py。
+    ai_reasoning_effort: str = "auto"
     ai_request_timeout_seconds: float = 60.0
     ai_token_encryption_key: str = ""
     ai_token_key_file: Path = PROJECT_ROOT / "data" / "secrets" / "ai.key"

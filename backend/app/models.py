@@ -111,6 +111,8 @@ class AIProviderConfiguration(TimestampMixin, Base):
     base_url: Mapped[str] = mapped_column(String(500))
     api_key_encrypted: Mapped[str] = mapped_column(Text)
     model: Mapped[str] = mapped_column(String(200))
+    # 厂商适配的可调项（目前只有 reasoning_effort：auto/low/high/max）；旧配置为 NULL = 全部取默认。
+    options: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     configured_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
 
 

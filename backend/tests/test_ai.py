@@ -42,6 +42,10 @@ def test_admin_configures_ai_provider_and_secret_is_encrypted(
         "base_url": "https://model.example/v1",
         "api_key_configured": True,
         "model": "scheduling-model",
+        "preset": "custom",
+        "family": "generic",
+        "official": False,
+        "reasoning_effort": "auto",
     }
     assert "secret-ai-key-value" not in configured.text
     with SessionLocal() as db:

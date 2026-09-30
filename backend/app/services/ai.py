@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import re
+import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,11 +19,21 @@ from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..models import AIProviderConfiguration
+from .ai_providers import (
+    REASONING_EFFORTS,
+    ProviderProfile,
+    build_chat_body,
+    normalize_usage,
+    preset_id_for,
+    resolve_profile,
+)
 from .task_context import (
     EXPLICIT_CORRECT_WORDS,
     EXPLICIT_EXPIRE_WORDS,
     EXPLICIT_SAVE_WORDS,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AIServiceError(RuntimeError):
@@ -34,6 +47,7 @@ class AIProviderCredentials:
     api_key: str
     model: str
     source: str
+    reasoning_effort: str = "auto"
 
 
 class AISecretCipher:
@@ -82,10 +96,28 @@ class AIService:
     @staticmethod
     def _validate_url(value: str) -> str:
         normalized = value.strip().rstrip("/")
-        parsed = urlsplit(normalized)
+        try:
+            parsed = urlsplit(normalized)
+        except ValueError as exc:
+            raise AIServiceError("AI 接口地址格式不正确") from exc
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise AIServiceError("AI 接口地址必须是完整的 HTTP 或 HTTPS 地址")
         return normalized
+
+    @staticmethod
+    def _normalize_key(api_key: str | None) -> str:
+        key = (api_key or "").strip()
+        if key and not key.isascii():
+            raise AIServiceError("API Key 只能包含 ASCII 字符，请检查是否复制进了全角字符")
+        return key
+
+    def _stored_effort(self, stored: AIProviderConfiguration) -> str:
+        return self._valid_effort((stored.options or {}).get("reasoning_effort"))
+
+    @staticmethod
+    def _valid_effort(value: Any) -> str:
+        text = str(value or "auto").strip().lower()
+        return text if text in REASONING_EFFORTS else "auto"
 
     def _environment_configuration(self) -> AIProviderCredentials | None:
         if not self.settings.ai_environment_configured:
@@ -96,6 +128,7 @@ class AIService:
             api_key=self.settings.ai_api_key.strip(),
             model=self.settings.ai_model.strip(),
             source="environment",
+            reasoning_effort=self._valid_effort(self.settings.ai_reasoning_effort),
         )
 
     def _stored_configuration(self) -> AIProviderConfiguration | None:
@@ -114,29 +147,26 @@ class AIService:
             api_key=self._cipher().decrypt(stored.api_key_encrypted),
             model=stored.model,
             source="frontend",
+            reasoning_effort=self._stored_effort(stored),
         )
 
     def configuration_view(self) -> dict[str, Any]:
         environment = self._environment_configuration()
         if environment is not None:
-            return {
-                "configured": True,
-                "source": "environment",
-                "provider": environment.provider,
-                "base_url": environment.base_url,
-                "api_key_configured": True,
-                "model": environment.model,
-            }
+            return self._view(environment, api_key_configured=True)
         stored = self._stored_configuration()
         if stored is not None:
-            return {
-                "configured": True,
-                "source": "frontend",
-                "provider": stored.provider,
-                "base_url": stored.base_url,
-                "api_key_configured": bool(stored.api_key_encrypted),
-                "model": stored.model,
-            }
+            return self._view(
+                AIProviderCredentials(
+                    provider=stored.provider,
+                    base_url=stored.base_url,
+                    api_key="",
+                    model=stored.model,
+                    source="frontend",
+                    reasoning_effort=self._stored_effort(stored),
+                ),
+                api_key_configured=bool(stored.api_key_encrypted),
+            )
         return {
             "configured": False,
             "source": "none",
@@ -144,6 +174,26 @@ class AIService:
             "base_url": None,
             "api_key_configured": False,
             "model": None,
+            "preset": None,
+            "family": None,
+            "official": False,
+            "reasoning_effort": "auto",
+        }
+
+    @staticmethod
+    def _view(credentials: AIProviderCredentials, *, api_key_configured: bool) -> dict[str, Any]:
+        profile = resolve_profile(credentials.base_url, credentials.model)
+        return {
+            "configured": True,
+            "source": credentials.source,
+            "provider": credentials.provider,
+            "base_url": credentials.base_url,
+            "api_key_configured": api_key_configured,
+            "model": credentials.model,
+            "preset": preset_id_for(credentials.base_url),
+            "family": profile.family,
+            "official": profile.official,
+            "reasoning_effort": credentials.reasoning_effort,
         }
 
     def save_configuration(
@@ -154,6 +204,7 @@ class AIService:
         base_url: str,
         api_key: str | None,
         model: str,
+        reasoning_effort: str = "auto",
     ) -> AIProviderConfiguration:
         if self._environment_configuration() is not None:
             raise AIServiceError("当前 AI 模型接口由部署环境统一管理")
@@ -161,12 +212,17 @@ class AIService:
         if normalized_provider != "openai_compatible":
             raise AIServiceError("当前仅支持 OpenAI-compatible 接口")
         normalized_url = self._validate_url(base_url)
-        normalized_key = (api_key or "").strip()
+        normalized_key = self._normalize_key(api_key)
         normalized_model = model.strip()
         if not normalized_model:
             raise AIServiceError("必须填写模型名称")
+        if reasoning_effort not in REASONING_EFFORTS:
+            raise AIServiceError("思考强度只能取 auto、low、high、max")
 
         stored = self._stored_configuration()
+        if stored is not None and not normalized_key and stored.base_url != normalized_url:
+            # 换了接口地址就是换了厂商：不能让旧厂商的 Key 悄悄发给新地址。
+            raise AIServiceError("接口地址变了，不能沿用已保存的密钥，请重新填写 API Key")
         if stored is None and len(normalized_key) < 8:
             raise AIServiceError("首次配置必须填写有效的 AI 接口密钥")
         if normalized_key and len(normalized_key) < 8:
@@ -184,12 +240,86 @@ class AIService:
         stored.provider = normalized_provider
         stored.base_url = normalized_url
         stored.model = normalized_model
+        stored.options = {**(stored.options or {}), "reasoning_effort": reasoning_effort}
         stored.configured_by = user_id
         if normalized_key:
             stored.api_key_encrypted = self._cipher().encrypt(normalized_key)
         self.db.commit()
         self.db.refresh(stored)
         return stored
+
+    def test_connection(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        api_key: str | None,
+        reasoning_effort: str = "auto",
+    ) -> dict[str, Any]:
+        """用给定（尚未保存）的配置发一次最小请求，验证地址、Key、模型名和厂商参数都能通。
+
+        Key 留空表示沿用已保存的密钥，但只在接口地址没变时才沿用——否则会把旧厂商的 Key
+        发给新地址。走与正式调用完全相同的发包路径，所以这里通过就说明一句话排课也能通。
+        """
+        normalized_url = self._validate_url(base_url)
+        normalized_model = model.strip()
+        if not normalized_model:
+            raise AIServiceError("必须填写模型名称")
+        if reasoning_effort not in REASONING_EFFORTS:
+            raise AIServiceError("思考强度只能取 auto、low、high、max")
+        key = self._normalize_key(api_key)
+        if not key:
+            environment = self._environment_configuration()
+            stored = self._stored_configuration()
+            if environment is not None and environment.base_url == normalized_url:
+                key = environment.api_key
+            elif stored is not None and stored.base_url == normalized_url:
+                key = self._cipher().decrypt(stored.api_key_encrypted)
+            else:
+                raise AIServiceError("请填写 API Key（接口地址变了，不能沿用已保存的密钥）")
+        credentials = AIProviderCredentials(
+            provider="openai_compatible",
+            base_url=normalized_url,
+            api_key=key,
+            model=normalized_model,
+            source="test",
+            reasoning_effort=reasoning_effort,
+        )
+        profile = resolve_profile(normalized_url, normalized_model)
+        started = time.perf_counter()
+        probe_prompt = '你是连通性自检助手。只输出 JSON 对象，不要输出 Markdown。输出：{"ok":true}'
+        parsed, thinking, usage = self._chat_json(probe_prompt, "ping", credentials=credentials)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        # 网页一句话排课实际走流式通道（失败才回退非流式），两条都探一下，测试通过才真的说明能用。
+        stream_error = ""
+        try:
+            asyncio.run(self._drain_stream(probe_prompt, credentials))
+        except AIServiceError as exc:
+            stream_error = str(exc)
+        return {
+            "ok": True,
+            "latency_ms": latency_ms,
+            "model": normalized_model,
+            "family": profile.family,
+            "official": profile.official,
+            "thinking_returned": bool(thinking),
+            "usage": usage,
+            "stream_ok": not stream_error,
+            "message": self._test_message(parsed, stream_error),
+        }
+
+    @staticmethod
+    def _test_message(parsed: dict[str, Any], stream_error: str) -> str:
+        head = "连接成功"
+        if parsed.get("ok") is not True:
+            head += "（模型输出与约定略有出入，但 JSON 通道正常）"
+        if not stream_error:
+            return f"{head}；流式通道也正常"
+        return f"{head}；但流式通道失败：{stream_error}（网页解析会自动回退到非流式）"
+
+    async def _drain_stream(self, system_prompt: str, credentials: AIProviderCredentials) -> None:
+        async for _event in self._chat_stream_json(system_prompt, "ping", credentials=credentials):
+            pass
 
     @staticmethod
     def _chat_completions_url(base_url: str) -> str:
@@ -281,18 +411,23 @@ class AIService:
             return str(error)
         return ""
 
-    def _chat_json(
-        self, system_prompt: str, user_content: str
-    ) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
-        """向 OpenAI-compatible 接口要一个 JSON 对象，返回 (解析结果, 思考文本, token 用量)。
-
-        解析指令与结果解释共用这一条通道：错误分支、think 块清洗、围栏 JSON
-        的处理只应该有一份实现。思考文本由 reasoning_content 与被剥离的
-        <think> 块拼接而来，两者都没有时为 None，供解析链路透出展示。
-        """
-        credentials = self.credentials()
-        if credentials.provider != "openai_compatible":
-            raise AIServiceError(f"暂不支持 AI 提供商：{credentials.provider}")
+    def _post_chat(
+        self,
+        credentials: AIProviderCredentials,
+        profile: ProviderProfile,
+        system_prompt: str,
+        user_content: str,
+    ) -> dict[str, Any]:
+        """发一次非流式请求，返回解码后的响应体；HTTP 与解码错误统一成 AIServiceError。"""
+        body = build_chat_body(
+            profile,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            stream=False,
+            reasoning_effort=credentials.reasoning_effort,
+        )
         try:
             response = httpx.post(
                 self._chat_completions_url(credentials.base_url),
@@ -300,15 +435,7 @@ class AIService:
                     "Authorization": f"Bearer {credentials.api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": credentials.model,
-                    "temperature": 0,
-                    "response_format": {"type": "json_object"},
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_content},
-                    ],
-                },
+                json=body,
                 timeout=self.settings.ai_request_timeout_seconds,
             )
             response.raise_for_status()
@@ -316,7 +443,7 @@ class AIService:
             detail = self._upstream_error_detail(exc.response.content)
             suffix = f"：{detail[:300]}" if detail else ""
             raise AIServiceError(f"AI 模型请求返回 {exc.response.status_code}{suffix}") from exc
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, UnicodeError) as exc:
             raise AIServiceError(f"AI 模型请求失败：{exc}") from exc
 
         try:
@@ -331,24 +458,81 @@ class AIService:
                     "（通常以 /v1 结尾），不要填写管理控制台地址"
                 ) from exc
             raise AIServiceError("AI 模型响应不是合法 JSON") from exc
+        if not isinstance(payload, dict):
+            raise AIServiceError("AI 模型响应不是合法 JSON")
+        return payload
 
-        try:
-            choices = payload["choices"]
-            message = choices[0]["message"]
-            reasoning = message.get("reasoning_content")
-            content = message.get("content")
-            if content in (None, ""):
-                # 兜底保持兼容：个别推理模型把最终答案放进 reasoning_content。
+    @staticmethod
+    def _empty_reason(finish_reason: Any) -> str:
+        if finish_reason == "length":
+            return "AI 模型输出被截断（finish_reason=length）：请调低思考强度或缩短输入后重试"
+        return "AI 模型返回了空内容"
+
+    @staticmethod
+    def _log_usage(
+        credentials: AIProviderCredentials,
+        profile: ProviderProfile,
+        usage: dict[str, Any],
+        elapsed: float,
+    ) -> None:
+        """记一行用量：缓存命中数是判断提示词前缀稳不稳定的唯一依据。"""
+        logger.info(
+            "AI 调用完成 model=%s family=%s official=%s prompt=%s cached=%s completion=%s "
+            "reasoning=%s elapsed=%.1fs",
+            credentials.model,
+            profile.family,
+            profile.official,
+            usage.get("prompt_tokens"),
+            usage.get("cached_tokens"),
+            usage.get("completion_tokens"),
+            usage.get("reasoning_tokens"),
+            elapsed,
+        )
+
+    def _chat_json(
+        self,
+        system_prompt: str,
+        user_content: str,
+        *,
+        credentials: AIProviderCredentials | None = None,
+    ) -> tuple[dict[str, Any], str | None, dict[str, Any]]:
+        """向 OpenAI-compatible 接口要一个 JSON 对象，返回 (解析结果, 思考文本, token 用量)。
+
+        解析指令与结果解释共用这一条通道：错误分支、think 块清洗、围栏 JSON
+        的处理只应该有一份实现。思考文本由 reasoning_content 与被剥离的
+        <think> 块拼接而来，两者都没有时为 None，供解析链路透出展示。
+        各家发包差异（思考参数、max_tokens、空内容重试）见 ai_providers。
+        """
+        credentials = credentials or self.credentials()
+        if credentials.provider != "openai_compatible":
+            raise AIServiceError(f"暂不支持 AI 提供商：{credentials.provider}")
+        profile = resolve_profile(credentials.base_url, credentials.model)
+        attempts = 2 if profile.retry_on_empty else 1
+        started = time.perf_counter()
+        for attempt in range(attempts):
+            payload = self._post_chat(credentials, profile, system_prompt, user_content)
+            try:
+                choices = payload["choices"]
+                message = choices[0]["message"]
+                finish_reason = choices[0].get("finish_reason")
+                reasoning = message.get("reasoning_content")
+                content = message.get("content")
+            except (KeyError, IndexError, TypeError, AttributeError) as exc:
+                raise AIServiceError("AI 模型响应缺少 choices[0].message.content") from exc
+            has_content = bool(self._content_text(content).strip())
+            if not has_content and profile.reasoning_may_hold_answer:
+                # 兜底保持兼容：个别认不出厂商的推理模型把最终答案放进 reasoning_content。
+                # DeepSeek / GLM 的 reasoning_content 只是思考草稿，不能当答案。
                 content = reasoning
-        except (KeyError, IndexError, TypeError) as exc:
-            raise AIServiceError("AI 模型响应缺少 choices[0].message.content") from exc
-        raw_usage = payload.get("usage") if isinstance(payload, dict) else None
-        usage = {
-            "model": credentials.model,
-            "prompt_tokens": (raw_usage or {}).get("prompt_tokens"),
-            "completion_tokens": (raw_usage or {}).get("completion_tokens"),
-            "total_tokens": (raw_usage or {}).get("total_tokens"),
-        }
+                has_content = bool(self._content_text(content).strip())
+            if has_content or attempt + 1 >= attempts:
+                break
+            # DeepSeek 的 JSON 输出偶尔返回空内容（官方文档承认）：重试一次。
+            logger.warning("AI 模型返回了空内容，重试一次 model=%s", credentials.model)
+        usage = normalize_usage(credentials.model, payload.get("usage"))
+        self._log_usage(credentials, profile, usage, time.perf_counter() - started)
+        if not has_content:
+            raise AIServiceError(self._empty_reason(finish_reason))
         parsed, think_text = self._parse_json_object(content)
         thinking_parts: list[str] = []
         if isinstance(reasoning, str) and reasoning.strip() and content is not reasoning:
@@ -367,7 +551,11 @@ class AIService:
         return 0
 
     async def _chat_stream_json(
-        self, system_prompt: str, user_content: str
+        self,
+        system_prompt: str,
+        user_content: str,
+        *,
+        credentials: AIProviderCredentials | None = None,
     ) -> AsyncIterator[tuple[str, Any]]:
         """流式版本的 _chat_json：边读边产出思考增量，结束时给一个解析结果。
 
@@ -377,13 +565,17 @@ class AIService:
         content 原文整体累积，结束后仍走 _parse_json_object 清洗校验，
         与同步通道共享同一套解析语义。基于 httpx.AsyncClient 实现，
         供 async 端点直接 await，不允许退化为事件循环内的阻塞请求。
+        content 为空时不在这里重试：流式失败由前端自动回退到同步接口，那里有 DeepSeek 的空内容重试。
         """
-        credentials = self.credentials()
+        credentials = credentials or self.credentials()
         if credentials.provider != "openai_compatible":
             raise AIServiceError(f"暂不支持 AI 提供商：{credentials.provider}")
+        profile = resolve_profile(credentials.base_url, credentials.model)
+        started = time.perf_counter()
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
         usage: dict[str, Any] | None = None
+        finish_reason: Any = None
         # <think> 块拆分器状态：是否处于块内，以及可能被截断的半个标签。
         inside_think = False
         tag_buffer = ""
@@ -425,17 +617,15 @@ class AIService:
                         "Authorization": f"Bearer {credentials.api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "model": credentials.model,
-                        "temperature": 0,
-                        "response_format": {"type": "json_object"},
-                        "stream": True,
-                        "stream_options": {"include_usage": True},
-                        "messages": [
+                    json=build_chat_body(
+                        profile,
+                        messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_content},
                         ],
-                    },
+                        stream=True,
+                        reasoning_effort=credentials.reasoning_effort,
+                    ),
                 ) as response,
             ):
                 if response.status_code >= 400:
@@ -464,6 +654,8 @@ class AIService:
                         and isinstance(choices[0], dict)
                         else None
                     )
+                    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                        finish_reason = choices[0].get("finish_reason") or finish_reason
                     if not isinstance(delta, dict):
                         continue
                     reasoning = delta.get("reasoning_content")
@@ -476,17 +668,21 @@ class AIService:
                         piece = feed_content(content)
                         if piece:
                             yield "thinking", piece
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, UnicodeError) as exc:
             raise AIServiceError(f"AI 模型请求失败：{exc}") from exc
 
         raw_content = "".join(content_parts).strip()
         reasoning_text = "".join(reasoning_parts).strip()
-        if not raw_content:
-            # 兜底保持兼容：个别推理模型把最终答案放进 reasoning_content（同 _chat_json）。
+        if not raw_content and reasoning_text and profile.reasoning_may_hold_answer:
+            # 兜底保持兼容：个别认不出厂商的推理模型把答案放进 reasoning_content（同 _chat_json）。
             raw_content = reasoning_text
             reasoning_thinking = None
+        elif not raw_content:
+            raise AIServiceError(self._empty_reason(finish_reason))
         else:
             reasoning_thinking = reasoning_text or None
+        normalized_usage = normalize_usage(credentials.model, usage)
+        self._log_usage(credentials, profile, normalized_usage, time.perf_counter() - started)
         parsed, think_text = self._parse_json_object(raw_content)
         thinking_parts: list[str] = []
         if reasoning_thinking:
@@ -496,12 +692,7 @@ class AIService:
         thinking = "\n\n".join(thinking_parts) if thinking_parts else None
         yield "result", {
             "parsed": parsed,
-            "usage": {
-                "model": credentials.model,
-                "prompt_tokens": (usage or {}).get("prompt_tokens"),
-                "completion_tokens": (usage or {}).get("completion_tokens"),
-                "total_tokens": (usage or {}).get("total_tokens"),
-            },
+            "usage": normalized_usage,
             "thinking": thinking,
         }
 
@@ -656,15 +847,33 @@ class AIService:
             "业务事实：不同产品线并行运营；课程教师（教研组）与固定开始/结束时间保持原数据；"
             "日期与教室允许重新编排；同一教室和同一具体日程账号的真实时间区间不可重叠；"
             "每个班级的课次号独立编号且允许跳号。\n"
-            f"当前日期为 {datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat()}，"
-            "用户提到今天、明天、下周等相对日期时，转换成明确的 YYYY-MM-DD。\n"
-            f"输入上下文：{json.dumps(context, ensure_ascii=False)}\n"
             "输出结构："
             '{"business_lines":[],"product_types":[],"class_business_ids":[],'
             '"date_from":null,"date_to":null,"date_window_days":7,'
             '"recognized_rules":[],"task_constraints":[],"memory_actions":[],'
-            '"unsupported_requirements":[]}'
+            '"unsupported_requirements":[]}\n'
+            # 上面全是跨请求不变的规则；下面才是随请求变化的内容。DeepSeek / GLM 的上下文缓存都按
+            # 请求前缀命中，变化的内容越靠后，能复用的前缀越长：先放同一方案下稳定的候选值，再放
+            # 随本次指令变化的偏好与任务上下文，最后才是每天都变的日期。
+            f"输入上下文：{json.dumps(AIService._ordered_context(context), ensure_ascii=False)}\n"
+            f"当前日期为 {datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat()}，"
+            "用户提到今天、明天、下周等相对日期时，转换成明确的 YYYY-MM-DD。"
         )
+
+    # 解析上下文里同一方案下基本不变的键，放在 JSON 最前面以延长可缓存的前缀。
+    _STABLE_CONTEXT_KEYS = (
+        "business_lines",
+        "product_types",
+        "class_business_ids",
+        "teachers",
+        "time_slots",
+        "fixed_rule_labels",
+    )
+
+    @staticmethod
+    def _ordered_context(context: dict[str, Any]) -> dict[str, Any]:
+        stable = {key: context[key] for key in AIService._STABLE_CONTEXT_KEYS if key in context}
+        return {**stable, **{key: value for key, value in context.items() if key not in stable}}
 
     def interpret_instruction(
         self,
