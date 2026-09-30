@@ -5,6 +5,7 @@
  * 途排智策前后端分离 MVP API
  * OpenAPI spec version: 0.1.0
  */
+import type { SolveRequestParentScheduleId } from './solveRequestParentScheduleId';
 import type { SolveRequestDateFrom } from './solveRequestDateFrom';
 import type { SolveRequestDateTo } from './solveRequestDateTo';
 import type { SolveRequestSolverRulesItem } from './solveRequestSolverRulesItem';
@@ -17,6 +18,7 @@ export interface SolveRequest {
    */
   time_limit_seconds?: number;
   course_business_ids?: string[];
+  parent_schedule_id?: SolveRequestParentScheduleId;
   /**
    * @minimum 0
    * @maximum 1000000

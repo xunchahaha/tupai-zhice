@@ -380,3 +380,124 @@ def test_assistant_solve_rejects_a_base_version_from_elsewhere(client, weekly_sc
     response = _assistant_solve(client, headers, parent_schedule_id="no-such-version")
     assert response.status_code == 422, response.text
     assert "基准课表版本" in response.json()["detail"]
+
+
+# ---- 单课范围与基准是任务约定（复审 #1）：重试、续办不能丢 ----
+
+
+def _create_goal(client, headers) -> str:
+    response = client.post(
+        "/api/v1/goals",
+        headers=headers,
+        json={"instruction": "把周一上午这节课挪到别处", "course_business_ids": ["L1"]},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["id"]
+
+
+def _run_payload(run_id: str) -> dict:
+    with SessionLocal() as db:
+        return dict(db.get(SolverRun, run_id).request_payload)
+
+
+def _goal_context(goal_id: str) -> dict:
+    from app.models import SolveGoal
+
+    with SessionLocal() as db:
+        return dict(db.get(SolveGoal, goal_id).context or {})
+
+
+def test_retry_after_a_run_without_a_draft_keeps_the_lesson_and_the_original_base(
+    client, weekly_schedule
+):
+    headers, draft_id = weekly_schedule
+    with SessionLocal() as db:
+        scope_id = db.get(ScheduleVersion, draft_id).schedule_set_id
+    published_id = _add_published_version(scope_id)
+    goal_id = _create_goal(client, headers)
+
+    first = _assistant_solve(
+        client,
+        headers,
+        goal_id=goal_id,
+        parent_schedule_id=draft_id,
+        course_business_ids=["L1"],
+    )
+    assert first.status_code == 202, first.text
+    # 任务约定被记下来：课次限定 + 原始基准。
+    context = _goal_context(goal_id)
+    assert context["scope"]["course_business_ids"] == ["L1"]
+    assert context["base_schedule_id"] == draft_id
+
+    # 第一次求解没有产出草稿（超时/无解），教务只点「加大时间预算重跑」——手动提交路径，
+    # 请求里没有显式基准；后端仍要用任务记下的原始基准，而不是当前已发布版本。
+    retry = client.post(
+        "/api/v1/solver-runs",
+        headers=headers,
+        json={"goal_id": goal_id, "course_business_ids": ["L1"], "time_limit_seconds": 90},
+    )
+    assert retry.status_code == 202, retry.text
+    payload = _run_payload(retry.json()["id"])
+    assert payload["parent_schedule_id"] == draft_id != published_id
+    assert payload["baseline_source"] == "goal_base"
+    assert payload["course_business_ids"] == ["L1"]
+    assert len(payload["previous_assignments"]) == 3
+
+
+def test_a_newer_work_draft_advances_the_base_but_not_the_lesson_scope(client, weekly_schedule):
+    from app.models import SolveGoal
+
+    headers, draft_id = weekly_schedule
+    with SessionLocal() as db:
+        scope_id = db.get(ScheduleVersion, draft_id).schedule_set_id
+    _add_published_version(scope_id)
+    goal_id = _create_goal(client, headers)
+    first = _assistant_solve(
+        client, headers, goal_id=goal_id, parent_schedule_id=draft_id, course_business_ids=["L1"]
+    )
+    assert first.status_code == 202, first.text
+
+    # 求解成功后目标的工作草稿指向新草稿（tasks._persist_result 写入）：基准前进到它。
+    with SessionLocal() as db:
+        work = ScheduleVersion(
+            schedule_set_id=scope_id,
+            version_no=3,
+            name="工作草稿",
+            status="draft",
+            solver_run_id=first.json()["id"],
+        )
+        db.add(work)
+        db.flush()
+        goal = db.get(SolveGoal, goal_id)
+        goal.context = {**(goal.context or {}), "work_draft_schedule_id": work.id}
+        work_id = work.id
+        db.commit()
+
+    again = client.post(
+        "/api/v1/solver-runs",
+        headers=headers,
+        json={"goal_id": goal_id, "course_business_ids": ["L1"]},
+    )
+    assert again.status_code == 202, again.text
+    payload = _run_payload(again.json()["id"])
+    assert payload["parent_schedule_id"] == work_id
+    assert payload["baseline_source"] == "goal_work_draft"
+    # 基准前进了，课次范围没有因此被清空。
+    assert payload["course_business_ids"] == ["L1"]
+    assert _goal_context(goal_id)["scope"]["course_business_ids"] == ["L1"]
+
+
+def test_manual_solve_without_a_goal_honours_an_explicit_base(client, weekly_schedule):
+    headers, draft_id = weekly_schedule
+    with SessionLocal() as db:
+        scope_id = db.get(ScheduleVersion, draft_id).schedule_set_id
+    _add_published_version(scope_id)
+    response = client.post(
+        "/api/v1/solver-runs",
+        headers=headers,
+        json={"parent_schedule_id": draft_id, "course_business_ids": ["L1"]},
+    )
+    assert response.status_code == 202, response.text
+    payload = _run_payload(response.json()["id"])
+    assert payload["parent_schedule_id"] == draft_id
+    assert payload["baseline_source"] == "explicit_parent"

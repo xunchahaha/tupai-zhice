@@ -414,6 +414,7 @@ export * from './solveRequest';
 export * from './solveRequestDateFrom';
 export * from './solveRequestDateTo';
 export * from './solveRequestGoalId';
+export * from './solveRequestParentScheduleId';
 export * from './solveRequestSolverRulesItem';
 export * from './solverRunDetailResponse';
 export * from './solverRunDetailResponseBestBound';

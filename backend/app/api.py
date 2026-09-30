@@ -4490,6 +4490,14 @@ def create_solver_run(
                 ):
                     parent_version = candidate
                     baseline_source = "goal_work_draft"
+            # 目标记下的原始基准（例如从课表选中某份草稿的课次交给助手）：第一次求解没有产出草稿
+            # （超时/无解）时，重试、刷新续办都必须仍以它为准，不能悄悄退回当前已发布版本。
+            if parent_version is None:
+                recorded_id = str((goal_row.context or {}).get("base_schedule_id") or "")
+                recorded = db.get(ScheduleVersion, recorded_id) if recorded_id else None
+                if recorded is not None and recorded.schedule_set_id == schedule_set_id:
+                    parent_version = recorded
+                    baseline_source = "goal_base"
         if parent_version is None:
             parent_version = db.scalar(
                 select(ScheduleVersion)
@@ -4548,7 +4556,12 @@ def create_solver_run(
             "date_from": request.date_from.isoformat() if request.date_from else None,
             "date_to": request.date_to.isoformat() if request.date_to else None,
             "date_window_days": request.date_window_days,
+            # 单课调整的课次限定是任务约定的一部分：续办、加预算重跑从这里恢复。
+            "course_business_ids": list(getattr(request, "course_business_ids", []) or []),
         }
+        # 显式基准（请求指定的版本）记进任务上下文；之后没有更新的工作草稿时仍以它为基准。
+        if requested_parent_id and "parent_schedule_id" not in (extra or {}):
+            context["base_schedule_id"] = requested_parent_id
         soft_merged = {
             str(item.get("id")): dict(item)
             for item in context.get("soft_task_constraints") or []

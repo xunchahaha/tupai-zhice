@@ -13700,6 +13700,17 @@
             "type": "array",
             "title": "Course Business Ids"
           },
+          "parent_schedule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Schedule Id"
+          },
           "change_weight": {
             "type": "integer",
             "maximum": 1000000.0,

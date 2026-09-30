@@ -809,6 +809,8 @@ class GoalResponse(ORMModel):
 class SolveRequest(BaseModel):
     time_limit_seconds: float = Field(default=30, ge=1, le=900)
     course_business_ids: list[str] = Field(default_factory=list)
+    # 显式基准版本：手动排课/加预算重跑也要能沿用任务原来的基准，而不是回退到当前已发布版本。
+    parent_schedule_id: str | None = None
     change_weight: int = Field(default=100000, ge=0, le=1000000)
     business_lines: list[str] = Field(default_factory=list)
     product_types: list[str] = Field(default_factory=list)

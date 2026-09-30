@@ -467,7 +467,7 @@ solver-page.tsx:190-207 的绑定 useEffect 扩展（绑定的 GET /goals/{id} �
 
 理由：续办目标的「最少变更」应相对**该目标上一轮产出**，相对已发布版本会把上一轮草稿的全部
 调整都算成变更、诱导求解器回退已确认的成果。三级选择写入 request_payload 的
-`baseline_source` 字段（explicit_parent/goal_work_draft/latest_published），解释层可转述。
+`baseline_source` 字段（explicit_parent/goal_work_draft/goal_base/latest_published；goal_base = 目标记下的原始显式基准，第一次求解没产出草稿时重试/续办仍用它），解释层可转述。
 `minimize_changes`、diff 链路无需改动（它们只读 previous_assignments/parent_id）。
 
 ## 5. TC-6 · 缺口 7：补救→执行（后端编译随 TC-3 已闭合）
