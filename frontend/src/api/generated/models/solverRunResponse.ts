@@ -13,6 +13,9 @@ import type { SolverRunResponseExplanation } from './solverRunResponseExplanatio
 import type { SolverRunResponseMemoryUsage } from './solverRunResponseMemoryUsage';
 import type { SolverRunResponseGoalId } from './solverRunResponseGoalId';
 import type { SolverRunResponseGoalReport } from './solverRunResponseGoalReport';
+import type { SolverRunResponseTimeLimitSeconds } from './solverRunResponseTimeLimitSeconds';
+import type { SolverRunResponseTaskRevision } from './solverRunResponseTaskRevision';
+import type { SolverRunResponseRerunOf } from './solverRunResponseRerunOf';
 import type { SolverRunResponseErrorMessage } from './solverRunResponseErrorMessage';
 
 export interface SolverRunResponse {
@@ -32,6 +35,9 @@ export interface SolverRunResponse {
   memory_usage?: SolverRunResponseMemoryUsage;
   goal_id?: SolverRunResponseGoalId;
   goal_report?: SolverRunResponseGoalReport;
+  time_limit_seconds?: SolverRunResponseTimeLimitSeconds;
+  task_revision?: SolverRunResponseTaskRevision;
+  rerun_of?: SolverRunResponseRerunOf;
   error_message: SolverRunResponseErrorMessage;
   created_at: string;
   updated_at: string;

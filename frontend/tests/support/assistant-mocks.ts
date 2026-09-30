@@ -27,6 +27,9 @@ export const assistantMocks = {
   scheduleDetails: {} as Record<string, Rec>,
   diff: vi.fn<(...args: unknown[]) => { data?: unknown; isLoading?: boolean; isError?: boolean }>(() => ({ data: undefined })),
   submitMutate: vi.fn(),
+  /** 按原参数重跑（useRerunSolverRun…）：记录调用；设置 rerunResult 后同步走 onSuccess。 */
+  rerunMutate: vi.fn(),
+  rerunResult: undefined as Rec | undefined,
   publishMutate: vi.fn(),
   abandonMutate: vi.fn(),
   checklistPatch: vi.fn(),
@@ -54,6 +57,8 @@ export function resetAssistantMocks() {
   m.scheduleDetails = {};
   m.diff.mockReset().mockReturnValue({ data: undefined });
   m.submitMutate.mockReset();
+  m.rerunMutate.mockReset();
+  m.rerunResult = undefined;
   m.publishMutate.mockReset();
   m.abandonMutate.mockReset();
   m.checklistPatch.mockReset();
@@ -96,6 +101,13 @@ export const clientMock = {
     mutate: (variables: unknown) => {
       assistantMocks.submitMutate(variables);
       if (assistantMocks.submitResult) config?.mutation?.onSuccess?.(assistantMocks.submitResult);
+    },
+    isPending: false,
+  }),
+  useRerunSolverRunApiV1SolverRunsRunIdRerunPost: (config?: { mutation?: { onSuccess?: (data: unknown) => void } }) => ({
+    mutate: (variables: unknown) => {
+      assistantMocks.rerunMutate(variables);
+      if (assistantMocks.rerunResult) config?.mutation?.onSuccess?.(assistantMocks.rerunResult);
     },
     isPending: false,
   }),

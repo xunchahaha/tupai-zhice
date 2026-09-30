@@ -15,6 +15,12 @@ export interface RefineState {
 
 const CLOSED_REFINE: RefineState = { open: false, text: "" };
 
+/** 一次用户指令的幂等标识（crypto.randomUUID 不可用的环境退回随机串）。 */
+function newRequestId(): string {
+  const random = globalThis.crypto?.randomUUID?.();
+  return random ?? `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
 /**
  * 「需求 → AI 解析 → 待确认的理解」这一段状态机：流式解析 + 同步回退、取消、失败重试、继续调整。
  * 与求解/任务状态解耦——解析结果怎样影响范围草稿与任务提示，由调用方通过 onParsed 接手。
@@ -49,6 +55,20 @@ export function useInterpretSession({
   const [refine, setRefine] = useState<RefineState>(CLOSED_REFINE);
   const interpretAbort = useRef<AbortController | null>(null);
   const interpretStartedAt = useRef(0);
+  // 幂等标识按「这条指令」发：同一句话、同一任务的失败重试沿用上一个标识（提交后结果丢失的重试
+  // 不会让服务端再执行一遍「记住」）；解析成功后，同一句话再点一次是新的一次操作，换新标识。
+  const requestState = useRef<{ key: string; id: string; settled: boolean } | null>(null);
+  const requestIdFor = (text: string, goalId: string): string => {
+    const key = `${goalId}|${text}`;
+    const state = requestState.current;
+    if (state && state.key === key && !state.settled) return state.id;
+    const id = newRequestId();
+    requestState.current = { key, id, settled: false };
+    return id;
+  };
+  const settleRequest = () => {
+    if (requestState.current) requestState.current.settled = true;
+  };
   // 收到后端 stage 事件后锁定轮播（事件即真实进度），避免计时器把阶段倒拨回去。
   const stageLocked = useRef(false);
 
@@ -93,6 +113,7 @@ export function useInterpretSession({
     const isCurrent = () => interpretAbort.current === controller;
     interpretStartedAt.current = Date.now();
     const boundGoalId = goalIdForParse;
+    const requestId = requestIdFor(text, boundGoalId);
     setLastSent(text);
     setOriginalInstruction((previous) => previous || text);
     setInterpretError("");
@@ -111,8 +132,9 @@ export function useInterpretSession({
             setStageIndex(index);
           }
         },
-      }, boundGoalId || undefined);
+      }, boundGoalId || undefined, requestId);
       if (!isCurrent()) return;
+      settleRequest();
       applyInterpretation(data, boundGoalId);
     } catch {
       // 用户主动取消、或被切走/取代不算失败：只有仍是当前这一轮时才回到初始态等下一次解析。
@@ -125,10 +147,11 @@ export function useInterpretSession({
         // 同步回退的请求体与流式主路径口径一致（同样带 goal_id）。
         const { data } = await http.post<Interpretation>(
           "/api/v1/assistant/interpret",
-          { instruction: text, ...(boundGoalId ? { goal_id: boundGoalId } : {}) },
+          { instruction: text, ...(boundGoalId ? { goal_id: boundGoalId } : {}), request_id: requestId },
           { signal: controller.signal },
         );
         if (!isCurrent()) return;
+        settleRequest();
         applyInterpretation(data, boundGoalId);
       } catch (error) {
         if (controller.signal.aborted) {

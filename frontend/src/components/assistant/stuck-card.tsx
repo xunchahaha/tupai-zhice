@@ -106,7 +106,7 @@ export function StuckCard({ task, run, defaultDiagnosisOpen }: { task: Assistant
         <div role="status" className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-900">
           {task.goalClosed
             ? <p>这个任务已放弃，不能再重跑，所以不提供「加大时间预算重跑」。可以先「修正范围」，或按下面的范围重新排课。</p>
-            : <p>这次求解没有关联任务，没法确认它原来的排课范围，所以不提供「加大时间预算重跑」。可以先「修正范围」，或按下面的范围重新排课。</p>}
+            : <p>这次求解的记录暂时不可用，所以不提供「加大时间预算重跑」。可以先「修正范围」，或按下面的范围重新排课。</p>}
           <p className="mt-1 font-medium">将使用的范围：{scopeText}；求解时限 {task.params.time_limit_seconds} 秒</p>
         </div>
       ) : null}

@@ -181,7 +181,26 @@ describe("AssistantPage solve request contract (TC-6 §6.5/§6.4)", () => {
     const fallbackCall = mocks.post.mock.calls.find((call) => call[0] === "/api/v1/assistant/interpret") as unknown[] | undefined;
     expect(fallbackCall).toBeDefined();
     // 同步回退与流式主路径口径一致（同样带 goal_id）。
-    expect(fallbackCall![1]).toEqual({ instruction: expect.any(String), goal_id: "goal-77" });
+    expect(fallbackCall![1]).toEqual({ instruction: expect.any(String), goal_id: "goal-77", request_id: expect.any(String) });
+  });
+
+  it("keeps one request_id across the stream attempt, the sync fallback and a failed retry of the same sentence (R4)", async () => {
+    mockAiConfigured();
+    mocks.stream.mockRejectedValue(new Error("stream unavailable"));
+    mocks.post.mockRejectedValue(new Error("网关超时"));
+    const user = userEvent.setup();
+    renderAssistant();
+    await parse(user);
+    await screen.findByRole("button", { name: /重试解析/ });
+    const streamId = (mocks.stream.mock.calls[0] as unknown[])[4];
+    const fallbackId = (mocks.post.mock.calls[0][1] as { request_id: string }).request_id;
+    // 提交成功后结果丢失的场景：流式失败回退同步接口，两次请求必须是同一个标识。
+    expect(streamId).toEqual(expect.any(String));
+    expect(fallbackId).toBe(streamId);
+    // 点「重试解析」仍是同一句话的重试：沿用同一个标识（服务端据此只执行一次「记住」）。
+    await user.click(screen.getByRole("button", { name: /重试解析/ }));
+    await waitFor(() => expect(mocks.stream).toHaveBeenCalledTimes(2));
+    expect((mocks.stream.mock.calls[1] as unknown[])[4]).toBe(streamId);
   });
 });
 
@@ -255,25 +274,20 @@ describe("AssistantPage resume restore (TC-6 §4.4/§4.5)", () => {
 });
 
 describe("AssistantPage budget retry and scope remedy (TC-6 §5.2)", () => {
-  it("auto-submits a raised budget on mount when action=raise_budget, bypassing the interpretation guard", async () => {
-    mocks.goalDetail = goalFixture({ context: goalContext });
+  it("auto-replays the task's last run on mount when action=raise_budget, bypassing the interpretation guard", async () => {
+    mocks.goalDetail = goalFixture({ context: goalContext, latest_run_id: "run-77", run_count: 1 });
+    mocks.runDetails["run-77"] = runFixture({ id: "run-77", goal_id: "goal-77", model_status: "UNKNOWN" });
     renderAssistant("/assistant?goal=goal-77&action=raise_budget");
-    // 无任何解析状态（AI 未配置、从未解析）也能提交——不经过 solveFromInterpretation
-    // 的守卫，直接复用手动求解提交路径（§5.2 评审指认的机制修正）。
-    await waitFor(() => expect(mocks.submitMutate).toHaveBeenCalledTimes(1));
+    // 无任何解析状态（AI 未配置、从未解析）也能重跑——不经过 solveFromInterpretation 的守卫。
+    await waitFor(() => expect(mocks.rerunMutate).toHaveBeenCalledTimes(1));
     expect(mocks.stream).not.toHaveBeenCalled();
-    const submitted = mocks.submitMutate.mock.calls[0][0] as { data: Record<string, unknown> };
-    // 时限 30 → max(30×3, 90) = 90；范围来自 context.scope 回填，未被重选。
-    expect(submitted.data.time_limit_seconds).toBe(90);
-    expect(submitted.data.goal_id).toBe("goal-77");
-    expect(submitted.data.business_lines).toEqual(["考研"]);
-    expect(submitted.data.class_business_ids).toEqual(["B01"]);
-    expect(submitted.data.date_from).toBe("2026-09-28");
-    expect(submitted.data.date_to).toBe("2026-10-04");
-    expect(submitted.data.solver_rules).toEqual(expect.arrayContaining(["room_no_overlap", "teacher_no_overlap"]));
+    // 预算、范围、规则开关、权重、数据与基准全部由后端从 run-77 冻结的参数取：前端一个都不发，
+    // 刷新后回到默认值的参数草稿（30 秒、全部规则开）不可能成为依据（评审 R2）。
+    expect(mocks.rerunMutate).toHaveBeenCalledWith({ runId: "run-77", data: {} });
+    expect(mocks.submitMutate).not.toHaveBeenCalled();
     // action 参数执行后摘除：刷新不会重复提交。
     await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(/^\/assistant\?goal=goal-77$/));
-    expect(mocks.submitMutate).toHaveBeenCalledTimes(1);
+    expect(mocks.rerunMutate).toHaveBeenCalledTimes(1);
   });
 
   it("raises the budget from the gap remedy button and caps the limit at 900", async () => {
@@ -295,19 +309,38 @@ describe("AssistantPage budget retry and scope remedy (TC-6 §5.2)", () => {
     });
     renderAssistant("/assistant?goal=goal-9");
     const remedyButton = await screen.findByRole("button", { name: "加大时间预算重跑" });
-    // 先把时限改到 350：350×3=1050 → 上限 900。
+    // 手动面板里把草稿的时限改到 350：它和「加预算」无关——加预算按求解记录自己的预算算（上限 900 由后端把关）。
     await user.click(screen.getByRole("button", { name: "手动排课（自己设置参数）" }));
     const timeInput = screen.getByLabelText("求解时限（秒）");
     await user.clear(timeInput);
     await user.type(timeInput, "350");
     await user.click(remedyButton);
-    await waitFor(() => expect(mocks.submitMutate).toHaveBeenCalledTimes(1));
-    const submitted = mocks.submitMutate.mock.calls[0][0] as { data: Record<string, unknown> };
-    expect(submitted.data.time_limit_seconds).toBe(900);
-    expect(submitted.data.goal_id).toBe("goal-9");
-    // 只加预算不重选范围：范围字段保持原状。
-    expect(submitted.data.business_lines).toEqual([]);
-    expect(submitted.data.date_from).toBeNull();
+    await waitFor(() => expect(mocks.rerunMutate).toHaveBeenCalledTimes(1));
+    expect(mocks.rerunMutate).toHaveBeenCalledWith({ runId: "run-goal", data: {} });
+    expect(mocks.submitMutate).not.toHaveBeenCalled();
+  });
+
+  it("tells the admin how the confirmed requirements revised the task when the solve starts (R1)", async () => {
+    mockAiConfigured();
+    mocks.stream.mockResolvedValue(interpretationFixture({ task_constraints: taskConstraints }));
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      if (String(args[0]) === "/api/v1/goals") return { data: { id: "goal-rev", status: "open", checklist: [] } };
+      return {
+        data: {
+          id: "run-rev",
+          status: "queued",
+          model_status: null,
+          goal_id: "goal-rev",
+          task_revision: { tightened: ["张老师周三晚绝对不能上"], kept_hard: ["李老师周四尽量别排"] },
+        },
+      };
+    });
+    const user = userEvent.setup();
+    renderAssistant();
+    await parse(user);
+    await user.click(await screen.findByRole("button", { name: CONFIRM }));
+    expect(await screen.findByText(/已更新任务要求：由「尽量」收紧为硬性要求：「张老师周三晚绝对不能上」/)).toBeInTheDocument();
+    expect(screen.getByText(/没有放宽（要放宽请到任务清单里改）：「李老师周四尽量别排」/)).toBeInTheDocument();
   });
 
   it("expands the manual panel before scrolling to the scope area for action=resolve_scope", async () => {

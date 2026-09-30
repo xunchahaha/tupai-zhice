@@ -229,34 +229,31 @@ describe("AssistantPage stuck card", () => {
     renderAssistant("/assistant?run=run-u");
     expect(await screen.findByRole("heading", { name: "时间用完了，还没找到可用的排法" })).toBeInTheDocument();
     expect(screen.queryByText(/已确认在当前硬性要求下无法排开/)).not.toBeInTheDocument();
-    // 任务的范围草稿恢复之前不能重跑，恢复后才可点。
+    // 重跑的依据是这条求解记录本身：记录读到就能点，不需要等任务的范围草稿恢复。
     const raise = screen.getByRole("button", { name: "加大时间预算重跑" });
     await waitFor(() => expect(raise).toBeEnabled());
     await user.click(raise);
-    await waitFor(() => expect(mocks.submitMutate).toHaveBeenCalledTimes(1));
-    const submitted = (mocks.submitMutate.mock.calls[0][0] as { data: Record<string, unknown> }).data;
-    expect(submitted.time_limit_seconds).toBe(90);
-    expect(submitted.goal_id).toBe("goal-77");
+    // 只让后端按 run-u 重放（预算按它原来的预算加大），前端不发范围/规则/预算。
+    await waitFor(() => expect(mocks.rerunMutate).toHaveBeenCalledTimes(1));
+    expect(mocks.rerunMutate).toHaveBeenCalledWith({ runId: "run-u", data: {} });
+    expect(mocks.submitMutate).not.toHaveBeenCalled();
   });
 
-  it("does not offer a raised-budget rerun for a run without a task: it names the scope that a rerun would use", async () => {
+  it("offers the raised-budget rerun for a run without a task too: the run record holds its own parameters", async () => {
     const user = userEvent.setup();
     mocks.runDetails["run-u"] = runFixture({ id: "run-u", model_status: "UNKNOWN", explanation: EXPLAINED });
     renderAssistant("/assistant?run=run-u");
     expect(await screen.findByRole("heading", { name: "时间用完了，还没找到可用的排法" })).toBeInTheDocument();
-    // 没有任务就不知道原来的范围，绝不能悄悄拿默认的全范围提交。
-    expect(screen.queryByRole("button", { name: "加大时间预算重跑" })).not.toBeInTheDocument();
-    expect(screen.getByText(/没有关联任务，没法确认它原来的排课范围/)).toBeInTheDocument();
-    expect(screen.getByText(/将使用的范围：全部课次；求解时限 30 秒/)).toBeInTheDocument();
+    // 以前没有任务就拿不到原来的范围、只能拿默认的全范围提交——现在范围在求解记录里，后端原样重放。
+    expect(screen.queryByText(/没有关联任务，没法确认它原来的排课范围/)).not.toBeInTheDocument();
+    const raise = screen.getByRole("button", { name: "加大时间预算重跑" });
+    expect(raise).toBeEnabled();
+    await user.click(raise);
+    await waitFor(() => expect(mocks.rerunMutate).toHaveBeenCalledWith({ runId: "run-u", data: {} }));
     expect(mocks.submitMutate).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "按当前范围重新排课" }));
-    await waitFor(() => expect(mocks.submitMutate).toHaveBeenCalledTimes(1));
-    const submitted = (mocks.submitMutate.mock.calls[0][0] as { data: Record<string, unknown> }).data;
-    expect(submitted.time_limit_seconds).toBe(30);
-    expect(submitted.goal_id).toBeNull();
   });
 
-  it("lets a run started in this session raise the budget even without a task, since the draft holds its scope", async () => {
+  it("lets a run started in this session raise the budget by replaying it, not by resubmitting the draft", async () => {
     const user = userEvent.setup();
     mockAiConfigured(); // AI 已配置时手动面板默认收起，需要点开；未配置时会自动展开
     mocks.submitResult = runFixture({ id: "run-m", model_status: "UNKNOWN", explanation: EXPLAINED });
@@ -265,15 +262,13 @@ describe("AssistantPage stuck card", () => {
     await user.click(await screen.findByRole("button", { name: "手动排课（自己设置参数）" }));
     await user.click(await screen.findByRole("button", { name: /按参数开始求解/ }));
     expect(await screen.findByRole("heading", { name: "时间用完了，还没找到可用的排法" })).toBeInTheDocument();
-    // 范围草稿就是这次提交用的那份，不存在「悄悄换成默认全范围」的风险。
     expect(screen.queryByText(/没有关联任务，没法确认它原来的排课范围/)).not.toBeInTheDocument();
     const raise = screen.getByRole("button", { name: "加大时间预算重跑" });
     expect(raise).toBeEnabled();
     await user.click(raise);
-    await waitFor(() => expect(mocks.submitMutate).toHaveBeenCalledTimes(2));
-    const submitted = (mocks.submitMutate.mock.calls[1][0] as { data: Record<string, unknown> }).data;
-    expect(submitted.time_limit_seconds).toBe(90);
-    expect(submitted.goal_id).toBeNull();
+    // 重放 run-m：不再把草稿当第二次手动提交（那会把原预算改成草稿默认值算出来的 90 秒）。
+    await waitFor(() => expect(mocks.rerunMutate).toHaveBeenCalledWith({ runId: "run-m", data: {} }));
+    expect(mocks.submitMutate).toHaveBeenCalledTimes(1);
   });
 
   it("shows the error message of a failed run", async () => {

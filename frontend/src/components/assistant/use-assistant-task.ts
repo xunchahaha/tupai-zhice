@@ -10,6 +10,7 @@ import {
   getOverviewApiV1OverviewGetQueryKey,
   useGetGoalApiV1GoalsGoalIdGet,
   useGetSolverRunApiV1SolverRunsRunIdGet,
+  useRerunSolverRunApiV1SolverRunsRunIdRerunPost,
   useSubmitSolverRunApiV1SolverRunsPost,
 } from "@/api/generated/client";
 import { type GoalChecklistItem, type GoalDetailResponse, type SolverRunResponse } from "@/api/generated/models";
@@ -27,7 +28,7 @@ import { isClosedGoal } from "@/lib/goal";
 import { type Interpretation } from "@/lib/interpret-stream";
 import { classifyRun } from "@/lib/run-kind";
 import { type SolverParamValues, withSystemRules } from "@/lib/solver-params";
-import { parseGoalContext, raisedBudgetSeconds } from "@/lib/task-context";
+import { describeTaskRevision, parseGoalContext } from "@/lib/task-context";
 
 export type { RefineState } from "@/components/assistant/use-interpret-session";
 
@@ -47,7 +48,7 @@ export function useAssistantTask() {
   const client = useQueryClient();
   const probe = useAssistantProbe();
   const taskParams = useTaskParams();
-  const { params, setParams, scopeExpansion } = taskParams;
+  const { params, scopeExpansion } = taskParams;
   const { blockedReason: submitBlockedReason, gated } = useSubmitGate(scopeExpansion);
   // 每次完整重置 +1：在途的建任务/求解请求返回时据此丢弃结果，不落到已经换掉的任务上。
   const epoch = useRef(0);
@@ -85,8 +86,6 @@ export function useAssistantTask() {
   // —— 求解 ——
   const [runId, setRunId] = useState("");
   const [current, setCurrent] = useState<SolverRunResponse | null>(null);
-  // 本会话里由这个页面发起的求解：范围草稿就是它提交时用的那份，没有任务也能据此加预算重跑。
-  const [sessionRunId, setSessionRunId] = useState("");
   const latestRunId = useRef(runId);
   useEffect(() => { latestRunId.current = runId; });
   // 这份理解是在哪个 run 存在时解析出来的：之后 runId 变了，说明期间又发起过求解（手动路径）。
@@ -152,7 +151,6 @@ export function useAssistantTask() {
     clearHandoff();
     session.reset();
     setRunId("");
-    setSessionRunId("");
     setCurrent(null);
     setInterpretedAtRun("");
     setConstraintUse("pending");
@@ -236,13 +234,15 @@ export function useAssistantTask() {
   const startedRun = useCallback((run: SolverRunResponse, via: "solve" | "manual") => {
     setRunId(run.id);
     setCurrent(run);
-    setSessionRunId(run.id);
     // 课次限定随这次求解提交，成为已确认的范围；base/lesson 从地址栏摘掉，之后由任务上下文承载。
     // 交接对象本身不在这里清除：没产出草稿（超时/无解）的重试仍要用它；有草稿后基准才前进。
     commitLessonScope();
     if (via === "solve") {
       setConfirmed(true);
       setConstraintUse("submitted");
+      // 确认过的要求在求解前已经成为任务的新版要求：把这次改了什么如实告诉教务。
+      const revised = describeTaskRevision(run.task_revision);
+      if (revised) setGoalNotice(revised);
     } else {
       // 手动路径不代表用户确认了那份理解：确认卡和未落实要求继续可见，只记下这次没带上解析出的任务约束。
       setConstraintUse((previous) => (previous === "pending" ? "bypassed" : previous));
@@ -265,8 +265,25 @@ export function useAssistantTask() {
       onError: (error) => toast.error(errorMessage(error)),
     },
   });
+  // 按原求解的冻结参数重跑（只改时间预算）：范围/规则/权重/数据/记忆/基准都由后端从原求解取，
+  // 这里不发任何参数——刷新后的参数草稿是默认值，绝不能成为重跑的依据。
+  const rerunEpoch = useRef(0);
+  const rerun = useRerunSolverRunApiV1SolverRunsRunIdRerunPost({
+    mutation: {
+      onSuccess: (result) => {
+        if (rerunEpoch.current !== epoch.current) return;
+        startedRun(result, "manual");
+        toast.success(
+          result.time_limit_seconds
+            ? `已按原参数重新提交，时间预算加大至 ${result.time_limit_seconds} 秒`
+            : "已按原参数重新提交求解",
+        );
+      },
+      onError: (error) => toast.error(errorMessage(error)),
+    },
+  });
   const explain = useRunExplanation(current);
-  const pending = submit.isPending || current?.status === "running";
+  const pending = submit.isPending || rerun.isPending || current?.status === "running";
 
   // —— 生命周期：URL → 状态 ——
   // 07 §4.4 续办恢复：不只绑 id——instruction 与 context.scope（范围/日期草稿）一并回填，基准默认
@@ -366,37 +383,35 @@ export function useAssistantTask() {
   const submitManual = gated(() => startManualRun(params));
 
   /**
-   * 加预算重跑只在两种情况下可用：已绑定任务且该任务的范围草稿已恢复；或这次求解就是本会话发起的
-   * （草稿范围即它提交时的范围）。范围草稿要是没恢复、也不是本会话提交的，提交的就是默认全范围——
-   * 悄悄改变排课范围；这类求解记录改走「按当前范围重新排课」，由界面明确展示将使用的范围。
+   * 加预算重跑的依据是**这次求解记录本身**：后端按它冻结的范围/日期/课次、规则开关、变更权重、
+   * 数据快照、偏好记忆与基准原样重跑，只把时间预算按「min(max(原预算×3, 90), 900)」加大。
+   * 不依赖任务的范围草稿是否恢复——草稿刷新后是默认值（30 秒、全部规则开关），用它提交会把
+   * 300 秒的任务降成 90 秒、悄悄重新打开被关掉的规则。有任务时任务要求取任务当前版本。
+   * 记录没读到、求解没结束、任务已放弃时不可用；需要换范围/数据/规则时走「按当前范围重新排课」。
    */
-  const sessionRunOwnsDraft = !solveGoalId && Boolean(sessionRunId) && sessionRunId === runId;
-  const canRaiseBudget = (Boolean(solveGoalId) && restoredGoalId === solveGoalId && !goalLoadFailed) || sessionRunOwnsDraft;
-  const budgetBlockedByGoal = canRaiseBudget
+  const runLoaded = Boolean(runId) && current?.id === runId;
+  const runSettled = runLoaded && (current?.status === "completed" || current?.status === "failed");
+  const runLoadFailed = Boolean(runId) && !current && Boolean(progress.isError);
+  const canRaiseBudget = runSettled && !goalClosed;
+  const budgetBlockedByRun = canRaiseBudget
     ? null
     : goalClosed
       ? "这个任务已放弃，不能再重跑；可以「按当前范围重新排课」。"
-      : !goalId
-        ? "这次求解没有关联任务，无法确认原来的排课范围；请先「修正范围」，或按当前范围重新排课。"
-        : goalLoadFailed
-          ? "任务没能读取，暂时无法恢复它的排课范围，请先重试读取任务。"
-          : "正在恢复这个任务的排课范围，请稍候再试。";
-  const raiseBudgetBlockedReason = submitBlockedReason ?? (pending ? "上一次求解还在进行中，结束后再重跑。" : budgetBlockedByGoal);
-  /**
-   * 07 §5.2 加预算重跑的独立提交函数：刻意不经过 solveFromInterpretation——该函数开头的
-   * interpretation/unsupported 守卫在「刷新后的助手页、从旧链接进来」等无解析状态场景必然提前返回。
-   * 这里直接复用手动求解提交路径：只把时限按 min(max(当前×3, 90), 900) 抬升，
-   * 范围/日期/规则键全部沿用共享参数草稿（MEM-I2），不重新解析、不重选范围。
-   */
+      : !runId
+        ? "没有关联任务，也没有可重跑的求解记录，无法确认原来的排课参数；请先「修正范围」，或按当前范围重新排课。"
+        : runLoadFailed
+          ? "这次求解的记录没能读取，暂时无法按原参数重跑，请先重试读取。"
+          : !runLoaded
+            ? "正在读取这次求解的记录，请稍候再试。"
+            : "这次求解还没结束，结束后再重跑。";
+  const raiseBudgetBlockedReason = submitBlockedReason ?? (pending ? "上一次求解还在进行中，结束后再重跑。" : budgetBlockedByRun);
   const raiseBudget = gated(() => {
-    if (raiseBudgetBlockedReason) {
-      toast.error(raiseBudgetBlockedReason);
+    if (raiseBudgetBlockedReason || !current) {
+      toast.error(raiseBudgetBlockedReason ?? budgetBlockedByRun ?? "暂时无法重跑");
       return;
     }
-    const nextParams = { ...params, time_limit_seconds: raisedBudgetSeconds(params.time_limit_seconds) };
-    setParams(nextParams);
-    toast.success(`时间预算已加大至 ${nextParams.time_limit_seconds} 秒，正在重新提交求解`);
-    startManualRun(nextParams);
+    rerunEpoch.current = epoch.current;
+    rerun.mutate({ runId: current.id, data: {} });
   });
 
   // ?action=：等目标绑定与上下文回填完成后一次性执行，执行后摘掉参数，刷新不会重复提交。
@@ -406,7 +421,8 @@ export function useAssistantTask() {
     if (actionHandled.current === actionParam) return;
     if (actionParam === "raise_budget") {
       if (goalParam && goalId !== goalParam) return; // URL 里的任务还没绑定上
-      if (goalId && restoredGoalId !== goalId && !goalLoadFailed) return; // 范围草稿还在恢复
+      if (goalId && restoredGoalId !== goalId && !goalLoadFailed) return; // 任务还在恢复（最近一次求解由它给出）
+      if (runId && current?.id !== runId && !runLoadFailed) return; // 要重跑的求解记录还在读取
       actionHandled.current = actionParam;
       raiseBudget();
       updateSearch((next) => next.delete("action"));
@@ -418,7 +434,7 @@ export function useAssistantTask() {
       openManual({ focusScope: true });
       updateSearch((next) => next.delete("action"));
     }
-  }, [actionParam, goalId, goalLoadFailed, goalParam, openManual, raiseBudget, restoredGoalId, updateSearch]);
+  }, [actionParam, current?.id, goalId, goalLoadFailed, goalParam, openManual, raiseBudget, restoredGoalId, runId, runLoadFailed, updateSearch]);
 
   /**
    * 按解析结果登记持久目标（清单用后端预填草稿，前端可改的项暂不展开）。
@@ -635,7 +651,7 @@ export function useAssistantTask() {
     runId,
     activeRun: current,
     runKind: classifyRun(current),
-    runLoadFailed: Boolean(runId) && !current && Boolean(progress.isError),
+    runLoadFailed,
     retryRun: () => void progress.refetch(),
     pending,
     /** 扩大范围待确认时的统一拦截原因；所有提交类按钮据此 disabled。 */

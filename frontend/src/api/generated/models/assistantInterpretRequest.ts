@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { AssistantInterpretRequestGoalId } from './assistantInterpretRequestGoalId';
+import type { AssistantInterpretRequestRequestId } from './assistantInterpretRequestRequestId';
 
 export interface AssistantInterpretRequest {
   /**
@@ -14,4 +15,5 @@ export interface AssistantInterpretRequest {
    */
   instruction: string;
   goal_id?: AssistantInterpretRequestGoalId;
+  request_id?: AssistantInterpretRequestRequestId;
 }

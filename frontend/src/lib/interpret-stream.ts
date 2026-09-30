@@ -66,12 +66,15 @@ export function parseSseFrames(buffer: string): { events: SseEvent[]; rest: stri
  * signal 同时承担取消职责：abort 后端通过断开连接感知并取消上游模型请求。
  * goalId 有值时随请求体携带 goal_id（07 §6.4）：续办场景后端据此注入既有任务
  * 上下文做增量解析；同步回退通道必须携带同一字段（两通道口径一致）。
+ * requestId 是这条用户指令的幂等标识：解析会直接执行「记住…」这类显式授权的记忆动作，
+ * 提交之后结果丢失再回退同步接口时，两条请求靠它被服务端认成同一次操作（只执行一次）。
  */
 export async function streamInterpretInstruction(
   instruction: string,
   signal: AbortSignal,
   handlers: InterpretStreamHandlers = {},
   goalId?: string,
+  requestId?: string,
 ): Promise<Interpretation> {
   const token = authStore.get();
   const scheduleSetId = scheduleSetStore.get();
@@ -82,7 +85,7 @@ export async function streamInterpretInstruction(
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(scheduleSetId ? { "X-Schedule-Set-Id": scheduleSetId } : {}),
     },
-    body: JSON.stringify({ instruction, ...(goalId ? { goal_id: goalId } : {}) }),
+    body: JSON.stringify({ instruction, ...(goalId ? { goal_id: goalId } : {}), ...(requestId ? { request_id: requestId } : {}) }),
     signal,
   });
   if (!response.ok) {

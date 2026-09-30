@@ -122,6 +122,7 @@ import type {
   SolveRequest,
   SolverRunDetailResponse,
   SolverRunExplanationDetail,
+  SolverRunRerunRequest,
   SolverRunResponse,
   TeacherBatchUpdate,
   TeacherPayload,
@@ -5195,6 +5196,79 @@ export function useListSolverRunsApiV1SolverRunsGet<TData = Awaited<ReturnType<t
 
 
 
+/**
+ * 「同一个问题，多算一会儿」：按原求解的冻结参数重跑，只改时间预算。
+
+沿用原求解的范围/日期/课次、规则开关、变更权重、数据快照与偏好记忆、基准版本；
+有关联任务时任务要求取任务当前版本（与验收同一份），无任务的一句话求解沿用当时
+冻结的任务约束。**不**读取任何界面草稿——刷新后参数草稿回到默认值，也不会让
+300 秒的任务被「加预算」降成 90 秒，或悄悄重新打开被用户关掉的规则开关。需要换
+数据、规则、记忆或基准时是另一个动作：按当前范围重新排课。
+ * @summary Rerun Solver Run
+ */
+export const rerunSolverRunApiV1SolverRunsRunIdRerunPost = (
+    runId: string,
+    solverRunRerunRequest: SolverRunRerunRequest,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<SolverRunDetailResponse>(
+      {url: `/api/v1/solver-runs/${runId}/rerun`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: solverRunRerunRequest, signal
+    },
+      );
+    }
+  
+
+
+export const getRerunSolverRunApiV1SolverRunsRunIdRerunPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rerunSolverRunApiV1SolverRunsRunIdRerunPost>>, TError,{runId: string;data: SolverRunRerunRequest}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof rerunSolverRunApiV1SolverRunsRunIdRerunPost>>, TError,{runId: string;data: SolverRunRerunRequest}, TContext> => {
+
+const mutationKey = ['rerunSolverRunApiV1SolverRunsRunIdRerunPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof rerunSolverRunApiV1SolverRunsRunIdRerunPost>>, {runId: string;data: SolverRunRerunRequest}> = (props) => {
+          const {runId,data} = props ?? {};
+
+          return  rerunSolverRunApiV1SolverRunsRunIdRerunPost(runId,data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RerunSolverRunApiV1SolverRunsRunIdRerunPostMutationResult = NonNullable<Awaited<ReturnType<typeof rerunSolverRunApiV1SolverRunsRunIdRerunPost>>>
+    export type RerunSolverRunApiV1SolverRunsRunIdRerunPostMutationBody = SolverRunRerunRequest
+    export type RerunSolverRunApiV1SolverRunsRunIdRerunPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Rerun Solver Run
+ */
+export const useRerunSolverRunApiV1SolverRunsRunIdRerunPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rerunSolverRunApiV1SolverRunsRunIdRerunPost>>, TError,{runId: string;data: SolverRunRerunRequest}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof rerunSolverRunApiV1SolverRunsRunIdRerunPost>>,
+        TError,
+        {runId: string;data: SolverRunRerunRequest},
+        TContext
+      > => {
+
+      const mutationOptions = getRerunSolverRunApiV1SolverRunsRunIdRerunPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
 /**
  * @summary Get Solver Run
  */

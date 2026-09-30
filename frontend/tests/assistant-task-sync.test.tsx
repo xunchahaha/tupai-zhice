@@ -224,20 +224,29 @@ describe("one gate for every solve / re-parse entry (parity.F1/F2)", () => {
     await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(/^\/assistant$/));
   });
 
-  it("restores the scope of a legacy task from its coverage item before the budget rerun uses it", async () => {
+  it("replays the run a legacy task last solved for ?action=raise_budget, without reading any scope from the draft", async () => {
     mocks.goalDetails = {
       "goal-old": goalFixture({
         id: "goal-old",
+        latest_run_id: "run-old",
+        run_count: 1,
         checklist: [{ key: "coverage", kind: "coverage", requirement: "覆盖全部目标课次", params: { business_lines: ["考研"], class_business_ids: ["B01"], date_from: "2026-09-28T00:00:00+08:00" } }],
       }),
     };
+    mocks.runDetails["run-old"] = runFixture({ id: "run-old", goal_id: "goal-old", model_status: "UNKNOWN", explanation: EXPLAINED });
     renderAssistant("/assistant?goal=goal-old&action=raise_budget");
-    await waitFor(() => expect(mocks.submitMutate).toHaveBeenCalledTimes(1));
-    const submitted = (mocks.submitMutate.mock.calls[0][0] as { data: Record<string, unknown> }).data;
-    expect(submitted.business_lines).toEqual(["考研"]);
-    expect(submitted.class_business_ids).toEqual(["B01"]);
-    expect(submitted.date_from).toBe("2026-09-28");
-    expect(submitted.goal_id).toBe("goal-old");
+    // 等到任务恢复、它的最近一次求解读到之后才重放；范围/规则/预算基数全部来自那条求解记录。
+    await waitFor(() => expect(mocks.rerunMutate).toHaveBeenCalledTimes(1));
+    expect(mocks.rerunMutate).toHaveBeenCalledWith({ runId: "run-old", data: {} });
+    expect(mocks.submitMutate).not.toHaveBeenCalled();
+  });
+
+  it("explains itself instead of guessing when the task has no run to replay", async () => {
+    mocks.goalDetails = { "goal-none": goalFixture({ id: "goal-none" }) };
+    renderAssistant("/assistant?goal=goal-none&action=raise_budget");
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith(expect.stringContaining("没有可重跑的求解记录")));
+    expect(mocks.rerunMutate).not.toHaveBeenCalled();
+    expect(mocks.submitMutate).not.toHaveBeenCalled();
   });
 });
 

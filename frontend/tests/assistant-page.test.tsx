@@ -194,7 +194,11 @@ describe("AssistantPage interpret phases", () => {
     await parse(user);
     expect(await screen.findByText(/AI 解析失败：AI 模型请求失败：连接超时/)).toBeInTheDocument();
     // 流式失败后必须先尝试同步回退，再展示最终错误。
-    expect(mocks.post).toHaveBeenCalledWith("/api/v1/assistant/interpret", { instruction: "请在三天内重排考研课程" }, expect.anything());
+    expect(mocks.post).toHaveBeenCalledWith(
+      "/api/v1/assistant/interpret",
+      { instruction: "请在三天内重排考研课程", request_id: expect.any(String) },
+      expect.anything(),
+    );
     expect(screen.getByRole("button", { name: /重试解析/ })).toBeInTheDocument();
     // 失败不进任务视图：需求还在，可以直接改了再试。
     expect(screen.getByLabelText("排课需求")).toHaveValue("请在三天内重排考研课程");
@@ -757,17 +761,14 @@ describe("AssistantPage handoff from the schedule page (review #5 / follow-up)",
     await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(/^\/assistant\?goal=goal-h$/));
     expect(screen.getByLabelText("调整对象")).toHaveTextContent("基于课表 v3（草稿）的这一节课");
 
-    // 第一次求解没有产出草稿，教务只点「加大时间预算重跑」：范围和基准都不能因此改变。
+    // 第一次求解没有产出草稿，教务只点「加大时间预算重跑」：范围和基准都不能因此改变——
+    // 前端只让后端按这次求解（run-h）重放，不发任何范围/基准/规则（它们由原求解冻结）。
     const raise = await screen.findByRole("button", { name: "加大时间预算重跑" });
     await waitFor(() => expect(raise).toBeEnabled());
     await user.click(raise);
-    await waitFor(() => expect(manualBodies()).toHaveLength(1));
-    expect(manualBodies()[0]).toMatchObject({
-      time_limit_seconds: 90,
-      goal_id: "goal-h",
-      course_business_ids: ["COURSE-9"],
-      parent_schedule_id: "draft-3",
-    });
+    await waitFor(() => expect(mocks.rerunMutate).toHaveBeenCalledTimes(1));
+    expect(mocks.rerunMutate).toHaveBeenCalledWith({ runId: "run-h", data: {} });
+    expect(manualBodies()).toHaveLength(0);
   });
 
   it("restores the lesson scope from the task on reload, keeps sending it, and does not resend the original base once a work draft exists", async () => {
@@ -790,10 +791,9 @@ describe("AssistantPage handoff from the schedule page (review #5 / follow-up)",
     const raise = await screen.findByRole("button", { name: "加大时间预算重跑" });
     await waitFor(() => expect(raise).toBeEnabled());
     await user.click(raise);
-    await waitFor(() => expect(manualBodies()).toHaveLength(1));
-    expect(manualBodies()[0]).toMatchObject({ goal_id: "goal-h", course_business_ids: ["COURSE-9"] });
-    // 基准由后端按「显式 > 任务工作草稿 > 记下的原始基准」选择，前端没有原始交接对象可发。
-    expect(manualBodies()[0]).not.toHaveProperty("parent_schedule_id");
+    // 课次限定、基准都在 run-h 冻结的参数里，由后端重放；前端不再把刷新后恢复的草稿当依据。
+    await waitFor(() => expect(mocks.rerunMutate).toHaveBeenCalledWith({ runId: "run-h", data: {} }));
+    expect(manualBodies()).toHaveLength(0);
   });
 
   it("falls back to the checklist coverage for a task written before the lesson scope was stored in its context", async () => {
@@ -834,8 +834,9 @@ describe("AssistantPage handoff from the schedule page (review #5 / follow-up)",
     await waitFor(() => expect(screen.queryByLabelText("调整对象")).not.toBeInTheDocument());
     await waitFor(() => expect(screen.getByRole("button", { name: "加大时间预算重跑" })).toBeEnabled());
     await user.click(screen.getByRole("button", { name: "加大时间预算重跑" }));
-    await waitFor(() => expect(manualBodies()).toHaveLength(1));
-    expect(manualBodies()[0].course_business_ids).toEqual([]);
+    // 加预算是「同一个问题多算一会儿」：重放原求解，不带走刚确认的范围扩大（扩大对「重新排课」生效）。
+    await waitFor(() => expect(mocks.rerunMutate).toHaveBeenCalledWith({ runId: "run-h", data: {} }));
+    expect(manualBodies()).toHaveLength(0);
   });
 
   it("does not silently fall back to the published version when the chosen lesson is not in that version", async () => {

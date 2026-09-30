@@ -93,3 +93,25 @@ export function memoryReceiptStatusLabel(status: AssistantMemoryActionReceipt["s
 export function raisedBudgetSeconds(current: number): number {
   return Math.min(Math.max(Math.round(current) * 3, 90), 900);
 }
+
+const REVISION_PARTS: Array<[string, (items: string) => string]> = [
+  ["added_hard", (items) => `新增硬性要求：${items}`],
+  ["tightened", (items) => `由「尽量」收紧为硬性要求：${items}`],
+  ["added_soft", (items) => `新增软性要求：${items}`],
+  ["replaced_soft", (items) => `修改了软性要求：${items}`],
+  ["kept_hard", (items) => `原本就是硬性要求、这次没有放宽（要放宽请到任务清单里改）：${items}`],
+];
+
+/**
+ * 这次求解创建时对任务要求做过的修订（后端 task_revision）转成给教务看的一句话：
+ * 确认过的要求先成为任务的新版要求、再开始求解，之后重跑与验收都按这一版——说清楚改了什么。
+ * 没有修订（含空对象）返回空串。
+ */
+export function describeTaskRevision(revision: Record<string, string[] | undefined> | null | undefined): string {
+  if (!revision) return "";
+  const parts = REVISION_PARTS.flatMap(([key, render]) => {
+    const items = revision[key];
+    return items?.length ? [render(items.map((item) => `「${item}」`).join("、"))] : [];
+  });
+  return parts.length ? `已更新任务要求：${parts.join("；")}。之后重跑与验收都按这一版。` : "";
+}

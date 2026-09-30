@@ -340,7 +340,26 @@ test("课表交接：只调整选中的那一节课、基于所选草稿——�
   await page.reload();
   await expect(page.getByLabel("调整对象")).toContainText("本任务只针对课表里选中的 1 节课", { timeout: 20_000 });
 
-  // 手动重跑（与加预算重跑同一条提交路径）：课次范围原样沿用，不会因为「只是重跑」而放大成整批。
+  // 加大时间预算重跑：前端只让后端按最近一次求解（冻结的范围/课次/规则/数据/基准）重放，
+  // 不发任何参数——刷新后的参数草稿是默认值，不能成为依据；预算按原求解的预算加大。
+  const originalLimit = (await (await api.get(`/api/v1/solver-runs/${run.id}`)).json()).time_limit_seconds;
+  const raiseResponse = page.waitForResponse(
+    (response) => /\/api\/v1\/solver-runs\/[^/]+\/rerun$/.test(response.url()) && response.request().method() === "POST",
+  );
+  await page.goto(`/assistant?goal=${run.goal_id}&action=raise_budget`);
+  const raised = await raiseResponse;
+  expect(raised.ok(), await raised.text()).toBeTruthy();
+  expect(raised.request().postDataJSON()).toEqual({});
+  const raisedRun = await raised.json();
+  expect(raisedRun.rerun_of).toBe(run.id);
+  expect(raisedRun.time_limit_seconds).toBeGreaterThan(originalLimit);
+  await expect
+    .poll(async () => (await (await api.get(`/api/v1/solver-runs/${raisedRun.id}`)).json()).status, { timeout: 60_000, intervals: [500, 1000, 2000] })
+    .toBe("completed");
+  expect((await goalContext()).scope.course_business_ids).toEqual([lesson.course_business_id]);
+  await expect(page.getByLabel("调整对象")).toContainText("本任务只针对课表里选中的 1 节课", { timeout: 20_000 });
+
+  // 手动重跑（按参数重新排课）：课次范围原样沿用，不会因为「只是重跑」而放大成整批。
   const manualToggle = page.getByRole("button", { name: "手动排课（自己设置参数）" });
   if ((await manualToggle.getAttribute("aria-expanded")) !== "true") await manualToggle.click();
   const rerunResponse = page.waitForResponse(
