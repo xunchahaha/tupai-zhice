@@ -160,6 +160,7 @@ export function scopeFromChecklist(goal: Pick<GoalDetailResponse, "checklist">):
     business_lines: list(raw.business_lines),
     product_types: list(raw.product_types),
     class_business_ids: list(raw.class_business_ids),
+    course_business_ids: list(raw.course_business_ids),
     date_from: day(raw.date_from),
     date_to: day(raw.date_to),
   };

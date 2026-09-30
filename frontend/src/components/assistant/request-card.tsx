@@ -35,7 +35,7 @@ export function RequestCard({ task }: { task: AssistantTask }) {
         disabled={interpreting}
         onChange={(event) => task.editInstruction(event.target.value)}
       />
-      {task.handoff ? <div className="mt-3"><HandoffNotice task={task} /></div> : null}
+      {task.handoff || task.params.course_business_ids.length ? <div className="mt-3"><HandoffNotice task={task} /></div> : null}
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
         <Button onClick={() => void task.interpret()} disabled={!canParse || interpreting || task.instruction.trim().length < 2}>
           <Sparkles className="size-4" />{interpreting ? "AI 正在理解需求" : "让 AI 解析"}

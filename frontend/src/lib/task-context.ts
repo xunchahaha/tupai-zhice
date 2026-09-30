@@ -40,6 +40,8 @@ export interface GoalTaskContext {
     business_lines?: string[];
     product_types?: string[];
     class_business_ids?: string[];
+    /** 单课调整的课次限定（后端随每次求解写回，续办时据此恢复）。 */
+    course_business_ids?: string[];
     date_from?: string | null;
     date_to?: string | null;
     date_window_days?: number;

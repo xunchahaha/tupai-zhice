@@ -10,6 +10,8 @@ export interface SolverParamValues {
   business_lines: string[];
   product_types: string[];
   class_business_ids: string[];
+  /** 限定到具体课次（课表里选中的那一节课）：任务约定的一部分，重跑、继续调整都沿用。 */
+  course_business_ids: string[];
   date_from: string | null;
   date_to: string | null;
 }
@@ -34,6 +36,7 @@ export const defaultParams: SolverParamValues = {
   business_lines: [],
   product_types: [],
   class_business_ids: [],
+  course_business_ids: [],
   date_from: null,
   date_to: null,
 };
@@ -42,6 +45,8 @@ export const defaultParams: SolverParamValues = {
 export interface ScopeExpansion {
   business_lines?: string[];
   class_business_ids?: string[];
+  /** 取消「只调整选中课次」的限定，也是扩大范围。 */
+  course_business_ids?: string[];
 }
 
 /** 提交求解时系统硬约束必须在场，且去重。 */

@@ -1,12 +1,12 @@
 import { Target } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { type SolverRunResponse } from "@/api/generated/models";
 import { GoalSupplementPanel } from "@/components/goal/goal-supplement-panel";
 import { type AssistantTask } from "@/components/assistant/use-assistant-task";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { goalChecklistVersion, goalNeedsParams, historicalReportNote, parseGoalReport, reportStanding } from "@/lib/goal";
+import { goalChecklistVersion, goalNeedsParams, historicalReportNote, parseGoalReport, reportChecklistVersion, reportStanding } from "@/lib/goal";
 
 /**
  * 要求落实情况的一句话摘要 + 缺口与建议下一步（直接展示，不折叠）。
@@ -21,6 +21,16 @@ import { goalChecklistVersion, goalNeedsParams, historicalReportNote, parseGoalR
 export function AcceptanceSummary({ run, task }: { run: SolverRunResponse; task: AssistantTask }) {
   const [fixing, setFixing] = useState(false);
   const report = parseGoalReport(run.goal_report);
+  const standing = report ? reportStanding(report, task.goal) : null;
+  // 报告比已读到的任务还新：两份数据没同步，先刷新任务（每个「报告版本 / 任务版本」组合只刷新一次）。
+  const refetchedFor = useRef("");
+  const { goal: taskGoal, retryGoal } = task;
+  const staleKey = report && taskGoal ? `${reportChecklistVersion(report)}/${goalChecklistVersion(taskGoal)}` : "";
+  useEffect(() => {
+    if (standing !== "unknown" || !staleKey || refetchedFor.current === staleKey) return;
+    refetchedFor.current = staleKey;
+    retryGoal();
+  }, [retryGoal, staleKey, standing]);
   if (!report) {
     if (!(run.goal_id && run.status === "completed")) return null;
     return (
@@ -34,7 +44,6 @@ export function AcceptanceSummary({ run, task }: { run: SolverRunResponse; task:
       </section>
     );
   }
-  const standing = reportStanding(report, task.goal);
   // 核对失败本身不是正面结论，读不到任务时照样如实展示；但旧版本的失败也只是历史，交给下面的历史分支。
   if (report.acceptance_status === "failed" && standing !== "historical") {
     return (

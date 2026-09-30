@@ -1,5 +1,5 @@
 import { CalendarDays, Send } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -12,7 +12,7 @@ import { type ScheduleSummaryResponse } from "@/api/generated/models";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { asArray, datetime } from "@/lib/format";
-import { parseGoalReport, requirementsNote } from "@/lib/goal";
+import { goalChecklistVersion, parseGoalReport, reportChecklistVersion, requirementsNote } from "@/lib/goal";
 import { schedulePath } from "@/lib/routes";
 import { usePublishSchedule } from "@/lib/use-publish-schedule";
 
@@ -51,6 +51,16 @@ function PublishConfirm({
   // 报告要和任务当前的清单版本比对，才知道它是不是当前要求的结论。
   const goalId = run.data?.goal_id || report?.goal_id || "";
   const goal = useGetGoalApiV1GoalsGoalIdGet(goalId, { query: { enabled: Boolean(goalId) } });
+
+  // 报告比已读到的任务还新：先刷新任务再判断（每个组合只刷新一次）。
+  const refetchedFor = useRef("");
+  const staleKey = report && goal.data && reportChecklistVersion(report) > goalChecklistVersion(goal.data) ? `${reportChecklistVersion(report)}/${goalChecklistVersion(goal.data)}` : "";
+  const refetchGoal = goal.refetch;
+  useEffect(() => {
+    if (!staleKey || refetchedFor.current === staleKey) return;
+    refetchedFor.current = staleKey;
+    void refetchGoal();
+  }, [refetchGoal, staleKey]);
 
   let changes: string;
   if (!published) changes = "暂无对比基准（当前还没有已发布的版本）。";

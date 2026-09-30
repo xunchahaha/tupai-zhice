@@ -50,15 +50,34 @@ export interface ReschedulePrefill {
   scheduleId?: string;
 }
 
+/**
+ * 链接指定了课次（?lesson=），但没能定位到它：定位好之前不能提交，也不会悄悄变成普通的教师/教室事件。
+ * 只有用户明确「取消单课限定，改为登记事件」才切到事件模式。
+ */
+export interface LessonProblem {
+  kind: "loading" | "error" | "missing" | "version_missing";
+  lessonId: string;
+  retry?: () => void;
+}
+
+const LESSON_PROBLEM_TEXT: Record<LessonProblem["kind"], string> = {
+  loading: "正在定位所选课次……定位好之前不能提交。",
+  error: "没能读到所选课表版本，无法确认要调整的是哪一节课，不能提交。",
+  missing: "所选课次不在这一版课表里（可能已被调整或删除），不能按这一节课提交。",
+  version_missing: "链接里指定的课表版本不存在，无法定位所选课次；不会自动换成别的版本，也不能提交。",
+};
+
 export interface ReschedulePageProps {
   /** 并入课表页时不再渲染自己的页头；默认 false 保持独立页面行为。 */
   embedded?: boolean;
   /** 课表页头部所选版本，作为「父课表」的默认值（表单里仍可改）。 */
   parentScheduleId?: string;
   prefill?: ReschedulePrefill;
+  /** 链接声明了课次但没定位成功；有它且用户没取消限定时，表单处于「待定位」状态（不可提交）。 */
+  lessonProblem?: LessonProblem;
 }
 
-export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: ReschedulePageProps = {}) {
+export function ReschedulePage({ embedded = false, parentScheduleId, prefill, lessonProblem }: ReschedulePageProps = {}) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   // 刚创建的调课事件：创建成功只代表任务入队，候选课表要跟踪到事件本身给出结果。
@@ -77,6 +96,9 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
   const [scope, setScope] = useState<"lesson" | "event">("lesson");
   const [includeNeighbors, setIncludeNeighbors] = useState(false);
   const [neighborhoodDays, setNeighborhoodDays] = useState(7);
+  // 用户明确取消了对某个（没能定位的）课次的限定：只对这一个课次号生效，换课次又回到待定位。
+  const [dismissedLesson, setDismissedLesson] = useState("");
+  const awaitingLesson = Boolean(lessonProblem) && dismissedLesson !== lessonProblem?.lessonId;
   const [reasonChoice, setReasonChoice] = useState<string | null>(null); const [reasonText, setReasonText] = useState("");
   const declaredReason = reasonChoice === null ? null : reasonChoice === "other" ? (reasonText.trim() || null) : reasonChoice;
   useEffect(() => { const initialSchedule = preferredSchedule(schedules.data); if (!parent && initialSchedule) setParent(initialSchedule.id); if (!teacher && teachers.data?.[0]) setTeacher(teachers.data[0].business_id); if (!room && rooms.data?.[0]) setRoom(rooms.data[0].business_id); if (!slot && slots.data?.[0]) setSlot(slots.data[0].business_id); }, [parent, room, rooms.data, slot, slots.data, schedules.data, teacher, teachers.data]);
@@ -88,17 +110,19 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
   useEffect(() => { setScope("lesson"); setIncludeNeighbors(false); }, [prefillLessonId]);
   // 「只调整这一节课」：课次身份、具体日期与版本都来自选课时的上下文，表单里不再让人改成别的教师/时段。
   const lessonMode = Boolean(prefill) && scope === "lesson" && eventType !== "extra_class";
+  // 只有「没在等待定位」且不是单课模式时，才展示教师/教室/时段这些事件表单项。
+  const eventFields = !lessonMode && !awaitingLesson;
   const lockedParent = lessonMode ? prefill?.scheduleId : undefined;
   const effectiveParent = lockedParent ?? parent;
   const effectiveTeacher = lessonMode ? (prefill?.teacherId ?? teacher) : teacher;
   const effectiveRoom = lessonMode ? (prefill?.roomId ?? room) : room;
   const effectiveSlot = lessonMode ? (prefill?.slotId ?? slot) : slot;
   // 登记成事件时展示影响范围：读这份课表数一数会有多少课次被卷进来。
-  const impactWanted = !lessonMode && eventType !== "extra_class" && Boolean(effectiveParent);
+  const impactWanted = !lessonMode && !awaitingLesson && eventType !== "extra_class" && Boolean(effectiveParent);
   const parentDetail = useGetScheduleApiV1SchedulesScheduleIdGet(effectiveParent, { query: { enabled: impactWanted } });
   const create = useCreateRescheduleEventApiV1RescheduleEventsPost({ mutation: { onSuccess: (event) => { toast.success("局部调课任务已创建"); void queryClient.invalidateQueries({ queryKey: getListRescheduleEventsApiV1RescheduleEventsGetQueryKey() }); void queryClient.invalidateQueries({ queryKey: getListSchedulesApiV1SchedulesGetQueryKey() }); setCreated(event); setDescription(""); setReasonChoice(null); setReasonText(""); }, onError: (error) => toast.error(errorMessage(error)) } });
   const all = [events, schedules, teachers, rooms, slots]; if (all.some((item) => item.isPending)) return <LoadingState />; if (all.some((item) => item.isError)) return <ErrorState retry={() => all.forEach((item) => void item.refetch())} />;
-  const submit = () => create.mutate({
+  const submit = () => awaitingLesson ? undefined : create.mutate({
     data: {
       event_type: eventType,
       description: description || (lessonMode && prefill ? `${typeLabel(eventType)}：${prefill.label}` : typeLabel(eventType)),
@@ -184,6 +208,15 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
               </label>
             </fieldset>
           ) : null}
+          {awaitingLesson && lessonProblem ? (
+            <div role="alert" className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">
+              <p>{LESSON_PROBLEM_TEXT[lessonProblem.kind]}</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {lessonProblem.retry ? <Button size="sm" variant="outline" onClick={lessonProblem.retry}>重试</Button> : null}
+                <Button size="sm" variant="outline" onClick={() => setDismissedLesson(lessonProblem.lessonId)}>取消单课限定，改为登记事件</Button>
+              </div>
+            </div>
+          ) : null}
           <label className="mt-5 block text-sm">
             事件类型
             <Select
@@ -230,7 +263,7 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
               {effectiveSlot ? <dd className="text-zinc-800">{slotText(effectiveSlot)}</dd> : null}
             </dl>
           ) : null}
-          {!lessonMode && eventType === "teacher_leave" ? (
+          {eventFields && eventType === "teacher_leave" ? (
             <label className="mt-4 block text-sm">
               教师
               <Select
@@ -248,7 +281,7 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
               </Select>
             </label>
           ) : null}
-          {!lessonMode && eventType === "room_outage" ? (
+          {eventFields && eventType === "room_outage" ? (
             <label className="mt-4 block text-sm">
               教室
               <Select
@@ -266,7 +299,7 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
               </Select>
             </label>
           ) : null}
-          {!lessonMode ? (
+          {eventFields ? (
           <label className="mt-4 block text-sm">
             影响时段
             <Select
@@ -284,7 +317,7 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
             </Select>
           </label>
           ) : null}
-          {!lessonMode && impact ? (
+          {eventFields && impact ? (
             <p role="status" className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
               登记为事件后，{subjectName}在这份课表里共有 {impact.total} 节课会进入调整范围
               {impact.dateFrom && impact.dateTo ? `（${impact.dateFrom} ~ ${impact.dateTo}）` : ""}，其中 {impact.inSlot} 节在所选时段；不限于某一天。
@@ -331,7 +364,7 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
               />
             ) : null}
           </div>
-          <Button className="mt-5 w-full" onClick={submit} disabled={!effectiveParent || create.isPending}>
+          <Button className="mt-5 w-full" onClick={submit} disabled={!effectiveParent || create.isPending || awaitingLesson}>
             生成候选方案
           </Button>
           {/* 创建成功只代表任务入队；候选草稿要等事件本身给出结果。生成、发布是两个独立动作：候选方案只是草稿，去历史版本核对后由有审批权限的人发布。 */}

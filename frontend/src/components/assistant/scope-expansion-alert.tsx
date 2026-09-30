@@ -6,7 +6,11 @@ import { type ScopeExpansion } from "@/lib/solver-params";
  * 这条提示必须直接展示（不能折叠进手动排课面板），确认前所有求解入口都被禁用。
  */
 export function ScopeExpansionAlert({ expansion, onConfirm, onRevert }: { expansion: ScopeExpansion; onConfirm: () => void; onRevert: () => void }) {
-  const fields = [expansion.business_lines ? "业务线" : null, expansion.class_business_ids ? "班级范围" : null].filter(Boolean).join("、");
+  const fields = [
+    expansion.business_lines ? "业务线" : null,
+    expansion.class_business_ids ? "班级范围" : null,
+    expansion.course_business_ids ? "课次范围（原来只调整选中的课次）" : null,
+  ].filter(Boolean).join("、");
   return (
     <div role="alert" className="border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900">
       <div>

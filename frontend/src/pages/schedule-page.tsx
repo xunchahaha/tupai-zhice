@@ -51,7 +51,7 @@ import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { SopSteps } from "@/components/sop-steps";
 import { PublicLinksPage } from "@/pages/public-links-page";
-import { ReschedulePage, type ReschedulePrefill } from "@/pages/reschedule-page";
+import { type LessonProblem, ReschedulePage, type ReschedulePrefill } from "@/pages/reschedule-page";
 import { VersionsPage } from "@/pages/versions-page";
 import { asArray, errorMessage, formatRoom, formatSlot } from "@/lib/format";
 import { statusLabel } from "@/lib/labels";
@@ -384,9 +384,12 @@ export function SchedulePage() {
   const rows = clockRows(slotRows);
 
   // 选中的课次：以课次业务号在所选版本里找；换到没有这节课的版本时自然为空。
+  // 链接显式指定的版本不存在时，页面会退回默认版本——但那不是这条链接说的版本，课次身份在默认版本里就不成立，
+  // 不能拿默认版本里同号的课次当成「所选课次」（会把别的版本的课次当作调整对象、交接对象）。
+  const versionUnresolved = Boolean(versionParam) && !scheduleList.some((item) => item.id === versionParam);
   const selectedAssignment = useMemo(
-    () => (lessonId ? asArray<AssignmentResponse>(schedule?.assignments).find((item) => item.course_business_id === lessonId) : undefined),
-    [lessonId, schedule],
+    () => (lessonId && !versionUnresolved ? asArray<AssignmentResponse>(schedule?.assignments).find((item) => item.course_business_id === lessonId) : undefined),
+    [lessonId, schedule, versionUnresolved],
   );
   const selectedVisible = selectedAssignment ? filtered.includes(selectedAssignment) : false;
   const selectedWeekIndex = selectedAssignment ? activeWeeks.findIndex((week) => week.items.includes(selectedAssignment)) : -1;
@@ -440,6 +443,20 @@ export function SchedulePage() {
           scheduleId: scheduleId || undefined,
         }
       : undefined;
+
+  // 链接指定了课次，却没能定位到它（版本不存在 / 还在读取 / 读取失败 / 这一版里没有这节课）：
+  // 不能当成「没选课」放行成普通事件表单——那样发出去的请求根本没有课次号，后端也无从拦截。
+  const lessonProblem: LessonProblem | undefined = !lessonId || selectedAssignment
+    ? undefined
+    : versionUnresolved
+      ? { kind: "version_missing", lessonId }
+      : !scheduleId
+        ? { kind: "missing", lessonId }
+        : detail.isError
+          ? { kind: "error", lessonId, retry: () => void detail.refetch() }
+          : detail.data
+            ? { kind: "missing", lessonId }
+            : { kind: "loading", lessonId };
 
   const toggleLesson = (id: string) => {
     revealedLesson.current = id;
@@ -1102,7 +1119,7 @@ export function SchedulePage() {
         ) : null}
 
         {view === "adjust" ? (
-          <ReschedulePage embedded parentScheduleId={scheduleId || undefined} prefill={prefill} />
+          <ReschedulePage embedded parentScheduleId={scheduleId || undefined} prefill={prefill} lessonProblem={lessonProblem} />
         ) : null}
 
         {view === "history" ? <VersionsPage embedded highlightId={scheduleId || undefined} /> : null}

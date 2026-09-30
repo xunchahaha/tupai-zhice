@@ -690,7 +690,7 @@ describe("AssistantPage register-for-later becomes an in-card supplement", () =>
 });
 
 
-describe("AssistantPage handoff from the schedule page (review #5)", () => {
+describe("AssistantPage handoff from the schedule page (review #5 / follow-up)", () => {
   const draftDetail = {
     id: "draft-3",
     version_no: 3,
@@ -701,8 +701,19 @@ describe("AssistantPage handoff from the schedule page (review #5)", () => {
     ],
   };
   const entry = "/assistant?prompt=" + encodeURIComponent("调整 B班 2026-10-12 周三晚 的课（教师 李老师）：") + "&base=draft-3&lesson=COURSE-9";
+  const EXPLAINED = { headline: "已解释", explanation: [], next_actions: [], source: "system" };
+  const solveCalls = () => mocks.post.mock.calls.filter((call) => String(call[0]) === "/api/v1/assistant/solve");
+  const manualBodies = () => mocks.submitMutate.mock.calls.map((call) => (call[0] as { data: Record<string, unknown> }).data);
+  const mockGoalAndRun = () => {
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      if (String(args[0]) === "/api/v1/goals") return { data: { id: "goal-h", status: "open", checklist: [] } };
+      return { data: { id: "run-h", status: "queued", goal_id: "goal-h" } };
+    });
+    // 第一次求解时间用完，没有产出草稿。
+    mocks.runDetails["run-h"] = runFixture({ id: "run-h", goal_id: "goal-h", model_status: "UNKNOWN", explanation: EXPLAINED });
+  };
 
-  it("resolves the handed-over lesson from the chosen version, states it, and takes the ids out of the address bar", async () => {
+  it("resolves the handed-over lesson from the chosen version and states it; the ids stay in the address bar until the task is registered", async () => {
     mockAiConfigured();
     mocks.scheduleDetails["draft-3"] = draftDetail;
     renderAssistant(entry);
@@ -712,34 +723,117 @@ describe("AssistantPage handoff from the schedule page (review #5)", () => {
     expect(notice).toHaveTextContent("班级 CLASS-B");
     expect(notice).toHaveTextContent("教师 T-002");
     expect(await screen.findByLabelText("排课需求")).toHaveValue("调整 B班 2026-10-12 周三晚 的课（教师 李老师）：");
-    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(/^\/assistant$/));
+    // 提示语只消费一次；版本与课次留在地址栏里——登记任务之前刷新页面还能恢复。
+    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(/^\/assistant\?base=draft-3&lesson=COURSE-9$/));
   });
 
-  it("solves against the chosen draft and lesson, not the currently published version and the whole range", async () => {
+  it("re-adopts the handed-over lesson after a reload before the task exists", async () => {
+    mockAiConfigured();
+    mocks.scheduleDetails["draft-3"] = draftDetail;
+    renderAssistant("/assistant?base=draft-3&lesson=COURSE-9");
+    expect(await screen.findByLabelText("调整对象")).toHaveTextContent("基于课表 v3（草稿）的这一节课");
+  });
+
+  it("carries the lesson scope and the original base through the first solve AND a raised-budget retry that produced no draft", async () => {
     const user = userEvent.setup();
     mockAiConfigured();
     mocks.scheduleDetails["draft-3"] = draftDetail;
     mocks.stream.mockResolvedValue(interpretationFixture());
-    mocks.post.mockImplementation(async (...args: unknown[]) => {
-      if (String(args[0]) === "/api/v1/goals") return { data: { id: "goal-h", status: "open", checklist: [] } };
-      return { data: { id: "run-h", status: "queued" } };
-    });
+    mockGoalAndRun();
     renderAssistant(entry);
     await screen.findByLabelText("调整对象");
     await user.click(screen.getByRole("button", { name: PARSE }));
     await user.click(await screen.findByRole("button", { name: CONFIRM }));
 
-    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
-    const [goalUrl, goalBody] = mocks.post.mock.calls[0] as [string, Record<string, unknown>];
-    expect(goalUrl).toBe("/api/v1/goals");
+    await waitFor(() => expect(solveCalls()).toHaveLength(1));
+    const [, first] = solveCalls()[0] as [string, Record<string, unknown>];
+    expect(first.parent_schedule_id).toBe("draft-3");
+    expect(first.course_business_ids).toEqual(["COURSE-9"]);
+    const goalBody = mocks.post.mock.calls[0][1] as Record<string, unknown>;
     expect(goalBody.course_business_ids).toEqual(["COURSE-9"]);
-    expect(goalBody.baseline_schedule_version_id).toBe("draft-3");
-    const [solveUrl, solveBody] = mocks.post.mock.calls[1] as [string, Record<string, unknown>];
-    expect(solveUrl).toBe("/api/v1/assistant/solve");
-    expect(solveBody.parent_schedule_id).toBe("draft-3");
-    expect(solveBody.course_business_ids).toEqual(["COURSE-9"]);
-    // 求解已带走交接对象：之后的继续调整以任务自己的工作草稿为基准，不再回到最初那一版。
+    // 任务登记后由任务上下文承载：地址栏里的交接参数摘掉，但交接说明仍在。
+    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(/^\/assistant\?goal=goal-h$/));
+    expect(screen.getByLabelText("调整对象")).toHaveTextContent("基于课表 v3（草稿）的这一节课");
+
+    // 第一次求解没有产出草稿，教务只点「加大时间预算重跑」：范围和基准都不能因此改变。
+    const raise = await screen.findByRole("button", { name: "加大时间预算重跑" });
+    await waitFor(() => expect(raise).toBeEnabled());
+    await user.click(raise);
+    await waitFor(() => expect(manualBodies()).toHaveLength(1));
+    expect(manualBodies()[0]).toMatchObject({
+      time_limit_seconds: 90,
+      goal_id: "goal-h",
+      course_business_ids: ["COURSE-9"],
+      parent_schedule_id: "draft-3",
+    });
+  });
+
+  it("restores the lesson scope from the task on reload, keeps sending it, and does not resend the original base once a work draft exists", async () => {
+    const user = userEvent.setup();
+    mocks.goalDetail = goalFixture({
+      id: "goal-h",
+      latest_run_id: "run-h",
+      run_count: 1,
+      context: {
+        schema_version: 1,
+        scope: { class_business_ids: [], business_lines: [], product_types: [], course_business_ids: ["COURSE-9"], date_from: null, date_to: null, date_window_days: 7 },
+        base_schedule_id: "draft-3",
+        work_draft_schedule_id: "draft-6",
+      },
+    });
+    mocks.runDetails["run-h"] = runFixture({ id: "run-h", goal_id: "goal-h", model_status: "UNKNOWN", explanation: EXPLAINED });
+    renderAssistant("/assistant?goal=goal-h");
+
+    expect(await screen.findByLabelText("调整对象")).toHaveTextContent("本任务只针对课表里选中的 1 节课：COURSE-9");
+    const raise = await screen.findByRole("button", { name: "加大时间预算重跑" });
+    await waitFor(() => expect(raise).toBeEnabled());
+    await user.click(raise);
+    await waitFor(() => expect(manualBodies()).toHaveLength(1));
+    expect(manualBodies()[0]).toMatchObject({ goal_id: "goal-h", course_business_ids: ["COURSE-9"] });
+    // 基准由后端按「显式 > 任务工作草稿 > 记下的原始基准」选择，前端没有原始交接对象可发。
+    expect(manualBodies()[0]).not.toHaveProperty("parent_schedule_id");
+  });
+
+  it("falls back to the checklist coverage for a task written before the lesson scope was stored in its context", async () => {
+    mocks.goalDetail = goalFixture({
+      id: "goal-h",
+      latest_run_id: "run-h",
+      run_count: 1,
+      checklist: [{ key: "coverage", kind: "coverage", requirement: "覆盖所选课次", params: { course_business_ids: ["COURSE-9"] } }],
+      context: { schema_version: 1, scope: { class_business_ids: [], business_lines: [], product_types: [], date_from: null, date_to: null, date_window_days: 7 } },
+    });
+    mocks.runDetails["run-h"] = runFixture({ id: "run-h", goal_id: "goal-h", model_status: "UNKNOWN", explanation: EXPLAINED });
+    renderAssistant("/assistant?goal=goal-h");
+    expect(await screen.findByLabelText("调整对象")).toHaveTextContent("COURSE-9");
+  });
+
+  it("makes dropping a submitted lesson scope an explicit expansion that must be confirmed", async () => {
+    const user = userEvent.setup();
+    mocks.goalDetail = goalFixture({
+      id: "goal-h",
+      latest_run_id: "run-h",
+      run_count: 1,
+      context: { schema_version: 1, scope: { class_business_ids: [], business_lines: [], product_types: [], course_business_ids: ["COURSE-9"], date_from: null, date_to: null, date_window_days: 7 } },
+    });
+    mocks.runDetails["run-h"] = runFixture({ id: "run-h", goal_id: "goal-h", model_status: "UNKNOWN", explanation: EXPLAINED });
+    renderAssistant("/assistant?goal=goal-h");
+    await user.click(await screen.findByRole("button", { name: "不限定课次" }));
+
+    // 范围扩大要单独确认；确认之前所有求解入口都被拦下。
+    expect(await screen.findByText(/课次范围（原来只调整选中的课次）将从限定范围改为「全部」/)).toBeInTheDocument();
+    const raise = screen.getByRole("button", { name: "加大时间预算重跑" });
+    expect(raise).toBeDisabled();
+    // 恢复原范围：课次限定回来。
+    await user.click(screen.getByRole("button", { name: "恢复原范围" }));
+    expect(screen.getByLabelText("调整对象")).toHaveTextContent("本任务只针对课表里选中的 1 节课");
+
+    await user.click(screen.getByRole("button", { name: "不限定课次" }));
+    await user.click(await screen.findByRole("button", { name: "确认扩大范围" }));
     await waitFor(() => expect(screen.queryByLabelText("调整对象")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "加大时间预算重跑" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "加大时间预算重跑" }));
+    await waitFor(() => expect(manualBodies()).toHaveLength(1));
+    expect(manualBodies()[0].course_business_ids).toEqual([]);
   });
 
   it("does not silently fall back to the published version when the chosen lesson is not in that version", async () => {
@@ -752,15 +846,15 @@ describe("AssistantPage handoff from the schedule page (review #5)", () => {
     expect(await screen.findByText(/所选课次不在课表 v3（草稿）里，无法作为调整对象/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: PARSE }));
     await user.click(await screen.findByRole("button", { name: CONFIRM }));
-    expect(mocks.post.mock.calls.some((call) => String(call[0]) === "/api/v1/assistant/solve")).toBe(false);
+    expect(solveCalls()).toHaveLength(0);
 
     // 用户明确取消限定后，才按需求整体排课，且请求里不再带基准与课次。
     mocks.post.mockResolvedValue({ data: { id: "run-h", status: "queued" } });
     await user.click(screen.getAllByRole("button", { name: "取消限定" })[0]);
     await user.click(await screen.findByRole("button", { name: CONFIRM }));
-    await waitFor(() => expect(mocks.post.mock.calls.some((call) => String(call[0]) === "/api/v1/assistant/solve")).toBe(true));
-    const solveBody = mocks.post.mock.calls.find((call) => String(call[0]) === "/api/v1/assistant/solve")![1] as Record<string, unknown>;
-    expect(solveBody).not.toHaveProperty("parent_schedule_id");
-    expect(solveBody).not.toHaveProperty("course_business_ids");
+    await waitFor(() => expect(solveCalls()).toHaveLength(1));
+    const [, body] = solveCalls()[0] as [string, Record<string, unknown>];
+    expect(body).not.toHaveProperty("parent_schedule_id");
+    expect(body.course_business_ids).toEqual([]);
   });
 });

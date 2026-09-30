@@ -91,10 +91,11 @@ export function goalChecklistVersion(goal: { checklist_version?: number | null }
 }
 
 /**
- * 这份报告代表的是不是目标**当前**的要求：
- * - current：报告落款版本与目标当前版本一致，才允许作为「当前结论」展示；
+ * 这份报告代表的是不是目标**当前**的要求（严格相等才算「当前」）：
+ * - current：报告落款版本与目标当前版本严格一致，才允许作为「当前结论」展示；
  * - historical：目标已修订到更新的版本（或报告属于另一个目标），旧报告只能作为历史留档；
- * - unknown：还没拿到目标（加载中/读取失败），无法比较——不得假定它是当前结论。
+ * - unknown：无法比较——还没拿到目标（加载中/读取失败），或报告的版本比已读到的目标还新（两份数据没同步，
+ *   要先刷新目标）。「不是旧版本」不等于「已确认是当前版本」。
  * 首页任务进展、任务结果卡、审批确认都用它，避免「旧版全部通过」被当成「新版通过」。
  */
 export type ReportStanding = "current" | "historical" | "unknown";
@@ -105,7 +106,10 @@ export function reportStanding(
 ): ReportStanding {
   if (!goal) return "unknown";
   if (report.goal_id && goal.id && report.goal_id !== goal.id) return "historical";
-  return reportChecklistVersion(report) < goalChecklistVersion(goal) ? "historical" : "current";
+  const reportVersion = reportChecklistVersion(report);
+  const goalVersion = goalChecklistVersion(goal);
+  if (reportVersion < goalVersion) return "historical";
+  return reportVersion === goalVersion ? "current" : "unknown";
 }
 
 /** 旧版本报告在当时口径下的结论，只用于「历史 vN …；当前 vM 尚待核对」这句话。 */
@@ -135,8 +139,11 @@ export function requirementsNote(
   if (standing === "unknown") return "暂时无法确认这份求解的要求核对对应哪一版要求，尚不能确认要求已落实。";
   if (standing === "historical") return `它关联的求解只有历史结论：${historicalReportNote(report, goal ?? {})}，尚不能确认当前要求已落实。`;
   if (report.all_passed) return `它关联的求解已落实全部 ${report.passed_count} 项要求。`;
-  const open = report.failed_count + (report.unverifiable_count ?? 0);
-  return open ? `它关联的求解还有 ${open} 项要求没落实。` : "它关联的求解要求落实情况尚未确认。";
+  // failed_count = 全部验收项 − 已通过，本来就包含「无法验证」的项：不能再加一遍 unverifiable_count。
+  const open = report.failed_count || (report.unverifiable_count ?? 0);
+  const unverifiable = report.unverifiable_count ?? 0;
+  if (!open) return "它关联的求解要求落实情况尚未确认。";
+  return `它关联的求解还有 ${open} 项要求没落实${unverifiable ? `（其中 ${unverifiable} 项暂时无法验证）` : ""}。`;
 }
 
 export const GOAL_STATUS_TONE: Record<string, "green" | "yellow" | "blue" | "neutral"> = {
@@ -283,9 +290,11 @@ export function goalProgress(goal: GoalProgressGoal, latestRun?: GoalProgressRun
   }
   const report = parseGoalReport(latestRun.goal_report);
   // 报告不是当前版本要求的结论（修订后还没重新验收）：只作历史留档，绝不显示「已落实」。
-  if (report && reportStanding(report, goal) === "historical") {
+  const standing = report ? reportStanding(report, goal) : null;
+  if (report && standing === "historical") {
     return { text: `要求已修订，${historicalReportNote(report, goal)}`, tone: "blue" };
   }
+  if (report && standing === "unknown") return { text: "核对结论对应的要求版本还没同步，稍后刷新再看", tone: "blue" };
   if ((goal.status === "achieved" && goal.acceptance_status !== "pending") || report?.all_passed) return { text: "已生成草稿，全部要求已落实", tone: "green" };
   if (!report) {
     return goal.acceptance_status === "failed"

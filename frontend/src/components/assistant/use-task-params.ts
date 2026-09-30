@@ -25,7 +25,7 @@ export function useTaskParams() {
   const manuallyEdited = useRef(untouched());
   // 解析写入草稿时的范围基线：判断「手动清空范围」是否属于扩大解析确认过的范围时以它为基准，
   // 而不是相邻两次编辑的差值——先改成别的限定值再清空，仍然算扩大。
-  const parsedScopeBaseline = useRef({ business_lines: [] as string[], class_business_ids: [] as string[] });
+  const parsedScopeBaseline = useRef({ business_lines: [] as string[], class_business_ids: [] as string[], course_business_ids: [] as string[] });
   const [scopeExpansion, setScopeExpansion] = useState<ScopeExpansion | null>(null);
   // 解析出的日期窗口是否已回填手动参数面板（来源徽标用，用户手动改动后即失效）。
   const [aiWindowFilled, setAiWindowFilled] = useState(false);
@@ -58,6 +58,27 @@ export function useTaskParams() {
     });
   }, []);
 
+  /** 课表交接带来的课次限定写进草稿：此时还没提交，取消它不算扩大。 */
+  const adoptLessons = useCallback((ids: string[]) => {
+    setParams((current) => ({ ...current, course_business_ids: ids }));
+  }, []);
+
+  /** 课次限定随求解提交后成为已确认的范围：之后取消它就是扩大，要单独确认。 */
+  const commitLessonScope = useCallback(() => {
+    parsedScopeBaseline.current = { ...parsedScopeBaseline.current, course_business_ids: latest.current.params.course_business_ids };
+  }, []);
+
+  /** 取消课次限定：已提交过的限定被取消 = 扩大范围（返回 true，调用方据此保留交接状态直到确认）。 */
+  const clearLessonScope = useCallback((): boolean => {
+    const previous = latest.current.params.course_business_ids;
+    setParams((current) => ({ ...current, course_business_ids: [] }));
+    if (previous.length && parsedScopeBaseline.current.course_business_ids.length) {
+      setScopeExpansion((current) => ({ ...current, course_business_ids: previous }));
+      return true;
+    }
+    return false;
+  }, []);
+
   /** 明确确认后扩大才生效：解除求解入口禁用，草稿保持用户改后的范围。 */
   const confirmScopeExpansion = useCallback(() => setScopeExpansion(null), []);
 
@@ -68,6 +89,7 @@ export function useTaskParams() {
         ...current,
         ...(pending.business_lines ? { business_lines: pending.business_lines } : {}),
         ...(pending.class_business_ids ? { class_business_ids: pending.class_business_ids } : {}),
+        ...(pending.course_business_ids ? { course_business_ids: pending.course_business_ids } : {}),
       }));
     }
     setScopeExpansion(null);
@@ -84,6 +106,7 @@ export function useTaskParams() {
           ...base,
           ...(pending.business_lines ? { business_lines: pending.business_lines } : {}),
           ...(pending.class_business_ids ? { class_business_ids: pending.class_business_ids } : {}),
+          ...(pending.course_business_ids ? { course_business_ids: pending.course_business_ids } : {}),
         }
       : base;
     if (pending) setScopeExpansion(null);
@@ -100,7 +123,7 @@ export function useTaskParams() {
       date_to: edited.date_to ? current.date_to : data.date_to ?? null,
       date_window_days: edited.date_window_days ? current.date_window_days : data.date_window_days ?? current.date_window_days,
     }));
-    parsedScopeBaseline.current = { business_lines: nextBusinessLines, class_business_ids: nextClassBusinessIds };
+    parsedScopeBaseline.current = { ...parsedScopeBaseline.current, business_lines: nextBusinessLines, class_business_ids: nextClassBusinessIds };
     setAiWindowFilled(!edited.date_window_days);
   }, []);
 
@@ -110,19 +133,20 @@ export function useTaskParams() {
       business_lines: scope.business_lines ?? [],
       product_types: scope.product_types ?? [],
       class_business_ids: scope.class_business_ids ?? [],
+      course_business_ids: scope.course_business_ids ?? [],
       date_from: scope.date_from ?? null,
       date_to: scope.date_to ?? null,
       date_window_days: scope.date_window_days ?? defaultParams.date_window_days,
     };
     setParams((current) => ({ ...current, ...restored }));
-    parsedScopeBaseline.current = { business_lines: restored.business_lines, class_business_ids: restored.class_business_ids };
+    parsedScopeBaseline.current = { business_lines: restored.business_lines, class_business_ids: restored.class_business_ids, course_business_ids: restored.course_business_ids };
   }, []);
 
   /** 回到首页：草稿、脏标记、范围基线全部复位，下一个任务从零开始。 */
   const reset = useCallback(() => {
     setParams(defaultParams);
     manuallyEdited.current = untouched();
-    parsedScopeBaseline.current = { business_lines: [], class_business_ids: [] };
+    parsedScopeBaseline.current = { business_lines: [], class_business_ids: [], course_business_ids: [] };
     setScopeExpansion(null);
     setAiWindowFilled(false);
   }, []);
@@ -136,6 +160,9 @@ export function useTaskParams() {
     changeScopeField,
     confirmScopeExpansion,
     revertScopeExpansion,
+    adoptLessons,
+    commitLessonScope,
+    clearLessonScope,
     applyInterpreted,
     restoreScope,
     reset,

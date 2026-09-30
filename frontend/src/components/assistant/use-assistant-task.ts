@@ -177,16 +177,42 @@ export function useAssistantTask() {
     bindGoal,
     bindRun,
   });
-  // 交接参数只在进入时消费一次：记进状态、把所选版本设为基准版本，然后从地址栏摘掉（刷新不会重复带入旧课次）。
+  // 交接参数进入时记进状态、把所选版本设为基准版本。base/lesson 留在地址栏里，直到任务登记或求解开始
+  // （之后由任务自己的上下文承载）——登记之前刷新页面，所选课次和版本还能恢复。
   useEffect(() => {
     if (!baseParam || !lessonParam) return;
     adoptHandoff({ scheduleId: baseParam, lessonId: lessonParam });
     setBaselineId(baseParam);
-    updateSearch((next) => {
-      next.delete("base");
-      next.delete("lesson");
-    });
-  }, [adoptHandoff, baseParam, lessonParam, updateSearch]);
+  }, [adoptHandoff, baseParam, lessonParam]);
+  // 读到所选课次后，它就是任务的课次范围（与业务线/班级同一份草稿）：手动排课、加预算重跑、继续调整都沿用。
+  const handoffReadyLesson = handoff?.status === "ready" ? handoff.target.lessonId : "";
+  const { adoptLessons, commitLessonScope } = taskParams;
+  useEffect(() => {
+    if (handoffReadyLesson) adoptLessons([handoffReadyLesson]);
+  }, [adoptLessons, handoffReadyLesson]);
+  const dropHandoffParams = useCallback(() => updateSearch((next) => {
+    next.delete("base");
+    next.delete("lesson");
+  }), [updateSearch]);
+  // 原始基准只在任务还没有更新的工作草稿时显式带上：有了草稿，基准前进到它（后端也按「显式 > 工作草稿 > 记下的原始基准」选择）。
+  const goalWorkDraft = parseGoalContext(goal?.context)?.work_draft_schedule_id;
+  const explicitBase = handoff?.status === "ready" && !goalWorkDraft ? handoff.target.scheduleId : undefined;
+  /**
+   * 取消「只调整选中课次」的限定。求解前取消只是改主意，直接生效；已随求解提交过的限定被取消就是扩大范围，
+   * 走范围扩大的单独确认，确认前保留交接对象（恢复原范围时还要用）。
+   */
+  const clearLessonScope = () => {
+    if (taskParams.clearLessonScope()) return;
+    clearHandoff();
+    dropHandoffParams();
+  };
+  const confirmScopeExpansion = () => {
+    if (taskParams.scopeExpansion?.course_business_ids) {
+      clearHandoff();
+      dropHandoffParams();
+    }
+    taskParams.confirmScopeExpansion();
+  };
   useEffect(() => {
     if (manualParam) openManual();
   }, [manualParam, openManual]);
@@ -211,9 +237,10 @@ export function useAssistantTask() {
     setRunId(run.id);
     setCurrent(run);
     setSessionRunId(run.id);
+    // 课次限定随这次求解提交，成为已确认的范围；base/lesson 从地址栏摘掉，之后由任务上下文承载。
+    // 交接对象本身不在这里清除：没产出草稿（超时/无解）的重试仍要用它；有草稿后基准才前进。
+    commitLessonScope();
     if (via === "solve") {
-      // 交接的基准与课次已经随这次求解提交；之后的继续调整以任务自己的工作草稿为基准，不再回到最初那一版。
-      clearHandoff();
       setConfirmed(true);
       setConstraintUse("submitted");
     } else {
@@ -221,8 +248,12 @@ export function useAssistantTask() {
       setConstraintUse((previous) => (previous === "pending" ? "bypassed" : previous));
     }
     // 新一次求解替代了 URL 里指向的旧求解记录。
-    updateSearch((next) => next.delete("run"));
-  }, [clearHandoff, setConfirmed, updateSearch]);
+    updateSearch((next) => {
+      next.delete("run");
+      next.delete("base");
+      next.delete("lesson");
+    });
+  }, [commitLessonScope, setConfirmed, updateSearch]);
   const submittedEpoch = useRef(0);
   const submit = useSubmitSolverRunApiV1SolverRunsPost({
     mutation: {
@@ -247,7 +278,10 @@ export function useAssistantTask() {
     setRestoredGoalId(detail.id);
     setInstruction(detail.instruction);
     const context = parseGoalContext(detail.context);
-    const scope = context?.scope ?? scopeFromChecklist(detail);
+    const fromChecklist = scopeFromChecklist(detail);
+    const scope = context?.scope
+      ? { ...context.scope, course_business_ids: context.scope.course_business_ids ?? fromChecklist?.course_business_ids }
+      : fromChecklist;
     if (scope) restoreScope(scope);
     // 已放弃：只回看，不接续（不回填基准、不自动落到最近一次求解、页面另有说明）。已达成的照常接续。
     if (isClosedGoal(detail.status)) return;
@@ -301,6 +335,8 @@ export function useAssistantTask() {
     const data = progress.data;
     if (!data) return;
     setCurrent(data);
+    // 产出了草稿：基准前进到任务自己的工作草稿，最初交接的那一版不再作为显式基准（课次范围不受影响）。
+    if (data.status === "completed" && !data.presolve_infeasible && (data.model_status === "OPTIMAL" || data.model_status === "FEASIBLE")) clearHandoff();
     if (data.status !== "completed" && data.status !== "failed") return;
     void Promise.all([
       client.invalidateQueries({ queryKey: getListSchedulesApiV1SchedulesGetQueryKey() }),
@@ -309,14 +345,20 @@ export function useAssistantTask() {
       client.invalidateQueries({ queryKey: getListGoalsApiV1GoalsGetQueryKey() }),
       ...(data.goal_id ? [client.invalidateQueries({ queryKey: getGetGoalApiV1GoalsGoalIdGetQueryKey(data.goal_id) })] : []),
     ]);
-  }, [client, progress.data]);
+  }, [clearHandoff, client, progress.data]);
 
   // —— 动作 ——
   /** 手动路径的统一提交：范围/日期/规则键全部来自共享参数草稿；任务已结束时不带 goal_id。 */
   const startManualRun = (nextParams: SolverParamValues) => {
+    // 带着交接对象来的，读不到它就不能开始：不能悄悄退回「当前已发布版本 + 整批范围」。
+    if (handoff && handoff.status !== "ready") {
+      toast.error(`${handoff.description}可以先取消这一节课的限定，再按参数排课。`);
+      return;
+    }
     submittedEpoch.current = epoch.current;
     submit.mutate({
-      data: { ...nextParams, solver_rules: withSystemRules(nextParams.solver_rules), goal_id: solveGoalId || null, wait: false },
+      // 课次范围随 nextParams 一并提交（加预算重跑同样沿用）；基准只在还没有更新的工作草稿时显式带上原始那一版。
+      data: { ...nextParams, solver_rules: withSystemRules(nextParams.solver_rules), goal_id: solveGoalId || null, wait: false, ...(explicitBase ? { parent_schedule_id: explicitBase } : {}) },
     });
   };
 
@@ -402,7 +444,7 @@ export function useAssistantTask() {
       business_lines: params.business_lines,
       product_types: params.product_types,
       class_business_ids: params.class_business_ids,
-      course_business_ids: handoff?.status === "ready" ? [handoff.target.lessonId] : [],
+      course_business_ids: params.course_business_ids,
       date_from: params.date_from,
       date_to: params.date_to,
       checklist: checklistDraft,
@@ -418,6 +460,9 @@ export function useAssistantTask() {
     updateSearch((next) => {
       next.set("goal", created.id);
       next.delete("action");
+      // 任务登记后，课次范围与基准由任务上下文承载，不再靠地址栏里的交接参数。
+      next.delete("base");
+      next.delete("lesson");
     });
     setGoalNotice(`已登记为任务${baselineId ? (changeLimitEnabled ? "，按所选基准的变更数验收" : "，已记录基准版本用于变更对比（未设变更上限）") : ""}。`);
     return created.id;
@@ -480,8 +525,9 @@ export function useAssistantTask() {
         // 07 §6.5：任务级约束随请求体全量携带（软约束链的前端填充——goal.context.soft_task_constraints
         // 的唯一来源），与确认卡展示同源；hard 约束走清单编译（§2.4），请求体带全量由后端同键去重兜底。
         task_constraints: interpretation.task_constraints ?? [],
-        // 交接：求解基准是课表里选中的那一版、目标是选中的那一节课，不是当前已发布版本与整批范围。
-        ...(handoff?.status === "ready" ? { parent_schedule_id: handoff.target.scheduleId, course_business_ids: [handoff.target.lessonId] } : {}),
+        // 课次范围来自共享参数草稿（课表交接 / 续办恢复）；基准只在还没有更新的工作草稿时显式带上原始那一版。
+        course_business_ids: params.course_business_ids,
+        ...(explicitBase ? { parent_schedule_id: explicitBase } : {}),
         goal_id: trackGoal ? activeGoalId : null,
         wait: false,
       });
@@ -605,6 +651,9 @@ export function useAssistantTask() {
     toggleManual,
     focusScope,
     clearFocusScope,
+    // 覆盖 ...taskParams 里的同名入口：课次限定的取消/确认还要同步交接状态与地址栏。
+    clearLessonScope,
+    confirmScopeExpansion,
   };
 }
 

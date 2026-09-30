@@ -378,6 +378,74 @@ describe("SchedulePage hub", () => {
       expect(posted.data).not.toHaveProperty("date_from");
     });
 
+    // 复审 #2：链接指定了课次却没能定位到它，绝不能悄悄变成一个可提交的普通事件表单
+    // （那样发出去的请求根本没有课次号，后端也就无从拦截）。
+    describe("a lesson named in the link that cannot be located", () => {
+      const eventPosts = () => mocks.request.mock.calls.map(([config]) => config).filter((config) => config.method === "POST" && config.url === "/api/v1/reschedule-events");
+      const generate = () => screen.getByRole("button", { name: "生成候选方案" });
+
+      it("waits while the version detail is still loading: no submit, no event fields", async () => {
+        const original = mocks.request.getMockImplementation()!;
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        mocks.request.mockImplementation(async (config: { url: string; method?: string }) => {
+          if (/^\/api\/v1\/schedules\/s1$/.test(String(config.url))) await gate;
+          return original(config);
+        });
+        renderPage("/schedule?view=adjust&version=s1&lesson=COURSE-2");
+
+        expect(await screen.findByText(/正在定位所选课次……定位好之前不能提交/)).toBeVisible();
+        expect(generate()).toBeDisabled();
+        expect(screen.queryByRole("combobox", { name: "教师" })).not.toBeInTheDocument();
+        release();
+        // 定位成功后回到单课模式，提交带课次号。
+        await waitFor(() => expect(screen.getByRole("radio", { name: /只调整这一节课/ })).toBeChecked());
+        expect(generate()).toBeEnabled();
+      });
+
+      it("does not turn a failed version read into an ordinary event form", async () => {
+        const original = mocks.request.getMockImplementation()!;
+        mocks.request.mockImplementation(async (config: { url: string; method?: string }) => {
+          if (/^\/api\/v1\/schedules\/s1$/.test(String(config.url))) throw new Error("boom");
+          return original(config);
+        });
+        renderPage("/schedule?view=adjust&version=s1&lesson=COURSE-2");
+
+        expect(await screen.findByText(/没能读到所选课表版本，无法确认要调整的是哪一节课，不能提交/)).toBeVisible();
+        expect(generate()).toBeDisabled();
+        expect(eventPosts()).toHaveLength(0);
+        expect(screen.getByRole("button", { name: "重试" })).toBeVisible();
+      });
+
+      it("refuses a lesson that is no longer in that version", async () => {
+        renderPage("/schedule?view=adjust&version=s1&lesson=COURSE-GONE");
+
+        expect(await screen.findByText(/所选课次不在这一版课表里（可能已被调整或删除），不能按这一节课提交/)).toBeVisible();
+        expect(generate()).toBeDisabled();
+        expect(eventPosts()).toHaveLength(0);
+      });
+
+      it("marks an unknown version in the link as invalid instead of swapping in the default version", async () => {
+        renderPage("/schedule?view=adjust&version=no-such-version&lesson=COURSE-2");
+
+        expect(await screen.findByText(/链接里指定的课表版本不存在，无法定位所选课次；不会自动换成别的版本，也不能提交/)).toBeVisible();
+        expect(generate()).toBeDisabled();
+        expect(eventPosts()).toHaveLength(0);
+      });
+
+      it("only lets the user register an ordinary event after explicitly dropping the single-lesson limit", async () => {
+        const user = userEvent.setup();
+        renderPage("/schedule?view=adjust&version=s1&lesson=COURSE-GONE");
+        await user.click(await screen.findByRole("button", { name: "取消单课限定，改为登记事件" }));
+
+        expect(await screen.findByRole("combobox", { name: "教师" })).toBeVisible();
+        expect(generate()).toBeEnabled();
+        await user.click(generate());
+        await waitFor(() => expect(eventPosts()).toHaveLength(1));
+        expect(eventPosts()[0].data).toMatchObject({ course_business_id: null });
+      });
+    });
+
     it("reveals a lesson from the link even when it belongs to another class", async () => {
       renderPage("/schedule?lesson=COURSE-2");
 

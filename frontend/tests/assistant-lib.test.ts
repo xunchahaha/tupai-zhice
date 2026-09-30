@@ -130,6 +130,23 @@ describe("report currency: an older checklist version never passes for the curre
     expect(reportStanding(parseGoalReport({ items: [], goal_id: "other" })!, { id: "g1", checklist_version: 1 })).toBe("historical");
   });
 
+  it("reportStanding: only strictly equal versions are current; a report newer than the goal we know cannot be confirmed", () => {
+    const report = (version: number) => parseGoalReport({ goal_id: "g1", items: [], meta: { checklist_version: version } })!;
+    expect(reportStanding(report(1), { id: "g1", checklist_version: 2 })).toBe("historical");
+    expect(reportStanding(report(2), { id: "g1", checklist_version: 2 })).toBe("current");
+    // 目标缓存还停在 v1，报告先带来了 v2：两份数据没同步，不能当成当前结论。
+    expect(reportStanding(report(2), { id: "g1", checklist_version: 1 })).toBe("unknown");
+    expect(goalProgress({ id: "g1", status: "open", checklist_version: 1, run_count: 1 }, { status: "completed", model_status: "OPTIMAL", goal_report: { ...report(2), all_passed: true, passed_count: 3, failed_count: 0 } }).text).not.toContain("全部要求已落实");
+  });
+
+  it("requirementsNote: failed_count already includes the unverifiable items, so they are not counted twice", () => {
+    // 共 5 项：通过 3、明确失败 1、无法验证 1 → 后端 failed_count=2, unverifiable_count=1。
+    const report = parseGoalReport({ goal_id: "g1", all_passed: false, passed_count: 3, failed_count: 2, unverifiable_count: 1, items: [], gaps: [] })!;
+    expect(requirementsNote(report, { id: "g1", checklist_version: 1 })).toBe("它关联的求解还有 2 项要求没落实（其中 1 项暂时无法验证）。");
+    const onlyUnverifiable = parseGoalReport({ goal_id: "g1", all_passed: false, passed_count: 4, failed_count: 1, unverifiable_count: 1, items: [], gaps: [] })!;
+    expect(requirementsNote(onlyUnverifiable, { id: "g1", checklist_version: 1 })).toBe("它关联的求解还有 1 项要求没落实（其中 1 项暂时无法验证）。");
+  });
+
   it("requirementsNote: a failed report with zero counts is a failure, never 全部 0 项", () => {
     const failed = parseGoalReport({ goal_id: "g1", acceptance_status: "failed", acceptance_error: "boom", all_passed: false, items: [], gaps: [] })!;
     expect(requirementsNote(failed, { id: "g1", checklist_version: 1 })).toBe("它关联的求解要求核对失败（boom），尚不能确认要求已落实。");

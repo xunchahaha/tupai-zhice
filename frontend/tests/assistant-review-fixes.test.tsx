@@ -151,8 +151,9 @@ describe("the publish confirmation states what is being published (coverage.F14)
   const goalReport = (over: Record<string, unknown> = {}) => ({
     goal_id: "goal-1",
     all_passed: false,
+    // 后端口径：failed_count = 全部验收项 − 已通过，本来就包含「无法验证」的项。
     passed_count: 2,
-    failed_count: 1,
+    failed_count: 2,
     unverifiable_count: 1,
     items: [],
     gaps: [],
@@ -174,8 +175,8 @@ describe("the publish confirmation states what is being published (coverage.F14)
     renderAssistant("/assistant", "approver");
     await openConfirm(user);
     expect(await screen.findByText(/相对当前已发布的 v1，这份草稿调整了 7 节课/)).toBeInTheDocument();
-    // 未通过 1 + 无法验证 1：都算没落实。
-    expect(screen.getByText(/它关联的求解还有 2 项要求没落实/)).toBeInTheDocument();
+    // 共 4 项：通过 2 项、失败 1 项、无法验证 1 项……后端给的 failed_count=2 已含无法验证的那 1 项，不能再加一遍。
+    expect(screen.getByText(/它关联的求解还有 2 项要求没落实（其中 1 项暂时无法验证）/)).toBeInTheDocument();
     expect(screen.getByText(/发布后成为当前课表，并同步到已启用的外部集成；不会自动下发日历。/)).toBeInTheDocument();
   });
 
