@@ -1,7 +1,7 @@
 import { type GoalDetailResponse } from "@/api/generated/models";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { goalKindLabel, goalNeedsParams, type GoalReport } from "@/lib/goal";
+import { goalChecklistVersion, goalKindLabel, goalNeedsParams, type GoalReport, reportChecklistVersion } from "@/lib/goal";
 
 /**
  * 「当前结论 / 最新验收」：报告绑定清单版本（MEM-E2/E2a）。验收 pending（清单修订后未重新验收）时，
@@ -28,8 +28,8 @@ export function GoalAcceptanceReport({
   onFixChecklist?: () => void;
 }) {
   if (!report) return null;
-  const goalVersion = Number(goal.checklist_version ?? 1);
-  const reportVersion = Number(report.meta?.checklist_version ?? 1);
+  const goalVersion = goalChecklistVersion(goal);
+  const reportVersion = reportChecklistVersion(report);
   const staleReport = goal.acceptance_status === "pending" && reportVersion < goalVersion;
   if (staleReport) {
     return (

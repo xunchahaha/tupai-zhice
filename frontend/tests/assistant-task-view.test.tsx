@@ -383,6 +383,20 @@ describe("AssistantPage progress card and acceptance states", () => {
     expect(screen.queryByText("建议的下一步")).not.toBeInTheDocument();
   });
 
+  // 审查 #2：v1 已通过 → 修订为 v2 → 还没重新验收，回来打开旧结果，不能看到绿色「全部已落实」。
+  it("shows a v1 all-passed report as history once the task was revised to v2 and is awaiting acceptance", async () => {
+    withDraft({}, {
+      goal_id: "goal-8",
+      goal_report: { goal_id: "goal-8", all_passed: true, passed_count: 2, failed_count: 0, items: [], gaps: [], decision: { status: "achieved", reason: "全部验收项通过" }, meta: { checklist_version: 1 } },
+    });
+    mocks.goalDetail = goalFixture({ id: "goal-8", latest_run_id: "run-1", run_count: 1, checklist_version: 2, acceptance_status: "pending", status: "open" });
+    renderAssistant("/assistant?run=run-1");
+    const summary = await screen.findByLabelText("要求核对");
+    expect(within(summary).getByText("等待新验收（v2）")).toBeInTheDocument();
+    expect(within(summary).getByText(/历史 v1 已通过；当前 v2 尚待核对/)).toBeInTheDocument();
+    expect(screen.queryByText(/要求已落实/)).not.toBeInTheDocument();
+  });
+
   it("fixes a pending checklist placeholder in place from the 补充条件 remedy", async () => {
     const user = userEvent.setup();
     const placeholder = {

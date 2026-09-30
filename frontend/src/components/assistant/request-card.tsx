@@ -1,6 +1,7 @@
 import { Bot, Sparkles } from "lucide-react";
 import { Link } from "react-router-dom";
 
+import { HandoffNotice } from "@/components/assistant/handoff-notice";
 import { InterpretFailure, InterpretProgress } from "@/components/assistant/interpret-progress";
 import { type AssistantTask } from "@/components/assistant/use-assistant-task";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +35,7 @@ export function RequestCard({ task }: { task: AssistantTask }) {
         disabled={interpreting}
         onChange={(event) => task.editInstruction(event.target.value)}
       />
+      {task.handoff ? <div className="mt-3"><HandoffNotice task={task} /></div> : null}
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
         <Button onClick={() => void task.interpret()} disabled={!canParse || interpreting || task.instruction.trim().length < 2}>
           <Sparkles className="size-4" />{interpreting ? "AI 正在理解需求" : "让 AI 解析"}

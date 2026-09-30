@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 
 import {
   useDiffSchedulesApiV1SchedulesScheduleIdDiffTargetScheduleIdGet,
+  useGetGoalApiV1GoalsGoalIdGet,
   useGetSolverRunApiV1SolverRunsRunIdGet,
   useListSchedulesApiV1SchedulesGet,
 } from "@/api/generated/client";
@@ -11,15 +12,19 @@ import { type ScheduleSummaryResponse } from "@/api/generated/models";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { asArray, datetime } from "@/lib/format";
-import { parseGoalReport } from "@/lib/goal";
+import { parseGoalReport, requirementsNote } from "@/lib/goal";
 import { schedulePath } from "@/lib/routes";
 import { usePublishSchedule } from "@/lib/use-publish-schedule";
+
+/** 首页默认只列最近几份草稿：多次重试会留下几十份，全部展开会把首页重新变成长列表。 */
+const DRAFT_LIMIT = 3;
 
 const PUBLISH_CONSEQUENCE = "发布后成为当前课表，并同步到已启用的外部集成；不会自动下发日历。";
 
 /**
  * 发布确认框里的事实：这份草稿相对当前已发布版本改了多少节课、它关联的求解还有几项要求没落实。
  * 审批的人不必先钻进历史版本才知道发布的分量；读不到就如实说没有，不编造。
+ * 「已落实」只在报告明确通过且对应任务当前版本的要求时才说；核对失败、旧版本结论、读不到任务都不能写成落实。
  * 只在确认框打开时挂载，列表本身不为每一行发这两个请求。
  */
 function PublishConfirm({
@@ -42,6 +47,10 @@ function PublishConfirm({
   );
   const runId = draft.solver_run_id ?? "";
   const run = useGetSolverRunApiV1SolverRunsRunIdGet(runId, { query: { enabled: Boolean(runId) } });
+  const report = parseGoalReport(run.data?.goal_report);
+  // 报告要和任务当前的清单版本比对，才知道它是不是当前要求的结论。
+  const goalId = run.data?.goal_id || report?.goal_id || "";
+  const goal = useGetGoalApiV1GoalsGoalIdGet(goalId, { query: { enabled: Boolean(goalId) } });
 
   let changes: string;
   if (!published) changes = "暂无对比基准（当前还没有已发布的版本）。";
@@ -49,14 +58,14 @@ function PublishConfirm({
   else if (diff.isError) changes = "暂无对比基准（调整明细没读出来，可以先到「课表」里查看版本对比）。";
   else changes = "正在对比当前已发布的版本……";
 
-  const report = parseGoalReport(run.data?.goal_report);
   let requirements: string;
   if (!runId) requirements = "这份草稿不是由助手任务生成的，没有要求核对记录。";
   else if (report) {
-    const open = report.failed_count + (report.unverifiable_count ?? 0);
-    requirements = open ? `它关联的求解还有 ${open} 项要求没落实。` : `它关联的求解已落实全部 ${report.passed_count} 项要求。`;
+    // 核对失败不依赖任务版本；其余结论要等任务读到才能判断是不是当前要求。
+    if (report.acceptance_status !== "failed" && goalId && goal.isPending) requirements = "正在核对要求落实情况……";
+    else requirements = requirementsNote(report, goal.data);
   } else if (run.isError) requirements = "要求落实情况暂时没读出来。";
-  else if (run.data) requirements = "这份草稿没有要求核对记录。";
+  else if (run.data) requirements = goalId ? "要求核对还没有结果，尚不能确认要求已落实。" : "这份草稿没有要求核对记录。";
   else requirements = "正在读取要求落实情况……";
 
   return (
@@ -80,9 +89,11 @@ export function PendingDrafts() {
   const navigate = useNavigate();
   const schedules = useListSchedulesApiV1SchedulesGet();
   const [target, setTarget] = useState<ScheduleSummaryResponse | null>(null);
+  const [showAll, setShowAll] = useState(false);
   const publish = usePublishSchedule({ onPublished: () => setTarget(null) });
   const all = asArray<ScheduleSummaryResponse>(schedules.data);
-  const drafts = all.filter((item) => item.status === "draft");
+  const drafts = all.filter((item) => item.status === "draft").sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  const shown = showAll ? drafts : drafts.slice(0, DRAFT_LIMIT);
   const published = all.find((item) => item.status === "published");
   if (!drafts.length) return null;
   return (
@@ -92,7 +103,7 @@ export function PendingDrafts() {
         <p className="mt-0.5 text-xs text-zinc-500">排课员生成的草稿在这里等你审批；先看课表，确认无误再发布。</p>
       </div>
       <ul className="divide-y divide-amber-100">
-        {drafts.map((item) => (
+        {shown.map((item) => (
           <li key={item.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
             <div className="min-w-0">
               <p className="truncate text-sm font-medium text-zinc-900">v{item.version_no} {item.name}</p>
@@ -109,6 +120,18 @@ export function PendingDrafts() {
           </li>
         ))}
       </ul>
+      {drafts.length > DRAFT_LIMIT ? (
+        <div className="border-t border-amber-100 px-4 py-2">
+          <button
+            type="button"
+            aria-expanded={showAll}
+            className="text-xs text-blue-700 underline-offset-2 hover:underline"
+            onClick={() => setShowAll((value) => !value)}
+          >
+            {showAll ? `只看最近 ${DRAFT_LIMIT} 份` : `查看全部草稿（${drafts.length}）`}
+          </button>
+        </div>
+      ) : null}
       {target ? (
         <PublishConfirm
           draft={target}

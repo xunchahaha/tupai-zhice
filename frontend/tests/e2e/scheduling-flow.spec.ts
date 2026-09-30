@@ -6,7 +6,7 @@ const apiBaseURL = process.env.E2E_API_BASE_URL ?? "http://127.0.0.1:8001";
 const sidebar = (page: Page) => page.getByRole("navigation", { name: "主导航" });
 
 test("管理员完成排课、调课、回滚和集成接入引导流程", async ({ page }, testInfo) => {
-  test.setTimeout(75_000);
+  test.setTimeout(120_000);
   const anonymousApi = await request.newContext({ baseURL: apiBaseURL });
   const login = await anonymousApi.post("/api/v1/auth/token", {
     form: { username: "admin", password: "tupai-demo-admin-2026!" },
@@ -161,6 +161,50 @@ test("管理员完成排课、调课、回滚和集成接入引导流程", async
   expect(movedItem.change_kind).toBe("moved");
   expect(movedItem.before_slot_id).toBe(blocked.slot_business_id);
   expect(movedItem.after_slot_id).not.toBe(blocked.slot_business_id);
+
+  // 页面自己把事件跟踪到候选生成：真实用户点的是「查看新草稿」，它指向的必须就是这次的候选，
+  // 而不是测试脚本在后台轮询到编号、再替用户去点「历史版本」标签。
+  await page.getByRole("button", { name: "在历史版本中查看新草稿" }).click();
+  await expect(page).toHaveURL(/view=history/);
+  await expect(page).toHaveURL(new RegExp(`version=${candidateScheduleId}`));
+
+  // 只调整选中的这一节课：课次号、那一天与所选版本一起提交，其余课次（同教师的其他周、同班的邻近课）保持不动。
+  // 被选中的课换到别的时段只有在别处有空位时才成立，所以两种结局都要给出如实的说明，但绝不允许动到别的课。
+  await page.goto(`/schedule?version=${parentSummary.id}&lesson=${encodeURIComponent(blocked.course_business_id)}&view=adjust`);
+  await expect(page.getByRole("radio", { name: /只调整这一节课/ })).toBeChecked();
+  await expect(page.getByLabel("父课表")).toBeDisabled();
+  const lessonResponse = page.waitForResponse((response) =>
+    response.url().endsWith("/api/v1/reschedule-events") && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "生成候选方案" }).click();
+  const lessonEventBody = (await lessonResponse).request().postDataJSON();
+  expect(lessonEventBody).toMatchObject({
+    parent_schedule_id: parentSummary.id,
+    course_business_id: blocked.course_business_id,
+    include_neighbors: false,
+  });
+  if (blocked.lesson_date) expect(lessonEventBody).toMatchObject({ date_from: blocked.lesson_date, date_to: blocked.lesson_date });
+  const lessonEvent = await (await lessonResponse).json();
+  let lessonOutcome = "";
+  await expect.poll(async () => {
+    const events = await (await api.get("/api/v1/reschedule-events")).json();
+    lessonOutcome = events.find((item: { id: string }) => item.id === lessonEvent.id)?.status ?? "";
+    return lessonOutcome;
+  }, { timeout: 30_000 }).not.toBe("pending");
+  expect(["candidate_ready", "no_candidate"]).toContain(lessonOutcome);
+  if (lessonOutcome === "candidate_ready") {
+    const settled = (await (await api.get("/api/v1/reschedule-events")).json()).find((item: { id: string }) => item.id === lessonEvent.id);
+    const lessonDiff = await (await api.get(`/api/v1/schedules/${parentSummary.id}/diff/${settled.candidate_schedule_id}`)).json();
+    const changedIds = lessonDiff.items
+      .filter((item: { change_kind: string }) => item.change_kind !== "unchanged")
+      .map((item: { course_business_id: string }) => item.course_business_id);
+    // 被选中的这一节课自己挪走了，且没有任何别的课被动到。
+    expect(changedIds).toContain(blocked.course_business_id);
+    expect(changedIds.every((id: string) => id === blocked.course_business_id)).toBeTruthy();
+    await expect(page.getByRole("button", { name: "在历史版本中查看新草稿" })).toBeVisible();
+  } else {
+    await expect(page.getByText(/这次没有找到可行的候选方案，没有生成草稿/)).toBeVisible();
+  }
 
   // 生成候选只是草稿；发布/回滚在同一页的「历史版本」里由有审批权限的人决定。
   await page.getByRole("tab", { name: "历史版本" }).click();

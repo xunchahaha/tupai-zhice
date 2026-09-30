@@ -192,7 +192,8 @@ function describeLesson(
     className,
     teacherName,
     when,
-    prompt: `调整 ${className} ${when} 的课（教师 ${teacherName}）：`,
+    // 给人读的一句话带完整日期（含年份）；业务身份不靠它，见 assistantPath 的 base / lesson。
+    prompt: `调整 ${className} ${[item.lesson_date, `${weekday}${periodOfDay(slot?.start_time)}`].filter(Boolean).join(" ")} 的课（教师 ${teacherName}）：`,
   };
 }
 
@@ -434,6 +435,9 @@ export function SchedulePage() {
           teacherId: selectedAssignment.teacher_business_id,
           roomId: selectedAssignment.room_business_id,
           slotId: selectedAssignment.slot_business_id,
+          // 同一教师同一时段每周都有课：带上这一天和所选版本，调整才能限定在「这一节」。
+          lessonDate: selectedAssignment.lesson_date ?? null,
+          scheduleId: scheduleId || undefined,
         }
       : undefined;
 
@@ -694,7 +698,7 @@ export function SchedulePage() {
                         <ArrowLeftRight className="size-3.5" />
                         调整这节课
                       </Button>
-                      <Button size="sm" variant="outline" onClick={() => navigate(assistantPath({ prompt: selectedLesson.prompt }))}>
+                      <Button size="sm" variant="outline" onClick={() => navigate(assistantPath({ prompt: selectedLesson.prompt, base: scheduleId || undefined, lesson: selectedAssignment?.course_business_id }))}>
                         <Sparkles className="size-3.5" />
                         交给助手继续处理
                       </Button>

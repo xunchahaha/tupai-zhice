@@ -15,6 +15,7 @@ import {
 import { type GoalChecklistItem, type GoalDetailResponse, type SolverRunResponse } from "@/api/generated/models";
 import { http } from "@/api/http";
 import { useAssistantProbe } from "@/components/assistant/use-assistant-probe";
+import { useHandoff } from "@/components/assistant/use-handoff";
 import { useInterpretSession } from "@/components/assistant/use-interpret-session";
 import { useRunExplanation } from "@/components/assistant/use-run-explanation";
 import { useSubmitGate } from "@/components/assistant/use-submit-gate";
@@ -70,6 +71,8 @@ export function useAssistantTask() {
   const [restoredGoalId, setRestoredGoalId] = useState("");
   // 补充问题卡：已登记目标、正在行内补齐缺少的条件。
   const [supplementing, setSupplementing] = useState(false);
+  // 课表里「交给助手继续处理」带来的调整对象（所选版本 + 某一节课）：求解基准与目标课次都来自它。
+  const { handoff, adopt: adoptHandoff, clear: clearHandoff } = useHandoff();
   const goalQuery = useGetGoalApiV1GoalsGoalIdGet(goalId, { query: { enabled: Boolean(goalId) } });
   const goal = goalId ? (goalQuery.data as GoalDetailResponse | undefined) : undefined;
   const latestGoal = useRef(goal);
@@ -146,6 +149,7 @@ export function useAssistantTask() {
   /** 回到排课助手首页：清空本会话的任务与草稿（在途的解析/建任务/求解结果一并丢弃）。 */
   const resetTask = () => {
     epoch.current += 1;
+    clearHandoff();
     session.reset();
     setRunId("");
     setSessionRunId("");
@@ -168,11 +172,21 @@ export function useAssistantTask() {
     taskParams.reset();
   };
 
-  const { goalParam, runParam, actionParam, promptParam, manualParam, updateSearch } = useTaskUrlSync({
+  const { goalParam, runParam, actionParam, promptParam, manualParam, baseParam, lessonParam, updateSearch } = useTaskUrlSync({
     reset: resetTask,
     bindGoal,
     bindRun,
   });
+  // 交接参数只在进入时消费一次：记进状态、把所选版本设为基准版本，然后从地址栏摘掉（刷新不会重复带入旧课次）。
+  useEffect(() => {
+    if (!baseParam || !lessonParam) return;
+    adoptHandoff({ scheduleId: baseParam, lessonId: lessonParam });
+    setBaselineId(baseParam);
+    updateSearch((next) => {
+      next.delete("base");
+      next.delete("lesson");
+    });
+  }, [adoptHandoff, baseParam, lessonParam, updateSearch]);
   useEffect(() => {
     if (manualParam) openManual();
   }, [manualParam, openManual]);
@@ -198,6 +212,8 @@ export function useAssistantTask() {
     setCurrent(run);
     setSessionRunId(run.id);
     if (via === "solve") {
+      // 交接的基准与课次已经随这次求解提交；之后的继续调整以任务自己的工作草稿为基准，不再回到最初那一版。
+      clearHandoff();
       setConfirmed(true);
       setConstraintUse("submitted");
     } else {
@@ -206,7 +222,7 @@ export function useAssistantTask() {
     }
     // 新一次求解替代了 URL 里指向的旧求解记录。
     updateSearch((next) => next.delete("run"));
-  }, [setConfirmed, updateSearch]);
+  }, [clearHandoff, setConfirmed, updateSearch]);
   const submittedEpoch = useRef(0);
   const submit = useSubmitSolverRunApiV1SolverRunsPost({
     mutation: {
@@ -386,6 +402,7 @@ export function useAssistantTask() {
       business_lines: params.business_lines,
       product_types: params.product_types,
       class_business_ids: params.class_business_ids,
+      course_business_ids: handoff?.status === "ready" ? [handoff.target.lessonId] : [],
       date_from: params.date_from,
       date_to: params.date_to,
       checklist: checklistDraft,
@@ -434,6 +451,11 @@ export function useAssistantTask() {
 
   const solveFromInterpretation = gated(async () => {
     if (!interpretation || interpretation.unsupported_requirements?.length) return;
+    // 带着交接对象来的，读不到它就不能开始：不能悄悄退回「当前已发布版本 + 整批范围」。
+    if (handoff && handoff.status !== "ready") {
+      toast.error(`${handoff.description}可以先取消这一节课的限定，再按需求整体排课。`);
+      return;
+    }
     const startedEpoch = epoch.current;
     try {
       // 目标验收闭环（MEM-C3）：先按解析结果登记持久目标，再把 goal_id 带进求解任务；run 结束后自动验收。
@@ -458,6 +480,8 @@ export function useAssistantTask() {
         // 07 §6.5：任务级约束随请求体全量携带（软约束链的前端填充——goal.context.soft_task_constraints
         // 的唯一来源），与确认卡展示同源；hard 约束走清单编译（§2.4），请求体带全量由后端同键去重兜底。
         task_constraints: interpretation.task_constraints ?? [],
+        // 交接：求解基准是课表里选中的那一版、目标是选中的那一节课，不是当前已发布版本与整批范围。
+        ...(handoff?.status === "ready" ? { parent_schedule_id: handoff.target.scheduleId, course_business_ids: [handoff.target.lessonId] } : {}),
         goal_id: trackGoal ? activeGoalId : null,
         wait: false,
       });
@@ -546,6 +570,8 @@ export function useAssistantTask() {
     trackForced,
     baselineId,
     setBaselineId,
+    handoff,
+    clearHandoff,
     changeLimitEnabled,
     setChangeLimitEnabled,
     maxChangesLimit,

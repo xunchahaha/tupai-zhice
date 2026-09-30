@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router-dom";
+
+import { readAssistantHomeToken } from "@/lib/routes";
 
 export interface TaskUrlHandlers {
   /** 完整重置任务状态（含放弃在途解析）；首次挂载没有旧任务，不会调用。 */
@@ -23,6 +25,8 @@ export function useTaskUrlSync(handlers: TaskUrlHandlers) {
   const actionParam = searchParams.get("action") ?? "";
   const promptParam = searchParams.get("prompt") ?? "";
   const manualParam = searchParams.get("manual") === "1";
+  const baseParam = searchParams.get("base") ?? "";
+  const lessonParam = searchParams.get("lesson") ?? "";
 
   // URL 更新走「最新 search + 变更函数」：解析/求解都是异步的，闭包里的 searchParams 早已过期，
   // 直接基于它 set 会把期间别处写入的参数（如新建任务同步进去的 goal）覆盖掉。
@@ -41,6 +45,9 @@ export function useTaskUrlSync(handlers: TaskUrlHandlers) {
 
   const latestHandlers = useRef(handlers);
   useEffect(() => { latestHandlers.current = handlers; });
+  // 明确的「回到首页 / 新建需求」导航（侧栏、品牌链接）：即使 goal/run 本来就不在 URL 里也要清空临时任务。
+  const homeToken = readAssistantHomeToken(useLocation().state);
+  const handledHome = useRef(homeToken);
   // 必须排在其它会调用 updateSearch 的 effect 之前（hook 调用顺序保证）。
   useEffect(() => {
     const previous = synced.current;
@@ -51,6 +58,12 @@ export function useTaskUrlSync(handlers: TaskUrlHandlers) {
     if (goalParam) bindGoal(goalParam);
     if (runParam) bindRun(runParam);
   }, [goalParam, runParam]);
+  useEffect(() => {
+    if (homeToken === undefined || homeToken === handledHome.current) return;
+    handledHome.current = homeToken;
+    synced.current = { goal: goalParam, run: runParam };
+    latestHandlers.current.reset();
+  }, [goalParam, homeToken, runParam]);
 
-  return { goalParam, runParam, actionParam, promptParam, manualParam, updateSearch };
+  return { goalParam, runParam, actionParam, promptParam, manualParam, baseParam, lessonParam, updateSearch };
 }

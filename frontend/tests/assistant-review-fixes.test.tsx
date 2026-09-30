@@ -169,7 +169,8 @@ describe("the publish confirmation states what is being published (coverage.F14)
     const user = userEvent.setup();
     mocks.schedules = [scheduleFixture({ id: "pub-1", status: "published", version_no: 1, name: "已发布", parent_id: null, solver_run_id: "run-0" }), scheduleFixture()];
     mocks.diff.mockReturnValue({ data: { changed_count: 7, items: [] } });
-    mocks.runDetails["run-1"] = runFixture({ id: "run-1", goal_report: goalReport() });
+    mocks.runDetails["run-1"] = runFixture({ id: "run-1", goal_id: "goal-1", goal_report: goalReport() });
+    mocks.goalDetails["goal-1"] = goalFixture({ id: "goal-1" });
     renderAssistant("/assistant", "approver");
     await openConfirm(user);
     expect(await screen.findByText(/相对当前已发布的 v1，这份草稿调整了 7 节课/)).toBeInTheDocument();
@@ -182,10 +183,57 @@ describe("the publish confirmation states what is being published (coverage.F14)
     const user = userEvent.setup();
     mocks.schedules = [scheduleFixture({ id: "pub-1", status: "published", version_no: 1, parent_id: null }), scheduleFixture()];
     mocks.diff.mockReturnValue({ data: { changed_count: 0, items: [] } });
-    mocks.runDetails["run-1"] = runFixture({ id: "run-1", goal_report: goalReport({ all_passed: true, passed_count: 3, failed_count: 0, unverifiable_count: 0 }) });
+    mocks.runDetails["run-1"] = runFixture({ id: "run-1", goal_id: "goal-1", goal_report: goalReport({ all_passed: true, passed_count: 3, failed_count: 0, unverifiable_count: 0 }) });
+    mocks.goalDetails["goal-1"] = goalFixture({ id: "goal-1" });
     renderAssistant("/assistant", "approver");
     await openConfirm(user);
     expect(await screen.findByText(/它关联的求解已落实全部 3 项要求/)).toBeInTheDocument();
+  });
+
+  // 审查 #3：验收器异常时后端落的是「all_passed=false、items=[]、没有计数」的报告，
+  // 计数缺省成 0 不能被读成「未通过数为 0 = 全部落实」。
+  it("never says everything is met for a failed acceptance report that carries no counts", async () => {
+    const user = userEvent.setup();
+    mocks.schedules = [scheduleFixture({ id: "pub-1", status: "published", version_no: 1, parent_id: null }), scheduleFixture()];
+    mocks.diff.mockReturnValue({ data: { changed_count: 2, items: [] } });
+    mocks.runDetails["run-1"] = runFixture({
+      id: "run-1",
+      goal_id: "goal-1",
+      goal_report: { goal_id: "goal-1", acceptance_status: "failed", acceptance_error: "验收器异常：boom", all_passed: false, items: [], gaps: [], decision: null, checklist_version: 1 },
+    });
+    mocks.goalDetails["goal-1"] = goalFixture({ id: "goal-1", acceptance_status: "failed" });
+    renderAssistant("/assistant", "approver");
+    await openConfirm(user);
+    expect(await screen.findByText(/要求核对失败（验收器异常：boom），尚不能确认要求已落实/)).toBeInTheDocument();
+    expect(screen.queryByText(/已落实全部/)).not.toBeInTheDocument();
+  });
+
+  // 审查 #2：要求修订后，旧版「全部通过」只是历史结论，不能在审批时被当成当前要求已落实。
+  it("shows an all-passed report from an older checklist version as history, not as the current verdict", async () => {
+    const user = userEvent.setup();
+    mocks.schedules = [scheduleFixture({ id: "pub-1", status: "published", version_no: 1, parent_id: null }), scheduleFixture()];
+    mocks.diff.mockReturnValue({ data: { changed_count: 2, items: [] } });
+    mocks.runDetails["run-1"] = runFixture({
+      id: "run-1",
+      goal_id: "goal-1",
+      goal_report: goalReport({ all_passed: true, passed_count: 3, failed_count: 0, unverifiable_count: 0, meta: { checklist_version: 1 } }),
+    });
+    mocks.goalDetails["goal-1"] = goalFixture({ id: "goal-1", checklist_version: 2, acceptance_status: "pending" });
+    renderAssistant("/assistant", "approver");
+    await openConfirm(user);
+    expect(await screen.findByText(/历史 v1 已通过；当前 v2 尚待核对，尚不能确认当前要求已落实/)).toBeInTheDocument();
+    expect(screen.queryByText(/已落实全部/)).not.toBeInTheDocument();
+  });
+
+  it("does not claim the requirements are met while the task behind the report cannot be read", async () => {
+    const user = userEvent.setup();
+    mocks.schedules = [scheduleFixture({ id: "pub-1", status: "published", version_no: 1, parent_id: null }), scheduleFixture()];
+    mocks.diff.mockReturnValue({ data: { changed_count: 2, items: [] } });
+    mocks.runDetails["run-1"] = runFixture({ id: "run-1", goal_id: "goal-gone", goal_report: goalReport({ all_passed: true, passed_count: 3, failed_count: 0, unverifiable_count: 0 }) });
+    renderAssistant("/assistant", "approver");
+    await openConfirm(user);
+    expect(await screen.findByText(/无法确认这份求解的要求核对对应哪一版要求，尚不能确认要求已落实/)).toBeInTheDocument();
+    expect(screen.queryByText(/已落实全部/)).not.toBeInTheDocument();
   });
 
   it("admits when there is no baseline to compare with instead of inventing a number", async () => {

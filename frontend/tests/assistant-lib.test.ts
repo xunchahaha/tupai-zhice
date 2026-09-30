@@ -10,7 +10,7 @@ import {
   plainInterpretSummary,
   truncateText,
 } from "@/lib/assistant-task";
-import { goalNeedsParams, goalProgress, isActiveGoal, isClosedGoal, needsParamsItems } from "@/lib/goal";
+import { goalNeedsParams, goalProgress, isActiveGoal, isClosedGoal, needsParamsItems, parseGoalReport, reportStanding, requirementsNote } from "@/lib/goal";
 import { type Interpretation } from "@/lib/interpret-stream";
 import { memoryEntryPath, memoryOutcomeDescription, splitMemoryOutcomes } from "@/lib/memory-usage";
 import { classifyRun } from "@/lib/run-kind";
@@ -101,6 +101,48 @@ describe("goalProgress (one-line business progress)", () => {
   it("falls back to a neutral sentence when the latest run is not in the list", () => {
     expect(goalProgress({ status: "open", run_count: 3 }).text).toBe("已有排课记录，继续处理可查看最新进展");
     expect(goalProgress({ status: "achieved", run_count: 3 }).text).toBe("已生成草稿，全部要求已落实");
+  });
+});
+
+describe("report currency: an older checklist version never passes for the current one (review #2/#3)", () => {
+  const okRun = { status: "completed", model_status: "OPTIMAL" };
+  const passed = (version: number) => ({ goal_id: "g1", all_passed: true, passed_count: 3, failed_count: 0, items: [], gaps: [], meta: { checklist_version: version } });
+
+  it("goalProgress: v1 all-passed report on a v2 goal awaiting acceptance is history, not 全部要求已落实", () => {
+    const result = goalProgress({ id: "g1", status: "open", checklist_version: 2, acceptance_status: "pending", run_count: 1 }, { ...okRun, goal_report: passed(1) });
+    expect(result).toMatchObject({ tone: "blue" });
+    expect(result.text).toContain("历史 v1 已通过；当前 v2 尚待核对");
+    expect(result.text).not.toContain("全部要求已落实");
+  });
+
+  it("goalProgress: the same report still counts once the goal is at that version", () => {
+    expect(goalProgress({ id: "g1", status: "achieved", checklist_version: 1, acceptance_status: "completed", run_count: 1 }, { ...okRun, goal_report: passed(1) }).text).toBe("已生成草稿，全部要求已落实");
+  });
+
+  it("goalProgress: an achieved-looking goal whose acceptance is pending is not reported as done without a run", () => {
+    expect(goalProgress({ status: "achieved", acceptance_status: "pending", run_count: 2 }).text).toBe("已有排课记录，继续处理可查看最新进展");
+  });
+
+  it("reads the version of a failure fallback report from its top level and treats it as version 1 when absent", () => {
+    expect(reportStanding(parseGoalReport({ items: [], acceptance_status: "failed", checklist_version: 1 })!, { checklist_version: 2 })).toBe("historical");
+    expect(reportStanding(parseGoalReport({ items: [] })!, { checklist_version: 1 })).toBe("current");
+    expect(reportStanding(parseGoalReport({ items: [] })!, undefined)).toBe("unknown");
+    expect(reportStanding(parseGoalReport({ items: [], goal_id: "other" })!, { id: "g1", checklist_version: 1 })).toBe("historical");
+  });
+
+  it("requirementsNote: a failed report with zero counts is a failure, never 全部 0 项", () => {
+    const failed = parseGoalReport({ goal_id: "g1", acceptance_status: "failed", acceptance_error: "boom", all_passed: false, items: [], gaps: [] })!;
+    expect(requirementsNote(failed, { id: "g1", checklist_version: 1 })).toBe("它关联的求解要求核对失败（boom），尚不能确认要求已落实。");
+  });
+
+  it("requirementsNote: only a current, explicitly all-passed report is called fulfilled", () => {
+    const ok = parseGoalReport(passed(2))!;
+    expect(requirementsNote(ok, { id: "g1", checklist_version: 2 })).toBe("它关联的求解已落实全部 3 项要求。");
+    expect(requirementsNote(ok, { id: "g1", checklist_version: 3 })).toContain("历史 v2 已通过；当前 v3 尚待核对");
+    expect(requirementsNote(ok, undefined)).toContain("无法确认");
+    // 没有失败项也没有 all_passed（例如空清单）：不能凭「0 项未通过」说成功。
+    const empty = parseGoalReport({ goal_id: "g1", all_passed: false, passed_count: 0, failed_count: 0, items: [], gaps: [] })!;
+    expect(requirementsNote(empty, { id: "g1", checklist_version: 1 })).toBe("它关联的求解要求落实情况尚未确认。");
   });
 });
 

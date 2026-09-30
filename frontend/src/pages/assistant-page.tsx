@@ -15,6 +15,7 @@ import { HomeTasks } from "@/components/assistant/home-tasks";
 import { ManualSolvePanel } from "@/components/assistant/manual-solve-panel";
 import { NextStep } from "@/components/assistant/next-step";
 import { PendingDrafts } from "@/components/assistant/pending-drafts";
+import { HandoffNotice } from "@/components/assistant/handoff-notice";
 import { RequestCard } from "@/components/assistant/request-card";
 import { RequirementsPanel } from "@/components/assistant/requirements-panel";
 import { RestrictedRunView } from "@/components/assistant/restricted-run-view";
@@ -162,6 +163,7 @@ function SchedulerAssistant({ canPublish, canOpenSettings }: { canPublish: boole
       {task.goalId && task.goalNotice ? (
         <p role="status" className="border-l-2 border-blue-400 bg-blue-50/60 px-3 py-2 text-xs text-zinc-700">{task.goalNotice}</p>
       ) : null}
+      <HandoffNotice task={task} />
       <RequirementsPanel task={task} />
       <NextStep task={task} scheduleList={scheduleList} canPublish={canPublish} defaultDiagnosisOpen={Boolean(task.runParam)} />
       <div>

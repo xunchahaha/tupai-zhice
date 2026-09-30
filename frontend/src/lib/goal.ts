@@ -46,6 +46,8 @@ export interface GoalReport {
     solve_checklist_version?: number;
     version_note?: string;
   } | null;
+  /** 验收/求解失败时的兜底报告没有 meta，版本号落在顶层（见后端 tasks._persist_failure）。 */
+  checklist_version?: number | null;
 }
 
 /** SolverRun.goal_report 在生成模型里是宽松的 Record，这里收敛成可渲染结构。 */
@@ -74,7 +76,67 @@ export function parseGoalReport(value: unknown): GoalReport | null {
       report.meta && typeof report.meta === "object"
         ? (report.meta as GoalReport["meta"])
         : null,
+    checklist_version: typeof report.checklist_version === "number" ? report.checklist_version : null,
   };
+}
+
+/** 报告落款的清单版本：优先 meta，其次失败兜底报告的顶层字段；两处都没有的旧报告按 v1（版本化之前）。 */
+export function reportChecklistVersion(report: GoalReport): number {
+  return Number(report.meta?.checklist_version ?? report.checklist_version ?? 1);
+}
+
+/** 目标当前的清单版本（缺省 v1）。 */
+export function goalChecklistVersion(goal: { checklist_version?: number | null }): number {
+  return Number(goal.checklist_version ?? 1);
+}
+
+/**
+ * 这份报告代表的是不是目标**当前**的要求：
+ * - current：报告落款版本与目标当前版本一致，才允许作为「当前结论」展示；
+ * - historical：目标已修订到更新的版本（或报告属于另一个目标），旧报告只能作为历史留档；
+ * - unknown：还没拿到目标（加载中/读取失败），无法比较——不得假定它是当前结论。
+ * 首页任务进展、任务结果卡、审批确认都用它，避免「旧版全部通过」被当成「新版通过」。
+ */
+export type ReportStanding = "current" | "historical" | "unknown";
+
+export function reportStanding(
+  report: GoalReport,
+  goal: { id?: string | null; checklist_version?: number | null } | null | undefined,
+): ReportStanding {
+  if (!goal) return "unknown";
+  if (report.goal_id && goal.id && report.goal_id !== goal.id) return "historical";
+  return reportChecklistVersion(report) < goalChecklistVersion(goal) ? "historical" : "current";
+}
+
+/** 旧版本报告在当时口径下的结论，只用于「历史 vN …；当前 vM 尚待核对」这句话。 */
+function historicalVerdict(report: GoalReport): string {
+  if (report.acceptance_status === "failed") return "核对没有完成";
+  return report.all_passed ? "已通过" : "未全部通过";
+}
+
+/** 「历史 v1 已通过；当前 v2 尚待核对」——旧版本结论永远不写成当前要求已落实。 */
+export function historicalReportNote(report: GoalReport, goal: { checklist_version?: number | null }): string {
+  return `历史 v${reportChecklistVersion(report)} ${historicalVerdict(report)}；当前 v${goalChecklistVersion(goal)} 尚待核对`;
+}
+
+/**
+ * 审批发布前对「要求落实情况」的一句话。先分清「没核对完 / 核对失败 / 历史结论 / 当前结论」，
+ * 再谈数量：只有当前版本的报告明确 all_passed 才说全部落实——「未通过数为 0」不是成功证明
+ * （核对失败的兜底报告没有计数，缺省成 0）。
+ */
+export function requirementsNote(
+  report: GoalReport,
+  goal: { id?: string | null; checklist_version?: number | null } | null | undefined,
+): string {
+  if (report.acceptance_status === "failed") {
+    return `它关联的求解要求核对失败${report.acceptance_error ? `（${report.acceptance_error}）` : ""}，尚不能确认要求已落实。`;
+  }
+  const standing = reportStanding(report, goal);
+  if (standing === "unknown") return "暂时无法确认这份求解的要求核对对应哪一版要求，尚不能确认要求已落实。";
+  if (standing === "historical") return `它关联的求解只有历史结论：${historicalReportNote(report, goal ?? {})}，尚不能确认当前要求已落实。`;
+  if (report.all_passed) return `它关联的求解已落实全部 ${report.passed_count} 项要求。`;
+  const open = report.failed_count + (report.unverifiable_count ?? 0);
+  return open ? `它关联的求解还有 ${open} 项要求没落实。` : "它关联的求解要求落实情况尚未确认。";
 }
 
 export const GOAL_STATUS_TONE: Record<string, "green" | "yellow" | "blue" | "neutral"> = {
@@ -181,7 +243,9 @@ interface GoalProgress {
 }
 
 interface GoalProgressGoal {
+  id?: string | null;
   status: string;
+  checklist_version?: number | null;
   acceptance_status?: string | null;
   run_count?: number | null;
   checklist?: unknown[] | null;
@@ -204,7 +268,8 @@ export function goalProgress(goal: GoalProgressGoal, latestRun?: GoalProgressRun
         ? { text: "还差一个条件，补充后才能开始排课", tone: "yellow" }
         : { text: "已登记，还没有开始排课", tone: "blue" };
     }
-    if (goal.status === "achieved") return { text: "已生成草稿，全部要求已落实", tone: "green" };
+    // 清单修订后验收回到 pending：此时没有可信的「已落实」，不能只凭状态字说全部落实。
+    if (goal.status === "achieved" && goal.acceptance_status !== "pending") return { text: "已生成草稿，全部要求已落实", tone: "green" };
     return { text: "已有排课记录，继续处理可查看最新进展", tone: "blue" };
   }
   const kind = classifyRun(latestRun);
@@ -217,7 +282,11 @@ export function goalProgress(goal: GoalProgressGoal, latestRun?: GoalProgressRun
     return { text: "没能排出来，需要你调整范围", tone: "red" };
   }
   const report = parseGoalReport(latestRun.goal_report);
-  if (goal.status === "achieved" || report?.all_passed) return { text: "已生成草稿，全部要求已落实", tone: "green" };
+  // 报告不是当前版本要求的结论（修订后还没重新验收）：只作历史留档，绝不显示「已落实」。
+  if (report && reportStanding(report, goal) === "historical") {
+    return { text: `要求已修订，${historicalReportNote(report, goal)}`, tone: "blue" };
+  }
+  if ((goal.status === "achieved" && goal.acceptance_status !== "pending") || report?.all_passed) return { text: "已生成草稿，全部要求已落实", tone: "green" };
   if (!report) {
     return goal.acceptance_status === "failed"
       ? { text: ACCEPTANCE_FAILED_TEXT, tone: "yellow" }

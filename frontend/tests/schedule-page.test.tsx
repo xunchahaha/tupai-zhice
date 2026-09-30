@@ -311,12 +311,15 @@ describe("SchedulePage hub", () => {
       await user.click(await screen.findByRole("button", { name: "交给助手继续处理" }));
 
       expect(location().startsWith("/assistant?")).toBe(true);
-      expect(search().get("prompt")).toBe("调整 A班 10月14日 周三晚 的课（教师 王老师）：");
+      // 一句话给人读（带完整日期）；业务身份走结构化参数：所选版本 + 课次业务号。
+      expect(search().get("prompt")).toBe("调整 A班 2026-10-14 周三晚 的课（教师 王老师）：");
+      expect(search().get("base")).toBe("s1");
+      expect(search().get("lesson")).toBe("COURSE-1");
       expect(search().has("goal")).toBe(false);
       expect(search().has("run")).toBe(false);
     });
 
-    it("jumps to 调整 with the lesson's teacher, room and slot prefilled but still editable", async () => {
+    it("jumps to 调整 scoped to exactly that lesson: identity, date and version travel with the request", async () => {
       const user = userEvent.setup();
       renderPage("/schedule?lesson=COURSE-2");
 
@@ -326,11 +329,40 @@ describe("SchedulePage hub", () => {
       expect(search().get("view")).toBe("adjust");
       expect(search().get("lesson")).toBe("COURSE-2");
       expect(screen.getByText(/已按所选课次带入：B班 10月15日 周四上午/)).toBeVisible();
-      expect(screen.getByRole("combobox", { name: "教师" })).toHaveValue("T-002");
-      expect(screen.getByRole("combobox", { name: "影响时段" })).toHaveValue(SLOT_THU);
+      // 选中课次的调整对象是一节具体的课：教师、日期、时段是事实，不再是可随手改的表单项。
+      const facts = screen.getByLabelText("所选课次");
+      expect(facts).toHaveTextContent("2026-10-15");
+      expect(facts).toHaveTextContent("李老师");
+      expect(screen.queryByRole("combobox", { name: "教师" })).not.toBeInTheDocument();
       expect(screen.getByRole("combobox", { name: "父课表" })).toHaveValue("s1");
+      expect(screen.getByRole("combobox", { name: "父课表" })).toBeDisabled();
 
-      // 预填后仍可改：换成另一位老师，提交的是改后的值。
+      await user.click(screen.getByRole("button", { name: "生成候选方案" }));
+      await waitFor(() =>
+        expect(mocks.request).toHaveBeenCalledWith(
+          expect.objectContaining({
+            url: "/api/v1/reschedule-events",
+            method: "POST",
+            data: expect.objectContaining({
+              teacher_business_id: "T-002",
+              slot_business_ids: [SLOT_THU],
+              parent_schedule_id: "s1",
+              course_business_id: "COURSE-2",
+              date_from: "2026-10-15",
+              date_to: "2026-10-15",
+              include_neighbors: false,
+            }),
+          }),
+        ),
+      );
+    });
+
+    it("registering the lesson as an event leaves the teacher editable and drops the single-lesson scope", async () => {
+      const user = userEvent.setup();
+      renderPage("/schedule?lesson=COURSE-2&view=adjust");
+
+      await user.click(await screen.findByRole("radio", { name: /登记为教师请假事件/ }));
+      expect(screen.getByRole("combobox", { name: "教师" })).toHaveValue("T-002");
       await user.selectOptions(screen.getByRole("combobox", { name: "教师" }), "T-001");
       await user.click(screen.getByRole("button", { name: "生成候选方案" }));
       await waitFor(() =>
@@ -338,10 +370,12 @@ describe("SchedulePage hub", () => {
           expect.objectContaining({
             url: "/api/v1/reschedule-events",
             method: "POST",
-            data: expect.objectContaining({ teacher_business_id: "T-001", slot_business_ids: [SLOT_THU], parent_schedule_id: "s1" }),
+            data: expect.objectContaining({ teacher_business_id: "T-001", slot_business_ids: [SLOT_THU], course_business_id: null }),
           }),
         ),
       );
+      const posted = mocks.request.mock.calls.map(([config]) => config).find((config) => config.method === "POST" && config.url === "/api/v1/reschedule-events");
+      expect(posted.data).not.toHaveProperty("date_from");
     });
 
     it("reveals a lesson from the link even when it belongs to another class", async () => {

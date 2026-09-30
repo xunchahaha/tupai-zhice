@@ -23,6 +23,8 @@ export const assistantMocks = {
   submitResult: undefined as Rec | undefined,
   /** 轮询钩子按 run id 返回的详情。 */
   runDetails: {} as Record<string, Rec>,
+  /** 课表详情（useGetSchedule…）按版本 id 取：交接对象（?base=&lesson=）据此解析成一节具体的课。 */
+  scheduleDetails: {} as Record<string, Rec>,
   diff: vi.fn<(...args: unknown[]) => { data?: unknown; isLoading?: boolean; isError?: boolean }>(() => ({ data: undefined })),
   submitMutate: vi.fn(),
   publishMutate: vi.fn(),
@@ -49,6 +51,7 @@ export function resetAssistantMocks() {
   m.goalDetails = {};
   m.submitResult = undefined;
   m.runDetails = {};
+  m.scheduleDetails = {};
   m.diff.mockReset().mockReturnValue({ data: undefined });
   m.submitMutate.mockReset();
   m.publishMutate.mockReset();
@@ -79,7 +82,9 @@ export const clientMock = {
   useListSchedulesApiV1SchedulesGet: () => query(assistantMocks.schedules),
   useListSolverRunsApiV1SolverRunsGet: () => query(assistantMocks.runs),
   useListGoalsApiV1GoalsGet: () => query(assistantMocks.goals),
-  useGetScheduleApiV1SchedulesScheduleIdGet: () => ({ data: undefined }),
+  useGetScheduleApiV1SchedulesScheduleIdGet: (scheduleId: string, options?: { query?: { enabled?: boolean } }) => (
+    query(options?.query?.enabled === false ? undefined : assistantMocks.scheduleDetails[scheduleId])
+  ),
   useGetSolverRunApiV1SolverRunsRunIdGet: (runId: string, options?: { query?: { enabled?: boolean } }) => ({
     ...query(options?.query?.enabled && runId ? assistantMocks.runDetails[runId] : undefined),
   }),

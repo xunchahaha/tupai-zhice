@@ -585,6 +585,24 @@ describe("AssistantPage permissions", () => {
     expect(screen.queryByLabelText("待发布的草稿")).not.toBeInTheDocument();
   });
 
+  it("shows only the most recent few drafts by default and folds the rest behind 查看全部草稿", async () => {
+    const user = userEvent.setup();
+    mocks.schedules = Array.from({ length: 6 }, (_, index) =>
+      scheduleFixture({ id: `draft-${index + 1}`, version_no: index + 2, name: `重试草稿 ${index + 1}`, created_at: `2026-09-2${index}T09:00:00+08:00` }),
+    );
+    renderAssistant();
+    const drafts = await screen.findByLabelText("待发布的草稿");
+    // 标题仍如实给出总数；列表只列最近 3 份（按生成时间倒序）。
+    expect(within(drafts).getByRole("heading", { name: "待发布的草稿（6）" })).toBeInTheDocument();
+    expect(within(drafts).getAllByRole("listitem")).toHaveLength(3);
+    expect(within(drafts).getByText(/重试草稿 6/)).toBeInTheDocument();
+    expect(within(drafts).queryByText(/重试草稿 1$/)).not.toBeInTheDocument();
+    await user.click(within(drafts).getByRole("button", { name: "查看全部草稿（6）" }));
+    expect(within(drafts).getAllByRole("listitem")).toHaveLength(6);
+    await user.click(within(drafts).getByRole("button", { name: "只看最近 3 份" }));
+    expect(within(drafts).getAllByRole("listitem")).toHaveLength(3);
+  });
+
   it("publishing from the pending list needs a confirmation that spells out the consequences", async () => {
     const user = userEvent.setup();
     mocks.schedules = [scheduleFixture()];
@@ -668,5 +686,81 @@ describe("AssistantPage register-for-later becomes an in-card supplement", () =>
     renderAssistant();
     await parse(user);
     expect(await screen.findByText("日期范围内没有 A 班的课次")).toBeInTheDocument();
+  });
+});
+
+
+describe("AssistantPage handoff from the schedule page (review #5)", () => {
+  const draftDetail = {
+    id: "draft-3",
+    version_no: 3,
+    name: "10 月调整草稿",
+    status: "draft",
+    assignments: [
+      { course_business_id: "COURSE-9", class_business_id: "CLASS-B", teacher_business_id: "T-002", lesson_date: "2026-10-12", slot_business_id: "SLOT-周三-1900-2030", room_business_id: "R1" },
+    ],
+  };
+  const entry = "/assistant?prompt=" + encodeURIComponent("调整 B班 2026-10-12 周三晚 的课（教师 李老师）：") + "&base=draft-3&lesson=COURSE-9";
+
+  it("resolves the handed-over lesson from the chosen version, states it, and takes the ids out of the address bar", async () => {
+    mockAiConfigured();
+    mocks.scheduleDetails["draft-3"] = draftDetail;
+    renderAssistant(entry);
+
+    const notice = await screen.findByLabelText("调整对象");
+    expect(notice).toHaveTextContent("基于课表 v3（草稿）的这一节课：2026-10-12");
+    expect(notice).toHaveTextContent("班级 CLASS-B");
+    expect(notice).toHaveTextContent("教师 T-002");
+    expect(await screen.findByLabelText("排课需求")).toHaveValue("调整 B班 2026-10-12 周三晚 的课（教师 李老师）：");
+    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(/^\/assistant$/));
+  });
+
+  it("solves against the chosen draft and lesson, not the currently published version and the whole range", async () => {
+    const user = userEvent.setup();
+    mockAiConfigured();
+    mocks.scheduleDetails["draft-3"] = draftDetail;
+    mocks.stream.mockResolvedValue(interpretationFixture());
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      if (String(args[0]) === "/api/v1/goals") return { data: { id: "goal-h", status: "open", checklist: [] } };
+      return { data: { id: "run-h", status: "queued" } };
+    });
+    renderAssistant(entry);
+    await screen.findByLabelText("调整对象");
+    await user.click(screen.getByRole("button", { name: PARSE }));
+    await user.click(await screen.findByRole("button", { name: CONFIRM }));
+
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
+    const [goalUrl, goalBody] = mocks.post.mock.calls[0] as [string, Record<string, unknown>];
+    expect(goalUrl).toBe("/api/v1/goals");
+    expect(goalBody.course_business_ids).toEqual(["COURSE-9"]);
+    expect(goalBody.baseline_schedule_version_id).toBe("draft-3");
+    const [solveUrl, solveBody] = mocks.post.mock.calls[1] as [string, Record<string, unknown>];
+    expect(solveUrl).toBe("/api/v1/assistant/solve");
+    expect(solveBody.parent_schedule_id).toBe("draft-3");
+    expect(solveBody.course_business_ids).toEqual(["COURSE-9"]);
+    // 求解已带走交接对象：之后的继续调整以任务自己的工作草稿为基准，不再回到最初那一版。
+    await waitFor(() => expect(screen.queryByLabelText("调整对象")).not.toBeInTheDocument());
+  });
+
+  it("does not silently fall back to the published version when the chosen lesson is not in that version", async () => {
+    const user = userEvent.setup();
+    mockAiConfigured();
+    mocks.scheduleDetails["draft-3"] = { ...draftDetail, assignments: [] };
+    mocks.stream.mockResolvedValue(interpretationFixture());
+    renderAssistant(entry);
+
+    expect(await screen.findByText(/所选课次不在课表 v3（草稿）里，无法作为调整对象/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: PARSE }));
+    await user.click(await screen.findByRole("button", { name: CONFIRM }));
+    expect(mocks.post.mock.calls.some((call) => String(call[0]) === "/api/v1/assistant/solve")).toBe(false);
+
+    // 用户明确取消限定后，才按需求整体排课，且请求里不再带基准与课次。
+    mocks.post.mockResolvedValue({ data: { id: "run-h", status: "queued" } });
+    await user.click(screen.getAllByRole("button", { name: "取消限定" })[0]);
+    await user.click(await screen.findByRole("button", { name: CONFIRM }));
+    await waitFor(() => expect(mocks.post.mock.calls.some((call) => String(call[0]) === "/api/v1/assistant/solve")).toBe(true));
+    const solveBody = mocks.post.mock.calls.find((call) => String(call[0]) === "/api/v1/assistant/solve")![1] as Record<string, unknown>;
+    expect(solveBody).not.toHaveProperty("parent_schedule_id");
+    expect(solveBody).not.toHaveProperty("course_business_ids");
   });
 });

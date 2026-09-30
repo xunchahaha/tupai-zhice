@@ -44,6 +44,23 @@ function withQuery(pathname: string, params: Record<string, string | undefined |
   return text ? `${pathname}?${text}` : pathname;
 }
 
+/**
+ * 「回到排课助手首页 / 新建需求」是一个明确的导航动作，而不是 URL 参数变化的副产品：
+ * 确认卡（还没有持久任务）和没关联任务的手动求解结果，URL 里都没有 goal / run，
+ * 点侧栏「排课助手」或品牌链接时地址不变，只靠比较 goal/run 推断不出「要回首页」。
+ * 这类链接在 location.state 里带一个每次都不同的标记，助手页据此清空当前临时任务。
+ */
+let assistantHomeCounter = 0;
+export function assistantHomeState(): { assistantHome: number } {
+  assistantHomeCounter += 1;
+  return { assistantHome: assistantHomeCounter };
+}
+
+export function readAssistantHomeToken(state: unknown): number | undefined {
+  const token = (state as { assistantHome?: unknown } | null | undefined)?.assistantHome;
+  return typeof token === "number" ? token : undefined;
+}
+
 export interface AssistantPathParams {
   /** 续办一个持久目标（原「目标跟踪」详情/「排课求解?goal=」）。 */
   goal?: string;
@@ -55,6 +72,12 @@ export interface AssistantPathParams {
   prompt?: string;
   /** 直接展开「手动排课」参数面板。 */
   manual?: boolean;
+  /**
+   * 交接：课表里选中的课表版本 + 课次业务号（成对出现）。求解基准与目标课次都以它们为准，
+   * prompt 只是给人读的一句话，不承担传递业务身份的职责。
+   */
+  base?: string;
+  lesson?: string;
 }
 
 export function assistantPath(params: AssistantPathParams = {}): string {
@@ -64,6 +87,9 @@ export function assistantPath(params: AssistantPathParams = {}): string {
     action: params.action,
     prompt: params.prompt,
     manual: params.manual ? "1" : undefined,
+    // 版本与课次必须成对，缺一个就都不带——单独一个 lesson 没有基准，反而会被误当成范围。
+    base: params.base && params.lesson ? params.base : undefined,
+    lesson: params.base && params.lesson ? params.lesson : undefined,
   });
 }
 

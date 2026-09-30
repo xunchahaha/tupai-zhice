@@ -13,7 +13,7 @@ import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/format";
 import { roleLabel } from "@/lib/labels";
-import { NAV_OWNER, ROUTES } from "@/lib/routes";
+import { assistantHomeState, NAV_OWNER, ROUTES } from "@/lib/routes";
 import { toast } from "sonner";
 
 // 侧栏只有三个业务入口 + 底部「设置」；规则/偏好/账号等低频管理页从设置进入，不占左侧入口。
@@ -38,6 +38,7 @@ function NavEntry({ item, active, collapsed, close }: { item: NavItem; active: b
   return (
     <Link
       to={item.to}
+      state={item.key === "assistant" ? assistantHomeState() : undefined}
       title={collapsed ? item.label : undefined}
       aria-label={collapsed ? item.label : undefined}
       aria-current={active ? "page" : undefined}
@@ -208,7 +209,7 @@ export function AppShell() {
   return <div className="min-h-screen bg-zinc-50/60">
     <aside className={cn("fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-zinc-200 bg-white px-3 py-5 transition-all duration-300 ease-in-out lg:flex shadow-2xs print:hidden", sidebarCollapsed ? "w-16" : "w-64")}>
       <div className={cn("flex h-8 items-center", sidebarCollapsed ? "justify-center" : "justify-between px-2.5")}>
-        <Link to={ROUTES.assistant} title="途排智策" className="flex items-center gap-2 text-base font-semibold text-zinc-950 hover:opacity-90 transition-opacity"><ShieldCheck className="size-4 text-blue-600" />{sidebarCollapsed ? null : "途排智策"}</Link>
+        <Link to={ROUTES.assistant} state={assistantHomeState()} title="途排智策" className="flex items-center gap-2 text-base font-semibold text-zinc-950 hover:opacity-90 transition-opacity"><ShieldCheck className="size-4 text-blue-600" />{sidebarCollapsed ? null : "途排智策"}</Link>
         <Button size="icon" variant="ghost" title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} onClick={() => { setAccountMenuOpen(false); setSidebarCollapsed((value) => !value); }}>{sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}</Button>
       </div>
       <Nav user={user} scheduleAccessRole={selectedScheduleSet?.access_role} collapsed={sidebarCollapsed} />{identity}

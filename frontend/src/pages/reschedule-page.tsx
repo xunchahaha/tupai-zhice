@@ -4,18 +4,23 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
-import { getListRescheduleEventsApiV1RescheduleEventsGetQueryKey, getListSchedulesApiV1SchedulesGetQueryKey, useCreateRescheduleEventApiV1RescheduleEventsPost, useListRescheduleEventsApiV1RescheduleEventsGet, useListRoomsApiV1RoomsGet, useListSchedulesApiV1SchedulesGet, useListTeachersApiV1TeachersGet, useListTimeSlotsApiV1TimeSlotsGet } from "@/api/generated/client";
+import { getListRescheduleEventsApiV1RescheduleEventsGetQueryKey, getListSchedulesApiV1SchedulesGetQueryKey, useCreateRescheduleEventApiV1RescheduleEventsPost, useGetScheduleApiV1SchedulesScheduleIdGet, useListRescheduleEventsApiV1RescheduleEventsGet, useListRoomsApiV1RoomsGet, useListSchedulesApiV1SchedulesGet, useListTeachersApiV1TeachersGet, useListTimeSlotsApiV1TimeSlotsGet } from "@/api/generated/client";
+import { type AssignmentResponse, type RescheduleResponse } from "@/api/generated/models";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
-import { datetime, errorMessage } from "@/lib/format";
+import { asArray, datetime, errorMessage } from "@/lib/format";
 import { eventTypeLabel, statusLabel } from "@/lib/labels";
+import { rescheduleImpact, rescheduleOutcome } from "@/lib/reschedule";
 import { schedulePath } from "@/lib/routes";
 import { preferredSchedule } from "@/lib/schedule";
 import { statusTone } from "@/lib/status";
 
 type EventType = "teacher_leave" | "room_outage" | "extra_class";
+
+/** 创建后跟踪事件结果的轮询间隔：后台求解完成前每隔一会儿刷新一次事件列表。 */
+const EVENT_POLL_MS = 1500;
 
 // 一键归因 chips（02 文档 §3.3）：区分「想换」与「被迫换」，是偏好挖掘的消噪关键。
 // declared_reason 是自由文本（≤80 字），其他选项直接落教务输入的原话。
@@ -26,15 +31,23 @@ const REASON_CHIPS: { value: string; label: string }[] = [
   { value: "other", label: "其他" },
 ];
 
-/** 课表里选中的课次带进来的预填值：教师请假用该课教师、教室停用用该课教室、影响时段用该课时段。 */
+/**
+ * 课表里选中的课次带进来的对象：教师请假用该课教师、教室停用用该课教室、影响时段用该课时段。
+ * 「只调整这一节课」时它就是请求的范围——课次号 + 具体日期 + 所选版本一起提交，
+ * 后端按这个范围执行，不会扩大到同一教师/教室的其他课次。
+ */
 export interface ReschedulePrefill {
-  /** 课次业务号，仅用来识别「换了一节课」以便重新预填。 */
+  /** 课次业务号：既用来识别「换了一节课」重新预填，也是「只调整这一节课」提交给后端的课次身份。 */
   lessonId: string;
   /** 给人看的一句话，例如「三年二班 10月12日 周三晚」。 */
   label: string;
   teacherId?: string;
   roomId?: string;
   slotId?: string;
+  /** 这节课具体的上课日期（YYYY-MM-DD）；同一教师同一时段每周都有课，只有带上日期才能限定到这一天。 */
+  lessonDate?: string | null;
+  /** 选中这节课时所看的课表版本：课次身份只在这一版里成立，调整基准就是它。 */
+  scheduleId?: string;
 }
 
 export interface ReschedulePageProps {
@@ -47,25 +60,76 @@ export interface ReschedulePageProps {
 
 export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: ReschedulePageProps = {}) {
   const navigate = useNavigate();
-  const queryClient = useQueryClient(); const events = useListRescheduleEventsApiV1RescheduleEventsGet(); const schedules = useListSchedulesApiV1SchedulesGet(); const teachers = useListTeachersApiV1TeachersGet(); const rooms = useListRoomsApiV1RoomsGet(); const slots = useListTimeSlotsApiV1TimeSlotsGet();
+  const queryClient = useQueryClient();
+  // 刚创建的调课事件：创建成功只代表任务入队，候选课表要跟踪到事件本身给出结果。
+  const [created, setCreated] = useState<RescheduleResponse | null>(null);
+  const events = useListRescheduleEventsApiV1RescheduleEventsGet({
+    query: {
+      refetchInterval: (query) => {
+        const tracked = created ? (asArray<RescheduleResponse>(query.state.data).find((item) => item.id === created.id) ?? created) : null;
+        return tracked && rescheduleOutcome(tracked) === "generating" ? EVENT_POLL_MS : false;
+      },
+    },
+  });
+  const schedules = useListSchedulesApiV1SchedulesGet(); const teachers = useListTeachersApiV1TeachersGet(); const rooms = useListRoomsApiV1RoomsGet(); const slots = useListTimeSlotsApiV1TimeSlotsGet();
   const [eventType, setEventType] = useState<EventType>("teacher_leave"); const [parent, setParent] = useState(parentScheduleId ?? ""); const [teacher, setTeacher] = useState(prefill?.teacherId ?? ""); const [room, setRoom] = useState(prefill?.roomId ?? ""); const [slot, setSlot] = useState(prefill?.slotId ?? ""); const [description, setDescription] = useState("");
-  const [candidateId, setCandidateId] = useState<string | null>(null);
+  // 选中了课次时：「只调整这一节课」（默认）还是「登记成变更事件」（该教师/教室的全部课次都会参与）。
+  const [scope, setScope] = useState<"lesson" | "event">("lesson");
+  const [includeNeighbors, setIncludeNeighbors] = useState(false);
+  const [neighborhoodDays, setNeighborhoodDays] = useState(7);
   const [reasonChoice, setReasonChoice] = useState<string | null>(null); const [reasonText, setReasonText] = useState("");
   const declaredReason = reasonChoice === null ? null : reasonChoice === "other" ? (reasonText.trim() || null) : reasonChoice;
   useEffect(() => { const initialSchedule = preferredSchedule(schedules.data); if (!parent && initialSchedule) setParent(initialSchedule.id); if (!teacher && teachers.data?.[0]) setTeacher(teachers.data[0].business_id); if (!room && rooms.data?.[0]) setRoom(rooms.data[0].business_id); if (!slot && slots.data?.[0]) setSlot(slots.data[0].business_id); }, [parent, room, rooms.data, slot, slots.data, schedules.data, teacher, teachers.data]);
   // 课表头部换了版本，表单的父课表跟着走；之后用户在表单里手动改仍然有效。
   useEffect(() => { if (parentScheduleId) setParent(parentScheduleId); }, [parentScheduleId]);
-  // 换选另一节课才重新预填，避免覆盖用户在表单里已经改过的值。
+  // 换选另一节课才重新预填，避免覆盖用户在表单里已经改过的值；范围也回到默认的「只调整这一节课」。
   const prefillLessonId = prefill?.lessonId; const prefillTeacher = prefill?.teacherId; const prefillRoom = prefill?.roomId; const prefillSlot = prefill?.slotId;
   useEffect(() => { if (prefillTeacher) setTeacher(prefillTeacher); if (prefillRoom) setRoom(prefillRoom); if (prefillSlot) setSlot(prefillSlot); }, [prefillLessonId, prefillTeacher, prefillRoom, prefillSlot]);
-  const create = useCreateRescheduleEventApiV1RescheduleEventsPost({ mutation: { onSuccess: (event) => { toast.success("局部调课任务已创建"); void queryClient.invalidateQueries({ queryKey: getListRescheduleEventsApiV1RescheduleEventsGetQueryKey() }); void queryClient.invalidateQueries({ queryKey: getListSchedulesApiV1SchedulesGetQueryKey() }); setCandidateId(event.candidate_schedule_id ?? null); setDescription(""); setReasonChoice(null); setReasonText(""); }, onError: (error) => toast.error(errorMessage(error)) } });
+  useEffect(() => { setScope("lesson"); setIncludeNeighbors(false); }, [prefillLessonId]);
+  // 「只调整这一节课」：课次身份、具体日期与版本都来自选课时的上下文，表单里不再让人改成别的教师/时段。
+  const lessonMode = Boolean(prefill) && scope === "lesson" && eventType !== "extra_class";
+  const lockedParent = lessonMode ? prefill?.scheduleId : undefined;
+  const effectiveParent = lockedParent ?? parent;
+  const effectiveTeacher = lessonMode ? (prefill?.teacherId ?? teacher) : teacher;
+  const effectiveRoom = lessonMode ? (prefill?.roomId ?? room) : room;
+  const effectiveSlot = lessonMode ? (prefill?.slotId ?? slot) : slot;
+  // 登记成事件时展示影响范围：读这份课表数一数会有多少课次被卷进来。
+  const impactWanted = !lessonMode && eventType !== "extra_class" && Boolean(effectiveParent);
+  const parentDetail = useGetScheduleApiV1SchedulesScheduleIdGet(effectiveParent, { query: { enabled: impactWanted } });
+  const create = useCreateRescheduleEventApiV1RescheduleEventsPost({ mutation: { onSuccess: (event) => { toast.success("局部调课任务已创建"); void queryClient.invalidateQueries({ queryKey: getListRescheduleEventsApiV1RescheduleEventsGetQueryKey() }); void queryClient.invalidateQueries({ queryKey: getListSchedulesApiV1SchedulesGetQueryKey() }); setCreated(event); setDescription(""); setReasonChoice(null); setReasonText(""); }, onError: (error) => toast.error(errorMessage(error)) } });
   const all = [events, schedules, teachers, rooms, slots]; if (all.some((item) => item.isPending)) return <LoadingState />; if (all.some((item) => item.isError)) return <ErrorState retry={() => all.forEach((item) => void item.refetch())} />;
-  const submit = () => create.mutate({ data: { event_type: eventType, description: description || typeLabel(eventType), parent_schedule_id: parent, declared_reason: declaredReason, teacher_business_id: eventType === "teacher_leave" ? teacher : null, room_business_id: eventType === "room_outage" ? room : null, slot_business_ids: slot ? [slot] : [], course_business_id: null, time_limit_seconds: 30 } });
+  const submit = () => create.mutate({
+    data: {
+      event_type: eventType,
+      description: description || (lessonMode && prefill ? `${typeLabel(eventType)}：${prefill.label}` : typeLabel(eventType)),
+      parent_schedule_id: effectiveParent,
+      declared_reason: declaredReason,
+      teacher_business_id: eventType === "teacher_leave" ? effectiveTeacher : null,
+      room_business_id: eventType === "room_outage" ? effectiveRoom : null,
+      slot_business_ids: effectiveSlot ? [effectiveSlot] : [],
+      // 只调整这一节课：范围就是这一节——课次号 + 那一天，其余课次不动；连带调整必须由人明确勾选。
+      ...(lessonMode && prefill
+        ? { course_business_id: prefill.lessonId, date_from: prefill.lessonDate ?? null, date_to: prefill.lessonDate ?? null, include_neighbors: includeNeighbors, neighborhood_days: neighborhoodDays }
+        : { course_business_id: null }),
+      time_limit_seconds: 30,
+    },
+  });
   const scheduleList = Array.isArray(schedules.data) ? schedules.data : [];
   const teacherList = Array.isArray(teachers.data) ? teachers.data : [];
   const roomList = Array.isArray(rooms.data) ? rooms.data : [];
   const slotList = Array.isArray(slots.data) ? slots.data : [];
   const eventList = Array.isArray(events.data) ? events.data : [];
+  // 刚创建的事件以列表里的最新状态为准（后台求解完成后候选编号才会出现），列表还没带上时用创建响应兜底。
+  const tracked = created ? (eventList.find((item) => item.id === created.id) ?? created) : null;
+  const outcome = tracked ? rescheduleOutcome(tracked) : null;
+  const subjectName = eventType === "teacher_leave"
+    ? (teacherList.find((item) => item.business_id === effectiveTeacher)?.name ?? effectiveTeacher)
+    : (roomList.find((item) => item.business_id === effectiveRoom)?.name ?? effectiveRoom);
+  const parentAssignments = (parentDetail.data as { assignments?: unknown } | undefined)?.assignments;
+  const impact = impactWanted && Array.isArray(parentAssignments)
+    ? rescheduleImpact(parentAssignments as AssignmentResponse[], { eventType, teacherId: effectiveTeacher, roomId: effectiveRoom, slotId: effectiveSlot })
+    : null;
+  const slotText = (id: string) => { const item = slotList.find((entry) => entry.business_id === id); return item ? `${item.weekday} ${item.start_time}` : id; };
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -76,10 +140,49 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
             <CalendarPlus className="size-4 text-blue-600" />
             <h2 className="font-semibold">创建变更事件</h2>
           </div>
-          {prefill ? (
-            <p className="mt-3 rounded-md border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs leading-5 text-blue-900">
-              已按所选课次带入：{prefill.label}。下面的教师、教室和影响时段仍可修改。
-            </p>
+          {prefill && eventType !== "extra_class" ? (
+            <fieldset className="mt-3 space-y-2 rounded-md border border-blue-100 bg-blue-50/60 px-3 py-2.5 text-xs leading-5 text-blue-900">
+              <legend className="px-1 text-xs font-medium text-blue-800">调整范围</legend>
+              <label className="flex items-start gap-2">
+                <input type="radio" name="reschedule-scope" className="mt-1" checked={scope === "lesson"} onChange={() => setScope("lesson")} />
+                <span>
+                  <span className="font-medium">只调整这一节课</span>
+                  <span className="block text-blue-800/80">已按所选课次带入：{prefill.label}。其余课次保持不动。</span>
+                </span>
+              </label>
+              {scope === "lesson" ? (
+                <div className="ml-6 space-y-1.5 border-l-2 border-blue-200 pl-3 text-zinc-700">
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={includeNeighbors} onChange={(event) => setIncludeNeighbors(event.target.checked)} />
+                    允许连带调整同班级、同教室的邻近课次
+                  </label>
+                  {includeNeighbors ? (
+                    <label className="flex flex-wrap items-center gap-1.5 text-zinc-600">
+                      前后各
+                      <input
+                        type="number"
+                        aria-label="连带调整的天数"
+                        min={0}
+                        max={31}
+                        className="h-7 w-16 rounded-md border border-zinc-300 px-2 text-sm"
+                        value={neighborhoodDays}
+                        onChange={(event) => setNeighborhoodDays(Math.min(31, Math.max(0, Math.trunc(Number(event.target.value) || 0))))}
+                      />
+                      天内的课次可以被挪动，系统仍会尽量少改。
+                    </label>
+                  ) : (
+                    <p className="text-zinc-500">不勾选时，其他课次只作为固定占用，不会被改动。</p>
+                  )}
+                </div>
+              ) : null}
+              <label className="flex items-start gap-2">
+                <input type="radio" name="reschedule-scope" className="mt-1" checked={scope === "event"} onChange={() => setScope("event")} />
+                <span>
+                  <span className="font-medium">登记为{eventType === "teacher_leave" ? "教师请假" : "教室停用"}事件</span>
+                  <span className="block text-blue-800/80">{eventType === "teacher_leave" ? "该教师" : "该教室"}在这份课表里的课次都会进入调整范围，不限于所选这一节。</span>
+                </span>
+              </label>
+            </fieldset>
           ) : null}
           <label className="mt-5 block text-sm">
             事件类型
@@ -101,7 +204,8 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
               aria-label="父课表"
               selectSize="md"
               containerClassName="mt-1.5"
-              value={parent}
+              value={effectiveParent}
+              disabled={Boolean(lockedParent)}
               onChange={(event) => setParent(event.target.value)}
             >
               {scheduleList.map((item) => (
@@ -111,7 +215,22 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
               ))}
             </Select>
           </label>
-          {eventType === "teacher_leave" ? (
+          {lessonMode && lockedParent ? (
+            <p className="mt-1.5 text-xs text-zinc-500">课次身份只在选中它时看的这一版里成立，调整基准固定为这一版。</p>
+          ) : null}
+          {lessonMode ? (
+            <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs" aria-label="所选课次">
+              <dt className="text-zinc-500">课次</dt>
+              <dd className="text-zinc-800">{prefill?.label}</dd>
+              {prefill?.lessonDate ? <dt className="text-zinc-500">日期</dt> : null}
+              {prefill?.lessonDate ? <dd className="text-zinc-800">{prefill.lessonDate}</dd> : null}
+              <dt className="text-zinc-500">{eventType === "teacher_leave" ? "教师" : "教室"}</dt>
+              <dd className="text-zinc-800">{subjectName}</dd>
+              {effectiveSlot ? <dt className="text-zinc-500">时段</dt> : null}
+              {effectiveSlot ? <dd className="text-zinc-800">{slotText(effectiveSlot)}</dd> : null}
+            </dl>
+          ) : null}
+          {!lessonMode && eventType === "teacher_leave" ? (
             <label className="mt-4 block text-sm">
               教师
               <Select
@@ -129,7 +248,7 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
               </Select>
             </label>
           ) : null}
-          {eventType === "room_outage" ? (
+          {!lessonMode && eventType === "room_outage" ? (
             <label className="mt-4 block text-sm">
               教室
               <Select
@@ -147,6 +266,7 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
               </Select>
             </label>
           ) : null}
+          {!lessonMode ? (
           <label className="mt-4 block text-sm">
             影响时段
             <Select
@@ -163,6 +283,13 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
               ))}
             </Select>
           </label>
+          ) : null}
+          {!lessonMode && impact ? (
+            <p role="status" className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+              登记为事件后，{subjectName}在这份课表里共有 {impact.total} 节课会进入调整范围
+              {impact.dateFrom && impact.dateTo ? `（${impact.dateFrom} ~ ${impact.dateTo}）` : ""}，其中 {impact.inSlot} 节在所选时段；不限于某一天。
+            </p>
+          ) : null}
           <label className="mt-4 block text-sm">
             说明
             <textarea
@@ -204,16 +331,32 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill }: 
               />
             ) : null}
           </div>
-          <Button className="mt-5 w-full" onClick={submit} disabled={!parent || create.isPending}>
+          <Button className="mt-5 w-full" onClick={submit} disabled={!effectiveParent || create.isPending}>
             生成候选方案
           </Button>
-          {/* 生成、发布是两个独立动作：候选方案只是草稿，去历史版本核对后由有审批权限的人发布。 */}
-          {create.isSuccess ? (
-            <div className="mt-3 space-y-2">
-              <p className="text-xs leading-5 text-zinc-500">候选方案已生成为草稿，尚未生效；需由有审批权限的人在「历史版本」核对后发布。</p>
-              <Button className="w-full" variant="outline" onClick={() => navigate(schedulePath({ view: "history", version: candidateId ?? undefined }))}>
-                在历史版本中查看新草稿
-              </Button>
+          {/* 创建成功只代表任务入队；候选草稿要等事件本身给出结果。生成、发布是两个独立动作：候选方案只是草稿，去历史版本核对后由有审批权限的人发布。 */}
+          {tracked && outcome ? (
+            <div className="mt-3 space-y-2" role="status" aria-label="调课结果">
+              {outcome === "generating" ? (
+                <p className="text-xs leading-5 text-zinc-500">正在生成候选方案……完成后这里会出现「查看新草稿」入口；也可以先离开，稍后在右侧「调课事件」里查看。</p>
+              ) : null}
+              {outcome === "ready" ? (
+                <>
+                  <p className="text-xs leading-5 text-zinc-500">候选方案已生成为草稿，尚未生效；需由有审批权限的人在「历史版本」核对后发布。</p>
+                  <Button className="w-full" variant="outline" onClick={() => navigate(schedulePath({ view: "history", version: tracked.candidate_schedule_id ?? undefined }))}>
+                    在历史版本中查看新草稿
+                  </Button>
+                </>
+              ) : null}
+              {outcome === "no_candidate" ? (
+                <p className="text-xs leading-5 text-amber-800">这次没有找到可行的候选方案，没有生成草稿。可以放宽范围（例如允许连带调整邻近课次）或换个时段后重新生成。</p>
+              ) : null}
+              {outcome === "failed" ? (
+                <p className="text-xs leading-5 text-red-700">求解没有完成，没有生成候选方案。可以调整后重新生成。</p>
+              ) : null}
+              {outcome === "discarded" ? (
+                <p className="text-xs leading-5 text-zinc-500">这次生成的候选草稿已被删除，需要的话可以重新生成。</p>
+              ) : null}
             </div>
           ) : null}
         </section>
