@@ -6,6 +6,20 @@ import { type GoalTaskContext } from "@/lib/task-context";
 
 type ManualField = "date_from" | "date_to" | "date_window_days" | "business_lines" | "class_business_ids" | "product_types";
 
+/**
+ * 待确认的范围扩大回滚：业务线、班级、课次共用同一套逻辑——「恢复原范围」和「新解析回包」两处都必须
+ * 把每个被扩大的字段一起放回草稿，不能某个入口只补其中几个（否则扩大状态被清掉、范围却留在扩大后）。
+ */
+function rolledBack(params: SolverParamValues, pending: ScopeExpansion | null): SolverParamValues {
+  if (!pending) return params;
+  return {
+    ...params,
+    ...(pending.business_lines ? { business_lines: pending.business_lines } : {}),
+    ...(pending.class_business_ids ? { class_business_ids: pending.class_business_ids } : {}),
+    ...(pending.course_business_ids ? { course_business_ids: pending.course_business_ids } : {}),
+  };
+}
+
 const untouched = (): Record<ManualField, boolean> => ({
   date_from: false,
   date_to: false,
@@ -84,14 +98,7 @@ export function useTaskParams() {
 
   const revertScopeExpansion = useCallback(() => {
     const pending = latest.current.scopeExpansion;
-    if (pending) {
-      setParams((current) => ({
-        ...current,
-        ...(pending.business_lines ? { business_lines: pending.business_lines } : {}),
-        ...(pending.class_business_ids ? { class_business_ids: pending.class_business_ids } : {}),
-        ...(pending.course_business_ids ? { course_business_ids: pending.course_business_ids } : {}),
-      }));
-    }
+    if (pending) setParams((current) => rolledBack(current, pending));
     setScopeExpansion(null);
   }, []);
 
@@ -101,21 +108,15 @@ export function useTaskParams() {
    */
   const applyInterpreted = useCallback((data: Interpretation) => {
     const { params: base, scopeExpansion: pending } = latest.current;
-    const draftBase = pending
-      ? {
-          ...base,
-          ...(pending.business_lines ? { business_lines: pending.business_lines } : {}),
-          ...(pending.class_business_ids ? { class_business_ids: pending.class_business_ids } : {}),
-          ...(pending.course_business_ids ? { course_business_ids: pending.course_business_ids } : {}),
-        }
-      : base;
+    const draftBase = rolledBack(base, pending);
     if (pending) setScopeExpansion(null);
     const edited = manuallyEdited.current;
     const nextBusinessLines = edited.business_lines ? draftBase.business_lines : data.business_lines ?? [];
     const nextProductTypes = edited.product_types ? draftBase.product_types : data.product_types ?? [];
     const nextClassBusinessIds = edited.class_business_ids ? draftBase.class_business_ids : data.class_business_ids ?? [];
+    // 以「此刻」的草稿为底：未确认的扩大先整体回滚（含课次范围），再叠上解析结果。
     setParams((current) => ({
-      ...current,
+      ...rolledBack(current, pending),
       business_lines: nextBusinessLines,
       product_types: nextProductTypes,
       class_business_ids: nextClassBusinessIds,

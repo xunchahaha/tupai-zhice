@@ -426,6 +426,8 @@ export function useAssistantTask() {
    * 返回空串表示请求期间任务已被切走，调用方应直接放弃后续动作。
    */
   const createGoalFromInterpretation = async (parsed: Interpretation): Promise<string> => {
+    // 带着交接对象来的，读不到它就不能登记：登记会把课次范围和基准写进任务，写错了之后所有重跑都跟着错。
+    if (handoff && handoff.status !== "ready") throw new Error(`${handoff.description}可以先取消这一节课的限定，再登记任务。`);
     const startedEpoch = epoch.current;
     // MEM-D3（基准联动）+ 问题4：基准版本默认只记录下来；只有用户明确开启「设置变更上限」
     // 才把 max_changes 项写进清单（上限取「验收上限」输入，默认 50），不用文案掩盖阈值的有无。
@@ -449,6 +451,8 @@ export function useAssistantTask() {
       date_to: params.date_to,
       checklist: checklistDraft,
       baseline_schedule_version_id: baselineId || null,
+      // 实际执行基准（与上面「变更数对比」的基准是两回事）：登记时就落库，之后刷新、补参、首次求解都以它为准。
+      base_schedule_id: handoff?.status === "ready" ? handoff.target.scheduleId : null,
       forbid_publish: true,
     });
     if (startedEpoch !== epoch.current) return "";
@@ -460,7 +464,7 @@ export function useAssistantTask() {
     updateSearch((next) => {
       next.set("goal", created.id);
       next.delete("action");
-      // 任务登记后，课次范围与基准由任务上下文承载，不再靠地址栏里的交接参数。
+      // 服务端已确认保存（POST /goals 成功）：课次范围在清单里、执行基准在任务上下文里，不再靠地址栏里的交接参数。
       next.delete("base");
       next.delete("lesson");
     });

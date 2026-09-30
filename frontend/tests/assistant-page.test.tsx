@@ -751,6 +751,8 @@ describe("AssistantPage handoff from the schedule page (review #5 / follow-up)",
     expect(first.course_business_ids).toEqual(["COURSE-9"]);
     const goalBody = mocks.post.mock.calls[0][1] as Record<string, unknown>;
     expect(goalBody.course_business_ids).toEqual(["COURSE-9"]);
+    // 登记任务时就把实际执行基准落库（与「变更数对比」的 baseline_schedule_version_id 是两回事）。
+    expect(goalBody.base_schedule_id).toBe("draft-3");
     // 任务登记后由任务上下文承载：地址栏里的交接参数摘掉，但交接说明仍在。
     await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(/^\/assistant\?goal=goal-h$/));
     expect(screen.getByLabelText("调整对象")).toHaveTextContent("基于课表 v3（草稿）的这一节课");
@@ -856,5 +858,106 @@ describe("AssistantPage handoff from the schedule page (review #5 / follow-up)",
     const [, body] = solveCalls()[0] as [string, Record<string, unknown>];
     expect(body).not.toHaveProperty("parent_schedule_id");
     expect(body.course_business_ids).toEqual([]);
+  });
+
+  // 复审 R3 #1：任务已登记、首次求解还没开始，此时刷新——执行基准不能只活在页面状态里。
+  it("registers the execution base together with the goal, and drops the ids from the URL only after the server accepted it", async () => {
+    const user = userEvent.setup();
+    mockAiConfigured();
+    mocks.scheduleDetails["draft-3"] = draftDetail;
+    mocks.stream.mockResolvedValueOnce({
+      ...interpretationFixture(),
+      unsupported_requirements: ["具体教师的禁排或请假要求"],
+      goal_checklist_draft: [{ key: "coverage", kind: "coverage", requirement: "覆盖全部目标课次", params: {} }, PLACEHOLDER_ITEM],
+    });
+    let goalCalls = 0;
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      if (String(args[0]) !== "/api/v1/goals") return { data: {} };
+      goalCalls += 1;
+      if (goalCalls === 1) throw new Error("boom");
+      return { data: { id: "goal-later", status: "open", checklist: [PLACEHOLDER_ITEM] } };
+    });
+    mocks.goalDetail = goalFixture({ id: "goal-later", checklist: [PLACEHOLDER_ITEM] });
+    renderAssistant(entry);
+    await screen.findByLabelText("调整对象");
+    await user.click(screen.getByRole("button", { name: PARSE }));
+    await user.click(await screen.findByRole("button", { name: "补充条件" }));
+
+    // 登记失败：交接参数还在地址栏里，没有丢。
+    await waitFor(() => expect(goalCalls).toBe(1));
+    expect(screen.getByTestId("location-probe")).toHaveTextContent(/base=draft-3&lesson=COURSE-9/);
+
+    await user.click(await screen.findByRole("button", { name: "补充条件" }));
+    await waitFor(() => expect(goalCalls).toBe(2));
+    const [, body] = mocks.post.mock.calls[1] as [string, Record<string, unknown>];
+    expect(body.base_schedule_id).toBe("draft-3");
+    expect(body.course_business_ids).toEqual(["COURSE-9"]);
+    // 服务端确认保存之后才摘掉交接参数；没有发出任何求解请求。
+    await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(/^\/assistant\?goal=goal-later$/));
+    expect(solveCalls()).toHaveLength(0);
+  });
+
+  it("does not register the task while the handed-over lesson is not resolved", async () => {
+    const user = userEvent.setup();
+    mockAiConfigured();
+    mocks.scheduleDetails["draft-3"] = { ...draftDetail, assignments: [] };
+    mocks.stream.mockResolvedValueOnce({
+      ...interpretationFixture(),
+      unsupported_requirements: ["具体教师的禁排或请假要求"],
+      goal_checklist_draft: [{ key: "coverage", kind: "coverage", requirement: "覆盖全部目标课次", params: {} }, PLACEHOLDER_ITEM],
+    });
+    renderAssistant(entry);
+    await screen.findByText(/所选课次不在课表 v3（草稿）里/);
+    await user.click(screen.getByRole("button", { name: PARSE }));
+    await user.click(await screen.findByRole("button", { name: "补充条件" }));
+    expect(mocks.post.mock.calls.some((call) => String(call[0]) === "/api/v1/goals")).toBe(false);
+  });
+
+  // 复审 R3 #2：解析回包不能把「待确认的扩大范围」清掉、却把扩大后的范围留下。
+  it("rolls a pending lesson-scope expansion back when an in-flight parse returns", async () => {
+    const user = userEvent.setup();
+    mockAiConfigured();
+    mocks.goalDetail = goalFixture({
+      id: "goal-h",
+      latest_run_id: "run-x",
+      run_count: 1,
+      context: { schema_version: 1, scope: { class_business_ids: [], business_lines: [], product_types: [], course_business_ids: ["COURSE-9"], date_from: null, date_to: null, date_window_days: 7 } },
+    });
+    mocks.runDetails["run-x"] = runFixture({ id: "run-x", goal_id: "goal-h", model_status: "INFEASIBLE", explanation: EXPLAINED });
+    let release: () => void = () => undefined;
+    mocks.stream.mockImplementation(() => new Promise((resolve) => { release = () => resolve(interpretationFixture()); }));
+    renderAssistant("/assistant?goal=goal-h");
+    await screen.findByLabelText("调整对象");
+    await user.click(await screen.findByRole("button", { name: "修改要求后重新解析" }));
+    await user.type(screen.getByLabelText("修改后的要求"), "放宽周三晚");
+    await user.click(screen.getByRole("button", { name: "重新解析" }));
+
+    // 模型还在返回时取消已提交过的课次限定：需要单独确认。
+    await user.click(screen.getByRole("button", { name: "不限定课次" }));
+    expect(await screen.findByText(/课次范围（原来只调整选中的课次）将从限定范围改为「全部」/)).toBeInTheDocument();
+    release();
+
+    // 回包按「回滚未确认的扩大」处理：确认提示与范围必须一起恢复，不能出现「范围空了、确认也没了」。
+    await waitFor(() => expect(screen.queryByText(/范围将要扩大/)).not.toBeInTheDocument());
+    expect(screen.getByLabelText("调整对象")).toHaveTextContent("本任务只针对课表里选中的 1 节课");
+    mocks.post.mockResolvedValue({ data: { id: "run-n", status: "queued", goal_id: "goal-h" } });
+    await user.click(await screen.findByRole("button", { name: CONFIRM }));
+    await waitFor(() => expect(solveCalls()).toHaveLength(1));
+    expect((solveCalls()[0] as [string, Record<string, unknown>])[1].course_business_ids).toEqual(["COURSE-9"]);
+  });
+
+  it("only promises the work-draft base when the task is tracked", async () => {
+    const user = userEvent.setup();
+    mockAiConfigured();
+    mocks.scheduleDetails["draft-3"] = draftDetail;
+    mocks.stream.mockResolvedValue(interpretationFixture());
+    renderAssistant(entry);
+    const notice = await screen.findByLabelText("调整对象");
+    expect(notice).toHaveTextContent("继续调整以这个任务自己的工作草稿为基准");
+    await user.click(screen.getByRole("button", { name: PARSE }));
+    await user.click(await screen.findByRole("button", { name: /更多选项/ }));
+    await user.click(screen.getByLabelText("以此为目标跟踪"));
+    expect(screen.getByLabelText("调整对象")).toHaveTextContent("没有跟踪成任务时，产出草稿后继续调整会以当前已发布版本为基准");
+    expect(screen.getByLabelText("调整对象")).not.toHaveTextContent("不会退回当前已发布版本");
   });
 });

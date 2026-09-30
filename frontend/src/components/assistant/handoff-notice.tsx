@@ -30,7 +30,14 @@ export function HandoffNotice({ task }: { task: AssistantTask }) {
         ) : (
           <p className="mt-0.5 break-words">本任务只针对课表里选中的 {lessons.length} 节课：{lessons.slice(0, 3).join("、")}{lessons.length > 3 ? " 等" : ""}。</p>
         )}
-        {ready || !handoff ? <p className="mt-0.5 text-blue-800/80">确认排课、手动排课、加预算重跑和继续调整都会沿用这个课次范围（基准版本也不会退回当前已发布版本）；放宽范围需要单独确认。</p> : null}
+        {ready || !handoff ? <p className="mt-0.5 text-blue-800/80">确认排课、手动排课、加预算重跑和继续调整都会沿用这个课次范围；放宽范围需要单独确认。</p> : null}
+        {ready ? (
+          <p className="mt-0.5 text-blue-800/80">
+            {task.trackGoal
+              ? "求解基准是这一版；产出草稿后，继续调整以这个任务自己的工作草稿为基准，不会退回当前已发布版本。"
+              : "求解基准是这一版；没有跟踪成任务时，产出草稿后继续调整会以当前已发布版本为基准。"}
+          </p>
+        ) : null}
         {trouble ? <p className="mt-0.5">读取好之前不能开始排课；也可以取消这一节课的限定，改为按需求整体排课。</p> : null}
       </div>
       <Button size="sm" variant="outline" onClick={task.clearLessonScope}>{trouble ? "取消限定" : "不限定课次"}</Button>

@@ -356,3 +356,65 @@ test("课表交接：只调整选中的那一节课、基于所选草稿——�
 
   await api.dispose();
 });
+
+test("课表交接：任务已登记、首次求解还没开始就刷新，执行基准仍是所选草稿而不是当前已发布版本", async ({ page }) => {
+  test.setTimeout(150_000);
+  const api = await adminApi();
+  await pointBackendAtFakeModel(api);
+
+  // 造一份草稿并从中选一节初二物理A班的课；「当前已发布版本」是另一份，二者不能混。
+  const classes = await (await api.get("/api/v1/class-groups")).json();
+  const cohort = classes.find((item: { name: string }) => item.name.includes("初二物理A"));
+  expect(cohort, "seed 里应有初二物理A班").toBeTruthy();
+  const base = await api.post("/api/v1/solver-runs", { data: { class_business_ids: [cohort.business_id], time_limit_seconds: 30, wait: true } });
+  expect(base.ok(), await base.text()).toBeTruthy();
+  const baseRun = await base.json();
+  const draft = (await (await api.get("/api/v1/schedules")).json()).find((item: { solver_run_id: string }) => item.solver_run_id === baseRun.id);
+  expect(draft, "求解应产出一份草稿").toBeTruthy();
+  const detail = await (await api.get(`/api/v1/schedules/${draft.id}`)).json();
+  const lesson = detail.assignments.find((item: { class_business_id: string }) => item.class_business_id === cohort.business_id);
+  expect(lesson).toBeTruthy();
+
+  await loginAndOpenAssistant(page);
+  const instruction = "重排初二物理A班，丙老师周五晚上不能上";
+  await page.goto(`/assistant?prompt=${encodeURIComponent(instruction)}&base=${draft.id}&lesson=${encodeURIComponent(lesson.course_business_id)}`);
+  await expect(page.getByLabel("调整对象")).toContainText(`v${draft.version_no}`);
+  await page.getByRole("button", { name: "让 AI 解析", exact: true }).click();
+
+  // 模型没能唯一确定「丙老师」：教务只能先「补充条件」——这会先登记任务，而不会创建任何求解。
+  await expect(page.getByRole("button", { name: "确认并开始求解" })).toBeDisabled();
+  await page.getByRole("button", { name: "补充条件", exact: true }).click();
+  await expect(page).toHaveURL(/\/assistant\?.*goal=/);
+  const goalId = new URL(page.url()).searchParams.get("goal");
+  expect(goalId).toBeTruthy();
+  // 交接参数已从地址栏摘掉——但执行基准在服务端确认保存之后才摘，此刻已经在任务上下文里。
+  await expect(page).not.toHaveURL(/base=/);
+  const registered = await (await api.get(`/api/v1/goals/${goalId}`)).json();
+  expect(registered.context?.base_schedule_id).toBe(draft.id);
+  expect(registered.run_count ?? 0).toBe(0);
+
+  // 首次求解之前刷新：课次限定从清单恢复，交接状态没有了。
+  await page.reload();
+  await expect(page.getByLabel("调整对象")).toContainText("本任务只针对课表里选中的 1 节课", { timeout: 20_000 });
+
+  // 首次求解（手动提交路径，不带显式基准）：求解仍从所选草稿出发。
+  const manualToggle = page.getByRole("button", { name: "手动排课（自己设置参数）" });
+  if ((await manualToggle.getAttribute("aria-expanded")) !== "true") await manualToggle.click();
+  const solveResponse = page.waitForResponse(
+    (response) => response.url().endsWith("/api/v1/solver-runs") && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "按参数开始求解" }).click();
+  const solved = await solveResponse;
+  expect(solved.ok(), await solved.text()).toBeTruthy();
+  const run = await solved.json();
+  expect(solved.request().postDataJSON()).not.toHaveProperty("parent_schedule_id");
+  await expect
+    .poll(async () => (await (await api.get(`/api/v1/solver-runs/${run.id}`)).json()).status, { timeout: 60_000, intervals: [500, 1000, 2000] })
+    .toBe("completed");
+  const produced = (await (await api.get("/api/v1/schedules")).json()).find((item: { solver_run_id: string }) => item.solver_run_id === run.id);
+  expect(produced, "首次求解应产出草稿").toBeTruthy();
+  // 新草稿的父版本就是当初选课的那一份，而不是当前已发布的版本。
+  expect(produced.parent_id).toBe(draft.id);
+
+  await api.dispose();
+});
