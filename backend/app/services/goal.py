@@ -2171,32 +2171,43 @@ def plan_task_constraint_revision(
         content_changes += 1
 
     # ---- 第 3 步：新内容（追加、指不到旧项的替换、硬要求），对照第 2 步做完之后的最终状态。
-    for op in ops:
-        if not op["hard"] or op["kind"] == "remove" or not op["valid"]:
-            continue
-        if op["kind"] == "replace" and not (op["superseding"] or op["degraded"]):
-            continue  # 已在第 2 步处理（硬要求清单项不可改）或是被忽略的重复
-        key = op["key"]
+    # 硬要求按内容分组、每个内容只落地一次：它是「由尽量收紧为硬」还是「新增硬要求」，由整批里
+    # 关于这个内容的全部动作共同决定（此刻还有同内容的软项、有硬替换让位、旧软项的内容正是它），
+    # 而不是由数组里最先走到的那个动作决定；摘要里列出这个内容对应的所有不同原话。
+    hard_ops = [
+        op
+        for op in ops
+        if op["hard"]
+        and op["kind"] != "remove"
+        and op["valid"]
+        # 硬的 replace：已在第 2 步处理（清单硬项不可改）或是被忽略的重复，这里只接让位与降级的。
+        and (op["kind"] != "replace" or op["superseding"] or op["degraded"])
+    ]
+    for key in dict.fromkeys(op["key"] for op in hard_ops):
+        group = [op for op in hard_ops if op["key"] == key]
         same_key = [item for item in softs if _soft_key(item) == key]
         if same_key:
             softs[:] = [item for item in softs if _soft_key(item) != key]
             content_changes += 1
         if key in hard_keys:
             continue
+        first = group[0]
         item = forbidden_slot_item(
             f"forbidden_slot_free-{next_hard_index()}",
-            subject_type=op["subject_type"],
-            subject_ids=op["subject_ids"],
-            slot_business_ids=op["slots"],
-            task_constraint_id=op["id"],
+            subject_type=first["subject_type"],
+            subject_ids=first["subject_ids"],
+            slot_business_ids=first["slots"],
+            task_constraint_id=first["id"],
         )
         new_checklist.append(item)
         hard_keys[key] = item
         hard_item_keys.add(str(item["key"]))
         result.checklist_changed = True
-        # 「由尽量收紧为硬」还是「新增硬要求」只看这个内容原来是不是软要求，与本批硬动作的先后无关。
-        was_soft = bool(same_key) or op["superseding"] or key in superseded_keys
-        (result.tightened if was_soft else result.added_hard).append(op["label"])
+        was_soft = (
+            bool(same_key) or key in superseded_keys or any(op["superseding"] for op in group)
+        )
+        summary_list = result.tightened if was_soft else result.added_hard
+        summary_list.extend(dict.fromkeys(op["label"] for op in group))
     for op in ops:
         if op["hard"] or op["kind"] == "remove" or not op["valid"]:
             continue

@@ -510,6 +510,52 @@ def test_whitespace_around_a_target_id_is_not_part_of_the_identity() -> None:
     assert contradictory_targets([replace_a, replace_padded]) == {"a"}
 
 
+def test_a_hard_add_and_a_hard_replace_landing_on_new_content_classify_alike() -> None:
+    """第十三轮 P3：a 是软的 S1；同一批里「新增硬的 S2」与「a 硬替换成 S2」——两个动作汇聚到同一个
+    新内容，其中一个是让软要求让位的替换，整个内容都按「收紧」归类，不论哪个动作排在前面。"""
+    softs = [_soft("a", "T01", ["S1"])]
+    outcome = _all_orders_agree(
+        [],
+        softs,
+        [
+            _replace("a", "S2", hardness="hard", text="张老师周二晚不能上"),
+            _constraint("tc-h", "T01", ["S2"], "hard", text="张老师周二晚不能上"),
+        ],
+    )
+    assert outcome["softs"] == [] and outcome["hards"] == [("T01", ("S2",))]
+    assert outcome["summary"] == {"tightened": ["张老师周二晚不能上"]}
+
+
+def test_different_wordings_of_one_hard_content_are_all_reported_in_every_order() -> None:
+    """同一个硬内容有两种原话：两种都列在摘要里，列哪一条不取决于谁排在前面。"""
+    softs = [_soft("a", "T01", ["S1"])]
+    outcome = _all_orders_agree(
+        [],
+        softs,
+        [
+            _constraint("tc-1", "T01", ["S2"], "hard", text="周二晚不能上"),
+            _replace("a", "S2", hardness="hard", text="a 那条改成周二晚绝对不行"),
+        ],
+    )
+    assert outcome["summary"] == {
+        "tightened": sorted(["周二晚不能上", "a 那条改成周二晚绝对不行"])
+    }
+
+
+def test_a_hard_add_is_added_not_tightened_when_no_soft_of_that_content_ever_existed() -> None:
+    softs = [_soft("a", "T01", ["S1"])]
+    outcome = _all_orders_agree(
+        [],
+        softs,
+        [
+            _constraint("tc-h", "T01", ["S9"], "hard", text="周九晚不能上"),
+            _constraint("tc-s", "T01", ["S3"], "soft", text="周三晚尽量别排"),
+        ],
+    )
+    assert outcome["summary"]["added_hard"] == ["周九晚不能上"]
+    assert "tightened" not in outcome["summary"]
+
+
 def test_repeating_an_identical_replacement_is_applied_once_without_noise() -> None:
     softs = [_soft("a", "T01", ["S1"]), _soft("b", "T01", ["S2"])]
     revision = _plan([], softs, _replace("a", "S3"), _replace("a", "S3"))
