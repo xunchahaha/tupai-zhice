@@ -363,13 +363,23 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
   `task_constraints` 先合并成任务的新版要求、再只从任务编译求解（`plan_task_constraint_revision`）。
   身份是内容（主体+时段），不是 id（解析侧 id 按序号生成，跨轮次会撞）：新硬要求追加进清单并
   **原子升清单版本**（同 `PATCH checklist` 的条件 UPDATE：achieved 回退 open、验收回 pending、旧清单进
-  历史，并发修订 409 整体回滚）；同内容的旧软要求随之收紧；同 id 同主体换时段 = 修改那一条；
-  **硬要求永不被请求里的「尽量」静默放宽**（保留并在 `task_revision.kept_hard` 留痕，放宽只能在清单
-  里人工保存）。修订摘要随 run 留档（`task_revision`）与审计。
-- **工作草稿指针保护（MEM-L3）**：run 产出草稿后接管 `goal.context.work_draft_schedule_id` 要过
-  三关——任务未放弃、求解创建时冻结的 `goal_checklist_version` 仍是当前清单版本、指针现指草稿不是
-  由更晚创建的求解产出的；读-改-写在任务行写锁下完成。被拒绝的产物只进历史，原因写进
-  `goal_report.meta.work_draft`。
+  历史，并发修订 409 整体回滚）；同内容的旧软要求随之收紧。**追加还是修改由请求显式说明**
+  （第十轮 MEM-M1）：`task_constraints[].op` = `add`（默认）/`replace`/`remove`，`replace`/`remove`
+  用 `target_id` 指向任务里既有要求的稳定编号（软要求 id、清单项 key，解析上下文
+  `task_context.active_task_constraints` 给出）——**同一个解析序号 id 不代表替换**，指不到具体旧项时
+  replace 退化为追加、remove 什么都不做（`task_revision.unresolved`）。
+  **硬要求永不被请求里的「尽量」或 replace/remove 静默放宽/改/删**（保留并在 `task_revision.kept_hard`
+  留痕，放宽只能在清单里人工保存）。修订摘要随 run 留档（`task_revision`）与审计。
+- **任务依据统一版本（MEM-M2）**：任务依据 = 硬要求清单 + 软要求 + 执行范围（`context.scope`），任何
+  一项内容变了都升 `checklist_revision`、使旧验收结论失效，且新 context 与版本号**同一条条件 UPDATE**
+  落库（旧清单、旧软要求、旧范围进 `checklist_history`，带 `changed` 原因）。首次求解（任务还没存过
+  范围/软要求）是确立初始依据、只更新软要求原话、以及范围变化已被清单 coverage 体现（先在清单里改了
+  验收范围再按新范围求解）都不重复升版本。读-改-写在任务行写锁下完成，读取后版本已前移 409。
+- **统一接纳条件（MEM-M3，取代 MEM-L3 的单点保护）**：旧求解晚结束不得接管当前任务结果——
+  工作草稿指针、验收中/失败标记、验收结论、`latest_run_id` 用同一套条件（`run_admission` 读侧 /
+  `run_admission_clause` 写侧原子版）：任务未放弃、求解创建时冻结的 `goal_checklist_version` 等于当前
+  版本、当前持有结论的求解不比它更晚创建。不接纳的求解报告照常留档（可按当前清单评估给人看），
+  `goal_report.meta.adopted=false` 与 `not_adopted_reason` 说明原因，任务状态一个字都不动。
 - **清单修订与历史（MEM-D3，MEM-E2/E2a 修订）**：`PATCH /api/v1/goals/{id}/checklist`
   整体替换验收清单——body 为完整 checklist 数组，校验复用创建口径（key 唯一、
   kind 白名单、`ensure_bottom_line_items` 强制并入底线；可选 `scope` 显式给新
@@ -450,8 +460,10 @@ RBAC 正交：链接的签发/轮换/停用复用 `admin/scheduler` 角色，撤
 - 按原参数重跑：`POST /api/v1/solver-runs/{id}/rerun`（MEM-L2；只改时间预算，缺省按
   `min(max(原预算×3, 90), 900)` 加大）。范围/日期/课次、规则开关、变更权重、数据快照、偏好记忆、
   基准都取原求解冻结的那一份；有关联任务时任务要求取任务当前版本，无任务的一句话求解沿用当时冻结的
-  任务约束；求解未结束 409、任务已放弃 409、调课/导入求解不支持 409。`SolverRunResponse` 新增
-  `time_limit_seconds` / `task_revision` / `rerun_of`
+  任务约束；原求解**没有基准时「没有」也冻结**（不会读入之后发布的课表，`freeze_baseline`）；
+  任务要求在原求解之后修订过 409（重放旧问题 ≠ 按新要求继续，请重新排课）；求解未结束 409、
+  任务已放弃 409、调课/导入求解不支持 409。`SolverRunResponse` 新增
+  `time_limit_seconds` / `task_revision` / `rerun_of` / `goal_checklist_version`
 - 求解进度：`GET /api/v1/solver-runs/{id}/events`
 - 版本差异：`GET /api/v1/schedules/{base_id}/diff/{target_id}`，逐课次返回 `added`、`removed`、`moved`、`unchanged` 及调整前后日期/时段/教室
 - 发布/回滚：`POST /api/v1/schedules/{id}/publish`、`POST /api/v1/schedules/{id}/rollback`（审批人权限）
