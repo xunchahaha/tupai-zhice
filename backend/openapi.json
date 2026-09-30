@@ -7186,6 +7186,28 @@
             "type": "array",
             "title": "Task Constraints"
           },
+          "task_goal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Goal Id"
+          },
+          "task_basis_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Basis Version"
+          },
           "memory_actions": {
             "items": {
               "$ref": "#/components/schemas/AssistantMemoryAction"
@@ -7531,6 +7553,18 @@
               }
             ],
             "title": "Goal Id"
+          },
+          "expected_task_basis_version": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Task Basis Version"
           },
           "task_constraints": {
             "items": {

@@ -1527,6 +1527,35 @@ class AssistantTaskConstraint(BaseModel):
     op: Literal["add", "replace", "remove"] = "add"
     target_id: str | None = Field(default=None, max_length=80)
 
+    def operation_identity(self) -> tuple[Any, ...]:
+        """一次修改动作的身份（不是约束内容）：完全相同才是重复动作。
+
+        取消只由 (op, target_id) 决定——它没有新的要求内容，其余字段是模型顺带填的，不算身份。
+        """
+        if self.op == "remove":
+            return ("remove", self.target_id or "")
+        return (
+            self.op,
+            self.target_id or "",
+            self.hardness,
+            self.subject_type,
+            tuple(sorted(self.subject_ids)),
+            tuple(sorted(self.slot_business_ids)),
+        )
+
+
+def contradictory_targets(constraints: list[AssistantTaskConstraint]) -> set[str]:
+    """同一个既有要求（target_id）上出现了身份不同的动作（改成 X 又改成 Y、改了又取消……）。
+
+    这种请求没法确定那条旧要求到底该怎么处理：不猜先后、不取第一条。解析规范化把它们都挡在确认卡上，
+    求解请求的校验同样拒绝——直接调接口的客户端也不会因为顺序不同得到不同的结果。
+    """
+    identities: dict[str, set[tuple[Any, ...]]] = {}
+    for item in constraints:
+        if item.target_id:
+            identities.setdefault(item.target_id, set()).add(item.operation_identity())
+    return {target for target, seen in identities.items() if len(seen) > 1}
+
 
 class AssistantMemoryAction(BaseModel):
     """解析产物中的记忆动作（TC-2，docs/roadmap/07-task-context.md §3.1）。
@@ -1584,6 +1613,11 @@ class AssistantSolveRequest(AilySolveRequest):
     course_business_ids: list[str] = Field(default_factory=list)
     # 目标验收闭环（MEM-C3）：一句话排课确认后可关联持久目标跟踪验收。
     goal_id: str | None = None
+    # 确认卡绑定的任务要求版本：这张卡是基于任务的哪一版要求解析出来的（AssistantInterpretResponse
+    # .task_basis_version 原样带回）。服务端只认这个「用户当时看到并确认的」版本：任务要求在此之后
+    # 已经变了（别的标签页、清单里改过、这次确认其实已提交过）就 409，要求重新解析再确认——
+    # 不会在点击提交时拿最新版本给一份旧解析重新盖章。缺省 = 不校验（直调/无任务/首次登记）。
+    expected_task_basis_version: int | None = Field(default=None, ge=1)
     # 任务级约束的请求侧载体（TC-1 §2.1）：API 直调 /assistant/solve（无解析
     # 前置）时任务约束的入口；编译见 api._compile_task_constraints 的请求来源
     # 分支（TASK-req-* 命名空间，一次性生效不落库）。确认卡链路也经此字段把
@@ -1596,6 +1630,16 @@ class AssistantSolveRequest(AilySolveRequest):
     # 拒绝，留空数组=「本次指令没有未实现要求」。契约层拦截而非硬保证（调用方
     # 静默省略即绕过），人面向的主防线仍是前端确认卡闸。
     unsupported_requirements: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def reject_contradictory_edits(self) -> AssistantSolveRequest:
+        conflicts = contradictory_targets(self.task_constraints)
+        if conflicts:
+            raise ValueError(
+                f"对同一条要求（{'、'.join(sorted(conflicts))}）给出了相互矛盾的修改，"
+                "请分开说明想怎么处理这一条"
+            )
+        return self
 
 
 class AssistantInterpretRequest(BaseModel):
@@ -1633,6 +1677,11 @@ class AssistantInterpretResponse(BaseModel):
     # 写进 goal_checklist_draft（§2.1b），soft 经确认后随 /assistant/solve 请求体
     # 回到后端落 goal.context.soft_task_constraints（§4.2 写入点①）。
     task_constraints: list[AssistantTaskConstraint] = Field(default_factory=list)
+    # 这份解析是基于哪个任务的哪一版要求做出的（续办增量解析才有）：解析时注入给模型的
+    # active_task_constraints（target_id 的来源）就是这一版。确认求解时随
+    # AssistantSolveRequest.expected_task_basis_version 原样带回，服务端据此识别陈旧确认。
+    task_goal_id: str | None = None
+    task_basis_version: int | None = None
     # 记忆动作与执行回执（TC-2 §3.1）：explicit 已直接执行（回执 executed），
     # inferred/降级进收件箱候选（pending_confirmation），无法降级的动作
     # failed_degraded——逐条回执，绝不混用两种授权。

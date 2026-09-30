@@ -492,6 +492,11 @@ def _mark_goal_acceptance_failed(
     是人工终态，验收异常与求解失败同样不得越权改写），rowcount 判定。行数=0
     = 版本已前移或目标已放弃——**目标当前结论一字不改**，失败只留在该 run
     自己的 goal_report 上（由调用方记录 run 与清单版本）。
+
+    失败也是这个任务「当前尝试」的结果：写回成功时同时把 `latest_run_id` 推进到这次求解，
+    成功、求解失败、验收异常共用同一份结果归属。否则较新的失败只改了状态字、归属仍在更早的
+    求解上，此后较早发起的成功晚到，仍会拿它和更早的持有者比较而接管——较新的失败被较早的
+    成功盖掉。草稿指针不因此改变（没有产出草稿的尝试不动工作草稿，仍保留最近可用的那张）。
     """
     from .goal import run_admission_clause  # 延迟导入：goal 顶层依赖本模块
 
@@ -500,13 +505,15 @@ def _mark_goal_acceptance_failed(
         SolveGoal.checklist_revision == version,
         SolveGoal.status != "abandoned",
     ]
+    values: dict[str, Any] = {"acceptance_status": "failed", "acceptance_detail": detail}
     if run is not None:
         # 失败同样只有有资格的求解能写：旧求解的失败不能把当前已完成的结论标成 failed。
         conditions.append(run_admission_clause(goal_id, run))
+        values["latest_run_id"] = run.id
     result = db.execute(
         update(SolveGoal)
         .where(*conditions)
-        .values(acceptance_status="failed", acceptance_detail=detail)
+        .values(**values)
         .execution_options(synchronize_session=False)
     )
     return int(result.rowcount or 0) == 1

@@ -625,9 +625,10 @@ class SolveGoal(TimestampMixin, Base):
     状态机：open → achieved（逐项通过；draft_only 目标在合格草稿交付即完成，
     发布永远不在目标自动动作里）／awaiting_decision（存在需教务放宽或裁决的
     缺口）／abandoned（人工放弃）。停止规则写死在验收器里：不存在允许的补救
-    动作就保持 open 并附终态报告，绝不自动无限重跑。latest_run_id 是展示用
-    快捷指针（无外键，避免与 solver_runs.goal_id 成环），权威关联以
-    SolverRun.goal_id 为准。
+    动作就保持 open 并附终态报告，绝不自动无限重跑。latest_run_id 是任务的「当前
+    尝试」指针：展示用快捷入口，同时是结果接纳的归属依据（services.goal.run_admission）——
+    验收结论、求解失败、验收异常三个写口成功时都推进它，较早发起的求解晚到不得接管。
+    无外键（避免与 solver_runs.goal_id 成环），权威关联以 SolverRun.goal_id 为准。
     """
 
     __tablename__ = "solve_goals"

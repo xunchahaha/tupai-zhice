@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import date
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import case, func, or_, select, update
 
@@ -1642,8 +1643,9 @@ def run_admission(db: Any, goal: SolveGoal, run: SolverRun) -> tuple[bool, str |
     1. 任务未放弃；
     2. 求解创建时冻结的 `goal_checklist_version` 仍等于任务当前清单版本——任务依据
        （硬要求/软要求/范围）已修订，这份结果回答的是旧问题；
-    3. 当前持有结论的求解（`latest_run_id`）不是**更晚创建**的——同一版依据下先后发起的
-       两次求解，晚创建的先完成后，早创建的晚到结果不接管。
+    3. 当前尝试（`latest_run_id`）不是**更晚创建**的——同一版依据下先后发起的两次求解，
+       晚创建的先落定（成功、求解失败、验收异常都算落定，都推进 `latest_run_id`）后，
+       早创建的晚到结果不接管。仍在运行、还没落定的更晚求解不持有归属：它落定时会顶替。
 
     不接纳不等于丢弃：报告照常留在这次求解上（可以按当前清单重新评估给人看），
     只是不写任务的当前状态。
@@ -1991,7 +1993,8 @@ def plan_task_constraint_revision(
     什么」永远是同一份。合并口径：
 
     - 身份是内容（主体+时段），不是 id：解析侧的 id 按序号生成，每次都从 tc-1 起，
-      **同 id 不能证明是同一条要求，更不能证明是「替换」**；
+      **同 id 不能证明是同一条要求，更不能证明是「替换」**；新落地的软要求由服务端另发
+      不复用的编号（`sc-…`，替换成新内容时也换新编号），模型的临时编号不进持久数据；
     - 每条要求带显式的 ``op``：``add``（默认，追加）、``replace``（替换 ``target_id``
       指向的那一条）、``remove``（取消 ``target_id`` 指向的那一条）；``target_id`` 是任务里
       已有要求的稳定编号（软要求的 id、清单项的 key）。**指不到具体旧项时不删任何东西**：
@@ -2023,14 +2026,15 @@ def plan_task_constraint_revision(
     def find_soft(target_id: str) -> dict[str, Any] | None:
         return next((item for item in softs if str(item.get("id")) == target_id), None)
 
-    def unique_soft_id(wanted: str) -> str:
+    def new_soft_id() -> str:
+        # 持久软要求的编号由服务端生成、不复用：模型给的 tc-N 只是这一轮解析里的临时标签，
+        # 每轮都从 tc-1 起。拿它当持久主键，删掉旧的 tc-1 后新的一条又叫 tc-1，任何还指着
+        # 旧 tc-1 的确认卡都会删错后来的这一条。
         taken = {str(item.get("id")) for item in softs}
-        if wanted not in taken:
-            return wanted
-        suffix = 2
-        while f"{wanted}-{suffix}" in taken:
-            suffix += 1
-        return f"{wanted}-{suffix}"
+        while True:
+            candidate = f"sc-{uuid4().hex[:12]}"
+            if candidate not in taken:
+                return candidate
 
     for index, constraint in enumerate(constraints or [], start=1):
         subject_type = str(getattr(constraint, "subject_type", "teacher"))
@@ -2098,8 +2102,11 @@ def plan_task_constraint_revision(
                 pass
             continue
         if replacing is not None:
+            # 换了内容就是另一条要求：旧编号作废、发新编号——还指着旧编号的确认卡（比如更早生成的
+            # 「取消周三那条」）再来时找不到目标，什么都不会动，而不是把替换后的新内容删掉。
             replacing.update(
                 {
+                    "id": new_soft_id(),
                     "subject_type": subject_type,
                     "subject_ids": subject_ids,
                     "slot_business_ids": slots,
@@ -2119,7 +2126,7 @@ def plan_task_constraint_revision(
             continue
         softs.append(
             {
-                "id": unique_soft_id(constraint_id),
+                "id": new_soft_id(),
                 "subject_type": subject_type,
                 "subject_ids": subject_ids,
                 "slot_business_ids": slots,

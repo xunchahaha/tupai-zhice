@@ -1176,13 +1176,18 @@ def test_assistant_solve_compiles_task_constraint_rules_and_updates_context(
         request_payload = dict(stored.request_payload or {})
         task_rules = request_payload.get("task_constraint_rules") or []
         business_ids = [rule["business_id"] for rule in task_rules]
+        # 持久软要求的编号由服务端发放（sc-…），不沿用模型这一轮的临时标签 tc-soft-1。
+        stored_goal = db.get(SolveGoal, goal.id)
+        assert stored_goal is not None
+        soft_id = (stored_goal.context or {})["soft_task_constraints"][0]["id"]
+        assert soft_id.startswith("sc-")
         # 有关联任务时，确认过的请求约束先成为任务的新版要求、再只从任务编译：
         # 新的硬要求进了清单（forbidden_slot_free-2），软要求进了 context，都以
         # 任务来源（goal:）命名——不再有只活在这一次请求里的 TASK-req-* 规则。
         assert business_ids == [
             f"TASK-{goal.id[:8]}-forbidden_slot_free-1",  # 原清单项
             f"TASK-{goal.id[:8]}-forbidden_slot_free-2",  # 请求硬项 → 清单新增
-            f"TASK-{goal.id[:8]}-soft-tc-soft-1",  # 请求软项 → context
+            f"TASK-{goal.id[:8]}-soft-{soft_id}",  # 请求软项 → context
         ]
         assert request_payload["goal_checklist_version"] == 2  # 新增硬要求升了清单版本
         assert request_payload["task_revision"] == {
@@ -1201,14 +1206,14 @@ def test_assistant_solve_compiles_task_constraint_rules_and_updates_context(
         assert context["schema_version"] == 1
         assert context["scope"]["class_business_ids"] == ["B01"]
         soft_items = context["soft_task_constraints"]
-        assert [item["id"] for item in soft_items] == ["tc-soft-1"]
+        assert [item["id"] for item in soft_items] == [soft_id]
         assert soft_items[0]["source_text"] == "乙老师周三晚尽量别排"
     # 审计：update_context 与任务约束规则 id 留痕。
     updates = _audit_records("update_context", goal.id)
     assert len(updates) == 1
     assert updates[0].detail["task_constraint_rule_ids"] == business_ids
 
-    # 幂等：同 id 再次提交不产生重复 soft 项，scope 照常覆盖。
+    # 幂等：同内容再次提交不产生重复 soft 项（编号不变、原话更新），scope 照常覆盖。
     second = client.post(
         "/api/v1/assistant/solve",
         headers=auth_headers,
@@ -1232,7 +1237,7 @@ def test_assistant_solve_compiles_task_constraint_rules_and_updates_context(
         goal_row = db.get(SolveGoal, goal.id)
         assert goal_row is not None
         soft_items = (goal_row.context or {})["soft_task_constraints"]
-        assert [item["id"] for item in soft_items] == ["tc-soft-1"]
+        assert [item["id"] for item in soft_items] == [soft_id]  # 同内容：幂等，编号不变
         assert soft_items[0]["source_text"].endswith("（更新描述）")
     assert len(_audit_records("update_context", goal.id)) == 2
 
