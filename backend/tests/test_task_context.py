@@ -1176,11 +1176,19 @@ def test_assistant_solve_compiles_task_constraint_rules_and_updates_context(
         request_payload = dict(stored.request_payload or {})
         task_rules = request_payload.get("task_constraint_rules") or []
         business_ids = [rule["business_id"] for rule in task_rules]
+        # 有关联任务时，确认过的请求约束先成为任务的新版要求、再只从任务编译：
+        # 新的硬要求进了清单（forbidden_slot_free-2），软要求进了 context，都以
+        # 任务来源（goal:）命名——不再有只活在这一次请求里的 TASK-req-* 规则。
         assert business_ids == [
-            f"TASK-{goal.id[:8]}-forbidden_slot_free-1",  # goal 清单来源
-            "TASK-req-tc-soft-1",  # 请求 soft
-            "TASK-req-tc-req-hard",  # 请求 hard
+            f"TASK-{goal.id[:8]}-forbidden_slot_free-1",  # 原清单项
+            f"TASK-{goal.id[:8]}-forbidden_slot_free-2",  # 请求硬项 → 清单新增
+            f"TASK-{goal.id[:8]}-soft-tc-soft-1",  # 请求软项 → context
         ]
+        assert request_payload["goal_checklist_version"] == 2  # 新增硬要求升了清单版本
+        assert request_payload["task_revision"] == {
+            "added_hard": ["B01 周五第一节课不能动"],
+            "added_soft": ["乙老师周三晚尽量别排"],
+        }
         # 覆盖陷阱防线：规则不写进 request_payload["rules"]，快照 rules 不被污染。
         assert "rules" not in request_payload
         snapshot = db.get(DataSnapshot, stored.snapshot_id)

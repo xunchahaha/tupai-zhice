@@ -10,6 +10,7 @@ import tempfile
 import time as time_module
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
@@ -55,11 +56,13 @@ from .integrations.feishu.adapter import UNCONFIGURED_DETAIL as FEISHU_UNCONFIGU
 from .integrations.platform_api import clear_token_cache
 from .models import (
     DEFAULT_SCHEDULE_SET_ID,
+    AssistantInterpretReceipt,
     AuditLog,
     CalendarEventBinding,
     Campus,
     ClassGroup,
     CourseSession,
+    DataSnapshot,
     ImportMappingHistory,
     IntegrationSync,
     PreferenceEntry,
@@ -176,6 +179,7 @@ from .schemas import (
     ScheduleSummaryResponse,
     SolveRequest,
     SolverRunExplanation,
+    SolverRunRerunRequest,
     SolverRunResponse,
     TeacherBatchUpdate,
     TeacherPayload,
@@ -189,6 +193,7 @@ from .schemas import (
     UserResponse,
     UserRoleUpdate,
     UserStatusUpdate,
+    default_solver_rules,
 )
 from .security import (
     create_access_token,
@@ -219,13 +224,16 @@ from .services.explain import (
 from .services.feishu import FeishuService, FeishuServiceError, json_text
 from .services.goal import (
     GOAL_CHECKLIST_KINDS,
+    TaskConstraintRevision,
     apply_goal_checklist_revision,
     build_checklist,
     draft_checklist_from_interpretation,
     ensure_bottom_line_items,
     goal_run_counts,
     normalize_goal_scope,
+    plan_task_constraint_revision,
 )
+from .services.goal import _hard_checklist_keys as _goal_hard_checklist_keys
 from .services.ics import build_public_calendar_ics, calendar_etag
 from .services.import_mapping import (
     ColumnMapping,
@@ -287,8 +295,9 @@ from .services.solver import _has_date_information, _selected_sessions, _session
 # services.task_context，提示词（services/ai.py）与这里共用同一组词。
 from .services.task_context import (
     TEACHER_RESTRICTION_LABEL,
-    explicit_word_hits,
+    authorization_clause,
     predicate_label,
+    scoped_word_hits,
 )
 from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
 from .services.xlsx_io import export_schedule_xlsx
@@ -4250,9 +4259,18 @@ def _validated_task_constraints(
         )
 
 
+@dataclass(frozen=True)
+class _TaskRequirements:
+    """任务要求的只读视图：修订计算结果在落库前的编译输入（形状同 SolveGoal 的三个字段）。"""
+
+    id: str
+    checklist: list[dict[str, Any]]
+    context: dict[str, Any]
+
+
 def _compile_task_constraints(
     *,
-    goal: SolveGoal | None = None,
+    goal: SolveGoal | _TaskRequirements | None = None,
     request_constraints: list[AssistantTaskConstraint] | None = None,
 ) -> list[dict[str, Any]]:
     """把任务级约束编译成规则对象，与 snapshot.payload["rules"] 同构（TC-3 §2.4）。
@@ -4277,11 +4295,59 @@ def _compile_task_constraints(
 
     同键（subject_type+subject_ids+slot_business_ids）去重：请求项撞上 goal
     清单项时保留清单侧（单一事实源），请求项之间也按序去重（含 business_id
-    撞名兜底）。任务级约束**永不**创建 Rule 行、不进快照 checksum（§2.5 红线）。
+    撞名兜底）。**硬要求永远压过软要求**：同键下只要任一来源是 hard，软项整体
+    让位（否则先处理的旧软项会通过去重把后来的硬要求挡在编译之外，执行层就只
+    按「尽量」办了用户确认过的「绝对不能」）；同 id 且同主体、时段不同的请求
+    软项视为对持久软项的修改，旧项让位而不是新旧并存。任务级约束**永不**创建
+    Rule 行、不进快照 checksum（§2.5 红线）。
+
+    goal 关联的求解不再同时传请求项：确认过的请求约束先经
+    `plan_task_constraint_revision` 写成任务的新版要求，再只从任务编译
+    （create_solver_run），这里的双来源合并是纯函数契约，仍供直调与无任务请求使用。
     """
     rules: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, tuple[str, ...], tuple[str, ...]]] = set()
     seen_business_ids: set[str] = set()
+
+    def _complete(
+        subject_type: str, subject_ids: list[str], slots: list[str]
+    ) -> tuple[str, tuple[str, ...], tuple[str, ...]] | None:
+        if not subject_ids or not slots:
+            return None
+        return (subject_type, tuple(sorted(subject_ids)), tuple(sorted(slots)))
+
+    # 预扫：哪些内容已经是硬要求（清单项 + 请求硬项），软项同内容一律让位。
+    hard_keys: set[tuple[str, tuple[str, ...], tuple[str, ...]]] = set()
+    if goal is not None:
+        hard_keys.update(_goal_hard_checklist_keys(list(goal.checklist or [])))
+    for constraint in request_constraints or []:
+        if constraint.hardness != "hard":
+            continue
+        hard_key = _complete(
+            str(constraint.subject_type),
+            [str(v) for v in constraint.subject_ids if str(v).strip()],
+            [str(v) for v in constraint.slot_business_ids if str(v).strip()],
+        )
+        if hard_key is not None:
+            hard_keys.add(hard_key)
+    persisted_softs = [
+        item
+        for item in (((goal.context or {}).get("soft_task_constraints") or []) if goal else [])
+        if isinstance(item, dict)
+    ]
+    # 请求软项对持久软项的修改：同 id、同主体、时段不同 → 旧项让位。
+    edited_soft_ids: set[str] = set()
+    for constraint in request_constraints or []:
+        if constraint.hardness != "soft" or not str(constraint.id or "").strip():
+            continue
+        for item in persisted_softs:
+            if (
+                str(item.get("id")) == str(constraint.id)
+                and str(item.get("subject_type") or "teacher") == str(constraint.subject_type)
+                and sorted(str(v) for v in item.get("subject_ids") or [])
+                == sorted(str(v) for v in constraint.subject_ids)
+            ):
+                edited_soft_ids.add(str(constraint.id))
 
     def _append(
         *,
@@ -4344,9 +4410,7 @@ def _compile_task_constraints(
                 source_doc=f"goal:{goal.id}",
                 key=key,
             )
-        for soft in (goal.context or {}).get("soft_task_constraints") or []:
-            if not isinstance(soft, dict):
-                continue
+        for soft in persisted_softs:
             subject_type = str(soft.get("subject_type") or "teacher")
             subject_ids = [str(v) for v in soft.get("subject_ids") or [] if str(v).strip()]
             slots = [str(v) for v in soft.get("slot_business_ids") or [] if str(v).strip()]
@@ -4357,9 +4421,11 @@ def _compile_task_constraints(
                 tuple(sorted(subject_ids)),
                 tuple(sorted(slots)),
             )
-            if key in seen_keys:
-                continue
+            if key in seen_keys or key in hard_keys:
+                continue  # 同内容已有硬要求：软项让位。
             soft_id = str(soft.get("id") or "").strip() or str(len(rules))
+            if soft_id in edited_soft_ids:
+                continue  # 被请求里的同 id 软项修改：新版在下面的请求分支编译。
             _append(
                 business_id=f"TASK-{prefix}-soft-{soft_id}",
                 source_text=str(soft.get("source_text") or ""),
@@ -4384,6 +4450,8 @@ def _compile_task_constraints(
         )
         if key in seen_keys:
             continue  # 与 goal 清单项同键 → 保留清单侧（单一事实源）。
+        if constraint.hardness == "soft" and key in hard_keys:
+            continue  # 同内容已有硬要求（含列表里靠后的请求硬项）：软项让位。
         # 缺失 id 按列表序号兜底生成（§2.4；调用方 create_solver_run 的
         # 预兜底与其保持同一序号口径，两条路径产物一致）。
         constraint_id = str(constraint.id or "").strip() or str(constraint_index)
@@ -4401,6 +4469,65 @@ def _compile_task_constraints(
     return rules
 
 
+def _save_task_requirements_revision(
+    db: Session,
+    user_id: str | None,
+    goal: SolveGoal,
+    revision: TaskConstraintRevision,
+) -> None:
+    """把任务要求的新版清单原子落库：升版本、使旧验收结论失效（评审 R1）。
+
+    与 PATCH /goals/{id}/checklist 同一条件 UPDATE（`apply_goal_checklist_revision`）：
+    版本号 +1、achieved 回退 open、验收状态回 pending、旧清单进历史。行数=0 = 读取后
+    清单已被并发修订（或任务已放弃）——整体回滚并要求重新确认，绝不带着旧快照继续。
+    """
+    old_version = int(goal.checklist_revision)
+    new_version = old_version + 1
+    acceptance_detail: str | None = None
+    if goal.acceptance_status in {"completed", "failed"}:
+        acceptance_detail = f"任务要求已修订至 v{new_version}，等待新验收"
+    if goal.status == "achieved":
+        acceptance_detail = (
+            f"任务要求已修订至 v{new_version}（原已达成结论基于 v{old_version}），等待新验收"
+        )
+    history_entry = {
+        "version": old_version,
+        "saved_at": shanghai_now().isoformat(),
+        "saved_by": user_id,
+        "items": list(goal.checklist or []),
+    }
+    if not apply_goal_checklist_revision(
+        db,
+        goal,
+        old_version=old_version,
+        new_checklist=revision.checklist,
+        history_entry=history_entry,
+        acceptance_detail=acceptance_detail,
+    ):
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="任务要求已被并发修订或任务已放弃，请刷新任务后重新确认再提交",
+        )
+    db.add(
+        AuditLog(
+            actor_id=user_id,
+            action="update_checklist",
+            resource_type="solve_goal",
+            resource_id=goal.id,
+            detail={
+                "from_version": old_version,
+                "to_version": new_version,
+                "via": "task_constraint_revision",
+                "summary": revision.summary(),
+                "acceptance_reset": True,
+            },
+        )
+    )
+    db.flush()
+    db.refresh(goal)
+
+
 def create_solver_run(
     db: Session,
     user_id: str | None,
@@ -4409,16 +4536,32 @@ def create_solver_run(
     run_type: str = "initial",
     extra: dict[str, Any] | None = None,
     goal_id: str | None = None,
+    frozen_from: SolverRun | None = None,
 ) -> SolverRun:
-    # MEM-C1（§6 修正 6）：创建任务时即编译偏好记忆并冻结——快照带 memory 节，
-    # run 落 memory_usage；执行路径只读快照，改记忆不影响在途求解的可复现性。
-    # 编译整体失败不拦截排课主链路：memory 节标 compile_failed，解释层显式提示。
-    try:
-        memory_state = compile_memory_state(db, schedule_set_id)
-    except Exception as exc:  # noqa: BLE001 - 任何记忆层故障都不应拦下课表求解
-        logger.exception("偏好记忆编译失败，本次求解将不带偏好进行")
-        memory_state = compile_failed_state(str(exc))
-    snapshot = create_snapshot(db, user_id, schedule_set_id, memory=memory_state)
+    # frozen_from：「同一个问题多算一会儿」的重跑——沿用原求解冻结的数据快照与偏好记忆，
+    # 不重新读主数据、不重新编译记忆，避免加预算悄悄换了问题（评审 R2）。
+    snapshot: DataSnapshot | None = None
+    memory_state: dict[str, Any] | None
+    if frozen_from is not None:
+        frozen_snapshot = db.get(DataSnapshot, frozen_from.snapshot_id)
+        if frozen_snapshot is not None and frozen_snapshot.schedule_set_id == schedule_set_id:
+            snapshot = frozen_snapshot
+    if snapshot is not None and frozen_from is not None:
+        memory_state = (
+            dict(frozen_from.memory_usage)
+            if frozen_from.memory_usage is not None
+            else None
+        )
+    else:
+        # MEM-C1（§6 修正 6）：创建任务时即编译偏好记忆并冻结——快照带 memory 节，
+        # run 落 memory_usage；执行路径只读快照，改记忆不影响在途求解的可复现性。
+        # 编译整体失败不拦截排课主链路：memory 节标 compile_failed，解释层显式提示。
+        try:
+            memory_state = compile_memory_state(db, schedule_set_id)
+        except Exception as exc:  # noqa: BLE001 - 任何记忆层故障都不应拦下课表求解
+            logger.exception("偏好记忆编译失败，本次求解将不带偏好进行")
+            memory_state = compile_failed_state(str(exc))
+        snapshot = create_snapshot(db, user_id, schedule_set_id, memory=memory_state)
     payload: dict[str, Any] = {
         "time_limit_seconds": request.time_limit_seconds,
         "change_weight": getattr(request, "change_weight", 100000),
@@ -4454,9 +4597,32 @@ def create_solver_run(
                 request_task_constraints.append(
                     constraint.model_copy(update={"id": str(index)})
                 )
-    task_constraint_rules = _compile_task_constraints(
-        goal=goal_row, request_constraints=request_task_constraints
-    )
+    # 有关联任务时：用户确认过的请求约束先合并成任务的新版要求（硬要求进清单、软要求
+    # 进 context），再只从新版编译——这次求解用什么、之后重跑与验收核对什么，是同一份。
+    # 此处只做计算（不写库）：落库放在覆盖性校验通过之后，校验失败不留半份修订。
+    revision: TaskConstraintRevision | None = None
+    if goal_row is not None and request_task_constraints:
+        revision = plan_task_constraint_revision(
+            list(goal_row.checklist or []),
+            list((goal_row.context or {}).get("soft_task_constraints") or []),
+            request_task_constraints,
+        )
+        task_constraint_rules = _compile_task_constraints(
+            goal=_TaskRequirements(
+                id=goal_row.id,
+                checklist=revision.checklist,
+                context={
+                    **(goal_row.context or {}),
+                    "soft_task_constraints": revision.soft_constraints,
+                },
+            )
+        )
+    elif goal_row is not None:
+        task_constraint_rules = _compile_task_constraints(goal=goal_row)
+    else:
+        task_constraint_rules = _compile_task_constraints(
+            request_constraints=request_task_constraints
+        )
     if task_constraint_rules:
         payload["task_constraint_rules"] = task_constraint_rules
     # 基准三级选择（TC-5 §4.6）：显式 parent > goal 工作草稿（仍为 draft）>
@@ -4540,9 +4706,13 @@ def create_solver_run(
     # MEM-E2/E2a：创建任务时冻结关联目标当时的清单版本——验收若晚于清单修订，
     # 报告 meta 会注明「求解参数基于 v{m} 清单生成，验收按 v{n}」，可解释。
     if goal_row is not None:
+        if revision is not None and revision.checklist_changed:
+            _save_task_requirements_revision(db, user_id, goal_row, revision)
         # 版本号以持久化计数列为准（MEM-F/F2 收口），与验收写回的
-        # 条件 UPDATE 用同一计数。
+        # 条件 UPDATE 用同一计数；任务要求刚被修订时这里已经是新版本。
         payload["goal_checklist_version"] = int(goal_row.checklist_revision)
+        if revision is not None and (summary := revision.summary()):
+            payload["task_revision"] = summary
         # TC-4 写入点①（§4.2）：创建求解 = 用户决策点，本次请求的范围整体覆盖
         # context.scope，soft 任务约束按 id 幂等合并（来源=请求约束中
         # hardness=soft 的项，无请求项时维持现值）；同事务 + 审计
@@ -4562,22 +4732,16 @@ def create_solver_run(
         # 显式基准（请求指定的版本）记进任务上下文；之后没有更新的工作草稿时仍以它为基准。
         if requested_parent_id and "parent_schedule_id" not in (extra or {}):
             context["base_schedule_id"] = requested_parent_id
-        soft_merged = {
-            str(item.get("id")): dict(item)
-            for item in context.get("soft_task_constraints") or []
-            if isinstance(item, dict) and item.get("id")
-        }
-        for constraint in request_task_constraints:
-            if constraint.hardness != "soft":
-                continue
-            soft_merged[str(constraint.id)] = {
-                "id": constraint.id,
-                "subject_type": constraint.subject_type,
-                "subject_ids": list(constraint.subject_ids),
-                "slot_business_ids": list(constraint.slot_business_ids),
-                "source_text": constraint.source_text,
-            }
-        context["soft_task_constraints"] = list(soft_merged.values())
+        if revision is not None:
+            soft_constraints = [dict(item) for item in revision.soft_constraints]
+        else:
+            soft_constraints = [
+                dict(item)
+                for item in context.get("soft_task_constraints") or []
+                if isinstance(item, dict) and item.get("id")
+            ]
+        soft_merged = {str(item.get("id")): item for item in soft_constraints}
+        context["soft_task_constraints"] = soft_constraints
         goal_row.context = context
         db.add(
             AuditLog(
@@ -4592,6 +4756,11 @@ def create_solver_run(
                     "task_constraint_rule_ids": [
                         str(rule.get("business_id")) for rule in task_constraint_rules
                     ],
+                    **(
+                        {"task_revision": payload["task_revision"]}
+                        if "task_revision" in payload
+                        else {}
+                    ),
                 },
             )
         )
@@ -4646,6 +4815,104 @@ def submit_solver_run(
         "solver_run",
         run.id,
         {"goal_id": run.goal_id} if run.goal_id else None,
+    )
+    db.commit()
+    if request.wait:
+        execute_solver_run(run.id)
+    else:
+        enqueue_solver_run(run.id)
+    db.refresh(run)
+    return run
+
+
+def raised_budget_seconds(current: float | None) -> float:
+    """加预算的统一口径：min(max(原预算 × 3, 90), 900) 秒（07 §5.2）。"""
+    base = float(current) if current else 30.0
+    return float(min(max(base * 3, 90.0), 900.0))
+
+
+# 重跑时原样沿用的冻结键：基准（版本 + 当时的上一版课次）与一句话排课入口的痕迹。
+_RERUN_CARRIED_KEYS = (
+    "instruction",
+    "assistant_entry",
+    "parent_schedule_id",
+    "previous_assignments",
+    "baseline_source",
+)
+
+
+@router.post(
+    "/solver-runs/{run_id}/rerun",
+    response_model=SolverRunDetailResponse,
+    status_code=202,
+    tags=["solver"],
+)
+def rerun_solver_run(
+    run_id: str,
+    request: SolverRunRerunRequest,
+    db: Db,
+    user: AdminOrScheduler,
+    scope: SchedulerScope,
+) -> SolverRun:
+    """「同一个问题，多算一会儿」：按原求解的冻结参数重跑，只改时间预算。
+
+    沿用原求解的范围/日期/课次、规则开关、变更权重、数据快照与偏好记忆、基准版本；
+    有关联任务时任务要求取任务当前版本（与验收同一份），无任务的一句话求解沿用当时
+    冻结的任务约束。**不**读取任何界面草稿——刷新后参数草稿回到默认值，也不会让
+    300 秒的任务被「加预算」降成 90 秒，或悄悄重新打开被用户关掉的规则开关。需要换
+    数据、规则、记忆或基准时是另一个动作：按当前范围重新排课。
+    """
+    source = get_scoped_or_404(db, SolverRun, run_id, scope)
+    if source.status not in {"completed", "failed"}:
+        raise HTTPException(status_code=409, detail="求解尚未结束，结束后才能按原参数重跑")
+    if source.run_type != "initial":
+        # 调课/导入求解带着各自专属的冻结参数（事件、局部邻域…），这里只认识排课求解的那一套，
+        # 重放会悄悄丢掉它们——不支持就明说，不做「差不多」的重跑。
+        raise HTTPException(status_code=409, detail="调课或导入产生的求解不支持按原参数重跑")
+    goal = _resolve_goal_for_run(db, source.goal_id, scope.id)
+    frozen = dict(source.request_payload or {})
+    time_limit = request.time_limit_seconds or raised_budget_seconds(source.time_limit_seconds)
+    solve_request = SolveRequest(
+        time_limit_seconds=time_limit,
+        course_business_ids=list(frozen.get("course_business_ids") or []),
+        change_weight=int(frozen.get("change_weight", 100000)),
+        business_lines=list(frozen.get("business_lines") or []),
+        product_types=list(frozen.get("product_types") or []),
+        class_business_ids=list(frozen.get("class_business_ids") or []),
+        date_from=frozen.get("date_from"),
+        date_to=frozen.get("date_to"),
+        date_window_days=int(frozen.get("date_window_days", 7)),
+        solver_rules=list(frozen.get("solver_rules") or default_solver_rules()),
+        goal_id=goal.id if goal else None,
+        wait=request.wait,
+    )
+    extra: dict[str, Any] = {key: frozen[key] for key in _RERUN_CARRIED_KEYS if key in frozen}
+    extra["rerun_of"] = source.id
+    if goal is None and frozen.get("task_constraint_rules"):
+        # 无任务的一句话求解：当时确认的任务约束只存在于这次求解的冻结载荷里。
+        extra["task_constraint_rules"] = frozen["task_constraint_rules"]
+    run = create_solver_run(
+        db,
+        user.id,
+        solve_request,
+        scope.id,
+        run_type=source.run_type,
+        extra=extra,
+        goal_id=goal.id if goal else None,
+        frozen_from=source,
+    )
+    audit(
+        db,
+        user,
+        "rerun",
+        "solver_run",
+        run.id,
+        {
+            "rerun_of": source.id,
+            "goal_id": run.goal_id,
+            "time_limit_seconds": time_limit,
+            "previous_time_limit_seconds": source.time_limit_seconds,
+        },
     )
     db.commit()
     if request.wait:
@@ -7325,16 +7592,120 @@ def _goal_task_context(
     }
 
 
+# 解析上下文里注入的活跃记忆条数：与本次原话提到的主体相关的优先，其余按新近补足。
+_INTERPRET_RELEVANT_PREFERENCES = 60
+_INTERPRET_PREFERENCE_CAP = 80
+
+
+def _mentioned_subjects(
+    db: Session, schedule_set_id: str, text: str | None
+) -> dict[str, set[str]]:
+    """原话里提到了哪些教师/教室/班级，按主体类型分组（业务标识、名称；教师再认「姓+老师」）。
+
+    用于两件事：检索与本次话语相关的记忆（避免旧偏好被一堆不相关的新记忆挤出候选），
+    以及复核动作原话没有指向另一个主体（授权不能借给别的主体，只与同类型主体比对）。
+    宁可多召回：「张老师」可能对应多位姓张的教师，都算提到。
+    """
+    found: dict[str, set[str]] = {"teacher": set(), "classroom": set(), "cohort": set()}
+    if not text:
+        return found
+
+    def consider(
+        subject_type: str,
+        business_id: str | None,
+        name: str | None,
+        *,
+        surname_title: bool = False,
+    ) -> None:
+        if not business_id:
+            return
+        tokens = {business_id}
+        if name:
+            tokens.add(name)
+            if surname_title and 2 <= len(name) <= 4:
+                tokens.update({f"{name[0]}老师", f"{name[0]}教师"})
+        if any(token and token in text for token in tokens):
+            found[subject_type].add(business_id)
+
+    for business_id, name in db.execute(
+        select(Teacher.business_id, Teacher.name).where(Teacher.schedule_set_id == schedule_set_id)
+    ).all():
+        consider("teacher", business_id, name, surname_title=True)
+    for business_id, name in db.execute(
+        select(Room.business_id, Room.name).where(Room.schedule_set_id == schedule_set_id)
+    ).all():
+        consider("classroom", business_id, name)
+    for business_id, name in db.execute(
+        select(ClassGroup.business_id, ClassGroup.name).where(
+            ClassGroup.schedule_set_id == schedule_set_id
+        )
+    ).all():
+        consider("cohort", business_id, name)
+    return found
+
+
+def _active_preferences_for_interpret(
+    db: Session, schedule_set_id: str, instruction: str | None
+) -> list[dict[str, Any]]:
+    """注入解析上下文的活跃记忆：先取与原话主体相关的，再按新近补足。
+
+    撤销/修改动作的 target_entry_id 必须在这份列表里（列表外的 id 视为幻觉），所以列表
+    不能只是「全局最新 N 条」——使用一段时间后，张老师的旧偏好会被其他老师的新记忆
+    挤出最近 50 条，仍参与排课却没法用自然语言纠正。已过有效期但状态还没迁移的条目
+    不再占位（编译层本来就不会用它们）。
+    """
+    today = shanghai_now().date()
+    rows = list(
+        db.scalars(
+            select(PreferenceEntry)
+            .where(
+                PreferenceEntry.schedule_set_id == schedule_set_id,
+                PreferenceEntry.status.in_(["confirmed", "probation"]),
+                or_(PreferenceEntry.valid_until.is_(None), PreferenceEntry.valid_until >= today),
+            )
+            .order_by(PreferenceEntry.created_at.desc(), PreferenceEntry.id)
+        ).all()
+    )
+    mentioned = {
+        business_id
+        for ids in _mentioned_subjects(db, schedule_set_id, instruction).values()
+        for business_id in ids
+    }
+    relevant = [item for item in rows if item.subject_id in mentioned][
+        :_INTERPRET_RELEVANT_PREFERENCES
+    ]
+    chosen_ids = {item.id for item in relevant}
+    recent = [item for item in rows if item.id not in chosen_ids]
+    chosen = [*relevant, *recent][:_INTERPRET_PREFERENCE_CAP]
+    return [
+        {
+            "id": item.id,
+            "subject_type": item.subject_type,
+            "subject_id": item.subject_id,
+            "predicate": item.predicate,
+            "constraint": dict(item.constraint or {}),
+            "modality": item.modality,
+            "status": item.status,
+            "valid_until": item.valid_until.isoformat() if item.valid_until else None,
+        }
+        for item in chosen
+    ]
+
+
 def _interpret_context(
-    db: Session, schedule_set_id: str, goal_id: str | None = None
+    db: Session,
+    schedule_set_id: str,
+    goal_id: str | None = None,
+    instruction: str | None = None,
 ) -> dict[str, Any]:
     """AI 解析用的业务候选值上下文，同步与流式两条 interpret 通道共用。
 
     TC-1 §2.1 追加 teachers/time_slots 两组候选（任务级约束的主体/时段只能取
     候选值）；TC-2 §3.4 追加 active_preferences（记忆动作的 target_entry_id
-    只能取这里出现的 id，列表外的 id 视为幻觉降级候选，按 created_at 倒序
-    上限 50 条防 token 膨胀）；TC-4 §4.3 goal_id 有值时追加 task_context 节
-    （既有任务的增量解析口径）。
+    只能取这里出现的 id，列表外的 id 视为幻觉降级候选）：先取与本次原话提到的
+    主体相关的活跃条目、再按新近补足，总量有上限防 token 膨胀，已过有效期的
+    不占位（见 _active_preferences_for_interpret）；TC-4 §4.3 goal_id 有值时追加
+    task_context 节（既有任务的增量解析口径）。
     """
     context: dict[str, Any] = {
         "business_lines": sorted(
@@ -7381,27 +7752,9 @@ def _interpret_context(
                 .order_by(TimeSlot.business_id)
             ).all()
         ],
-        "active_preferences": [
-            {
-                "id": item.id,
-                "subject_type": item.subject_type,
-                "subject_id": item.subject_id,
-                "predicate": item.predicate,
-                "constraint": dict(item.constraint or {}),
-                "modality": item.modality,
-                "status": item.status,
-                "valid_until": item.valid_until.isoformat() if item.valid_until else None,
-            }
-            for item in db.scalars(
-                select(PreferenceEntry)
-                .where(
-                    PreferenceEntry.schedule_set_id == schedule_set_id,
-                    PreferenceEntry.status.in_(["confirmed", "probation"]),
-                )
-                .order_by(PreferenceEntry.created_at.desc(), PreferenceEntry.id)
-                .limit(50)
-            ).all()
-        ],
+        "active_preferences": _active_preferences_for_interpret(
+            db, schedule_set_id, instruction
+        ),
         "fixed_rule_labels": list(SOLVER_RULE_LABELS.values()),
     }
     if goal_id:
@@ -7543,6 +7896,8 @@ def _verify_explicit_memory_action(
     schedule_set_id: str,
     injected_ids: set[str],
     word_hits: dict[str, list[str]],
+    binding_error: str | None = None,
+    mentioned_subjects: dict[str, set[str]] | None = None,
 ) -> tuple[bool, str | None, PreferenceEntry | None]:
     """explicit 三条代码复核（TC-2 §3.2）：模型自报不算数，三条全过才执行。
 
@@ -7550,12 +7905,21 @@ def _verify_explicit_memory_action(
        constraint 引用的 slot/room 存在；expire/update：目标条目存在且属于本方案）；
     ② target_entry_id 必须命中 _interpret_context 注入的真实活跃条目（§3.4，
        列表外的 id 一律视为幻觉，降级候选）；
-    ③ 原指令命中显式声明词表（services.task_context 单一事实源，与提示词同表）。
+    ③ 动作**自己的原话分句**命中显式声明词表（services.task_context 单一事实源，
+       与提示词同表）：word_hits 是该分句内的命中（带词前否定、明确拒绝否决），
+       不是整句指令的——整句里别处出现的「记住」不能替另一条动作授权；片段定位
+       不到/跨句（binding_error）、分句点名的是另一个主体（mentioned_subjects 不含
+       本动作主体）同样不通过。
     返回 (是否通过, 不通过原因, expire/update 的目标条目)。
     """
+    if binding_error:
+        return False, binding_error, None
     if action.action == "save_preference":
         if not word_hits.get("save"):
-            return False, "原话未命中显式声明词表（记录类），按推测处理", None
+            return False, "动作自己的原话里没有显式的记录声明（或被否定），按推测处理", None
+        same_type = (mentioned_subjects or {}).get(action.subject_type) or set()
+        if same_type and action.subject_id not in same_type:
+            return False, "动作的原话指向的是其他主体，授权不能借用", None
         if not action.subject_id or not action.predicate:
             return False, "主体或谓词缺失", None
         if action.predicate not in ALL_PREDICATES:
@@ -7570,13 +7934,16 @@ def _verify_explicit_memory_action(
             return False, "约束引用的时段/教室在本方案中不存在", None
         return True, None, None
     if not (word_hits.get("expire") or word_hits.get("correct")):
-        return False, "原话未命中显式声明词表（撤销/失效或纠正类），按推测处理", None
+        return False, "动作自己的原话里没有显式的撤销/纠正声明（或被否定），按推测处理", None
     target_id = str(action.target_entry_id or "").strip()
     if not target_id or target_id not in injected_ids:
         return False, "目标条目 id 未出现在本次解析注入的活跃记忆中（疑似幻觉）", None
     entry = db.get(PreferenceEntry, target_id)
     if entry is None or entry.schedule_set_id != schedule_set_id:
         return False, "目标条目不存在或不属于当前方案", None
+    same_type = (mentioned_subjects or {}).get(entry.subject_type) or set()
+    if same_type and entry.subject_id not in same_type:
+        return False, "动作的原话指向的是其他主体，授权不能借用", None
     return True, None, entry
 
 
@@ -7708,7 +8075,6 @@ def _execute_memory_actions(
         for item in context.get("active_preferences") or []
         if isinstance(item, dict) and item.get("id")
     }
-    word_hits = explicit_word_hits(instruction)
     for index, raw in enumerate(raw_list, start=1):
         action_id = f"ma-{index}"
         if not isinstance(raw, dict):
@@ -7756,13 +8122,18 @@ def _execute_memory_actions(
                 )
             continue
 
+        # 授权按动作绑定：只看这条动作自己的原话所在分句，不让整句里别处的
+        # 「记住」替它授权（评审 R5）。
+        clause, binding_error = authorization_clause(instruction, action.source_text)
         verified, reason, target = _verify_explicit_memory_action(
             db,
             action,
             instruction=instruction,
             schedule_set_id=schedule_set_id,
             injected_ids=injected_ids,
-            word_hits=word_hits,
+            word_hits=scoped_word_hits(clause) if clause is not None else {},
+            binding_error=binding_error,
+            mentioned_subjects=_mentioned_subjects(db, schedule_set_id, clause),
         )
         if not verified:
             # explicit 复核不过 = 不是真正的显式声明 → 降级（§3.2）。
@@ -8195,6 +8566,64 @@ AILY_INTERPRET_CONTRACT = {
 }
 
 
+def _interpret_receipt_replay(
+    db: Session, schedule_set_id: str, request: AssistantInterpretRequest
+) -> AssistantInterpretResponse | None:
+    """这条指令已经解析并执行过了吗：有回执就原样返回当时的响应（评审 R4）。"""
+    if not request.request_id:
+        return None
+    receipt = db.scalar(
+        select(AssistantInterpretReceipt).where(
+            AssistantInterpretReceipt.schedule_set_id == schedule_set_id,
+            AssistantInterpretReceipt.request_id == request.request_id,
+        )
+    )
+    if receipt is None:
+        return None
+    if receipt.instruction != request.instruction:
+        raise HTTPException(status_code=409, detail="请求标识已用于另一条指令，请重新提交")
+    return AssistantInterpretResponse.model_validate(receipt.response)
+
+
+def _commit_interpret(
+    db: Session,
+    user: User,
+    schedule_set_id: str,
+    request: AssistantInterpretRequest,
+    normalized: AssistantInterpretResponse,
+    audit_detail: dict[str, Any],
+) -> AssistantInterpretResponse:
+    """解析结果收口：审计 + 幂等回执与记忆动作的副作用同一事务提交。
+
+    回执只在有副作用时写（有已执行或已入收件箱的记忆动作）。并发的两次相同请求撞
+    唯一约束时，输家整体回滚（它执行的记忆动作随之撤销），返回赢家的回执响应。
+    """
+    audit(db, user, "assistant_interpret", "instruction", None, audit_detail)
+    has_side_effects = any(
+        item.status in {"executed", "pending_confirmation"}
+        for item in normalized.memory_action_receipts
+    )
+    if request.request_id and has_side_effects:
+        db.add(
+            AssistantInterpretReceipt(
+                schedule_set_id=schedule_set_id,
+                request_id=request.request_id,
+                instruction=request.instruction,
+                response=normalized.model_dump(mode="json"),
+                created_by=user.id,
+            )
+        )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        winner = _interpret_receipt_replay(db, schedule_set_id, request)
+        if winner is None:
+            raise
+        return winner
+    return normalized
+
+
 @router.post(
     "/assistant/interpret",
     response_model=AssistantInterpretResponse,
@@ -8206,6 +8635,9 @@ def assistant_interpret(
     user: AdminOrScheduler,
     schedule_scope: SchedulerScope,
 ) -> AssistantInterpretResponse:
+    replay = _interpret_receipt_replay(db, schedule_scope.id, request)
+    if replay is not None:
+        return replay
     ai_service = AIService(settings, db)
     ai_configuration = ai_service.configuration_view()
     configuration = FeishuService(settings, db).configuration_view()
@@ -8218,7 +8650,7 @@ def assistant_interpret(
     # 解析上下文一次性构建（TC-1 §2.1 候选 + TC-2 §3.4 active_preferences +
     # TC-4 §4.3 goal_id 有值时的 task_context），Aily 分支同样需要（记忆动作的
     # explicit 复核校验 target_entry_id 命中注入列表）。
-    context = _interpret_context(db, schedule_scope.id, request.goal_id)
+    context = _interpret_context(db, schedule_scope.id, request.goal_id, request.instruction)
     if ai_configuration["configured"]:
         try:
             output, thinking = ai_service.interpret_instruction(
@@ -8256,16 +8688,14 @@ def assistant_interpret(
         context=context,
         actor=user,
     )
-    audit(
+    return _commit_interpret(
         db,
         user,
-        "assistant_interpret",
-        "instruction",
-        None,
+        schedule_scope.id,
+        request,
+        normalized,
         {"source": normalized.source, "instruction": request.instruction},
     )
-    db.commit()
-    return normalized
 
 
 @router.post(
@@ -8286,13 +8716,14 @@ async def assistant_interpret_stream(
     StreamingResponse 会取消本生成器，httpx 上游流随之关闭。Aily 无流式，
     退化为单条 result 事件（伪流式）。AI 未配置且无 Aily 时仍返回 409 JSON。
     """
+    replay = _interpret_receipt_replay(db, schedule_scope.id, request)
     ai_service = AIService(settings, db)
     ai_configuration = ai_service.configuration_view()
     configuration = FeishuService(settings, db).configuration_view()
     aily_app_id = settings.aily_app_id or configuration.get("aily_app_id")
     aily_skill_id = settings.aily_skill_id or configuration.get("aily_skill_id")
     aily_configured = bool(aily_app_id and aily_skill_id)
-    if not ai_configuration["configured"] and not aily_configured:
+    if replay is None and not ai_configuration["configured"] and not aily_configured:
         raise HTTPException(
             status_code=409,
             detail="尚未配置一句话排课 AI，请先前往“飞书集成”填写模型接口配置。",
@@ -8305,9 +8736,13 @@ async def assistant_interpret_stream(
 
         # 首包立即发送：客户端据此确认连接，不会被反代缓冲卡到请求结束。
         yield _sse_event("stage", {"stage": "connect"})
+        if replay is not None:
+            # 这条指令早已解析并执行过（提交后结果在网络里丢了的重试）：原样重放。
+            yield _sse_event("result", replay.model_dump(mode="json"))
+            return
         # 解析上下文一次性构建（候选 + active_preferences + goal_id 的
         # task_context），与同步端点同一口径。
-        context = _interpret_context(db, schedule_scope.id, request.goal_id)
+        context = _interpret_context(db, schedule_scope.id, request.goal_id, request.instruction)
         if ai_configuration["configured"]:
             try:
                 yield _sse_event("stage", {"stage": "read"})
@@ -8333,19 +8768,18 @@ async def assistant_interpret_stream(
                         context=context,
                         actor=user,
                     )
-                    audit(
+                    normalized = _commit_interpret(
                         db,
                         user,
-                        "assistant_interpret",
-                        "instruction",
-                        None,
+                        schedule_scope.id,
+                        request,
+                        normalized,
                         {
                             "source": normalized.source,
                             "instruction": request.instruction,
                             "stream": True,
                         },
                     )
-                    db.commit()
                     yield _sse_event("result", normalized.model_dump(mode="json"))
             except AIServiceError as exc:
                 yield _sse_event("error", {"detail": f"AI 指令解析失败：{exc}"})
@@ -8376,19 +8810,18 @@ async def assistant_interpret_stream(
                     context=context,
                     actor=user,
                 )
-                audit(
+                normalized = _commit_interpret(
                     db,
                     user,
-                    "assistant_interpret",
-                    "instruction",
-                    None,
+                    schedule_scope.id,
+                    request,
+                    normalized,
                     {
                         "source": normalized.source,
                         "instruction": request.instruction,
                         "stream": True,
                     },
                 )
-                db.commit()
                 yield _sse_event("result", normalized.model_dump(mode="json"))
             except (FeishuServiceError, httpx.HTTPError) as exc:
                 yield _sse_event("error", {"detail": f"飞书 Aily 解析失败：{exc}"})

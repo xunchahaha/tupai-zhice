@@ -121,3 +121,84 @@ def predicate_label(predicate: str | None) -> str:
     if not predicate:
         return "未知偏好"
     return PREDICATE_LABELS.get(predicate, predicate)
+
+
+# ---------------------------------------------------------------- 动作级授权绑定
+#
+# 整句指令里出现一次「记住」，不等于这句话里每条动作都被授权：
+# 「记住张老师偏好上午；李老师这次先放周四，不要记成长期偏好」——第二条是一次性安排，
+# 不能借第一条的「记住」变成长期偏好。授权必须绑定到**该动作自己的原话片段**：
+# 片段所在的分句里命中显式声明词、且词前没有否定、分句里没有「不要记/别记」这类
+# 明确拒绝，才算这条动作被授权；绑不上的动作由调用方降级成待确认候选。
+
+# 分句边界：句末标点、分号、换行。逗号/顿号/冒号不切——「记住：…」「…，记住」是同一句。
+_CLAUSE_BOUNDARY = re.compile(r"[。！？!?；;\n\r]")
+# 动作原话片段至少这么长才能证明自己指的是哪一句（与 api._MIN_COVERED_TEXT_CHARS 同值）。
+_MIN_SOURCE_CHARS = 4
+# 词前否定窗口：否定词出现在命中词之前 6 个字内、且中间没有逗号类停顿。
+_NEGATION_WINDOW = 6
+_NEGATION_PAUSE = "，,、：:（）()"
+_WINDOW_NEGATION = re.compile(
+    r"不是|并非|不算|不要|不用|不必|不需要|没必要|先不|暂不|不想|(?<![特区分差辨告道离])别"
+)
+# 明确拒绝记录：「不要记成长期偏好」「别记」「先不存」——词前窗口抓不到「不要记成长期」
+# 里隔着两个字的否定，这里按短语整体否决记录类授权。
+_REFUSE_SAVE = re.compile(
+    r"(?:不要|不用|不必|先不|暂不|不想|(?<![特区分差辨告道离])别)\s*(?:记|存|保存|长期)"
+)
+
+
+def _negated_before(text: str, start: int) -> bool:
+    prefix = text[max(0, start - _NEGATION_WINDOW) : start]
+    for mark in _NEGATION_PAUSE:
+        cut = prefix.rfind(mark)
+        if cut != -1:
+            prefix = prefix[cut + 1 :]
+    return bool(_WINDOW_NEGATION.search(prefix))
+
+
+def authorization_clause(instruction: str, source_text: str) -> tuple[str | None, str | None]:
+    """定位动作原话片段所在的分句，返回 (分句文本, 绑不上的原因)。
+
+    片段靠「忽略标点/空白」的逐字匹配在指令里定位（模型摘录常带走或补上标点）；
+    定位不到、太短、或跨越多个分句（无法确定授权范围）都返回原因，由调用方降级。
+    """
+    chars = [ch for ch in source_text or "" if re.match(r"[^\W_]", ch)]
+    if len(chars) < _MIN_SOURCE_CHARS:
+        return None, "动作没有可定位的原话片段，无法确认授权属于哪一句"
+    pattern = re.compile(r"[\W_]*".join(re.escape(ch) for ch in chars))
+    found = pattern.search(instruction)
+    if found is None:
+        return None, "动作的原话片段不在本次指令里，无法确认授权属于哪一句"
+    start, end = found.span()
+    if _CLAUSE_BOUNDARY.search(instruction[start:end]):
+        return None, "动作的原话片段跨越多句，无法确定授权范围"
+    boundaries = list(_CLAUSE_BOUNDARY.finditer(instruction, 0, start))
+    clause_start = boundaries[-1].end() if boundaries else 0
+    tail = _CLAUSE_BOUNDARY.search(instruction, end)
+    clause_end = tail.start() if tail else len(instruction)
+    return instruction[clause_start:clause_end], None
+
+
+def scoped_word_hits(clause: str) -> dict[str, list[str]]:
+    """分句内的显式声明词命中：带词前否定窗口，记录类再受「明确拒绝记录」否决。
+
+    与 `explicit_word_hits` 同一张词表；区别是这里只看动作自己的分句、
+    否定可以隔着几个字（「不要记成长期偏好」），撤销类里本身不带否定的词
+    （撤销/作废）同样受词前否定约束。
+    """
+    hits: dict[str, list[str]] = {}
+    for group, words in _EXPLICIT_WORD_GROUPS.items():
+        alternation = "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True))
+        matched: set[str] = set()
+        for found in re.finditer(alternation, clause):
+            word = found.group()
+            negatable = group == "save" or word in {"撤销", "作废"}
+            if negatable and _negated_before(clause, found.start()):
+                continue
+            matched.add(word)
+        if matched:
+            hits[group] = sorted(matched)
+    if "save" in hits and _REFUSE_SAVE.search(clause):
+        del hits["save"]
+    return hits

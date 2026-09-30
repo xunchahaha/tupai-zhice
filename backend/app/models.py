@@ -412,6 +412,27 @@ class SolverRun(TimestampMixin, Base):
         """结论是否来自求解前预检——CP-SAT 未运行，不能表述为「已证明无解」。"""
         return bool((self.result_payload or {}).get("presolve_infeasible"))
 
+    @property
+    def time_limit_seconds(self) -> float | None:
+        """这次求解提交时的时间预算——「加预算」按它计算，而不是按界面草稿的默认值。"""
+        raw = (self.request_payload or {}).get("time_limit_seconds")
+        try:
+            return float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def task_revision(self) -> dict[str, Any] | None:
+        """本次求解创建时对任务要求做过的修订摘要（新增/收紧/替换/保留的要求）。"""
+        raw = (self.request_payload or {}).get("task_revision")
+        return dict(raw) if isinstance(raw, dict) else None
+
+    @property
+    def rerun_of(self) -> str | None:
+        """由哪次求解「按原参数重跑」而来。"""
+        raw = (self.request_payload or {}).get("rerun_of")
+        return str(raw) if raw else None
+
 
 class ScheduleVersion(TimestampMixin, Base):
     __tablename__ = "schedule_versions"
@@ -711,6 +732,31 @@ class ImportMappingHistory(TimestampMixin, Base):
     sheet_name: Mapped[str] = mapped_column(String(255), default="")
     used_count: Mapped[int] = mapped_column(Integer, default=0)
     last_used_at: Mapped[datetime] = mapped_column(ShanghaiDateTime(), default=shanghai_now)
+
+
+class AssistantInterpretReceipt(TimestampMixin, Base):
+    """一条用户指令的解析回执：让「有副作用的解析」可以安全重试（评审 R4）。
+
+    解析接口会直接执行用户明确授权的记忆动作（「记住…」）并提交，再把结果发给前端。
+    提交之后结果在网络里丢了，前端会用同一句话回退到同步接口——没有共同标识就分不出
+    这是重试，偏好会被再建一条、重复计权。客户端给一次指令生成一个 request_id，
+    流式、同步回退、失败重试都带同一个；服务端在**动作执行的同一事务**里写入本回执
+    （方案 + request_id 唯一，存下当时的完整响应），重试直接返回原响应，不再调用
+    模型、不再执行动作。并发的两次重试撞唯一约束，输家整体回滚后读回赢家的回执。
+    只为产生了副作用（有已执行或已入收件箱的记忆动作）的解析落回执，纯读取不占行。
+    """
+
+    __tablename__ = "assistant_interpret_receipts"
+    __table_args__ = (UniqueConstraint("schedule_set_id", "request_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    schedule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("schedule_sets.id", ondelete="CASCADE"), index=True
+    )
+    request_id: Mapped[str] = mapped_column(String(64))
+    instruction: Mapped[str] = mapped_column(Text)
+    response: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 
 class AuditLog(Base):

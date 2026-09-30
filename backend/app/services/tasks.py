@@ -478,6 +478,74 @@ def _mark_goal_acceptance_failed(db: Any, goal_id: str, *, version: int, detail:
     return int(result.rowcount or 0) == 1
 
 
+def _promote_work_draft(
+    db: Any, run: SolverRun, goal_id: str, draft_version: ScheduleVersion
+) -> dict[str, Any]:
+    """run 产出草稿后接管任务的工作草稿指针——只有仍是「当前有效求解」的产物才行。
+
+    指针决定下一次「继续调整」从哪张草稿起步（api.create_solver_run 三级基准里的
+    goal_work_draft），和验收结论的 checklist_revision 保护是两件事：旧求解晚结束
+    不能把基准换回旧草稿。接管条件（读到的都是持有行锁之后的当前状态）：
+
+    1. 任务未放弃；
+    2. 求解创建时冻结的 goal_checklist_version 仍等于任务当前清单版本——任务要求
+       已修订，这份产物回答的是旧版要求，只进历史，不接管当前基准；
+    3. 指针现在指向的草稿不是由**更晚创建**的求解产出的——同一版要求下先后发起的
+       两次求解，晚创建的先完成后，早创建的晚到结果不得覆盖它。
+
+    读-改-写放在同一个行锁下：先发一条不改值的 UPDATE 取得该任务行的写锁，再读
+    context（SQLite 单写者串行、PostgreSQL 行锁，两者下「读到什么就写回什么」都不会
+    被另一个并发验收写回夹在中间）。返回 {"promoted": bool, "reason": str | None}。
+    """
+    db.execute(
+        update(SolveGoal)
+        .where(SolveGoal.id == goal_id)
+        .values(checklist_revision=SolveGoal.checklist_revision)
+        .execution_options(synchronize_session=False)
+    )
+    goal = db.get(SolveGoal, goal_id)
+    if goal is None:
+        return {"promoted": False, "reason": "任务不存在"}
+    db.refresh(goal)
+    if goal.status == "abandoned":
+        return {"promoted": False, "reason": "任务已放弃"}
+    anchor = _goal_version_anchor(run.request_payload)
+    if anchor is not None and anchor != int(goal.checklist_revision):
+        return {
+            "promoted": False,
+            "reason": (
+                f"任务要求已修订至 v{goal.checklist_revision}，"
+                f"这次求解基于 v{anchor}，产物只留在历史里"
+            ),
+        }
+    context = dict(goal.context or {})
+    pointer_id = str(context.get("work_draft_schedule_id") or "")
+    if pointer_id and pointer_id != draft_version.id:
+        holder_draft = db.get(ScheduleVersion, pointer_id)
+        holder_run = (
+            db.get(SolverRun, holder_draft.solver_run_id)
+            if holder_draft is not None and holder_draft.solver_run_id
+            else None
+        )
+        if (
+            holder_run is not None
+            and holder_run.id != run.id
+            and holder_run.goal_id == goal_id
+            and holder_run.created_at > run.created_at
+        ):
+            return {
+                "promoted": False,
+                "reason": "任务已有更晚发起的求解产出的草稿，这次较早发起的结果不接管工作草稿",
+            }
+    context.setdefault("schema_version", 1)
+    context["work_draft_schedule_id"] = draft_version.id
+    goal.context = context
+    # 立即 flush：apply_goal_evaluation 的事务内重读（db.refresh）会丢弃未 flush 的
+    # ORM 赋值——先落库（事务内可见）再验收。
+    db.flush()
+    return {"promoted": True, "reason": None}
+
+
 def _evaluate_goal_for_run(run_id: str, goal_id: str) -> None:
     # 延迟导入：goal.py 验收器复用本模块的 count_hard_conflicts，顶层互相引用成环。
     from .goal import apply_goal_evaluation
@@ -500,19 +568,21 @@ def _evaluate_goal_for_run(run_id: str, goal_id: str) -> None:
             # 版本仍为 draft 时写 goal.context.work_draft_schedule_id。与验收
             # 同一独立事务；发布/回滚不改这个指针——「正在调整」语义由
             # api.create_solver_run 的三级基准选择按「仍为 draft」惰性校验保证。
+            work_draft: dict[str, Any] | None = None
             if goal.status != "abandoned":
                 draft_version = db.scalar(
                     select(ScheduleVersion).where(ScheduleVersion.solver_run_id == run.id)
                 )
                 if draft_version is not None and draft_version.status == "draft":
-                    context = dict(goal.context or {})
-                    context.setdefault("schema_version", 1)
-                    context["work_draft_schedule_id"] = draft_version.id
-                    goal.context = context
-                    # 立即 flush：apply_goal_evaluation 的事务内重读（db.refresh）
-                    # 会丢弃未 flush 的 ORM 赋值——先落库（事务内可见）再验收。
-                    db.flush()
-            apply_goal_evaluation(db, run)
+                    work_draft = _promote_work_draft(db, run, goal_id, draft_version)
+            report = apply_goal_evaluation(db, run)
+            if work_draft is not None and report is not None and not work_draft["promoted"]:
+                # 这次产物没有接管任务的工作草稿：报告里留一笔原因（整体重新赋值，
+                # JSON 列不追踪就地修改）。
+                run.goal_report = {
+                    **report,
+                    "meta": {**(report.get("meta") or {}), "work_draft": work_draft},
+                }
             db.commit()
     except Exception as exc:  # noqa: BLE001 - 验收失败不影响求解结果落库
         # MEM-D2/D6：验收异常不再只打日志——acceptance_status 置 failed，原因

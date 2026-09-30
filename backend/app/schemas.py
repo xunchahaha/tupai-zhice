@@ -873,9 +873,27 @@ class SolverRunResponse(ORMModel):
     # 目标验收闭环（MEM-C3）：关联目标与最近一次自动验收报告（completed 后生成）。
     goal_id: str | None = None
     goal_report: dict[str, Any] | None = None
+    # 提交时的时间预算：「加预算重跑」以它为基数，不能按界面草稿的默认值算。
+    time_limit_seconds: float | None = None
+    # 这次求解创建时对任务要求做过的修订摘要（added_hard/tightened/added_soft/
+    # replaced_soft/kept_hard 原话列表），没有修订为 None。
+    task_revision: dict[str, list[str]] | None = None
+    # 由哪次求解按原参数重跑而来。
+    rerun_of: str | None = None
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class SolverRunRerunRequest(BaseModel):
+    """按原求解的冻结参数重跑：范围、规则、权重、数据与记忆都沿用，只改时间预算。
+
+    time_limit_seconds 缺省 = 按原预算加大（×3，至少 90 秒，上限 900 秒）；
+    显式给出则用给定值。需要换数据、规则、记忆或基准时是另一个动作——重新排课。
+    """
+
+    time_limit_seconds: float | None = Field(default=None, ge=1, le=900)
+    wait: bool = False
 
 
 class GoalDetailResponse(GoalResponse):
@@ -1576,6 +1594,10 @@ class AssistantInterpretRequest(BaseModel):
     # 续办增量解析（TC-4 §4.3）：携带 goal_id 时 _interpret_context 注入既有
     # 任务上下文，提示词按「对既有状态的增量修改」解释这句话。
     goal_id: str | None = None
+    # 这条用户指令的幂等标识（客户端每次提交生成一个；流式、同步回退、失败重试沿用
+    # 同一个）：解析会直接执行「记住…」这类显式授权的记忆动作，重试必须只执行一次。
+    # 缺省 = 不做幂等（直调/旧客户端维持原行为）。
+    request_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class AssistantInterpretResponse(BaseModel):

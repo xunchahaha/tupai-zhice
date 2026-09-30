@@ -4054,6 +4054,80 @@
         }
       }
     },
+    "/api/v1/solver-runs/{run_id}/rerun": {
+      "post": {
+        "tags": [
+          "solver"
+        ],
+        "summary": "Rerun Solver Run",
+        "description": "「同一个问题，多算一会儿」：按原求解的冻结参数重跑，只改时间预算。\n\n沿用原求解的范围/日期/课次、规则开关、变更权重、数据快照与偏好记忆、基准版本；\n有关联任务时任务要求取任务当前版本（与验收同一份），无任务的一句话求解沿用当时\n冻结的任务约束。**不**读取任何界面草稿——刷新后参数草稿回到默认值，也不会让\n300 秒的任务被「加预算」降成 90 秒，或悄悄重新打开被用户关掉的规则开关。需要换\n数据、规则、记忆或基准时是另一个动作：按当前范围重新排课。",
+        "operationId": "rerun_solver_run_api_v1_solver_runs__run_id__rerun_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "X-Schedule-Set-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Schedule-Set-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SolverRunRerunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SolverRunDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/solver-runs/{run_id}": {
       "get": {
         "tags": [
@@ -6961,6 +7035,19 @@
               }
             ],
             "title": "Goal Id"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 8
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
           }
         },
         "type": "object",
@@ -13948,6 +14035,45 @@
             ],
             "title": "Goal Report"
           },
+          "time_limit_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Limit Seconds"
+          },
+          "task_revision": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Revision"
+          },
+          "rerun_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rerun Of"
+          },
           "error_message": {
             "anyOf": [
               {
@@ -14140,6 +14266,31 @@
         "title": "SolverRunExplanationDetail",
         "description": "比 `SolverRunExplanation` 多一段可直接粘回「一句话排课」输入框的指令草稿。\n\n这段文字由 `explain.build_retry_instruction` 确定性拼出，不是模型写的，\n因此不与 AI 措辞共用契约；求解正常结束时为 None。"
       },
+      "SolverRunRerunRequest": {
+        "properties": {
+          "time_limit_seconds": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 900.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Limit Seconds"
+          },
+          "wait": {
+            "type": "boolean",
+            "title": "Wait",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "SolverRunRerunRequest",
+        "description": "按原求解的冻结参数重跑：范围、规则、权重、数据与记忆都沿用，只改时间预算。\n\ntime_limit_seconds 缺省 = 按原预算加大（×3，至少 90 秒，上限 900 秒）；\n显式给出则用给定值。需要换数据、规则、记忆或基准时是另一个动作——重新排课。"
+      },
       "SolverRunResponse": {
         "properties": {
           "id": {
@@ -14272,6 +14423,45 @@
               }
             ],
             "title": "Goal Report"
+          },
+          "time_limit_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Limit Seconds"
+          },
+          "task_revision": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Revision"
+          },
+          "rerun_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rerun Of"
           },
           "error_message": {
             "anyOf": [

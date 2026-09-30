@@ -21,6 +21,8 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date
 from typing import Any
 
@@ -94,6 +96,39 @@ _SUBJECT_TYPE_LABELS = {
 
 def _item(key: str, requirement: str, kind: str, params: dict[str, Any]) -> dict[str, Any]:
     return {"key": key, "requirement": requirement, "kind": kind, "params": params}
+
+
+def forbidden_slot_item(
+    key: str,
+    *,
+    subject_type: str,
+    subject_ids: list[str],
+    slot_business_ids: list[str],
+    task_constraint_id: str = "",
+) -> dict[str, Any]:
+    """一条带参的 forbidden_slot_free 清单项（建清单与任务要求修订共用同一份文案与参数形状）。
+
+    任务级约束（TC-1 §2.1b）：解析侧 constraint id 随项带进 params，供确认卡/编译侧
+    回溯原话（api._compile_task_constraints 与 draft_checklist_from_interpretation
+    的对应关系锚点）。
+    """
+    params: dict[str, Any] = {
+        "subject_type": subject_type,
+        "subject_ids": subject_ids,
+        "slot_business_ids": slot_business_ids,
+    }
+    if task_constraint_id:
+        params["task_constraint_id"] = task_constraint_id
+    return _item(
+        key,
+        (
+            f"{_SUBJECT_TYPE_LABELS.get(subject_type, subject_type)}"
+            f" {'、'.join(subject_ids) or '（未指定主体）'} 不占用指定时段"
+            f"（{'、'.join(slot_business_ids) or '（未指定时段）'}）——独立复核，不信任求解器自报"
+        ),
+        "forbidden_slot_free",
+        params,
+    )
 
 
 def normalize_goal_scope(
@@ -235,30 +270,15 @@ def build_checklist(
             )
         )
     for index, entry in enumerate(forbidden_slots or [], start=1):
-        subject_type = str(entry.get("subject_type") or "teacher")
-        subject_ids = [str(v) for v in entry.get("subject_ids") or [] if str(v).strip()]
-        slots = [str(v) for v in entry.get("slot_business_ids") or [] if str(v).strip()]
-        params = {
-            "subject_type": subject_type,
-            "subject_ids": subject_ids,
-            "slot_business_ids": slots,
-        }
-        # 任务级约束（TC-1 §2.1b）：解析侧 constraint id 随项带进 params，供
-        # 确认卡/编译侧回溯原话（api._compile_task_constraints 与
-        # draft_checklist_from_interpretation 的对应关系锚点）。
-        task_constraint_id = str(entry.get("task_constraint_id") or "").strip()
-        if task_constraint_id:
-            params["task_constraint_id"] = task_constraint_id
         items.append(
-            _item(
+            forbidden_slot_item(
                 f"forbidden_slot_free-{index}",
-                (
-                    f"{_SUBJECT_TYPE_LABELS.get(subject_type, subject_type)}"
-                    f" {'、'.join(subject_ids) or '（未指定主体）'} 不占用指定时段"
-                    f"（{'、'.join(slots) or '（未指定时段）'}）——独立复核，不信任求解器自报"
-                ),
-                "forbidden_slot_free",
-                params,
+                subject_type=str(entry.get("subject_type") or "teacher"),
+                subject_ids=[str(v) for v in entry.get("subject_ids") or [] if str(v).strip()],
+                slot_business_ids=[
+                    str(v) for v in entry.get("slot_business_ids") or [] if str(v).strip()
+                ],
+                task_constraint_id=str(entry.get("task_constraint_id") or "").strip(),
             )
         )
     items.append(
@@ -1791,6 +1811,191 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
     return report
 
 
+TaskConstraintKey = tuple[str, tuple[str, ...], tuple[str, ...]]
+
+
+def task_constraint_key(
+    subject_type: str, subject_ids: list[str], slot_business_ids: list[str]
+) -> TaskConstraintKey:
+    """任务级约束的内容身份：主体类型 + 主体集合 + 时段集合（与编译去重同一口径）。
+
+    约束 id 只是标签：解析侧按序号生成（每次解析都从 tc-1 起），不同轮次的 tc-1 可能是
+    完全不同的要求，所以身份不能靠 id。
+    """
+    return (subject_type, tuple(sorted(subject_ids)), tuple(sorted(slot_business_ids)))
+
+
+def _clean_ids(values: Any) -> list[str]:
+    return [str(v) for v in values or [] if str(v).strip()]
+
+
+def _hard_checklist_keys(
+    checklist: list[dict[str, Any]],
+) -> dict[TaskConstraintKey, dict[str, Any]]:
+    """清单里已落实（参数齐备）的硬性禁排项，按内容身份索引。"""
+    found: dict[TaskConstraintKey, dict[str, Any]] = {}
+    for item in checklist:
+        if str(item.get("kind")) != "forbidden_slot_free":
+            continue
+        params = dict(item.get("params") or {})
+        if params.get("needs_params"):
+            continue
+        subject_ids = _clean_ids(params.get("subject_ids"))
+        slots = _clean_ids(params.get("slot_business_ids"))
+        if not subject_ids or not slots:
+            continue
+        found.setdefault(
+            task_constraint_key(str(params.get("subject_type") or "teacher"), subject_ids, slots),
+            item,
+        )
+    return found
+
+
+def _soft_key(soft: dict[str, Any]) -> TaskConstraintKey:
+    return task_constraint_key(
+        str(soft.get("subject_type") or "teacher"),
+        _clean_ids(soft.get("subject_ids")),
+        _clean_ids(soft.get("slot_business_ids")),
+    )
+
+
+@dataclass
+class TaskConstraintRevision:
+    """一次「确认过的任务要求」对任务已保存要求的修订结果（纯计算，未落库）。
+
+    checklist / soft_constraints 是修订后的完整新版；其余字段是给教务看的差异：
+    新增的硬要求、由「尽量」收紧为「绝对」的、新增/替换的软要求，以及被保留的硬要求
+    （请求里想放宽它——放宽硬要求只能由人在清单里显式保存，这里不静默降级）。
+    """
+
+    checklist: list[dict[str, Any]]
+    soft_constraints: list[dict[str, Any]]
+    added_hard: list[str] = dataclass_field(default_factory=list)
+    tightened: list[str] = dataclass_field(default_factory=list)
+    added_soft: list[str] = dataclass_field(default_factory=list)
+    replaced_soft: list[str] = dataclass_field(default_factory=list)
+    kept_hard: list[str] = dataclass_field(default_factory=list)
+    checklist_changed: bool = False
+    soft_changed: bool = False
+
+    @property
+    def changed(self) -> bool:
+        return self.checklist_changed or self.soft_changed
+
+    def summary(self) -> dict[str, list[str]] | None:
+        """随求解任务留档、供界面展示的差异摘要；没有任何变化也没有被保留项时为 None。"""
+        summary = {
+            name: list(getattr(self, name))
+            for name in ("added_hard", "tightened", "added_soft", "replaced_soft", "kept_hard")
+            if getattr(self, name)
+        }
+        return summary or None
+
+
+def plan_task_constraint_revision(
+    checklist: list[dict[str, Any]],
+    soft_constraints: list[dict[str, Any]],
+    constraints: Any,
+) -> TaskConstraintRevision:
+    """把用户确认的任务级约束合并进任务已保存的要求（07 §4.3「对既有状态的增量修改」）。
+
+    确认卡随求解请求带回的 task_constraints 是用户刚确认过的要求，求解前必须先成为
+    任务的新版要求，再从新版编译——这样「这一次求解用了什么」和「之后重跑、验收核对
+    什么」永远是同一份。合并口径：
+
+    - 身份是内容（主体+时段），不是 id（id 按序号生成，跨轮次会撞）；
+    - 硬要求：清单里没有就追加一条带参项（调用方据此升清单版本、使旧验收结论失效）；
+      同内容的旧软要求随之收紧为硬，不并存；
+    - 软要求：同内容更新原话；同 id 且同主体但时段不同，视为对那一条的修改（替换）；
+      同 id 但主体不同是序号撞名，另存一条；
+    - 已经是硬要求的内容，请求里的「尽量」不会把它放宽（kept_hard）——放宽/删除
+      硬要求是人在清单里的显式保存动作（§5.3），这里永不静默降级；
+    - 主体或时段为空的项不参与（与编译一致）。
+    """
+    new_checklist = [dict(item) for item in checklist]
+    softs = [dict(item) for item in soft_constraints if isinstance(item, dict)]
+    hard_keys = _hard_checklist_keys(new_checklist)
+    result = TaskConstraintRevision(checklist=new_checklist, soft_constraints=softs)
+
+    def next_hard_index() -> int:
+        highest = 0
+        for item in new_checklist:
+            match = re.fullmatch(r"forbidden_slot_free-(\d+)", str(item.get("key") or ""))
+            if match:
+                highest = max(highest, int(match.group(1)))
+        return highest + 1
+
+    for index, constraint in enumerate(constraints or [], start=1):
+        subject_type = str(getattr(constraint, "subject_type", "teacher"))
+        subject_ids = _clean_ids(getattr(constraint, "subject_ids", []))
+        slots = _clean_ids(getattr(constraint, "slot_business_ids", []))
+        if not subject_ids or not slots:
+            continue
+        key = task_constraint_key(subject_type, subject_ids, slots)
+        constraint_id = str(getattr(constraint, "id", "") or "").strip() or str(index)
+        text = str(getattr(constraint, "source_text", "") or "").strip()
+        label = text or constraint_id
+        same_key = [item for item in softs if _soft_key(item) == key]
+        if str(getattr(constraint, "hardness", "hard")) == "hard":
+            if same_key:
+                softs[:] = [item for item in softs if _soft_key(item) != key]
+                result.soft_changed = True
+            if key in hard_keys:
+                continue
+            item = forbidden_slot_item(
+                f"forbidden_slot_free-{next_hard_index()}",
+                subject_type=subject_type,
+                subject_ids=subject_ids,
+                slot_business_ids=slots,
+                task_constraint_id=constraint_id,
+            )
+            new_checklist.append(item)
+            hard_keys[key] = item
+            result.checklist_changed = True
+            (result.tightened if same_key else result.added_hard).append(label)
+            continue
+        if key in hard_keys:
+            result.kept_hard.append(label)
+            continue
+        if same_key:
+            existing = same_key[0]
+            if text and text != str(existing.get("source_text") or ""):
+                existing["source_text"] = text
+                result.soft_changed = True
+            continue
+        replaced = next(
+            (
+                item
+                for item in softs
+                if str(item.get("id")) == constraint_id
+                and str(item.get("subject_type") or "teacher") == subject_type
+                and sorted(_clean_ids(item.get("subject_ids"))) == sorted(subject_ids)
+            ),
+            None,
+        )
+        entry = {
+            "id": constraint_id,
+            "subject_type": subject_type,
+            "subject_ids": subject_ids,
+            "slot_business_ids": slots,
+            "source_text": text,
+        }
+        if replaced is not None:
+            softs[softs.index(replaced)] = entry
+            result.replaced_soft.append(label)
+        else:
+            taken = {str(item.get("id")) for item in softs}
+            if constraint_id in taken:
+                suffix = 2
+                while f"{constraint_id}-{suffix}" in taken:
+                    suffix += 1
+                entry["id"] = f"{constraint_id}-{suffix}"
+            softs.append(entry)
+            result.added_soft.append(label)
+        result.soft_changed = True
+    return result
+
+
 def apply_goal_checklist_revision(
     db: Any,
     goal: SolveGoal,
@@ -1874,4 +2079,8 @@ __all__ = [
     "goal_run_counts",
     "merge_coverage_scope",
     "normalize_goal_scope",
+    "plan_task_constraint_revision",
+    "task_constraint_key",
+    "TaskConstraintRevision",
+    "forbidden_slot_item",
 ]
