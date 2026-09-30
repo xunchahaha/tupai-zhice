@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 # 旧版兜底正则命中「具体教师禁排/请假」话术时追加进 unsupported_requirements 的标签
 # （api._LEGACY_UNSUPPORTED_PATTERNS 生成，确认卡展示，清单草稿据此判断是否需要
@@ -202,3 +203,120 @@ def scoped_word_hits(clause: str) -> dict[str, list[str]]:
     if "save" in hits and _REFUSE_SAVE.search(clause):
         del hits["save"]
     return hits
+
+
+# ---- 意图绑定：授权证据 与 偏好内容 分别定位，再核对对应关系（评审 6fe2bf8 R5）
+#
+# 分句（句末标点/分号/换行）只是粗边界：「记住张老师偏好上午，李老师这次先放周四」是同一个
+# 分句，「记住」却只属于前半句。所以分句内再按逗号/冒号切成小段，分别回答三件事：
+#   1. 内容在哪（动作原话片段落在哪几小段）；
+#   2. 授权证据在哪（哪一小段里有显式声明词，且不被否定/拒绝）——它必须在内容段里，或紧挨着
+#      内容段（「张老师尽量别排晚课，记住这个」），并且它点名的主体不能是另一个人；
+#   3. 这是不是长期偏好——内容段里带「这次/本周/下周/临时/先放…」这类一次性或限定时段的
+#      措辞、又没有「以后都/长期/每周…」时，不能借「记住」变成长期偏好。
+# 任何一件对不上就绑不上授权，由调用方降级为待确认候选。
+
+_SEGMENT_SPLIT = re.compile(r"[，,：:]")
+_ONE_OFF_MARKERS = re.compile(
+    r"这次|本次|这一次|这回|这周|本周|这星期|下周|下星期|这两天|这几天|这个月|本月|下个月"
+    r"|临时|暂时|先放|先排|先调|今天|明天|后天|今晚|明晚|当天"
+)
+_LONG_TERM_MARKERS = re.compile(r"以后都|以后一直|长期|这学期都|本学期都|一直|每周|每个")
+
+
+def _segments(clause: str) -> list[tuple[int, int, str]]:
+    """分句内按逗号/冒号切成小段：[(起, 止, 文本)]，空段丢弃。"""
+    segments: list[tuple[int, int, str]] = []
+    cursor = 0
+    for found in _SEGMENT_SPLIT.finditer(clause):
+        if found.start() > cursor:
+            segments.append((cursor, found.start(), clause[cursor : found.start()]))
+        cursor = found.end()
+    if cursor < len(clause):
+        segments.append((cursor, len(clause), clause[cursor:]))
+    return segments
+
+
+def _source_span(clause: str, source_text: str) -> tuple[int, int] | None:
+    chars = [ch for ch in source_text or "" if re.match(r"[^\W_]", ch)]
+    if len(chars) < _MIN_SOURCE_CHARS:
+        return None
+    found = re.search(r"[\W_]*".join(re.escape(ch) for ch in chars), clause)
+    return found.span() if found else None
+
+
+def bind_explicit_authorization(
+    instruction: str,
+    source_text: str,
+    *,
+    kind: str,
+    subject_id: str,
+    mentions_of: Callable[[str], set[str]],
+) -> tuple[bool, str | None]:
+    """这条动作的显式授权能不能可靠地归属到它自己的原话（kind: save | retract）。
+
+    mentions_of(文本) 返回该文本点名的、与动作主体同类型的主体 id 集合（调用方查库）。
+    返回 (是否绑定成功, 绑不上的原因)。只做「矛盾检测」而不要求必须点名主体——教研组全称与口语
+    称呼对不上时不误伤。
+    """
+    clause, error = authorization_clause(instruction, source_text)
+    if clause is None:
+        return False, error
+    span = _source_span(clause, source_text)
+    segments = _segments(clause)
+    if span is None or not segments:
+        return False, "动作的原话片段不在本次指令里，无法确认授权属于哪一句"
+    texts = [text for _start, _end, text in segments]
+    mentions = [mentions_of(text) for text in texts]
+    content = [
+        index
+        for index, (start, end, _text) in enumerate(segments)
+        if start < span[1] and end > span[0]
+    ]
+    if not content:
+        return False, "动作的原话片段不在本次指令里，无法确认授权属于哪一句"
+    content_mentions = set().union(*(mentions[index] for index in content))
+    if content_mentions and subject_id not in content_mentions:
+        return False, "动作的原话指向的是其他主体，授权不能借用"
+
+    wanted = ("save",) if kind == "save" else ("expire", "correct")
+    evidence: list[int] = []
+    wrong_subject = False
+    for index, text in enumerate(texts):
+        hits = scoped_word_hits(text)
+        if not any(hits.get(group) for group in wanted):
+            continue
+        near_content = min(abs(index - other) for other in content) <= 1
+        if not near_content:
+            continue
+        if mentions[index] and subject_id not in mentions[index]:
+            wrong_subject = True  # 授权词挨着内容，但它点名的是另一个人
+            continue
+        evidence.append(index)
+    if not evidence:
+        if wrong_subject:
+            return False, "动作附近的显式声明词属于另一个主体，授权不能借用"
+        return False, (
+            "动作自己的原话里没有显式的记录声明（或被否定），按推测处理"
+            if kind == "save"
+            else "动作自己的原话里没有显式的撤销/纠正声明（或被否定），按推测处理"
+        )
+    if kind == "save":
+        relevant = [index for index in content if subject_id in mentions[index]] or content
+        scan = {
+            *relevant,
+            *evidence,
+            *(
+                neighbour
+                for index in content
+                for neighbour in (index - 1, index + 1)
+                if 0 <= neighbour < len(texts)
+            ),
+        }
+        if any(_REFUSE_SAVE.search(texts[index]) for index in scan):
+            return False, "原话里明确说了不要记成长期偏好，按推测处理"
+        for index in relevant:
+            one_off = _ONE_OFF_MARKERS.search(texts[index])
+            if one_off and not _LONG_TERM_MARKERS.search(texts[index]):
+                return False, "这是一次性或限定时段的安排，不是长期偏好，按推测处理"
+    return True, None

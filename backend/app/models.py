@@ -428,6 +428,15 @@ class SolverRun(TimestampMixin, Base):
         return dict(raw) if isinstance(raw, dict) else None
 
     @property
+    def goal_checklist_version(self) -> int | None:
+        """求解创建时冻结的任务依据版本；与任务当前版本不同说明任务要求在这之后改过。"""
+        raw = (self.request_payload or {}).get("goal_checklist_version")
+        try:
+            return int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @property
     def rerun_of(self) -> str | None:
         """由哪次求解「按原参数重跑」而来。"""
         raw = (self.request_payload or {}).get("rerun_of")

@@ -7596,6 +7596,28 @@
             ],
             "title": "Hardness",
             "default": "hard"
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              "add",
+              "replace",
+              "remove"
+            ],
+            "title": "Op",
+            "default": "add"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 80
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
           }
         },
         "type": "object",
@@ -14074,6 +14096,17 @@
             ],
             "title": "Rerun Of"
           },
+          "goal_checklist_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal Checklist Version"
+          },
           "error_message": {
             "anyOf": [
               {
@@ -14462,6 +14495,17 @@
               }
             ],
             "title": "Rerun Of"
+          },
+          "goal_checklist_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal Checklist Version"
           },
           "error_message": {
             "anyOf": [

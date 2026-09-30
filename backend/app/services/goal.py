@@ -26,7 +26,7 @@ from dataclasses import field as dataclass_field
 from datetime import date
 from typing import Any
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, func, or_, select, update
 
 from ..models import (
     AuditLog,
@@ -43,7 +43,7 @@ from ..models import (
 )
 from ..timezone import shanghai_now
 from .solver import _selected_sessions
-from .tasks import count_hard_conflicts
+from .tasks import _goal_version_anchor, count_hard_conflicts
 
 logger = logging.getLogger("tupai.memory")
 
@@ -1633,6 +1633,59 @@ def _snapshot_coverage_params(checklist: list[dict[str, Any]]) -> dict[str, Any]
     return snapshot
 
 
+def run_admission(db: Any, goal: SolveGoal, run: SolverRun) -> tuple[bool, str | None]:
+    """这次求解的结果有没有资格成为任务的**当前**结果（读侧判断，给报告与草稿接管用）。
+
+    任务状态、验收中/失败标记、`latest_run_id`、工作草稿指针是同一件事的几个面：旧求解晚结束
+    不能把任何一面改回去。接纳条件（写侧的原子版本见 `run_admission_clause`）：
+
+    1. 任务未放弃；
+    2. 求解创建时冻结的 `goal_checklist_version` 仍等于任务当前清单版本——任务依据
+       （硬要求/软要求/范围）已修订，这份结果回答的是旧问题；
+    3. 当前持有结论的求解（`latest_run_id`）不是**更晚创建**的——同一版依据下先后发起的
+       两次求解，晚创建的先完成后，早创建的晚到结果不接管。
+
+    不接纳不等于丢弃：报告照常留在这次求解上（可以按当前清单重新评估给人看），
+    只是不写任务的当前状态。
+    """
+    if goal.status == "abandoned":
+        return False, "任务已放弃"
+    anchor = _goal_version_anchor(run.request_payload)
+    if anchor is not None and anchor != int(goal.checklist_revision):
+        return False, (
+            f"任务要求已修订至 v{goal.checklist_revision}，"
+            f"这次求解基于 v{anchor}，结果只留在历史里"
+        )
+    holder_id = goal.latest_run_id
+    if holder_id and holder_id != run.id:
+        holder = db.get(SolverRun, holder_id)
+        if (
+            holder is not None
+            and holder.goal_id == goal.id
+            and holder.created_at > run.created_at
+        ):
+            return False, "任务当前结果来自更晚发起的求解，这次较早发起的结果不接管"
+    return True, None
+
+
+def run_admission_clause(goal_id: str, run: SolverRun) -> Any:
+    """`run_admission` 第 3 条的写侧原子版本：拼进条件 UPDATE 的 WHERE。
+
+    当前持有结论的求解必须是：没有、就是它自己、创建不晚于它、或已经不属于这个任务
+    （latest_run_id 无外键，求解被删后会悬空——不能让悬空指针把任务永远锁死）。
+    """
+    older_or_same = select(SolverRun.id).where(
+        SolverRun.goal_id == goal_id, SolverRun.created_at <= run.created_at
+    )
+    known = select(SolverRun.id).where(SolverRun.goal_id == goal_id)
+    return or_(
+        SolveGoal.latest_run_id.is_(None),
+        SolveGoal.latest_run_id == run.id,
+        SolveGoal.latest_run_id.in_(older_or_same),
+        SolveGoal.latest_run_id.not_in(known),
+    )
+
+
 def evaluate_goal(db: Any, goal: SolveGoal, run: SolverRun) -> dict[str, Any]:
     """对一次 completed 的 run 出具验收报告。纯代码，绝不触发新的求解。
 
@@ -1743,6 +1796,14 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
         return None
     report = evaluate_goal(db, goal, run)
     evaluated_version = int(report["meta"]["checklist_version"])
+    # 没有资格成为当前结果的求解（旧版依据下算的、或比当前持有者更早发起的）：评估可以做、
+    # 报告留档，但一个字都不写任务的当前状态（结论、验收状态、latest_run_id）。
+    admitted, not_adopted_reason = run_admission(db, goal, run)
+    report["meta"]["adopted"] = admitted
+    if not admitted:
+        report["meta"]["not_adopted_reason"] = not_adopted_reason
+        run.goal_report = report
+        return report
     # 事务内重读：本会话持有的 goal 可能是修订前的旧快照，写回前必须以持久化
     # 状态为准（db.refresh 把清单与版本号刷到当前最新值）。重读之后到条件
     # UPDATE 之间的竞态由 UPDATE 的 WHERE 子句在数据库层面兜住——条件 UPDATE
@@ -1758,6 +1819,10 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
         meta = report["meta"]
         meta["evaluated_checklist_version"] = evaluated_version
         meta["current_checklist_version"] = current_version
+        meta["adopted"] = False
+        meta["not_adopted_reason"] = (
+            f"清单已修订至 v{current_version}，本报告基于 v{evaluated_version}，结果只留在历史里"
+        )
         marker = db.execute(
             update(SolveGoal)
             .where(
@@ -1771,7 +1836,6 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
                 acceptance_detail=(
                     f"清单已修订至 v{current_version}，本报告基于 v{evaluated_version}，需重新验收"
                 ),
-                latest_run_id=run.id,
             )
             .execution_options(synchronize_session=False)
         )
@@ -1790,6 +1854,7 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
             SolveGoal.id == goal.id,
             SolveGoal.checklist_revision == evaluated_version,
             SolveGoal.status != "abandoned",
+            run_admission_clause(goal.id, run),
         )
         .values(
             status=str(report["decision"]["status"]),
@@ -1808,6 +1873,8 @@ def apply_goal_evaluation(db: Any, run: SolverRun) -> dict[str, Any] | None:
     meta = report["meta"]
     meta["evaluated_checklist_version"] = evaluated_version
     meta["current_checklist_version"] = _checklist_version(goal)
+    meta["adopted"] = False
+    meta["not_adopted_reason"] = "写回时任务已被修订、放弃，或已有更晚发起的求解成为当前结果"
     return report
 
 
@@ -1864,8 +1931,9 @@ class TaskConstraintRevision:
     """一次「确认过的任务要求」对任务已保存要求的修订结果（纯计算，未落库）。
 
     checklist / soft_constraints 是修订后的完整新版；其余字段是给教务看的差异：
-    新增的硬要求、由「尽量」收紧为「绝对」的、新增/替换的软要求，以及被保留的硬要求
-    （请求里想放宽它——放宽硬要求只能由人在清单里显式保存，这里不静默降级）。
+    新增的硬要求、由「尽量」收紧为「绝对」的、新增/替换/取消的软要求、没能指到具体旧项的
+    修改（保留原要求、不删任何东西）、以及被保留的硬要求（想放宽/改/删它——这只能由人在清单里
+    显式保存，这里不静默降级）。
     """
 
     checklist: list[dict[str, Any]]
@@ -1874,19 +1942,38 @@ class TaskConstraintRevision:
     tightened: list[str] = dataclass_field(default_factory=list)
     added_soft: list[str] = dataclass_field(default_factory=list)
     replaced_soft: list[str] = dataclass_field(default_factory=list)
+    removed_soft: list[str] = dataclass_field(default_factory=list)
+    unresolved: list[str] = dataclass_field(default_factory=list)
     kept_hard: list[str] = dataclass_field(default_factory=list)
     checklist_changed: bool = False
     soft_changed: bool = False
+    # 只更新了软要求的原话（内容不变）：不算任务依据的变化，不升版本。
+    soft_text_only: bool = False
 
     @property
     def changed(self) -> bool:
         return self.checklist_changed or self.soft_changed
 
+    @property
+    def basis_changed(self) -> bool:
+        """任务依据（硬要求集合 + 软要求集合）的内容是否变了：变了就必须升版本、使旧结论失效。"""
+        if self.checklist_changed:
+            return True
+        return self.soft_changed and not self.soft_text_only
+
     def summary(self) -> dict[str, list[str]] | None:
         """随求解任务留档、供界面展示的差异摘要；没有任何变化也没有被保留项时为 None。"""
         summary = {
             name: list(getattr(self, name))
-            for name in ("added_hard", "tightened", "added_soft", "replaced_soft", "kept_hard")
+            for name in (
+                "added_hard",
+                "tightened",
+                "added_soft",
+                "replaced_soft",
+                "removed_soft",
+                "unresolved",
+                "kept_hard",
+            )
             if getattr(self, name)
         }
         return summary or None
@@ -1903,19 +1990,27 @@ def plan_task_constraint_revision(
     任务的新版要求，再从新版编译——这样「这一次求解用了什么」和「之后重跑、验收核对
     什么」永远是同一份。合并口径：
 
-    - 身份是内容（主体+时段），不是 id（id 按序号生成，跨轮次会撞）；
+    - 身份是内容（主体+时段），不是 id：解析侧的 id 按序号生成，每次都从 tc-1 起，
+      **同 id 不能证明是同一条要求，更不能证明是「替换」**；
+    - 每条要求带显式的 ``op``：``add``（默认，追加）、``replace``（替换 ``target_id``
+      指向的那一条）、``remove``（取消 ``target_id`` 指向的那一条）；``target_id`` 是任务里
+      已有要求的稳定编号（软要求的 id、清单项的 key）。**指不到具体旧项时不删任何东西**：
+      replace 退化为追加并记入 unresolved，remove 什么都不做并记入 unresolved；
     - 硬要求：清单里没有就追加一条带参项（调用方据此升清单版本、使旧验收结论失效）；
       同内容的旧软要求随之收紧为硬，不并存；
-    - 软要求：同内容更新原话；同 id 且同主体但时段不同，视为对那一条的修改（替换）；
-      同 id 但主体不同是序号撞名，另存一条；
-    - 已经是硬要求的内容，请求里的「尽量」不会把它放宽（kept_hard）——放宽/删除
-      硬要求是人在清单里的显式保存动作（§5.3），这里永不静默降级；
-    - 主体或时段为空的项不参与（与编译一致）。
+    - 软要求：同内容更新原话（不算依据变化）；内容不同就是另一条，追加；
+    - 已经是硬要求的内容（或 replace/remove 指向硬要求清单项），请求里的「尽量」/修改/取消都
+      不生效（kept_hard）——放宽、修改、删除硬要求是人在清单里的显式保存动作（§5.3），
+      这里永不静默降级；
+    - 主体或时段为空的 add/replace 项不参与（与编译一致）。
     """
     new_checklist = [dict(item) for item in checklist]
     softs = [dict(item) for item in soft_constraints if isinstance(item, dict)]
     hard_keys = _hard_checklist_keys(new_checklist)
+    hard_item_keys = {str(item.get("key")) for item in new_checklist}
     result = TaskConstraintRevision(checklist=new_checklist, soft_constraints=softs)
+    text_only_updates = 0
+    content_changes = 0
 
     def next_hard_index() -> int:
         highest = 0
@@ -1925,21 +2020,59 @@ def plan_task_constraint_revision(
                 highest = max(highest, int(match.group(1)))
         return highest + 1
 
+    def find_soft(target_id: str) -> dict[str, Any] | None:
+        return next((item for item in softs if str(item.get("id")) == target_id), None)
+
+    def unique_soft_id(wanted: str) -> str:
+        taken = {str(item.get("id")) for item in softs}
+        if wanted not in taken:
+            return wanted
+        suffix = 2
+        while f"{wanted}-{suffix}" in taken:
+            suffix += 1
+        return f"{wanted}-{suffix}"
+
     for index, constraint in enumerate(constraints or [], start=1):
         subject_type = str(getattr(constraint, "subject_type", "teacher"))
         subject_ids = _clean_ids(getattr(constraint, "subject_ids", []))
         slots = _clean_ids(getattr(constraint, "slot_business_ids", []))
-        if not subject_ids or not slots:
-            continue
-        key = task_constraint_key(subject_type, subject_ids, slots)
         constraint_id = str(getattr(constraint, "id", "") or "").strip() or str(index)
         text = str(getattr(constraint, "source_text", "") or "").strip()
         label = text or constraint_id
-        same_key = [item for item in softs if _soft_key(item) == key]
+        op = str(getattr(constraint, "op", "add") or "add")
+        target_id = str(getattr(constraint, "target_id", "") or "").strip()
+        target_soft = find_soft(target_id) if target_id else None
+        target_is_hard = bool(target_id) and target_id in hard_item_keys
+
+        if op == "remove":
+            if target_soft is not None:
+                softs.remove(target_soft)
+                result.removed_soft.append(label)
+                content_changes += 1
+            elif target_is_hard:
+                result.kept_hard.append(label)
+            else:
+                result.unresolved.append(label)
+            continue
+        if op == "replace" and target_is_hard:
+            result.kept_hard.append(label)
+            continue
+        if not subject_ids or not slots:
+            continue
+        key = task_constraint_key(subject_type, subject_ids, slots)
+        replacing = target_soft if op == "replace" else None
+        if op == "replace" and replacing is None:
+            # 指不到具体旧项：保留原要求，把这条当追加，并如实告诉教务没能确定改的是哪一条。
+            result.unresolved.append(label)
+        same_key = [item for item in softs if _soft_key(item) == key and item is not replacing]
+
         if str(getattr(constraint, "hardness", "hard")) == "hard":
+            if replacing is not None:
+                softs.remove(replacing)
+                content_changes += 1
             if same_key:
                 softs[:] = [item for item in softs if _soft_key(item) != key]
-                result.soft_changed = True
+                content_changes += 1
             if key in hard_keys:
                 continue
             item = forbidden_slot_item(
@@ -1951,48 +2084,53 @@ def plan_task_constraint_revision(
             )
             new_checklist.append(item)
             hard_keys[key] = item
+            hard_item_keys.add(str(item["key"]))
             result.checklist_changed = True
-            (result.tightened if same_key else result.added_hard).append(label)
+            (result.tightened if (same_key or replacing is not None) else result.added_hard).append(
+                label
+            )
             continue
+
         if key in hard_keys:
             result.kept_hard.append(label)
+            if replacing is not None:
+                # 替换的目标软要求被同内容的硬要求覆盖：旧的软项本身仍按原样保留，不因此被删。
+                pass
+            continue
+        if replacing is not None:
+            replacing.update(
+                {
+                    "subject_type": subject_type,
+                    "subject_ids": subject_ids,
+                    "slot_business_ids": slots,
+                    "source_text": text,
+                }
+            )
+            # 同内容的其他软项并入这一条，不留重复。
+            softs[:] = [item for item in softs if item is replacing or _soft_key(item) != key]
+            result.replaced_soft.append(label)
+            content_changes += 1
             continue
         if same_key:
             existing = same_key[0]
             if text and text != str(existing.get("source_text") or ""):
                 existing["source_text"] = text
-                result.soft_changed = True
+                text_only_updates += 1
             continue
-        replaced = next(
-            (
-                item
-                for item in softs
-                if str(item.get("id")) == constraint_id
-                and str(item.get("subject_type") or "teacher") == subject_type
-                and sorted(_clean_ids(item.get("subject_ids"))) == sorted(subject_ids)
-            ),
-            None,
+        softs.append(
+            {
+                "id": unique_soft_id(constraint_id),
+                "subject_type": subject_type,
+                "subject_ids": subject_ids,
+                "slot_business_ids": slots,
+                "source_text": text,
+            }
         )
-        entry = {
-            "id": constraint_id,
-            "subject_type": subject_type,
-            "subject_ids": subject_ids,
-            "slot_business_ids": slots,
-            "source_text": text,
-        }
-        if replaced is not None:
-            softs[softs.index(replaced)] = entry
-            result.replaced_soft.append(label)
-        else:
-            taken = {str(item.get("id")) for item in softs}
-            if constraint_id in taken:
-                suffix = 2
-                while f"{constraint_id}-{suffix}" in taken:
-                    suffix += 1
-                entry["id"] = f"{constraint_id}-{suffix}"
-            softs.append(entry)
-            result.added_soft.append(label)
-        result.soft_changed = True
+        result.added_soft.append(label)
+        content_changes += 1
+
+    result.soft_changed = bool(content_changes or text_only_updates)
+    result.soft_text_only = bool(text_only_updates) and not content_changes
     return result
 
 
@@ -2004,8 +2142,12 @@ def apply_goal_checklist_revision(
     new_checklist: list[dict[str, Any]],
     history_entry: dict[str, Any],
     acceptance_detail: str | None = None,
+    new_context: dict[str, Any] | None = None,
 ) -> bool:
     """清单修订落库（MEM-F/F2 第六轮复审收口）：单条条件 UPDATE 写全部字段。
+
+    new_context 非空时（任务要求修订：软要求/范围也是任务依据的一部分）随同一条 UPDATE 写入
+    goal.context——新版依据与版本号同生同灭，不会出现「版本没变、依据已换」。
 
     与验收侧（apply_goal_evaluation）对偶的并发保护：修订请求在 API 层读到
     的是旧快照，从读到落库之间，另一会话可能已按旧清单完成验收（status=
@@ -2034,6 +2176,8 @@ def apply_goal_checklist_revision(
         "acceptance_status": "pending",
         "status": case((SolveGoal.status == "achieved", "open"), else_=SolveGoal.status),
     }
+    if new_context is not None:
+        values["context"] = new_context
     if acceptance_detail is not None:
         # detail 文案由调用方按请求读取时的快照选择；快照为 pending 时与既有
         # 行为一致——不覆写库中已有的说明（如「等待重新验收」标记）。
@@ -2080,6 +2224,8 @@ __all__ = [
     "merge_coverage_scope",
     "normalize_goal_scope",
     "plan_task_constraint_revision",
+    "run_admission",
+    "run_admission_clause",
     "task_constraint_key",
     "TaskConstraintRevision",
     "forbidden_slot_item",

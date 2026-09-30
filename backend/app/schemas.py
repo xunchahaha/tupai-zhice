@@ -880,6 +880,9 @@ class SolverRunResponse(ORMModel):
     task_revision: dict[str, list[str]] | None = None
     # 由哪次求解按原参数重跑而来。
     rerun_of: str | None = None
+    # 求解创建时冻结的任务依据版本：和任务当前版本不同 = 任务要求在这次求解之后改过，
+    # 这时「按原参数重跑」不再成立（后端 409），界面据此说明而不是让人点了才报错。
+    goal_checklist_version: int | None = None
     error_message: str | None
     created_at: datetime
     updated_at: datetime
@@ -1517,6 +1520,12 @@ class AssistantTaskConstraint(BaseModel):
     subject_ids: list[str] = Field(default_factory=list)
     slot_business_ids: list[str] = Field(default_factory=list)
     hardness: Literal["hard", "soft"] = "hard"
+    # 这条要求对任务已有要求做什么（评审：同一个临时编号不能证明是替换）：
+    # add=追加（默认；「另外也要…」）；replace=替换 target_id 指向的那一条（「改成…」）；
+    # remove=取消 target_id 指向的那一条。target_id 只能取上下文 active_task_constraints
+    # 里出现的稳定编号；指不到具体旧项时不自动删除任何东西（见 plan_task_constraint_revision）。
+    op: Literal["add", "replace", "remove"] = "add"
+    target_id: str | None = Field(default=None, max_length=80)
 
 
 class AssistantMemoryAction(BaseModel):

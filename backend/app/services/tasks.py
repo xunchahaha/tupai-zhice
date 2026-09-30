@@ -427,10 +427,7 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
         if run_goal_id:
             # MEM-D2/D6：run completed 时先把验收状态置 pending（报告在下面
             # 的独立事务里异步生成）。前端据此显示「验收中…」而不是干等。
-            goal = db.get(SolveGoal, run_goal_id)
-            if goal is not None and goal.status != "abandoned":
-                goal.acceptance_status = "pending"
-                goal.acceptance_detail = None
+            _mark_goal_acceptance_pending(db, str(run_goal_id), run_id)
         db.commit()
     # 目标验收闭环（MEM-C3）：run 到达 completed 后对关联目标自动出验收报告。
     # 放在求解结果事务之外单独提交——验收层的任何异常都不得影响求解落库，
@@ -456,7 +453,38 @@ def _goal_version_anchor(request_payload: dict[str, Any] | None) -> int | None:
         return None
 
 
-def _mark_goal_acceptance_failed(db: Any, goal_id: str, *, version: int, detail: str) -> bool:
+def _mark_goal_acceptance_pending(db: Any, goal_id: str, run_id: str) -> bool:
+    """run completed 时把任务验收状态置 pending（「验收中…」）——只有有资格的求解才能写。
+
+    旧求解晚结束不能把当前结论的验收状态改回 pending：那一刻当前结论早已完成，
+    旧求解的报告又不会被接纳，任务会永远停在「验收中」。条件与验收结论写回一致：
+    版本锚点 = 当前版本、任务未放弃、当前持有结论的求解不比它更晚。
+    """
+    from .goal import run_admission_clause  # 延迟导入：goal 顶层依赖本模块
+
+    run = db.get(SolverRun, run_id)
+    if run is None:
+        return False
+    conditions = [
+        SolveGoal.id == goal_id,
+        SolveGoal.status != "abandoned",
+        run_admission_clause(goal_id, run),
+    ]
+    anchor = _goal_version_anchor(run.request_payload)
+    if anchor is not None:
+        conditions.append(SolveGoal.checklist_revision == anchor)
+    result = db.execute(
+        update(SolveGoal)
+        .where(*conditions)
+        .values(acceptance_status="pending", acceptance_detail=None)
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0) == 1
+
+
+def _mark_goal_acceptance_failed(
+    db: Any, goal_id: str, *, version: int, detail: str, run: SolverRun | None = None
+) -> bool:
     """异常/失败路径的目标写回：唯一入口是带版本守卫的条件 UPDATE。
 
     与 goal.apply_goal_evaluation 的结论写回同构（MEM-F/F2 第五轮复审模式）：
@@ -465,17 +493,37 @@ def _mark_goal_acceptance_failed(db: Any, goal_id: str, *, version: int, detail:
     = 版本已前移或目标已放弃——**目标当前结论一字不改**，失败只留在该 run
     自己的 goal_report 上（由调用方记录 run 与清单版本）。
     """
+    from .goal import run_admission_clause  # 延迟导入：goal 顶层依赖本模块
+
+    conditions = [
+        SolveGoal.id == goal_id,
+        SolveGoal.checklist_revision == version,
+        SolveGoal.status != "abandoned",
+    ]
+    if run is not None:
+        # 失败同样只有有资格的求解能写：旧求解的失败不能把当前已完成的结论标成 failed。
+        conditions.append(run_admission_clause(goal_id, run))
     result = db.execute(
         update(SolveGoal)
-        .where(
-            SolveGoal.id == goal_id,
-            SolveGoal.checklist_revision == version,
-            SolveGoal.status != "abandoned",
-        )
+        .where(*conditions)
         .values(acceptance_status="failed", acceptance_detail=detail)
         .execution_options(synchronize_session=False)
     )
     return int(result.rowcount or 0) == 1
+
+
+def lock_goal_row(db: Any, goal_id: str) -> None:
+    """取得任务行的写锁：先发一条不改值的 UPDATE，之后的读才是「持锁后的最新状态」。
+
+    读-改-写 goal.context 的几条路径（创建求解写范围/软要求、run 产出草稿接管工作草稿指针）
+    都先过这里——SQLite 单写者串行、PostgreSQL 行锁，谁都不会把对方刚写的 context 整份覆盖掉。
+    """
+    db.execute(
+        update(SolveGoal)
+        .where(SolveGoal.id == goal_id)
+        .values(checklist_revision=SolveGoal.checklist_revision)
+        .execution_options(synchronize_session=False)
+    )
 
 
 def _promote_work_draft(
@@ -497,27 +545,16 @@ def _promote_work_draft(
     context（SQLite 单写者串行、PostgreSQL 行锁，两者下「读到什么就写回什么」都不会
     被另一个并发验收写回夹在中间）。返回 {"promoted": bool, "reason": str | None}。
     """
-    db.execute(
-        update(SolveGoal)
-        .where(SolveGoal.id == goal_id)
-        .values(checklist_revision=SolveGoal.checklist_revision)
-        .execution_options(synchronize_session=False)
-    )
+    lock_goal_row(db, goal_id)
     goal = db.get(SolveGoal, goal_id)
     if goal is None:
         return {"promoted": False, "reason": "任务不存在"}
     db.refresh(goal)
-    if goal.status == "abandoned":
-        return {"promoted": False, "reason": "任务已放弃"}
-    anchor = _goal_version_anchor(run.request_payload)
-    if anchor is not None and anchor != int(goal.checklist_revision):
-        return {
-            "promoted": False,
-            "reason": (
-                f"任务要求已修订至 v{goal.checklist_revision}，"
-                f"这次求解基于 v{anchor}，产物只留在历史里"
-            ),
-        }
+    from .goal import run_admission  # 延迟导入：goal 顶层依赖本模块
+
+    admitted, reason = run_admission(db, goal, run)
+    if not admitted:
+        return {"promoted": False, "reason": reason}
     context = dict(goal.context or {})
     pointer_id = str(context.get("work_draft_schedule_id") or "")
     if pointer_id and pointer_id != draft_version.id:
@@ -612,7 +649,7 @@ def _evaluate_goal_for_run(run_id: str, goal_id: str) -> None:
                 landed = False
                 if anchor is not None:
                     landed = _mark_goal_acceptance_failed(
-                        db, goal_id, version=anchor, detail=detail
+                        db, goal_id, version=anchor, detail=detail, run=run
                     )
                 if run is not None:
                     run.goal_report = {
@@ -659,7 +696,7 @@ def _persist_failure(run_id: str, message: str) -> None:
                 landed = False
                 if anchor is not None:
                     landed = _mark_goal_acceptance_failed(
-                        db, run.goal_id, version=anchor, detail=detail
+                        db, run.goal_id, version=anchor, detail=detail, run=run
                     )
                 run.goal_report = {
                     "goal_id": run.goal_id,

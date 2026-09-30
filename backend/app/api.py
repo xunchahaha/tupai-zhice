@@ -295,11 +295,15 @@ from .services.solver import _has_date_information, _selected_sessions, _session
 # services.task_context，提示词（services/ai.py）与这里共用同一组词。
 from .services.task_context import (
     TEACHER_RESTRICTION_LABEL,
-    authorization_clause,
+    bind_explicit_authorization,
     predicate_label,
-    scoped_word_hits,
 )
-from .services.tasks import count_hard_conflicts, enqueue_solver_run, execute_solver_run
+from .services.tasks import (
+    count_hard_conflicts,
+    enqueue_solver_run,
+    execute_solver_run,
+    lock_goal_row,
+)
 from .services.xlsx_io import export_schedule_xlsx
 from .timezone import SHANGHAI_TZ, as_utc, shanghai_now
 
@@ -4297,8 +4301,9 @@ def _compile_task_constraints(
     清单项时保留清单侧（单一事实源），请求项之间也按序去重（含 business_id
     撞名兜底）。**硬要求永远压过软要求**：同键下只要任一来源是 hard，软项整体
     让位（否则先处理的旧软项会通过去重把后来的硬要求挡在编译之外，执行层就只
-    按「尽量」办了用户确认过的「绝对不能」）；同 id 且同主体、时段不同的请求
-    软项视为对持久软项的修改，旧项让位而不是新旧并存。任务级约束**永不**创建
+    按「尽量」办了用户确认过的「绝对不能」）；请求里显式 replace/remove 的
+    target_id 指向的持久软项让位。同 id 不代表替换（解析侧 id 按序号生成，跨轮次会撞）。
+    任务级约束**永不**创建
     Rule 行、不进快照 checksum（§2.5 红线）。
 
     goal 关联的求解不再同时传请求项：确认过的请求约束先经
@@ -4335,19 +4340,11 @@ def _compile_task_constraints(
         for item in (((goal.context or {}).get("soft_task_constraints") or []) if goal else [])
         if isinstance(item, dict)
     ]
-    # 请求软项对持久软项的修改：同 id、同主体、时段不同 → 旧项让位。
-    edited_soft_ids: set[str] = set()
+    # 请求里显式 replace/remove 指向的持久软项让位（身份靠 target_id，不靠会跨轮次撞的序号 id）。
+    superseded_soft_ids: set[str] = set()
     for constraint in request_constraints or []:
-        if constraint.hardness != "soft" or not str(constraint.id or "").strip():
-            continue
-        for item in persisted_softs:
-            if (
-                str(item.get("id")) == str(constraint.id)
-                and str(item.get("subject_type") or "teacher") == str(constraint.subject_type)
-                and sorted(str(v) for v in item.get("subject_ids") or [])
-                == sorted(str(v) for v in constraint.subject_ids)
-            ):
-                edited_soft_ids.add(str(constraint.id))
+        if constraint.op in {"replace", "remove"} and constraint.target_id:
+            superseded_soft_ids.add(str(constraint.target_id))
 
     def _append(
         *,
@@ -4424,8 +4421,8 @@ def _compile_task_constraints(
             if key in seen_keys or key in hard_keys:
                 continue  # 同内容已有硬要求：软项让位。
             soft_id = str(soft.get("id") or "").strip() or str(len(rules))
-            if soft_id in edited_soft_ids:
-                continue  # 被请求里的同 id 软项修改：新版在下面的请求分支编译。
+            if soft_id in superseded_soft_ids:
+                continue  # 被请求显式替换/取消：新版（若有）在下面的请求分支编译。
             _append(
                 business_id=f"TASK-{prefix}-soft-{soft_id}",
                 source_text=str(soft.get("source_text") or ""),
@@ -4469,40 +4466,84 @@ def _compile_task_constraints(
     return rules
 
 
-def _save_task_requirements_revision(
+def _scope_signature(
+    scope: dict[str, Any] | None, *, with_window: bool = True
+) -> tuple[Any, ...] | None:
+    """执行范围的可比较形态（列表无序、缺键按空处理、日期取日期部分）；没有存过范围返回 None。"""
+    if scope is None:
+        return None
+
+    def day(value: Any) -> str | None:
+        return str(value)[:10] if value else None
+
+    core: tuple[Any, ...] = (
+        tuple(sorted(str(v) for v in scope.get("business_lines") or [])),
+        tuple(sorted(str(v) for v in scope.get("product_types") or [])),
+        tuple(sorted(str(v) for v in scope.get("class_business_ids") or [])),
+        tuple(sorted(str(v) for v in scope.get("course_business_ids") or [])),
+        day(scope.get("date_from")),
+        day(scope.get("date_to")),
+    )
+    return (*core, int(scope.get("date_window_days") or 0)) if with_window else core
+
+
+def _coverage_scope_signature(checklist: list[dict[str, Any]]) -> tuple[Any, ...] | None:
+    """清单里 coverage 项声明的验收范围（验收侧对「排哪些课」的表述）；没有则 None。"""
+    for item in checklist:
+        if str(item.get("kind")) == "coverage":
+            return _scope_signature(dict(item.get("params") or {}), with_window=False)
+    return None
+
+
+def _save_task_basis_revision(
     db: Session,
     user_id: str | None,
     goal: SolveGoal,
-    revision: TaskConstraintRevision,
+    *,
+    checklist: list[dict[str, Any]],
+    new_context: dict[str, Any],
+    old_context: dict[str, Any],
+    reasons: list[str],
+    summary: dict[str, list[str]] | None,
 ) -> None:
-    """把任务要求的新版清单原子落库：升版本、使旧验收结论失效（评审 R1）。
+    """把任务依据的新版（硬要求清单 + 软要求 + 执行范围）原子落库：升版本、使旧验收结论失效。
 
-    与 PATCH /goals/{id}/checklist 同一条件 UPDATE（`apply_goal_checklist_revision`）：
-    版本号 +1、achieved 回退 open、验收状态回 pending、旧清单进历史。行数=0 = 读取后
-    清单已被并发修订（或任务已放弃）——整体回滚并要求重新确认，绝不带着旧快照继续。
+    任务依据 = 用户确认过的全部要求，不只是硬清单：软要求、范围变了，旧结果依据的就是
+    另一套要求，只比较清单版本的旧结果保护认不出来（评审 6fe2bf8 R2）。与
+    PATCH /goals/{id}/checklist 同一条件 UPDATE（`apply_goal_checklist_revision`）：版本号 +1、
+    achieved 回退 open、验收状态回 pending、旧清单与旧依据进历史，
+    **新 context 随同一条 UPDATE 写入**。
+    行数=0 = 读取后清单已被并发修订（或任务已放弃）——整体回滚并要求重新确认，绝不带着旧快照继续。
     """
     old_version = int(goal.checklist_revision)
     new_version = old_version + 1
+    changed = "、".join(reasons)
     acceptance_detail: str | None = None
     if goal.acceptance_status in {"completed", "failed"}:
-        acceptance_detail = f"任务要求已修订至 v{new_version}，等待新验收"
+        acceptance_detail = f"任务要求已修订至 v{new_version}（{changed}有变化），等待新验收"
     if goal.status == "achieved":
         acceptance_detail = (
-            f"任务要求已修订至 v{new_version}（原已达成结论基于 v{old_version}），等待新验收"
+            f"任务要求已修订至 v{new_version}（{changed}有变化，"
+            f"原已达成结论基于 v{old_version}），等待新验收"
         )
     history_entry = {
         "version": old_version,
         "saved_at": shanghai_now().isoformat(),
         "saved_by": user_id,
         "items": list(goal.checklist or []),
+        # 旧依据里不在清单中的部分：软要求与执行范围，供回看「当时到底按什么办」。
+        "soft_task_constraints": list(old_context.get("soft_task_constraints") or []),
+        "scope": old_context.get("scope"),
+        "changed": reasons,
     }
     if not apply_goal_checklist_revision(
         db,
         goal,
         old_version=old_version,
-        new_checklist=revision.checklist,
+        new_checklist=checklist,
         history_entry=history_entry,
         acceptance_detail=acceptance_detail,
+        new_context=new_context,
     ):
         db.rollback()
         raise HTTPException(
@@ -4518,8 +4559,9 @@ def _save_task_requirements_revision(
             detail={
                 "from_version": old_version,
                 "to_version": new_version,
-                "via": "task_constraint_revision",
-                "summary": revision.summary(),
+                "via": "task_basis_revision",
+                "changed": reasons,
+                "summary": summary,
                 "acceptance_reset": True,
             },
         )
@@ -4537,6 +4579,7 @@ def create_solver_run(
     extra: dict[str, Any] | None = None,
     goal_id: str | None = None,
     frozen_from: SolverRun | None = None,
+    freeze_baseline: bool = False,
 ) -> SolverRun:
     # frozen_from：「同一个问题多算一会儿」的重跑——沿用原求解冻结的数据快照与偏好记忆，
     # 不重新读主数据、不重新编译记忆，避免加预算悄悄换了问题（评审 R2）。
@@ -4582,8 +4625,12 @@ def create_solver_run(
     # 目标关联（TC-3/TC-4/TC-5）：一次读取，供版本冻结、任务约束编译、
     # 三级基准选择与 context 写入点①共用。
     goal_row: SolveGoal | None = None
+    planned_revision = 0
     if goal_id:
         goal_row = db.get(SolveGoal, goal_id)
+        if goal_row is not None:
+            # 下面的要求修订与编译都基于这一刻读到的任务版本；落库前若版本已前移就拒绝。
+            planned_revision = int(goal_row.checklist_revision)
     # 任务级约束编译（TC-3 §2.4）：goal 来源（清单带参项 + context 软约束）
     # 与请求来源（AssistantSolveRequest.task_constraints，缺失 id 按序号兜底）
     # 双来源合并，产物存独立键 task_constraint_rules——不写 request_payload
@@ -4644,7 +4691,9 @@ def create_solver_run(
         ]
     if "parent_schedule_id" in run_extra:
         baseline_source = "explicit_parent"
-    else:
+    elif not freeze_baseline:
+        # freeze_baseline（按原参数重跑）：基准已经由 extra 原样给出——原求解没有基准时
+        # 「没有」也是冻结的输入，不能重新去找当前工作草稿/最新已发布版本。
         if goal_row is not None:
             draft_id = str((goal_row.context or {}).get("work_draft_schedule_id") or "")
             if draft_id:
@@ -4706,20 +4755,23 @@ def create_solver_run(
     # MEM-E2/E2a：创建任务时冻结关联目标当时的清单版本——验收若晚于清单修订，
     # 报告 meta 会注明「求解参数基于 v{m} 清单生成，验收按 v{n}」，可解释。
     if goal_row is not None:
-        if revision is not None and revision.checklist_changed:
-            _save_task_requirements_revision(db, user_id, goal_row, revision)
-        # 版本号以持久化计数列为准（MEM-F/F2 收口），与验收写回的
-        # 条件 UPDATE 用同一计数；任务要求刚被修订时这里已经是新版本。
-        payload["goal_checklist_version"] = int(goal_row.checklist_revision)
-        if revision is not None and (summary := revision.summary()):
-            payload["task_revision"] = summary
+        # 读-改-写放在任务行写锁下：先取锁、再读最新状态——并发的验收写回、工作草稿接管
+        # 写的 context 不会被这里整份覆盖；读取后任务版本已前移就整体拒绝（提交的是旧版要求）。
+        lock_goal_row(db, goal_row.id)
+        db.refresh(goal_row)
+        if int(goal_row.checklist_revision) != planned_revision:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="任务要求在提交期间被修改，请刷新任务后重新确认再提交",
+            )
         # TC-4 写入点①（§4.2）：创建求解 = 用户决策点，本次请求的范围整体覆盖
-        # context.scope，soft 任务约束按 id 幂等合并（来源=请求约束中
-        # hardness=soft 的项，无请求项时维持现值）；同事务 + 审计
-        # action="update_context"。硬约束不进 context（单一事实源在 checklist）。
-        context = dict(goal_row.context or {})
+        # context.scope，软任务约束按修订结果落地；同事务 + 审计 action="update_context"。
+        # 硬约束不进 context（单一事实源在 checklist）。
+        old_context = dict(goal_row.context or {})
+        context = dict(old_context)
         context.setdefault("schema_version", 1)
-        context["scope"] = {
+        new_scope = {
             "business_lines": list(request.business_lines),
             "product_types": list(request.product_types),
             "class_business_ids": list(request.class_business_ids),
@@ -4729,6 +4781,7 @@ def create_solver_run(
             # 单课调整的课次限定是任务约定的一部分：续办、加预算重跑从这里恢复。
             "course_business_ids": list(getattr(request, "course_business_ids", []) or []),
         }
+        context["scope"] = new_scope
         # 显式基准（请求指定的版本）记进任务上下文；之后没有更新的工作草稿时仍以它为基准。
         if requested_parent_id and "parent_schedule_id" not in (extra or {}):
             context["base_schedule_id"] = requested_parent_id
@@ -4742,7 +4795,54 @@ def create_solver_run(
             ]
         soft_merged = {str(item.get("id")): item for item in soft_constraints}
         context["soft_task_constraints"] = soft_constraints
-        goal_row.context = context
+        # 任务依据 = 硬要求清单 + 软要求 + 执行范围：任何一项变了都升版本、使旧结论失效。
+        # 首次求解（任务还没存过范围/软要求）是在确立初始依据，不算修订；只更新软要求原话
+        # （内容不变）同样不算。
+        established = any(key in old_context for key in ("scope", "soft_task_constraints"))
+        reasons: list[str] = []
+        if revision is not None and revision.checklist_changed:
+            reasons.append("硬性要求")
+        if (
+            established
+            and revision is not None
+            and revision.soft_changed
+            and not revision.soft_text_only
+        ):
+            reasons.append("软性要求")
+        old_scope_signature = _scope_signature(old_context.get("scope"))
+        # 执行范围变了，且清单里的 coverage 还没有体现这个新范围——说明这是确认卡里换的范围，
+        # 验收口径没跟着动，旧结果依据的是另一个范围，必须升版本。coverage 已经等于新范围
+        # （例如先在清单里改了验收范围、再按新范围求解）时，同一个决定不重复升版本。
+        if (
+            established
+            and old_scope_signature is not None
+            and old_scope_signature != _scope_signature(new_scope)
+            and _coverage_scope_signature(
+                revision.checklist if revision is not None else list(goal_row.checklist or [])
+            )
+            != _scope_signature(new_scope, with_window=False)
+        ):
+            reasons.append("排课范围")
+        if reasons:
+            _save_task_basis_revision(
+                db,
+                user_id,
+                goal_row,
+                checklist=revision.checklist if revision is not None else list(goal_row.checklist),
+                new_context=context,
+                old_context=old_context,
+                reasons=reasons,
+                summary=revision.summary() if revision is not None else None,
+            )
+        else:
+            goal_row.context = context
+        # 版本号以持久化计数列为准（MEM-F/F2 收口），与验收写回的条件 UPDATE 用同一计数；
+        # 任务依据刚被修订时这里已经是新版本。
+        payload["goal_checklist_version"] = int(goal_row.checklist_revision)
+        if revision is not None and (summary := revision.summary()):
+            payload["task_revision"] = summary
+        if reasons:
+            payload["task_revision_reasons"] = reasons
         db.add(
             AuditLog(
                 actor_id=user_id,
@@ -4871,6 +4971,21 @@ def rerun_solver_run(
         raise HTTPException(status_code=409, detail="调课或导入产生的求解不支持按原参数重跑")
     goal = _resolve_goal_for_run(db, source.goal_id, scope.id)
     frozen = dict(source.request_payload or {})
+    if (
+        goal is not None
+        and source.goal_checklist_version is not None
+        and source.goal_checklist_version != int(goal.checklist_revision)
+    ):
+        # 「同一个问题多算一会儿」只在任务依据没变时成立：依据（硬要求/软要求/范围）改过之后，
+        # 重放旧求解 = 旧数据、旧范围却按新要求验收，问题已经不是原来那个了。
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"任务要求在这次求解之后修订过（v{source.goal_checklist_version}"
+                f" → v{goal.checklist_revision}），按原参数重跑会用旧问题对新要求验收；"
+                "请按当前要求重新排课"
+            ),
+        )
     time_limit = request.time_limit_seconds or raised_budget_seconds(source.time_limit_seconds)
     solve_request = SolveRequest(
         time_limit_seconds=time_limit,
@@ -4900,6 +5015,7 @@ def rerun_solver_run(
         extra=extra,
         goal_id=goal.id if goal else None,
         frozen_from=source,
+        freeze_baseline=True,
     )
     audit(
         db,
@@ -7566,13 +7682,22 @@ def _goal_task_context(
             .limit(1)
         )
     request = dict(latest_run.request_payload or {}) if latest_run is not None else {}
+    # 每条既有要求带稳定编号（硬要求=清单项 key，软要求=保存时的 id）与软/硬标记：
+    # 模型要「修改/取消某一条」时，用 op + target_id 指向它，而不是靠会跨轮次撞的序号。
     checklist_constraints = [
-        {"key": str(item.get("key")), "params": dict(item.get("params") or {})}
+        {
+            "id": str(item.get("key")),
+            "key": str(item.get("key")),
+            "hardness": "hard",
+            "params": dict(item.get("params") or {}),
+        }
         for item in goal.checklist or []
         if item.get("kind") == "forbidden_slot_free"
     ]
     soft_constraints = [
-        dict(item) for item in context.get("soft_task_constraints") or [] if isinstance(item, dict)
+        {**item, "hardness": "soft"}
+        for item in context.get("soft_task_constraints") or []
+        if isinstance(item, dict)
     ]
     return {
         "goal_id": goal.id,
@@ -7771,8 +7896,13 @@ def _normalize_assistant_task_constraints(
     *,
     unsupported: list[str],
     warnings: list[str],
+    active_ids: set[str] | None = None,
 ) -> list[AssistantTaskConstraint]:
     """把模型输出的任务级约束逐条校验/降级（TC-1 §2.2）。
+
+    op/target_id（追加/替换/取消既有要求）：target_id 只能取上下文里既有要求的稳定编号
+    （active_ids），指不到具体旧项的 replace 退化为追加、remove 忽略并提示——**不确定改的是
+    哪一条时绝不自动删除旧要求**；没有任务（active_ids 为空）时 replace 按追加处理。
 
     与范围未知实体的整响应 422 不同：任务约束坏一条只降级该条——subject/
     slot 里有未知值（或为空）的条目被剔除，原文追加进 unsupported（复用调用方
@@ -7825,6 +7955,24 @@ def _normalize_assistant_task_constraints(
                 "未进入结构化结果，请在清单中补参。"
             )
             continue
+        target_known = bool(constraint.target_id) and constraint.target_id in (active_ids or set())
+        if constraint.op == "remove":
+            if target_known:
+                normalized.append(constraint)
+            else:
+                warnings.append(
+                    f"要取消的要求『{source_text or constraint.id}』没能对应到任务里具体的某一条，"
+                    "已保留原要求；可以到任务清单里直接处理。"
+                )
+            continue
+        if constraint.op == "replace" and not target_known:
+            warnings.append(
+                f"要修改的要求『{source_text or constraint.id}』没能对应到任务里具体的某一条，"
+                "已保留原要求、把这条当作新增。"
+            )
+            constraint = constraint.model_copy(update={"op": "add", "target_id": None})
+        elif constraint.op == "add" and constraint.target_id:
+            constraint = constraint.model_copy(update={"target_id": None})
         unknown_subjects = sorted(
             set(constraint.subject_ids) - subject_candidates.get(constraint.subject_type, set())
         )
@@ -7895,9 +8043,6 @@ def _verify_explicit_memory_action(
     instruction: str,
     schedule_set_id: str,
     injected_ids: set[str],
-    word_hits: dict[str, list[str]],
-    binding_error: str | None = None,
-    mentioned_subjects: dict[str, set[str]] | None = None,
 ) -> tuple[bool, str | None, PreferenceEntry | None]:
     """explicit 三条代码复核（TC-2 §3.2）：模型自报不算数，三条全过才执行。
 
@@ -7905,21 +8050,14 @@ def _verify_explicit_memory_action(
        constraint 引用的 slot/room 存在；expire/update：目标条目存在且属于本方案）；
     ② target_entry_id 必须命中 _interpret_context 注入的真实活跃条目（§3.4，
        列表外的 id 一律视为幻觉，降级候选）；
-    ③ 动作**自己的原话分句**命中显式声明词表（services.task_context 单一事实源，
-       与提示词同表）：word_hits 是该分句内的命中（带词前否定、明确拒绝否决），
-       不是整句指令的——整句里别处出现的「记住」不能替另一条动作授权；片段定位
-       不到/跨句（binding_error）、分句点名的是另一个主体（mentioned_subjects 不含
-       本动作主体）同样不通过。
+    ③ 授权**绑定到这条动作自己的意图**（services.task_context.bind_explicit_authorization，
+       词表单一事实源、与提示词同表）：授权证据与偏好内容分别定位——证据必须在动作原话所在
+       小段里或紧挨着它，带词前否定/明确拒绝不算，点名的主体不能是另一个人；内容带
+       「这次/下周/临时…」这类一次性措辞又没有「以后都/长期」时，不能借「记住」变成长期偏好。
+       绑不上就降级，整句里别处出现的「记住」不替任何一条动作授权。
     返回 (是否通过, 不通过原因, expire/update 的目标条目)。
     """
-    if binding_error:
-        return False, binding_error, None
     if action.action == "save_preference":
-        if not word_hits.get("save"):
-            return False, "动作自己的原话里没有显式的记录声明（或被否定），按推测处理", None
-        same_type = (mentioned_subjects or {}).get(action.subject_type) or set()
-        if same_type and action.subject_id not in same_type:
-            return False, "动作的原话指向的是其他主体，授权不能借用", None
         if not action.subject_id or not action.predicate:
             return False, "主体或谓词缺失", None
         if action.predicate not in ALL_PREDICATES:
@@ -7932,18 +8070,35 @@ def _verify_explicit_memory_action(
             return False, str(exc.detail), None
         if not _constraint_refs_exist(db, action.constraint, schedule_set_id):
             return False, "约束引用的时段/教室在本方案中不存在", None
+        bound, reason = bind_explicit_authorization(
+            instruction,
+            action.source_text,
+            kind="save",
+            subject_id=action.subject_id,
+            mentions_of=lambda text: _mentioned_subjects(db, schedule_set_id, text).get(
+                action.subject_type, set()
+            ),
+        )
+        if not bound:
+            return False, reason, None
         return True, None, None
-    if not (word_hits.get("expire") or word_hits.get("correct")):
-        return False, "动作自己的原话里没有显式的撤销/纠正声明（或被否定），按推测处理", None
     target_id = str(action.target_entry_id or "").strip()
     if not target_id or target_id not in injected_ids:
         return False, "目标条目 id 未出现在本次解析注入的活跃记忆中（疑似幻觉）", None
     entry = db.get(PreferenceEntry, target_id)
     if entry is None or entry.schedule_set_id != schedule_set_id:
         return False, "目标条目不存在或不属于当前方案", None
-    same_type = (mentioned_subjects or {}).get(entry.subject_type) or set()
-    if same_type and entry.subject_id not in same_type:
-        return False, "动作的原话指向的是其他主体，授权不能借用", None
+    bound, reason = bind_explicit_authorization(
+        instruction,
+        action.source_text,
+        kind="retract",
+        subject_id=entry.subject_id,
+        mentions_of=lambda text: _mentioned_subjects(db, schedule_set_id, text).get(
+            entry.subject_type, set()
+        ),
+    )
+    if not bound:
+        return False, reason, None
     return True, None, entry
 
 
@@ -8122,18 +8277,14 @@ def _execute_memory_actions(
                 )
             continue
 
-        # 授权按动作绑定：只看这条动作自己的原话所在分句，不让整句里别处的
-        # 「记住」替它授权（评审 R5）。
-        clause, binding_error = authorization_clause(instruction, action.source_text)
+        # 授权按动作意图绑定：证据与内容分别定位再核对，不让整句里别处的「记住」
+        # 替它授权（评审 6fe2bf8 R5）。
         verified, reason, target = _verify_explicit_memory_action(
             db,
             action,
             instruction=instruction,
             schedule_set_id=schedule_set_id,
             injected_ids=injected_ids,
-            word_hits=scoped_word_hits(clause) if clause is not None else {},
-            binding_error=binding_error,
-            mentioned_subjects=_mentioned_subjects(db, schedule_set_id, clause),
         )
         if not verified:
             # explicit 复核不过 = 不是真正的显式声明 → 降级（§3.2）。
@@ -8426,12 +8577,18 @@ def _finalize_assistant_interpret(
     # 解析序号兜底 id 后随响应返回。
     task_warnings: list[str] = []
     rejected_texts: list[str] = []
+    active_ids = {
+        str(item.get("id"))
+        for item in ((context or {}).get("task_context") or {}).get("active_task_constraints") or []
+        if isinstance(item, dict) and item.get("id")
+    }
     task_constraints = _normalize_assistant_task_constraints(
         db,
         output.get("task_constraints"),
         schedule_set_id,
         unsupported=rejected_texts,
         warnings=task_warnings,
+        active_ids=active_ids,
     )
     parsed["coverage_warnings"] = [
         "仅下列结构化范围、规则开关和已确认的任务约束进入求解；本接口不会自动创建"
@@ -8554,7 +8711,8 @@ AILY_INTERPRET_CONTRACT = {
         # 在 Aily 通道一律按 inferred 处理（§3.2，外部通道授权降级）。
         "task_constraints": (
             "[{id, source_text, subject_type: teacher|classroom|cohort, "
-            "subject_ids[], slot_business_ids[], hardness: hard|soft}]"
+            "subject_ids[], slot_business_ids[], hardness: hard|soft, "
+            "op: add|replace|remove, target_id}]"
         ),
         "memory_actions": (
             "[{action: save_preference|expire_preference|update_preference, "

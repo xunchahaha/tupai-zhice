@@ -792,7 +792,9 @@ def test_stale_report_writeback_keeps_pending_and_never_achieves(
         assert stored_meta["checklist_version"] == 1
         assert stored_meta["evaluated_checklist_version"] == 1
         assert stored_meta["current_checklist_version"] == 2
-        assert goal_row.latest_run_id == run.id
+        # 旧版口径下算出的报告只留档，不接管任务的当前结果指针（评审 6fe2bf8 R3）。
+        assert stored_meta["adopted"] is False
+        assert goal_row.latest_run_id is None
 
     # 报告保留 ≠ 结论生效：按当前 v2 重新验收后恢复主路径 completed。
     run2 = _make_run(scope["scope_id"], goal_id, [_assignment(course)])

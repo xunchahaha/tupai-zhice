@@ -40,7 +40,11 @@ from app.models import (
 )
 from app.schemas import AssistantInterpretRequest
 from app.services.goal import plan_task_constraint_revision
-from app.services.task_context import authorization_clause, scoped_word_hits
+from app.services.task_context import (
+    authorization_clause,
+    bind_explicit_authorization,
+    scoped_word_hits,
+)
 from app.timezone import shanghai_now
 
 # ---------------------------------------------------------------- 工具
@@ -92,7 +96,12 @@ def _soft(constraint_id: str, subject_id: str, slots: list[str], text: str = "")
 
 
 def _constraint(
-    constraint_id: str, subject_id: str, slots: list[str], hardness: str, text: str = ""
+    constraint_id: str,
+    subject_id: str,
+    slots: list[str],
+    hardness: str,
+    text: str = "",
+    **extra: Any,
 ) -> dict[str, Any]:
     return {
         "id": constraint_id,
@@ -101,7 +110,14 @@ def _constraint(
         "subject_ids": [subject_id],
         "slot_business_ids": slots,
         "hardness": hardness,
+        **extra,
     }
+
+
+def _plan(checklist: list[dict[str, Any]], softs: list[dict[str, Any]], *items: dict[str, Any]):
+    return plan_task_constraint_revision(
+        checklist, softs, [api_module.AssistantTaskConstraint(**item) for item in items]
+    )
 
 
 def _stored_run(run_id: str) -> SolverRun:
@@ -194,14 +210,89 @@ def test_plan_revision_never_weakens_a_persisted_hard() -> None:
     assert revision.summary() == {"kept_hard": ["T01 soft S05"]}
 
 
-def test_plan_revision_same_id_same_subject_replaces_soft_slots() -> None:
-    """探针 same_id_soft_update：同 id、同主体、时段不同 = 对那一条的修改，不是新旧并存。"""
-    constraints = [
-        api_module.AssistantTaskConstraint(**_constraint("tc-1", "T01", ["S06"], "soft"))
+def test_additional_requirement_reusing_the_positional_id_is_kept_alongside() -> None:
+    """复审 R1：「另外，张老师周五晚也尽量别排」重新用了 tc-1——同 id 同主体也不能当成替换，
+    两条都留（解析编号按序号生成，同编号不能证明用户要改哪一条）。"""
+    revision = _plan(
+        [], [_soft("tc-1", "T01", ["S05"])], _constraint("tc-1", "T01", ["S07"], "soft")
+    )
+    assert revision.added_soft == ["T01 soft S07"] and not revision.replaced_soft
+    assert sorted(item["slot_business_ids"][0] for item in revision.soft_constraints) == [
+        "S05",
+        "S07",
     ]
-    revision = plan_task_constraint_revision([], [_soft("tc-1", "T01", ["S05"])], constraints)
-    assert revision.replaced_soft == ["T01 soft S06"]
-    assert [item["slot_business_ids"] for item in revision.soft_constraints] == [["S06"]]
+    assert len({item["id"] for item in revision.soft_constraints}) == 2
+    assert revision.basis_changed
+
+
+def test_replace_points_at_the_specific_old_requirement_only() -> None:
+    """「周三改成周五」：op=replace + target_id 指向具体旧项，只替换它，其余不动。"""
+    softs = [_soft("sc-a", "T01", ["S05"]), _soft("sc-b", "T01", ["S06"])]
+    revision = _plan(
+        [], softs, _constraint("tc-1", "T01", ["S07"], "soft", op="replace", target_id="sc-a")
+    )
+    assert revision.replaced_soft and not revision.added_soft
+    by_id = {item["id"]: item["slot_business_ids"] for item in revision.soft_constraints}
+    assert by_id == {"sc-a": ["S07"], "sc-b": ["S06"]}
+
+
+def test_remove_cancels_only_the_target_soft_requirement() -> None:
+    softs = [_soft("sc-a", "T01", ["S05"]), _soft("sc-b", "T02", ["S06"])]
+    revision = _plan(
+        [],
+        softs,
+        {"id": "tc-1", "source_text": "张老师那条不用了", "op": "remove", "target_id": "sc-a"},
+    )
+    assert revision.removed_soft == ["张老师那条不用了"]
+    assert [item["id"] for item in revision.soft_constraints] == ["sc-b"]
+    assert revision.basis_changed
+
+
+def test_unresolved_edits_never_delete_anything() -> None:
+    """指不到具体旧项：replace 退化为追加（保留原要求）、remove 什么都不做，都如实记录。"""
+    softs = [_soft("sc-a", "T01", ["S05"])]
+    replaced = _plan(
+        [], softs, _constraint("tc-1", "T01", ["S07"], "soft", op="replace", target_id="nope")
+    )
+    assert replaced.unresolved and replaced.added_soft
+    assert sorted(item["slot_business_ids"][0] for item in replaced.soft_constraints) == [
+        "S05",
+        "S07",
+    ]
+    removed = _plan([], softs, {"id": "tc-1", "source_text": "不用了", "op": "remove"})
+    assert removed.unresolved == ["不用了"]
+    assert [item["id"] for item in removed.soft_constraints] == ["sc-a"]
+    assert not removed.basis_changed
+
+
+def test_hard_items_cannot_be_edited_or_removed_through_a_solve_request() -> None:
+    """放宽/修改/删除硬要求是人在清单里的显式保存动作：op=replace/remove 指向清单项也不生效。"""
+    checklist = [_hard_item("forbidden_slot_free-1", "T01", ["S05"])]
+    edited = _plan(
+        checklist,
+        [],
+        _constraint(
+            "tc-1", "T01", ["S07"], "hard", op="replace", target_id="forbidden_slot_free-1"
+        ),
+    )
+    removed = _plan(
+        checklist,
+        [],
+        {"id": "tc-2", "source_text": "取消", "op": "remove", "target_id": "forbidden_slot_free-1"},
+    )
+    for revision in (edited, removed):
+        assert revision.kept_hard and not revision.changed
+        assert [item["params"]["slot_business_ids"] for item in revision.checklist] == [["S05"]]
+
+
+def test_refreshing_only_the_wording_of_a_soft_requirement_is_not_a_basis_change() -> None:
+    revision = _plan(
+        [],
+        [_soft("tc-1", "T01", ["S05"], "旧措辞")],
+        _constraint("tc-1", "T01", ["S05"], "soft", text="新措辞"),
+    )
+    assert revision.soft_changed and revision.soft_text_only and not revision.basis_changed
+    assert revision.soft_constraints[0]["source_text"] == "新措辞"
 
 
 def test_plan_revision_positional_id_collision_keeps_both_softs() -> None:
@@ -377,54 +468,214 @@ def test_request_soft_cannot_weaken_persisted_hard(
         assert (row.context or {}).get("soft_task_constraints") == []
 
 
-def test_soft_edit_replaces_old_slots_in_run_and_context(
-    client: TestClient, auth_headers: dict[str, str], no_solve: None
-) -> None:
-    """同 id 同主体换时段：这次求解只带新时段，context 只剩新版（求解与持久化一致）。"""
-    goal = _make_goal(
-        context={"schema_version": 1, "soft_task_constraints": [_soft("tc-1", "T01", ["S05"])]}
+def _established_goal(softs: list[dict[str, Any]] | None = None, **fields: Any) -> SolveGoal:
+    """已经跑过第一轮的任务：依据（范围 + 软要求）已确立，之后的变化才算修订。"""
+    return _make_goal(
+        context={
+            "schema_version": 1,
+            "scope": {
+                "business_lines": [],
+                "product_types": [],
+                "class_business_ids": ["B01"],
+                "course_business_ids": [],
+                "date_from": None,
+                "date_to": None,
+                "date_window_days": 7,
+            },
+            "soft_task_constraints": softs or [],
+        },
+        **fields,
     )
+
+
+def _solve_with(
+    client: TestClient,
+    headers: dict[str, str],
+    goal_id: str,
+    *constraints: dict[str, Any],
+    **overrides: Any,
+) -> dict[str, Any]:
     response = client.post(
         "/api/v1/assistant/solve",
-        headers=auth_headers,
+        headers=headers,
         json={
             "instruction": "重排 B01",
             "class_business_ids": ["B01"],
-            "goal_id": goal.id,
-            "task_constraints": [_constraint("tc-1", "T01", ["S07"], "soft")],
+            "goal_id": goal_id,
+            "task_constraints": list(constraints),
+            **overrides,
         },
     )
     assert response.status_code == 202, response.text
-    assert [rule["scope"]["slot_ids"] for rule in _task_rules(response.json()["id"])] == [["S07"]]
+    return response.json()
+
+
+def _goal_row(goal_id: str) -> SolveGoal:
     with SessionLocal() as db:
-        row = db.get(SolveGoal, goal.id)
+        row = db.get(SolveGoal, goal_id)
         assert row is not None
-        assert [
-            item["slot_business_ids"] for item in (row.context or {})["soft_task_constraints"]
-        ] == [["S07"]]
+        db.expunge(row)
+        return row
 
 
-def test_concurrent_task_revision_is_rejected_atomically(
+def test_additional_soft_requirement_keeps_both_in_run_and_context(
+    client: TestClient, auth_headers: dict[str, str], no_solve: None
+) -> None:
+    """第一轮「周三晚尽量别排」，第二轮「另外周五晚也尽量别排」（解析重新用了 tc-1）：
+    这次求解和保存的任务要求里两条都在。"""
+    goal = _established_goal([_soft("tc-1", "T01", ["S05"])])
+    run = _solve_with(client, auth_headers, goal.id, _constraint("tc-1", "T01", ["S07"], "soft"))
+    assert sorted(rule["scope"]["slot_ids"][0] for rule in _task_rules(run["id"])) == ["S05", "S07"]
+    row = _goal_row(goal.id)
+    assert sorted(
+        item["slot_business_ids"][0] for item in row.context["soft_task_constraints"]
+    ) == [
+        "S05",
+        "S07",
+    ]
+    assert run["task_revision"] == {"added_soft": ["T01 soft S07"]}
+
+
+def test_explicit_replace_changes_only_the_target_in_run_and_context(
+    client: TestClient, auth_headers: dict[str, str], no_solve: None
+) -> None:
+    goal = _established_goal([_soft("sc-a", "T01", ["S05"]), _soft("sc-b", "T02", ["S06"])])
+    run = _solve_with(
+        client,
+        auth_headers,
+        goal.id,
+        _constraint("tc-1", "T01", ["S07"], "soft", op="replace", target_id="sc-a"),
+    )
+    by_actor = {rule["actor_ids"][0]: rule["scope"]["slot_ids"] for rule in _task_rules(run["id"])}
+    assert by_actor == {"T01": ["S07"], "T02": ["S06"]}
+    row = _goal_row(goal.id)
+    assert {
+        item["id"]: item["slot_business_ids"] for item in row.context["soft_task_constraints"]
+    } == {
+        "sc-a": ["S07"],
+        "sc-b": ["S06"],
+    }
+
+
+# ------------------------------------------------- R2 任务依据统一版本（硬要求 + 软要求 + 范围）
+
+
+def test_soft_only_revision_bumps_the_version_and_invalidates_the_old_verdict(
+    client: TestClient, auth_headers: dict[str, str], no_solve: None
+) -> None:
+    """复审 R2：只改软要求也是用户确认过的任务依据变化——升版本、旧结论失效，新依据与版本号同一条
+    UPDATE 落库；旧依据进历史。"""
+    goal = _established_goal(
+        [_soft("sc-a", "T01", ["S05"])], status="achieved", acceptance_status="completed"
+    )
+    run = _solve_with(
+        client,
+        auth_headers,
+        goal.id,
+        _constraint("tc-1", "T01", ["S07"], "soft", op="replace", target_id="sc-a"),
+    )
+    row = _goal_row(goal.id)
+    assert row.checklist_revision == 2
+    assert row.status == "open" and row.acceptance_status == "pending"
+    assert "软性要求" in (row.acceptance_detail or "")
+    assert [item["slot_business_ids"] for item in row.context["soft_task_constraints"]] == [["S07"]]
+    history = row.checklist_history[-1]
+    assert history["version"] == 1 and history["changed"] == ["软性要求"]
+    assert [item["slot_business_ids"] for item in history["soft_task_constraints"]] == [["S05"]]
+    stored = _stored_run(run["id"])
+    assert stored.request_payload["goal_checklist_version"] == 2
+    assert stored.request_payload["task_revision_reasons"] == ["软性要求"]
+
+
+def test_rewording_a_soft_requirement_does_not_bump_the_version(
+    client: TestClient, auth_headers: dict[str, str], no_solve: None
+) -> None:
+    goal = _established_goal([_soft("tc-1", "T01", ["S05"], "旧措辞")])
+    _solve_with(
+        client, auth_headers, goal.id, _constraint("tc-1", "T01", ["S05"], "soft", text="新措辞")
+    )
+    row = _goal_row(goal.id)
+    assert row.checklist_revision == 1
+    assert row.context["soft_task_constraints"][0]["source_text"] == "新措辞"
+
+
+def test_first_solve_establishes_the_basis_without_a_revision(
+    client: TestClient, auth_headers: dict[str, str], no_solve: None
+) -> None:
+    goal = _make_goal()
+    run = _solve_with(client, auth_headers, goal.id, _constraint("tc-1", "T01", ["S05"], "soft"))
+    row = _goal_row(goal.id)
+    assert row.checklist_revision == 1
+    assert run["task_revision"] == {"added_soft": ["T01 soft S05"]}
+    assert row.context["scope"]["class_business_ids"] == ["B01"]
+    assert len(row.context["soft_task_constraints"]) == 1
+
+
+def test_changing_the_execution_scope_bumps_the_version_unless_coverage_already_says_so(
+    client: TestClient, auth_headers: dict[str, str], no_solve: None
+) -> None:
+    """确认卡里换了排课范围、验收口径没动：旧结果依据的是另一个范围，升版本；
+    先在清单里把 coverage 改成新范围再按新范围求解，同一个决定不重复升版本。"""
+    goal = _established_goal()
+    # 1) 日期浮动窗口变了：coverage 里没有它，升版本。
+    _solve_with(client, auth_headers, goal.id, date_window_days=3)
+    assert _goal_row(goal.id).checklist_revision == 2
+    assert _goal_row(goal.id).checklist_history[-1]["changed"] == ["排课范围"]
+    # 2) 范围没变再提交一次：不升版本。
+    _solve_with(client, auth_headers, goal.id, date_window_days=3)
+    assert _goal_row(goal.id).checklist_revision == 2
+    # 3) 清单 coverage 已经是新范围：按新范围求解不再升。
+    covered = _established_goal(
+        checklist=[
+            {
+                "key": "coverage",
+                "requirement": "覆盖 B01、B02",
+                "kind": "coverage",
+                "params": {"class_business_ids": ["B01", "B02"]},
+            }
+        ]
+    )
+    _solve_with(client, auth_headers, covered.id, class_business_ids=["B01", "B02"])
+    assert _goal_row(covered.id).checklist_revision == 1
+    # 4) coverage 是 B01 而执行范围悄悄改成 B01+B02：升版本。
+    uncovered = _established_goal(
+        checklist=[
+            {
+                "key": "coverage",
+                "requirement": "覆盖 B01",
+                "kind": "coverage",
+                "params": {"class_business_ids": ["B01"]},
+            }
+        ]
+    )
+    _solve_with(client, auth_headers, uncovered.id, class_business_ids=["B01", "B02"])
+    row = _goal_row(uncovered.id)
+    assert row.checklist_revision == 2
+    assert row.checklist_history[-1]["changed"] == ["排课范围"]
+
+
+def test_task_version_moved_before_the_write_lock_is_rejected_atomically(
     client: TestClient,
     auth_headers: dict[str, str],
     no_solve: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """修订读取后清单被并发改到新版本：整体 409 回滚，不带着旧快照提交，也不留半份修订。"""
+    """读取任务、计算修订之后、取得写锁之前，任务要求被别人改到了新版本：整体 409，不带着旧
+    要求提交，也不留半份修订或求解（SQLite 单写者，交错用「取锁前另一会话先提交」模拟）。"""
     goal = _make_goal()
-    real = api_module.apply_goal_checklist_revision
+    real_lock = api_module.lock_goal_row
 
-    def raced(db: Any, goal_row: SolveGoal, **kwargs: Any) -> bool:
+    def raced(db: Any, goal_id: str) -> None:
         with SessionLocal() as other:
             other.execute(
                 SolveGoal.__table__.update()
-                .where(SolveGoal.__table__.c.id == goal_row.id)
+                .where(SolveGoal.__table__.c.id == goal_id)
                 .values(checklist_revision=SolveGoal.__table__.c.checklist_revision + 1)
             )
             other.commit()
-        return real(db, goal_row, **kwargs)
+        real_lock(db, goal_id)
 
-    monkeypatch.setattr(api_module, "apply_goal_checklist_revision", raced)
+    monkeypatch.setattr(api_module, "lock_goal_row", raced)
     response = client.post(
         "/api/v1/assistant/solve",
         headers=auth_headers,
@@ -436,10 +687,9 @@ def test_concurrent_task_revision_is_rejected_atomically(
         },
     )
     assert response.status_code == 409, response.text
+    row = _goal_row(goal.id)
+    assert row.checklist == [] and row.checklist_revision == 2
     with SessionLocal() as db:
-        row = db.get(SolveGoal, goal.id)
-        assert row is not None
-        assert row.checklist == []
         assert not list(db.scalars(select(SolverRun).where(SolverRun.goal_id == goal.id)))
 
 
@@ -564,6 +814,59 @@ def test_rerun_refuses_reschedule_and_import_runs(
     )
     assert refused.status_code == 409, refused.text
     assert "不支持按原参数重跑" in refused.json()["detail"]
+
+
+def test_rerun_keeps_the_original_no_baseline_instead_of_picking_up_a_later_publication(
+    client: TestClient, isolated_scope: dict[str, Any], no_solve: None
+) -> None:
+    """复审 R4：原求解没有基准；之后系统里发布了一张课表，「加预算」不能把它当基准带进来。"""
+    scope_id, headers = isolated_scope["scope_id"], isolated_scope["headers"]
+    source = _completed_run(client, headers, class_business_ids=[])
+    assert "parent_schedule_id" not in _stored_run(source["id"]).request_payload
+    published = _scoped_run_with_draft(
+        scope_id, _make_goal(scope_id).id, age_seconds=5, version_no=1
+    )[1]
+    with SessionLocal() as db:
+        version = db.get(ScheduleVersion, published.id)
+        assert version is not None
+        version.status = "published"
+        db.commit()
+    rerun = client.post(f"/api/v1/solver-runs/{source['id']}/rerun", headers=headers, json={})
+    assert rerun.status_code == 202, rerun.text
+    payload = _stored_run(rerun.json()["id"]).request_payload
+    assert "parent_schedule_id" not in payload
+    assert "previous_assignments" not in payload
+    assert "baseline_source" not in payload
+
+
+def test_rerun_is_refused_once_the_task_requirements_moved_on(
+    client: TestClient, auth_headers: dict[str, str], no_solve: None
+) -> None:
+    """重放旧问题只在任务依据没变时成立：之后要求改过，按原参数重跑会「旧数据旧范围、新要求验收」，
+    409 并请按当前要求重新排课；对新版求解重跑不升版本。"""
+    goal = _established_goal([_soft("sc-a", "T01", ["S05"])])
+    first = _solve_with(client, auth_headers, goal.id)
+    second = _solve_with(
+        client,
+        auth_headers,
+        goal.id,
+        _constraint("tc-1", "T01", ["S07"], "soft", op="replace", target_id="sc-a"),
+    )
+    assert _stored_run(first["id"]).request_payload["goal_checklist_version"] == 1
+    assert _stored_run(second["id"]).request_payload["goal_checklist_version"] == 2
+    for run_id in (first["id"], second["id"]):
+        with SessionLocal() as db:
+            row = db.get(SolverRun, run_id)
+            assert row is not None
+            row.status = "completed"
+            db.commit()
+    stale = client.post(f"/api/v1/solver-runs/{first['id']}/rerun", headers=auth_headers, json={})
+    assert stale.status_code == 409, stale.text
+    assert "修订过" in stale.json()["detail"]
+    fresh = client.post(f"/api/v1/solver-runs/{second['id']}/rerun", headers=auth_headers, json={})
+    assert fresh.status_code == 202, fresh.text
+    assert fresh.json()["goal_checklist_version"] == 2
+    assert _goal_row(goal.id).checklist_revision == 2
 
 
 def test_rerun_uses_task_current_requirements_for_goal_runs_and_frozen_ones_otherwise(
@@ -726,6 +1029,143 @@ def test_evaluation_records_why_a_draft_was_not_promoted(isolated_scope: dict[st
         assert run is not None and run.goal_report is not None
         assert run.goal_report["meta"]["work_draft"]["promoted"] is False
     assert _pointer(goal.id) is None
+
+
+# ------------------------------------------------- R3 统一接纳：旧求解不得接管当前任务结果
+
+
+def _goal_state(goal_id: str) -> dict[str, Any]:
+    row = _goal_row(goal_id)
+    return {
+        "latest": row.latest_run_id,
+        "status": row.status,
+        "acceptance": row.acceptance_status,
+        "pointer": (row.context or {}).get("work_draft_schedule_id"),
+    }
+
+
+def _evaluate(goal_id: str, run: SolverRun) -> dict[str, Any] | None:
+    tasks_module._evaluate_goal_for_run(run.id, goal_id)
+    with SessionLocal() as db:
+        stored = db.get(SolverRun, run.id)
+        assert stored is not None
+        return stored.goal_report
+
+
+def test_old_version_result_finishing_late_keeps_the_current_conclusion_and_pointers(
+    isolated_scope: dict[str, Any],
+) -> None:
+    """复审 R3（跨版）：R1 按 v1 要求算、R2 按 v2 先完成并成为当前结果；R1 后到，报告留档，
+    但任务状态、验收状态、latest_run_id、工作草稿指针一个都不改。"""
+    scope_id = isolated_scope["scope_id"]
+    goal = _make_goal(scope_id, checklist_revision=2)
+    old, _ = _scoped_run_with_draft(scope_id, goal.id, age_seconds=60, version_no=1, anchor=1)
+    new, new_draft = _scoped_run_with_draft(
+        scope_id, goal.id, age_seconds=5, version_no=2, anchor=2
+    )
+    new_report = _evaluate(goal.id, new)
+    assert new_report is not None and new_report["meta"]["adopted"] is True
+    current = _goal_state(goal.id)
+    assert current["latest"] == new.id and current["pointer"] == new_draft.id
+    assert current["acceptance"] == "completed"
+
+    late_report = _evaluate(goal.id, old)
+    assert late_report is not None
+    assert late_report["meta"]["adopted"] is False
+    assert "v2" in late_report["meta"]["not_adopted_reason"]
+    assert _goal_state(goal.id) == current
+
+
+def test_older_same_version_result_finishing_late_keeps_the_current_conclusion(
+    isolated_scope: dict[str, Any],
+) -> None:
+    """复审 R3（同版）：同一版要求下先后发起的两次求解，较晚发起的先完成后，
+    较早发起的晚到结果不接管任何一面。"""
+    scope_id = isolated_scope["scope_id"]
+    goal = _make_goal(scope_id)
+    old, _ = _scoped_run_with_draft(scope_id, goal.id, age_seconds=60, version_no=1)
+    new, new_draft = _scoped_run_with_draft(scope_id, goal.id, age_seconds=5, version_no=2)
+    _evaluate(goal.id, new)
+    current = _goal_state(goal.id)
+    assert current["latest"] == new.id and current["pointer"] == new_draft.id
+    late_report = _evaluate(goal.id, old)
+    assert late_report is not None and late_report["meta"]["adopted"] is False
+    assert "更晚" in late_report["meta"]["not_adopted_reason"]
+    assert _goal_state(goal.id) == current
+
+
+def test_results_finishing_in_creation_order_each_take_over(isolated_scope: dict[str, Any]) -> None:
+    scope_id = isolated_scope["scope_id"]
+    goal = _make_goal(scope_id)
+    old, old_draft = _scoped_run_with_draft(scope_id, goal.id, age_seconds=60, version_no=1)
+    new, new_draft = _scoped_run_with_draft(scope_id, goal.id, age_seconds=5, version_no=2)
+    _evaluate(goal.id, old)
+    assert _goal_state(goal.id)["latest"] == old.id
+    assert _goal_state(goal.id)["pointer"] == old_draft.id
+    _evaluate(goal.id, new)
+    assert _goal_state(goal.id)["latest"] == new.id
+    assert _goal_state(goal.id)["pointer"] == new_draft.id
+
+
+def _set_goal(goal_id: str, **values: Any) -> None:
+    with SessionLocal() as db:
+        row = db.get(SolveGoal, goal_id)
+        assert row is not None
+        for key, value in values.items():
+            setattr(row, key, value)
+        db.commit()
+
+
+def test_pending_and_failed_marks_obey_the_same_admission_as_the_conclusion(
+    isolated_scope: dict[str, Any],
+) -> None:
+    """复审：旧求解晚结束也不能把当前已完成的结论改回「验收中」或标成「验收失败」。"""
+    scope_id = isolated_scope["scope_id"]
+    goal = _make_goal(scope_id, checklist_revision=2)
+    old_version, _ = _scoped_run_with_draft(
+        scope_id, goal.id, age_seconds=90, version_no=1, anchor=1
+    )
+    older, _ = _scoped_run_with_draft(scope_id, goal.id, age_seconds=60, version_no=2, anchor=2)
+    newer, _ = _scoped_run_with_draft(scope_id, goal.id, age_seconds=5, version_no=3, anchor=2)
+    _set_goal(goal.id, latest_run_id=newer.id, acceptance_status="completed")
+
+    def pending(run: SolverRun) -> bool:
+        with SessionLocal() as db:
+            landed = tasks_module._mark_goal_acceptance_pending(db, goal.id, run.id)
+            db.commit()
+            return landed
+
+    def failed(run: SolverRun | None, version: int = 2) -> bool:
+        with SessionLocal() as db:
+            landed = tasks_module._mark_goal_acceptance_failed(
+                db, goal.id, version=version, detail="炸了", run=run
+            )
+            db.commit()
+            return landed
+
+    assert pending(old_version) is False  # 旧版求解
+    assert pending(older) is False  # 同版但比当前持有者早
+    assert failed(old_version, version=1) is False
+    assert failed(older) is False
+    assert _goal_state(goal.id)["acceptance"] == "completed"
+    assert failed(newer) is True  # 当前持有者自己的失败照常写
+    assert _goal_state(goal.id)["acceptance"] == "failed"
+    _set_goal(goal.id, acceptance_status="completed")
+    assert pending(newer) is True
+    assert _goal_state(goal.id)["acceptance"] == "pending"
+
+
+def test_a_dangling_latest_run_pointer_does_not_lock_the_task(
+    isolated_scope: dict[str, Any],
+) -> None:
+    """latest_run_id 没有外键：指向已删除的求解时不能把任务永远锁死。"""
+    scope_id = isolated_scope["scope_id"]
+    goal = _make_goal(scope_id)
+    run, _ = _scoped_run_with_draft(scope_id, goal.id, age_seconds=5, version_no=1)
+    _set_goal(goal.id, latest_run_id="00000000-gone-run")
+    report = _evaluate(goal.id, run)
+    assert report is not None and report["meta"]["adopted"] is True
+    assert _goal_state(goal.id)["latest"] == run.id
 
 
 # ------------------------------------------------- R4 解析幂等
@@ -970,6 +1410,188 @@ def test_action_pointing_at_another_subject_or_unlocatable_text_is_not_authorize
     statuses = [item["status"] for item in response.json()["memory_action_receipts"]]
     assert statuses == ["pending_confirmation", "pending_confirmation"]
     assert all(entry.status == "probation" for entry in _entries(scope_id))
+
+
+_NAMES = {"张老师": "T1", "李老师": "T2"}
+
+
+def _mentions(text: str) -> set[str]:
+    return {subject for name, subject in _NAMES.items() if name in text}
+
+
+@pytest.mark.parametrize(
+    ("instruction", "source_text", "subject", "kind", "accepted"),
+    [
+        # 复审 R5：逗号连接的意图——「记住」只属于前半句。
+        ("记住张老师偏好上午，李老师这次先放周四。", "李老师这次先放周四", "T2", "save", False),
+        ("记住张老师偏好上午，李老师这次先放周四。", "记住张老师偏好上午", "T1", "save", True),
+        # 授权词在内容后面、紧挨着它：不能被逗号拆散。
+        ("张老师尽量别排晚课，记住这个", "张老师尽量别排晚课", "T1", "save", True),
+        (
+            "记住，这学期张老师周三晚都不排课，另外重排 B01",
+            "记住，这学期张老师周三晚都不排课",
+            "T1",
+            "save",
+            True,
+        ),
+        ("记住：张老师周三晚别排", "张老师周三晚别排", "T1", "save", True),
+        # 内容带一次性/限定时段措辞，又没有「以后都/长期」：不能借「记住」变成长期偏好。
+        ("记住，李老师下周一不排课", "李老师下周一不排课", "T2", "save", False),
+        ("记住，本周五李老师不排课", "本周五李老师不排课", "T2", "save", False),
+        ("记住，李老师以后都不排周一", "李老师以后都不排周一", "T2", "save", True),
+        # 「这次」与「以后都」自相矛盾：保守待确认。
+        (
+            "记住，李老师这次先放周四，以后都这样",
+            "李老师这次先放周四，以后都这样",
+            "T2",
+            "save",
+            False,
+        ),
+        # 没有任何显式声明词 / 被否定 / 明确拒绝。
+        ("张老师周四不上", "张老师周四不上", "T1", "save", False),
+        ("不要记住张老师周四不上", "张老师周四不上", "T1", "save", False),
+        (
+            "记住张老师偏好上午；李老师这次先放周四，不要记成长期偏好。",
+            "李老师这次先放周四，不要记成长期偏好",
+            "T2",
+            "save",
+            False,
+        ),
+        # 撤销/纠正类同样按动作绑定。
+        ("张老师旧的周三晚偏好不要用了", "张老师旧的周三晚偏好不要用了", "T1", "retract", True),
+        ("张老师周三晚的不用了，李老师周四的先留着", "李老师周四的先留着", "T2", "retract", False),
+        ("不用了", "不用了", "T1", "retract", False),
+    ],
+)
+def test_authorization_is_bound_to_the_action_intent(
+    instruction: str, source_text: str, subject: str, kind: str, accepted: bool
+) -> None:
+    bound, reason = bind_explicit_authorization(
+        instruction, source_text, kind=kind, subject_id=subject, mentions_of=_mentions
+    )
+    assert bound is accepted, reason
+    assert (reason is None) is accepted
+
+
+def test_comma_joined_one_off_cannot_borrow_the_remember_over_http(
+    client: TestClient, isolated_scope: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """复审 R5 探针：逗号连接的「记住张老师…，李老师这次先放周四」——模型把李老师那条标成 explicit、
+    原话片段也填对，执行层仍只执行前一条，后一条降级为待确认候选。"""
+    scope_id, headers = isolated_scope["scope_id"], isolated_scope["headers"]
+    _mock_interpret(
+        monkeypatch,
+        _output(
+            memory_actions=[
+                _save_action("T91", "记住赵一偏好周三晚", ["S1"]),
+                _save_action("T92", "钱二这次先放周四", ["S2"]),
+            ]
+        ),
+    )
+    response = client.post(
+        "/api/v1/assistant/interpret",
+        headers=headers,
+        json={"instruction": "记住赵一偏好周三晚，钱二这次先放周四"},
+    )
+    assert response.status_code == 200, response.text
+    statuses = {
+        item["action_id"]: item["status"] for item in response.json()["memory_action_receipts"]
+    }
+    assert statuses == {"ma-1": "executed", "ma-2": "pending_confirmation"}
+    (qian,) = _entries(scope_id, "T92")
+    assert qian.status == "probation" and qian.trial_authorized is False
+
+
+def test_trailing_remember_still_authorizes_the_clause_before_it(
+    client: TestClient, isolated_scope: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scope_id, headers = isolated_scope["scope_id"], isolated_scope["headers"]
+    _mock_interpret(
+        monkeypatch, _output(memory_actions=[_save_action("T93", "孙三尽量别排周三晚", ["S1"])])
+    )
+    response = client.post(
+        "/api/v1/assistant/interpret",
+        headers=headers,
+        json={"instruction": "孙三尽量别排周三晚，记住这个"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["memory_action_receipts"][0]["status"] == "executed"
+    assert [entry.status for entry in _entries(scope_id, "T93")] == ["confirmed"]
+
+
+# ------------------------------------------------- R1 op/target_id 的解析侧校验
+
+
+def test_interpret_normalizes_ops_against_the_tasks_real_requirement_ids(
+    isolated_scope: dict[str, Any],
+) -> None:
+    """target_id 只能取任务里既有要求的稳定编号；指不到就不删任何东西（replace 退化为追加，
+    remove 忽略并提示）。"""
+    scope_id = isolated_scope["scope_id"]
+
+    def base(subject: str) -> dict[str, Any]:
+        return {"subject_type": "teacher", "subject_ids": [subject], "slot_business_ids": ["S2"]}
+
+    raw = [
+        {
+            **base("T91"),
+            "id": "tc-1",
+            "source_text": "赵一改到周四",
+            "hardness": "soft",
+            "op": "replace",
+            "target_id": "sc-a",
+        },
+        {
+            **base("T92"),
+            "id": "tc-2",
+            "source_text": "钱二改到周四",
+            "hardness": "soft",
+            "op": "replace",
+            "target_id": "made-up",
+        },
+        {"id": "tc-3", "source_text": "孙三那条不用了", "op": "remove", "target_id": "sc-a"},
+        {"id": "tc-4", "source_text": "李四那条不用了", "op": "remove", "target_id": "made-up"},
+        {
+            **base("T93"),
+            "id": "tc-5",
+            "source_text": "赵一也别排周四",
+            "hardness": "soft",
+            "op": "add",
+            "target_id": "sc-a",
+        },
+    ]
+    warnings: list[str] = []
+    with SessionLocal() as db:
+        result = api_module._normalize_assistant_task_constraints(
+            db, raw, scope_id, unsupported=[], warnings=warnings, active_ids={"sc-a"}
+        )
+    by_id = {item.id: item for item in result}
+    assert (by_id["tc-1"].op, by_id["tc-1"].target_id) == ("replace", "sc-a")
+    assert (by_id["tc-2"].op, by_id["tc-2"].target_id) == ("add", None)
+    assert (by_id["tc-3"].op, by_id["tc-3"].target_id) == ("remove", "sc-a")
+    assert "tc-4" not in by_id  # 取消一个不存在的编号：忽略，不删任何东西
+    assert (by_id["tc-5"].op, by_id["tc-5"].target_id) == ("add", None)
+    assert len(warnings) == 2 and all("保留原要求" in text for text in warnings)
+
+
+def test_task_context_gives_the_model_stable_ids_and_hardness_for_every_requirement(
+    isolated_scope: dict[str, Any],
+) -> None:
+    from app.services.ai import AIService
+
+    scope_id = isolated_scope["scope_id"]
+    goal = _make_goal(
+        scope_id,
+        checklist=[_hard_item("forbidden_slot_free-1", "T91", ["S1"])],
+        context={"schema_version": 1, "soft_task_constraints": [_soft("sc-a", "T92", ["S2"])]},
+    )
+    with SessionLocal() as db:
+        task_context = api_module._goal_task_context(db, goal.id, scope_id)
+    assert task_context is not None
+    active = {item["id"]: item["hardness"] for item in task_context["active_task_constraints"]}
+    assert active == {"forbidden_slot_free-1": "hard", "sc-a": "soft"}
+    prompt = AIService._interpret_system_prompt({"task_context": task_context})
+    assert "op=replace" in prompt and "target_id" in prompt and "禁止猜 target_id" in prompt
 
 
 # ------------------------------------------------- R6 记忆检索按主体
