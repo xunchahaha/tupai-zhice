@@ -400,6 +400,10 @@ planned 形式占位。清单经 `GET /api/v1/integrations`（管理员/排课�
      的临时 `tc-N`；替换成新内容时也换新编号）；解析响应带 `task_goal_id` / `task_basis_version`（解析时注入给模型的那一版），
      确认求解经 `expected_task_basis_version` 原样带回，与任务当前版本不符 409、什么都不写。校验的是用户
      当时确认的版本，不是提交时刚查到的最新版本；重放（同 `request_id`）返回的仍是当时的版本。
+  5. **同一批修改先完成、再合并（N5，第十二轮）**：`plan_task_constraint_revision` 先把每个动作的 `target_id`
+     对照同一份旧快照解析成确定的旧项，做完全部取消与替换（不做内容去重），再处理追加与硬要求（对照改完之后的
+     状态，软的动作让位于本批最终的硬要求），最后才合并相同内容；同一批动作的结果与数组顺序无关，本来存在的
+     目标不会在同批处理中被提前合并掉、变成「找不到」。
 - **清单修订与历史（MEM-D3，MEM-E2/E2a 修订）**：`PATCH /api/v1/goals/{id}/checklist`
   整体替换验收清单——body 为完整 checklist 数组，校验复用创建口径（key 唯一、
   kind 白名单、`ensure_bottom_line_items` 强制并入底线；可选 `scope` 显式给新
