@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -24,8 +25,11 @@ from app.models import ClassGroup
 from app.services.converter_zhengzhou import SHEET_NAME, _read_rows, import_schedule_workbook
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-OFFICIAL_WORKBOOK = (
-    PROJECT_ROOT / "相关文件" / "郑州考研公职专升本课表数据源_教室班级标签版.xlsx"
+# 真实课表数据不进仓库：默认找 data/private/（已 gitignore），也可用环境变量 TUPAI_OFFICIAL_WORKBOOK
+# 指向本地文件；文件不存在时依赖它的用例自动跳过。
+OFFICIAL_WORKBOOK = Path(
+    os.environ.get("TUPAI_OFFICIAL_WORKBOOK")
+    or PROJECT_ROOT / "data" / "private" / "郑州考研公职专升本课表数据源_教室班级标签版.xlsx"
 )
 OMO4 = "暑期集训营OMO4班"
 
