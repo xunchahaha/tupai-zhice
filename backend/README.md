@@ -139,8 +139,29 @@ Lark 实测，见 `docs/integrations/feishu.md` 的「已知限制」。
 
 一句话排课 AI 在前端单独配置 `Base URL`、`API Key` 和模型名称，后端使用
 OpenAI-compatible `/chat/completions` 接口解析指令，并对 API Key 加密保存。集中部署也可使用
-`AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL` 和 `AI_TOKEN_ENCRYPTION_KEY`。Aily 的
-`spring_...__c` 与 `skill_...` 已调整为可选高级接入项。
+`AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL` 和 `AI_TOKEN_ENCRYPTION_KEY`（可选 `AI_REASONING_EFFORT`）。
+Aily 的 `spring_...__c` 与 `skill_...` 已调整为可选高级接入项。
+
+**供应商预设与厂商适配**（`app/services/ai_providers.py`，依据各家官方文档核对）：设置页「添加供应商」
+提供预设卡片（自定义 / DeepSeek / 智谱 GLM / Z.ai 国际站），选中后带出接口地址与常用模型；后端按
+**接口地址与模型名自动识别**厂商，发包差异都收在这一处，不需要额外配置：
+
+- **DeepSeek**（`https://api.deepseek.com`，模型 `deepseek-flash`、`deepseek-v4-pro`）：上下文缓存**默认开启，
+  没有任何请求头或参数**，命中靠请求前缀完全一致——所以一句话解析的系统提示词按「规则与输出结构 → 同一方案下
+  稳定的候选值 → 随本次指令变化的偏好与任务上下文 → 日期」排列，命中数从 `usage.prompt_cache_hit_tokens` 读取并写入
+  日志与 `usage.cached_tokens`；官方端点带 `thinking`、`reasoning_effort`、足够的 `max_tokens`（思考与 JSON 都计入输出）；
+  JSON 输出偶尔返回空内容（官方承认），重试一次。
+- **智谱 GLM**（原厂 Key 直接用标准端点 `https://open.bigmodel.cn/api/paas/v4`，国际站 `https://api.z.ai/api/paas/v4`）：
+  GLM-5.3 / 5.3-Flash **强制思考**，发 `thinking.type="disabled"` 会直接失败，所以永远只发 `enabled`，并按
+  `reasoning_effort`（low/high/max，GLM-5.2 及以上支持；auto = low 起步）控制强度；缓存隐式自动（前缀建议 500 token 以上），
+  命中数从 `usage.prompt_tokens_details.cached_tokens` 读取。**Coding Plan 专属端点（`/api/coding/paas/v4`）官方限定只能在
+  指定编码工具里使用，自建应用必须走标准 API**，所以没有做成预设，设置页填了该地址会给出提醒。
+- **只有官方域名才加厂商专有参数**：经第三方网关转发时网关未必透传，贸然带上可能被拒绝，这类地址只做无害的适配
+  （用量口径、DeepSeek 空内容重试）。
+- **「测试连接」**（`POST /api/v1/integrations/ai/test`）用尚未保存的配置走与正式调用相同的发包路径发一次最小请求，
+  返回耗时、是否返回思考、用量与缓存命中；Key 留空表示沿用已保存的密钥，但只在接口地址没变时沿用。
+- **真实冒烟**：`backend/scripts/ai_smoke.py` 读本地真实课表构造与网页完全相同的解析上下文，连发两句指令对着真实端点
+  验证，并打印缓存命中（第二次 `cached_tokens > 0` 说明前缀被复用）；Key 只从环境变量 `AI_SMOKE_API_KEY` 取。
 
 一句话解析默认走 SSE 流式接口 `POST /api/v1/assistant/interpret/stream`（事件：
 `stage` → `thinking` 增量 → `result`/`error`，响应头带 `X-Accel-Buffering: no`）。模型思考
@@ -472,7 +493,7 @@ RBAC 正交：链接的签发/轮换/停用复用 `admin/scheduler` 角色，撤
 - 模板直通导入：`POST /api/v1/imports/xlsx`（官方 14 列表头，严格匹配）
 - 智能导入预览：`POST /api/v1/imports/preview`（任意 XLSX/CSV，映射建议 + 行级校验，不落库；支持历史映射记忆与 `cell_overrides`）
 - 智能导入提交：`POST /api/v1/imports/commit`（`mapping_json` + `mode=insert|upsert`，支持 `cell_overrides`）
-- AI 配置：`GET/POST /api/v1/integrations/ai/configuration`
+- AI 配置：`GET/POST /api/v1/integrations/ai/configuration`（含 `reasoning_effort`）；供应商预设：`GET /api/v1/integrations/ai/presets`；连接测试：`POST /api/v1/integrations/ai/test`
 - 集成清单：`GET /api/v1/integrations`（管理员/排课员；manifest + 运行时状态，不触发探测）
 - 集成凭据配置：`GET/PUT /api/v1/integrations/{id}/configuration`（钉钉/企业微信；GET 管理员/排课员脱敏回读，PUT 管理员加密落库）
 - 一句话解析：`POST /api/v1/assistant/interpret`

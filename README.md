@@ -48,7 +48,7 @@ Web 管理端：<http://127.0.0.1:5173>
 
 将 `backend/.env.example` 复制为 `.env` 后按需填写。两类外部依赖都是**可选项**：
 
-- **AI 模型**：在前端「设置 → AI 模型」中填写 OpenAI-compatible 的 Base URL、API Key 与模型名称（可接豆包 Ark、DeepSeek 或企业模型网关）；不配置时导入语义层自动跳过，规则助手回落手动表单。
+- **AI 模型**：在前端「设置 → AI 模型」中选择供应商（DeepSeek、智谱 GLM 等预设，或自定义 OpenAI-compatible 接口），填写 API Key 与模型名称，可先「测试连接」；DeepSeek / GLM 的思考参数、缓存命中与空内容重试等发包差异由后端按接口地址自动适配（见 [backend/README.md](backend/README.md)）。不配置时导入语义层自动跳过，规则助手回落手动表单。
 - **外部集成**：不接任何平台即为本地模式，全功能可用；如需多维表格外发与日历下发，在「设置 → 外部集成」中按向导接入飞书。详见 [docs/integrations/](docs/integrations/README.md)。
 
 后端也可用 Docker 部署（`backend/Dockerfile`，入口自动执行迁移）。
@@ -70,7 +70,7 @@ Web 管理端：<http://127.0.0.1:5173>
 4. 偏好记忆层——偏好条目三态生命周期（待确认/试用期/已确认）、调课归因、证据校验与矛盾消解的挖掘闭环、求解软约束编译；解释层如实转述偏好使用情况，编译失败不冒充正常
 5. 可插拔集成层——能力接口 + 注册表，本地模式默认可用；飞书适配器完整可用，钉钉/企业微信适配器 v1 已实现（凭据 Fernet 加密落库）
 6. 公开课表层——免登录 token 链接（班级/教师/学校目录）、ICS 订阅含 RRULE 循环课次展开、白名单投影、按发布版本批量签发与轮换、H5 张榜打印（print CSS）
-7. 工程配套——Windows/macOS/Linux 一键启动、Docker 部署、orval 生成 client 单一事实源、pytest + vitest + Playwright 三层测试
+7. 工程配套——Windows/macOS/Linux 一键启动、Docker 部署、orval 生成 client 单一事实源、pytest + vitest + Playwright 三层测试；`bash scripts/verify.sh [--e2e]` 在本地复现 CI 的全部步骤（GitHub Actions 额度不可用时的兜底）
 
 **已知边界（Known limits）**（如实声明，不做过度承诺，欢迎 issue 认领）：
 
