@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -89,6 +89,37 @@ vi.mock("@/api/generated/client", () => ({
     isPending: false,
   }),
 }));
+
+const presets = [
+  { id: "custom", label: "自定义配置", family: "generic", base_url: "", models: [], key_url: "", docs_url: "", notes: [] },
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    family: "deepseek",
+    base_url: "https://api.deepseek.com",
+    models: ["deepseek-flash", "deepseek-v4-pro"],
+    key_url: "https://platform.deepseek.com/api_keys",
+    docs_url: "https://api-docs.deepseek.com/",
+    notes: ["上下文缓存默认开启，无需任何请求头或参数。"],
+  },
+  {
+    id: "zhipu",
+    label: "智谱 GLM",
+    family: "glm",
+    base_url: "https://open.bigmodel.cn/api/paas/v4",
+    models: ["glm-5.3", "glm-5.3-flash"],
+    key_url: "https://bigmodel.cn/usercenter/proj-mgmt/apikeys",
+    docs_url: "https://docs.bigmodel.cn/",
+    notes: ["GLM Coding Plan 的专属端点只允许在官方指定的编码工具里用，自建应用请用标准 API Key。"],
+  },
+];
+
+const unconfiguredAi = { configured: false, source: "none", provider: null, base_url: null, api_key_configured: false, model: null, preset: null, family: null, official: false, reasoning_effort: "auto" };
+
+/** 配置与预设清单走同一个 http.get，按地址分开返回。 */
+function mockAiEndpoints(configuration: Record<string, unknown>) {
+  mocks.aiGet.mockImplementation(async (url: string) => (url.endsWith("/ai/presets") ? { data: presets } : { data: configuration }));
+}
 
 const baseConnection = {
   status: "not_authorized",
@@ -203,7 +234,7 @@ describe("设置页", () => {
   });
 
   it("可配置独立 AI 模型完成一句话排课解析", async () => {
-    mocks.aiGet.mockResolvedValueOnce({ data: { configured: false, source: "none", provider: null, base_url: null, api_key_configured: false, model: null } });
+    mockAiEndpoints(unconfiguredAi);
     const user = userEvent.setup();
     renderPage();
 
@@ -218,7 +249,191 @@ describe("设置页", () => {
       base_url: "https://model.example/v1",
       api_key: "secret-ai-key",
       model: "scheduling-model",
+      reasoning_effort: "auto",
     });
+  });
+
+  it("选择 DeepSeek 供应商卡片：带出官方地址与常用模型，保存时带上思考强度", async () => {
+    mockAiEndpoints(unconfiguredAi);
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("Aily 标识已从必填项移除");
+    expect(screen.getByRole("button", { name: "自定义配置" })).toHaveAttribute("aria-pressed", "true");
+    // 自定义接口没有官方参数可调，不展示思考强度。
+    expect(screen.queryByLabelText("思考强度")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "DeepSeek" }));
+    expect(screen.getByRole("button", { name: "DeepSeek" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("AI 接口地址")).toHaveValue("https://api.deepseek.com");
+    expect(screen.getByLabelText("AI 模型名称")).toHaveValue("deepseek-flash");
+    expect(screen.getByText(/上下文缓存默认开启/)).toBeVisible();
+    expect(screen.getByRole("link", { name: /获取 API Key/ })).toHaveAttribute("href", "https://platform.deepseek.com/api_keys");
+
+    await user.click(screen.getByRole("button", { name: "使用模型 deepseek-v4-pro" }));
+    expect(screen.getByLabelText("AI 模型名称")).toHaveValue("deepseek-v4-pro");
+    await user.selectOptions(screen.getByLabelText("思考强度"), "high");
+    await user.type(screen.getByLabelText("AI API Key"), "deepseek-secret-key");
+    await user.click(screen.getByRole("button", { name: "保存 AI 配置" }));
+
+    expect(mocks.aiPost).toHaveBeenCalledWith("/api/v1/integrations/ai/configuration", {
+      provider: "openai_compatible",
+      base_url: "https://api.deepseek.com",
+      api_key: "deepseek-secret-key",
+      model: "deepseek-v4-pro",
+      reasoning_effort: "high",
+    });
+  });
+
+  it("选择智谱 GLM 卡片后切回自定义会清空地址；手改成预设地址会自动高亮对应卡片", async () => {
+    mockAiEndpoints(unconfiguredAi);
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("Aily 标识已从必填项移除");
+    await user.click(screen.getByRole("button", { name: "智谱 GLM" }));
+    expect(screen.getByLabelText("AI 接口地址")).toHaveValue("https://open.bigmodel.cn/api/paas/v4");
+    expect(screen.getByLabelText("AI 模型名称")).toHaveValue("glm-5.3");
+    expect(screen.getByText(/Coding Plan 的专属端点只允许在官方指定的编码工具里用/)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "自定义配置" }));
+    expect(screen.getByLabelText("AI 接口地址")).toHaveValue("");
+
+    await user.type(screen.getByLabelText("AI 接口地址"), "https://api.deepseek.com");
+    expect(screen.getByRole("button", { name: "DeepSeek" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("智谱 Coding Plan 专属端点给出明确提醒，引导改用标准 API", async () => {
+    mockAiEndpoints(unconfiguredAi);
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("Aily 标识已从必填项移除");
+    await user.type(screen.getByLabelText("AI 接口地址"), "https://open.bigmodel.cn/api/coding/paas/v4");
+    expect(screen.getByRole("alert")).toHaveTextContent(/Coding Plan 的专属端点.*标准 API/);
+  });
+
+  it("测试连接用尚未保存的配置发最小请求，并就地显示结果（含缓存命中）", async () => {
+    mockAiEndpoints(unconfiguredAi);
+    mocks.aiPost.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        message: "连接成功",
+        latency_ms: 1200,
+        model: "glm-5.3",
+        family: "glm",
+        official: true,
+        thinking_returned: true,
+        usage: { prompt_tokens: 40, cached_tokens: 0 },
+      },
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("Aily 标识已从必填项移除");
+    await user.click(screen.getByRole("button", { name: "智谱 GLM" }));
+    expect(screen.getByRole("button", { name: "测试连接" })).toBeDisabled(); // 还没填 Key
+    await user.type(screen.getByLabelText("AI API Key"), "zhipu-secret-key");
+    await user.click(screen.getByRole("button", { name: "测试连接" }));
+
+    expect(mocks.aiPost).toHaveBeenCalledWith("/api/v1/integrations/ai/test", {
+      provider: "openai_compatible",
+      base_url: "https://open.bigmodel.cn/api/paas/v4",
+      api_key: "zhipu-secret-key",
+      model: "glm-5.3",
+      reasoning_effort: "auto",
+    });
+    const result = await screen.findByRole("status", { name: "连接测试结果" });
+    expect(result).toHaveTextContent("通过");
+    expect(result).toHaveTextContent("1.2 秒");
+    expect(result).toHaveTextContent("已返回思考过程");
+    expect(result).toHaveTextContent("缓存命中 0");
+    // 测试不是保存。
+    expect(mocks.aiPost).not.toHaveBeenCalledWith("/api/v1/integrations/ai/configuration", expect.anything());
+  });
+
+  it("测试连接失败时显示后端给出的原因", async () => {
+    mockAiEndpoints(unconfiguredAi);
+    mocks.aiPost.mockResolvedValueOnce({ data: { ok: false, message: "AI 模型请求返回 401：Authentication Fails" } });
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("Aily 标识已从必填项移除");
+    await user.click(screen.getByRole("button", { name: "DeepSeek" }));
+    await user.type(screen.getByLabelText("AI API Key"), "wrong-key-value");
+    await user.click(screen.getByRole("button", { name: "测试连接" }));
+    const result = await screen.findByRole("status", { name: "连接测试结果" });
+    expect(result).toHaveTextContent("失败");
+    expect(result).toHaveTextContent("401：Authentication Fails");
+  });
+
+  it("改了输入之后，旧的连接测试结果不再显示", async () => {
+    mockAiEndpoints(unconfiguredAi);
+    mocks.aiPost.mockResolvedValueOnce({ data: { ok: true, message: "连接成功", latency_ms: 800, usage: {} } });
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("Aily 标识已从必填项移除");
+    await user.click(screen.getByRole("button", { name: "DeepSeek" }));
+    await user.type(screen.getByLabelText("AI API Key"), "deepseek-secret-key");
+    await user.click(screen.getByRole("button", { name: "测试连接" }));
+    expect(await screen.findByRole("status", { name: "连接测试结果" })).toHaveTextContent("通过");
+
+    // 换模型：测的已经不是现在这组配置，绿色「通过」不能继续挂着。
+    await user.click(screen.getByRole("button", { name: "使用模型 deepseek-v4-pro" }));
+    expect(screen.queryByRole("status", { name: "连接测试结果" })).not.toBeInTheDocument();
+  });
+
+  it("已保存配置后换了供应商卡片：敲了一半的 Key 被清掉，必须重新填写新厂商的 Key 才能保存或测试", async () => {
+    mockAiEndpoints({
+      configured: true,
+      source: "frontend",
+      provider: "openai_compatible",
+      base_url: "https://api.deepseek.com",
+      api_key_configured: true,
+      model: "deepseek-flash",
+      preset: "deepseek",
+      family: "deepseek",
+      official: true,
+      reasoning_effort: "auto",
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: /更新 AI 配置/ }));
+    // 地址没变时，Key 留空 = 沿用已保存的密钥。
+    expect(screen.getByLabelText("AI API Key")).toHaveAttribute("placeholder", "留空则继续使用已保存密钥");
+    expect(screen.getByRole("button", { name: "保存 AI 配置" })).toBeEnabled();
+
+    await user.type(screen.getByLabelText("AI API Key"), "half-typed-old-key");
+    await user.click(screen.getByRole("button", { name: "智谱 GLM" }));
+    expect(screen.getByLabelText("AI API Key")).toHaveValue(""); // 旧厂商的 Key 不能带到新地址
+    expect(screen.getByLabelText("AI API Key")).toHaveAttribute("placeholder", "接口地址已更改，请填写新的 API Key");
+    expect(screen.getByRole("button", { name: "保存 AI 配置" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "测试连接" })).toBeDisabled();
+
+    await user.type(screen.getByLabelText("AI API Key"), "zhipu-secret-key");
+    expect(screen.getByRole("button", { name: "保存 AI 配置" })).toBeEnabled();
+  });
+
+  it("已配置的官方供应商在摘要里显示供应商与思考强度", async () => {
+    mockAiEndpoints({
+      configured: true,
+      source: "frontend",
+      provider: "openai_compatible",
+      base_url: "https://api.deepseek.com",
+      api_key_configured: true,
+      model: "deepseek-flash",
+      preset: "deepseek",
+      family: "deepseek",
+      official: true,
+      reasoning_effort: "high",
+    });
+    renderPage();
+    expect(await screen.findByText(/官方端点 · 思考强度 high/)).toBeVisible();
+    const panel = document.getElementById("ai-configuration") as HTMLElement;
+    expect(within(panel).getByText("DeepSeek")).toBeVisible();
+    expect(within(panel).getByText("deepseek-flash")).toBeVisible();
   });
 
   it("展示当前账户信息并提供修改密码表单", async () => {

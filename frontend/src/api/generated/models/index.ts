@@ -6,13 +6,28 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './aIConnectionTestResponse';
+export * from './aIConnectionTestResponseFamily';
+export * from './aIConnectionTestResponseLatencyMs';
+export * from './aIConnectionTestResponseModel';
+export * from './aIConnectionTestResponseOfficial';
+export * from './aIConnectionTestResponseStreamOk';
+export * from './aIConnectionTestResponseThinkingReturned';
+export * from './aIConnectionTestResponseUsage';
+export * from './aIConnectionTestResponseUsageAnyOf';
 export * from './aIProviderConfigurationInput';
 export * from './aIProviderConfigurationInputApiKey';
+export * from './aIProviderConfigurationInputReasoningEffort';
 export * from './aIProviderConfigurationResponse';
 export * from './aIProviderConfigurationResponseBaseUrl';
+export * from './aIProviderConfigurationResponseFamily';
 export * from './aIProviderConfigurationResponseModel';
+export * from './aIProviderConfigurationResponsePreset';
 export * from './aIProviderConfigurationResponseProvider';
+export * from './aIProviderConfigurationResponseReasoningEffort';
 export * from './aIProviderConfigurationResponseSource';
+export * from './aIProviderPresetResponse';
+export * from './aIProviderPresetResponseFamily';
 export * from './ailyContextResponse';
 export * from './ailyContextResponseConstraintCatalogItem';
 export * from './ailyContextResponseEntities';

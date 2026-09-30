@@ -9,6 +9,9 @@ import type { AIProviderConfigurationResponseSource } from './aIProviderConfigur
 import type { AIProviderConfigurationResponseProvider } from './aIProviderConfigurationResponseProvider';
 import type { AIProviderConfigurationResponseBaseUrl } from './aIProviderConfigurationResponseBaseUrl';
 import type { AIProviderConfigurationResponseModel } from './aIProviderConfigurationResponseModel';
+import type { AIProviderConfigurationResponsePreset } from './aIProviderConfigurationResponsePreset';
+import type { AIProviderConfigurationResponseFamily } from './aIProviderConfigurationResponseFamily';
+import type { AIProviderConfigurationResponseReasoningEffort } from './aIProviderConfigurationResponseReasoningEffort';
 
 export interface AIProviderConfigurationResponse {
   configured: boolean;
@@ -17,4 +20,8 @@ export interface AIProviderConfigurationResponse {
   base_url: AIProviderConfigurationResponseBaseUrl;
   api_key_configured: boolean;
   model: AIProviderConfigurationResponseModel;
+  preset?: AIProviderConfigurationResponsePreset;
+  family?: AIProviderConfigurationResponseFamily;
+  official?: boolean;
+  reasoning_effort?: AIProviderConfigurationResponseReasoningEffort;
 }

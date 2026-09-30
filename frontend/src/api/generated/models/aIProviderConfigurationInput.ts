@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { AIProviderConfigurationInputApiKey } from './aIProviderConfigurationInputApiKey';
+import type { AIProviderConfigurationInputReasoningEffort } from './aIProviderConfigurationInputReasoningEffort';
 
 export interface AIProviderConfigurationInput {
   provider?: 'openai_compatible';
@@ -20,4 +21,5 @@ export interface AIProviderConfigurationInput {
    * @maxLength 200
    */
   model: string;
+  reasoning_effort?: AIProviderConfigurationInputReasoningEffort;
 }

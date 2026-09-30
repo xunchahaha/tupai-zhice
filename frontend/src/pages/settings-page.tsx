@@ -26,6 +26,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 
+import { type AIConnectionTestResponse, type AIProviderPresetResponse } from "@/api/generated/models";
+import { AiProviderForm } from "@/components/ai-provider/ai-provider-form";
+import { CUSTOM_PRESET_ID, presetIdForUrl, type ReasoningEffort } from "@/lib/ai-provider";
+
 import {
   getFeishuConnectionApiV1IntegrationsFeishuConnectionGetQueryKey,
   getListFeishuSyncsApiV1IntegrationsFeishuSyncsGetQueryKey,
@@ -119,7 +123,25 @@ interface AIConfiguration {
   base_url: string | null;
   api_key_configured: boolean;
   model: string | null;
+  preset?: string | null;
+  family?: "deepseek" | "glm" | "generic" | null;
+  official?: boolean;
+  reasoning_effort?: ReasoningEffort;
 }
+
+/** 预设清单取不到时至少还能自定义配置。 */
+const FALLBACK_PRESETS: AIProviderPresetResponse[] = [
+  {
+    id: CUSTOM_PRESET_ID,
+    label: "自定义配置",
+    family: "generic",
+    base_url: "",
+    models: [],
+    key_url: "",
+    docs_url: "",
+    notes: [],
+  },
+];
 
 const permissionLabels: Record<string, string> = {
   offline_access: "持续访问已授权的数据",
@@ -148,6 +170,15 @@ export function SettingsPage() {
     queryKey: ["ai-provider-configuration"],
     queryFn: async () => (await http.get<AIConfiguration>("/api/v1/integrations/ai/configuration")).data,
   });
+  const aiPresetsQuery = useQuery({
+    queryKey: ["ai-provider-presets"],
+    queryFn: async () => {
+      const data = (await http.get<AIProviderPresetResponse[]>("/api/v1/integrations/ai/presets")).data;
+      return Array.isArray(data) ? data : [];
+    },
+    staleTime: Infinity,
+  });
+  const aiPresets = aiPresetsQuery.data?.length ? aiPresetsQuery.data : FALLBACK_PRESETS;
   const [resource, setResource] = useState<(typeof resources)[number]>("schedule");
   const [workspaceName, setWorkspaceName] = useState("途排智策 - 排课空间");
   const [guideOpen, setGuideOpen] = useState(false);
@@ -166,6 +197,9 @@ export function SettingsPage() {
   const [aiBaseUrl, setAiBaseUrl] = useState("");
   const [aiApiKey, setAiApiKey] = useState("");
   const [aiModel, setAiModel] = useState("");
+  const [aiEffort, setAiEffort] = useState<ReasoningEffort>("auto");
+  // 测试结果连同「测的是哪组输入」一起存：输入一改，旧结果就不再显示（也不会把飞行中的旧请求结果错当新结果）。
+  const [aiTestRecord, setAiTestRecord] = useState<{ signature: string; result: AIConnectionTestResponse } | null>(null);
   const [editingAI, setEditingAI] = useState(false);
   const [batchResult, setBatchResult] = useState<FeishuBatchSyncResponse | null>(null);
   const [syncReauthorizationPrompt, setSyncReauthorizationPrompt] = useState(false);
@@ -280,17 +314,49 @@ export function SettingsPage() {
       base_url: aiBaseUrl.trim(),
       api_key: aiApiKey || null,
       model: aiModel.trim(),
+      reasoning_effort: aiEffort,
     })).data,
     onSuccess: (configured) => {
       setAiApiKey("");
       setEditingAI(false);
       setAiBaseUrl(configured.base_url ?? "");
       setAiModel(configured.model ?? "");
+      setAiTestRecord(null);
       void queryClient.invalidateQueries({ queryKey: ["ai-provider-configuration"] });
       toast.success("一句话排课 AI 已配置");
     },
     onError: (error) => toast.error(errorMessage(error)),
   });
+  const aiTestSignature = JSON.stringify([aiBaseUrl.trim(), aiModel.trim(), aiApiKey, aiEffort]);
+  const testAI = useMutation({
+    mutationFn: async () => (await http.post<AIConnectionTestResponse>("/api/v1/integrations/ai/test", {
+      provider: "openai_compatible",
+      base_url: aiBaseUrl.trim(),
+      api_key: aiApiKey || null,
+      model: aiModel.trim(),
+      reasoning_effort: aiEffort,
+    })).data,
+    // 发起时记下输入指纹（context），结果回来时对照当前输入决定显不显示。
+    onMutate: () => aiTestSignature,
+    onSuccess: (result, _variables, signature) => setAiTestRecord({ signature, result }),
+    onError: (error, _variables, signature) => setAiTestRecord({ signature: signature ?? "", result: { ok: false, message: errorMessage(error) } }),
+  });
+  const aiTestResult = aiTestRecord?.signature === aiTestSignature ? aiTestRecord.result : null;
+  // 高亮哪张卡片完全由接口地址决定：地址等于某个预设就是它，否则是自定义。
+  const aiPresetId = presetIdForUrl(aiPresets, aiBaseUrl);
+  const selectAiPreset = (preset: AIProviderPresetResponse) => {
+    if (!preset.base_url) {
+      // 自定义：从预设切过来就清空地址让人自己填；本来就是自定义地址则保留已填内容。
+      if (aiPresetId !== CUSTOM_PRESET_ID) {
+        setAiBaseUrl("");
+        setAiApiKey(""); // 换了供应商：敲了一半的 Key 属于上一家，不能带过去
+      }
+      return;
+    }
+    if (preset.base_url !== aiBaseUrl.trim().replace(/\/+$/, "")) setAiApiKey("");
+    setAiBaseUrl(preset.base_url);
+    if (preset.models.length && !preset.models.includes(aiModel.trim())) setAiModel(preset.models[0]);
+  };
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -352,6 +418,7 @@ export function SettingsPage() {
     if (!aiConfiguration.data) return;
     setAiBaseUrl(aiConfiguration.data.base_url ?? "");
     setAiModel(aiConfiguration.data.model ?? "");
+    setAiEffort(aiConfiguration.data.reasoning_effort ?? "auto");
     if (new URLSearchParams(window.location.search).get("section") === "ai") {
       setEditingAI(true);
       window.requestAnimationFrame(() => {
@@ -463,7 +530,7 @@ export function SettingsPage() {
         <ManagementEntries role={me.role} />
       </SettingsSection>
 
-      <SettingsSection title="AI 模型（OpenAI-compatible）" description="一句话排课的自然语言理解模型，与具体平台无关。">
+      <SettingsSection title="AI 模型（OpenAI-compatible）" description="一句话排课的自然语言理解模型：选择供应商（DeepSeek、智谱 GLM …）或自定义接口。">
         <div className="px-5 py-4">
           <AIConfigurationPanel
             configuration={aiConfiguration.data}
@@ -477,6 +544,14 @@ export function SettingsPage() {
             setEditing={setEditingAI}
             saving={configureAI.isPending}
             save={() => configureAI.mutate()}
+            presets={aiPresets}
+            presetId={aiPresetId}
+            onSelectPreset={selectAiPreset}
+            effort={aiEffort}
+            setEffort={setAiEffort}
+            testing={testAI.isPending}
+            testResult={aiTestResult}
+            test={() => testAI.mutate()}
           />
         </div>
       </SettingsSection>
@@ -1019,6 +1094,14 @@ function AIConfigurationPanel({
   setEditing,
   saving,
   save,
+  presets,
+  presetId,
+  onSelectPreset,
+  effort,
+  setEffort,
+  testing,
+  testResult,
+  test,
 }: {
   configuration: AIConfiguration;
   baseUrl: string;
@@ -1031,12 +1114,44 @@ function AIConfigurationPanel({
   setEditing: (value: boolean) => void;
   saving: boolean;
   save: () => void;
+  presets: AIProviderPresetResponse[];
+  presetId: string;
+  onSelectPreset: (preset: AIProviderPresetResponse) => void;
+  effort: ReasoningEffort;
+  setEffort: (value: ReasoningEffort) => void;
+  testing: boolean;
+  testResult: AIConnectionTestResponse | null;
+  test: () => void;
 }) {
   const environmentManaged = configuration.source === "environment";
   if (configuration.configured && !editing) {
-    return <div id="ai-configuration" className="space-y-3"><div className="flex flex-wrap items-center gap-3"><span className="text-sm font-medium text-emerald-700">自然语言 AI 已接入</span><Badge tone="green">API Key 已加密</Badge><span className="font-mono text-xs text-zinc-500">{configuration.model}</span></div><div className="break-all text-xs leading-5 text-zinc-500">OpenAI-compatible 接口：{configuration.base_url}</div><p className="text-xs leading-5 text-zinc-500">前端的一句话会先交给该模型解析为业务范围、日期窗口和约束，再由教务确认并启动 CP-SAT；普通飞书应用继续负责多维表格、日历和妙搭数据链路。</p>{environmentManaged ? <p className="text-xs text-zinc-500">当前配置由部署环境统一管理。</p> : <Button size="sm" variant="outline" onClick={() => setEditing(true)}><Settings2 className="size-3.5" />更新 AI 配置</Button>}</div>;
+    const presetLabel = presets.find((item) => item.id === configuration.preset)?.label;
+    return <div id="ai-configuration" className="space-y-3"><div className="flex flex-wrap items-center gap-3"><span className="text-sm font-medium text-emerald-700">自然语言 AI 已接入</span><Badge tone="green">API Key 已加密</Badge><span className="font-mono text-xs text-zinc-500">{configuration.model}</span>{presetLabel && configuration.preset !== CUSTOM_PRESET_ID ? <Badge tone="blue">{presetLabel}</Badge> : null}{configuration.official ? <Badge tone="neutral">官方端点 · 思考强度 {configuration.reasoning_effort ?? "auto"}</Badge> : null}</div><div className="break-all text-xs leading-5 text-zinc-500">OpenAI-compatible 接口：{configuration.base_url}</div><p className="text-xs leading-5 text-zinc-500">前端的一句话会先交给该模型解析为业务范围、日期窗口和约束，再由教务确认并启动 CP-SAT；普通飞书应用继续负责多维表格、日历和妙搭数据链路。</p>{environmentManaged ? <p className="text-xs text-zinc-500">当前配置由部署环境统一管理。</p> : <Button size="sm" variant="outline" onClick={() => setEditing(true)}><Settings2 className="size-3.5" />更新 AI 配置</Button>}</div>;
   }
-  return <div id="ai-configuration" className="space-y-4"><div className="border border-blue-200 bg-blue-50/60 p-4 text-sm text-blue-950"><div className="font-semibold">Aily 标识已从必填项移除</div><p className="mt-2 text-xs leading-5 text-blue-900/75">这里使用标准 OpenAI-compatible 模型接口，可接入豆包 Ark、DeepSeek 或企业已有模型网关。仅需要接口地址、API Key 和模型名称；飞书自建应用的 <code>cli_...</code> 继续用于飞书数据和日历授权。</p></div><div className="grid gap-4 sm:grid-cols-2"><label className="text-sm text-zinc-700 sm:col-span-2">接口地址<input aria-label="AI 接口地址" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" /><span className="mt-1 block text-xs leading-5 text-zinc-500">填写到版本根路径，系统会调用其 <code>/chat/completions</code>。</span></label><label className="text-sm text-zinc-700">模型名称或接入点 ID<input aria-label="AI 模型名称" value={model} onChange={(event) => setModel(event.target.value)} placeholder="例如：deepseek-chat 或 ep-..." className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 font-mono text-sm outline-none focus:border-blue-500" /></label><label className="text-sm text-zinc-700">API Key<input aria-label="AI API Key" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={configuration.api_key_configured ? "留空则继续使用已保存密钥" : "填写模型平台 API Key"} autoComplete="new-password" className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-3 text-sm outline-none focus:border-blue-500" /></label></div><div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-4"><Button onClick={save} disabled={saving || !/^https?:\/\//.test(baseUrl.trim()) || !model.trim() || (!configuration.api_key_configured && apiKey.length < 8) || (apiKey.length > 0 && apiKey.length < 8)}><ShieldCheck className="size-4" />{saving ? "正在加密保存" : "保存 AI 配置"}</Button>{configuration.configured ? <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>取消</Button> : null}<span className="text-xs text-zinc-500">API Key 只提交给本地后端并加密保存，页面不会回显。</span></div></div>;
+  return (
+    <AiProviderForm
+      presets={presets}
+      presetId={presetId}
+      onSelectPreset={onSelectPreset}
+      baseUrl={baseUrl}
+      setBaseUrl={setBaseUrl}
+      apiKey={apiKey}
+      setApiKey={setApiKey}
+      apiKeyConfigured={configuration.api_key_configured}
+      savedBaseUrl={configuration.base_url}
+      model={model}
+      setModel={setModel}
+      effort={effort}
+      setEffort={setEffort}
+      configured={configuration.configured}
+      saving={saving}
+      save={save}
+      cancel={() => setEditing(false)}
+      testing={testing}
+      testResult={testResult}
+      test={test}
+    />
+  );
 }
 
 function ConnectionSummary({

@@ -25,8 +25,10 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AIConnectionTestResponse,
   AIProviderConfigurationInput,
   AIProviderConfigurationResponse,
+  AIProviderPresetResponse,
   AilyContextResponse,
   AilyRuleBatch,
   AilySolveRequest,
@@ -7242,6 +7244,168 @@ export const useConfigureAiProviderApiV1IntegrationsAiConfigurationPost = <TErro
       > => {
 
       const mutationOptions = getConfigureAiProviderApiV1IntegrationsAiConfigurationPostMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    
+/**
+ * 设置页「添加供应商」的预设卡片：接口地址、常用模型、申请 Key 的入口与接入要点。
+ * @summary Ai Provider Presets
+ */
+export const aiProviderPresetsApiV1IntegrationsAiPresetsGet = (
+    
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<AIProviderPresetResponse[]>(
+      {url: `/api/v1/integrations/ai/presets`, method: 'GET', signal
+    },
+      );
+    }
+  
+
+
+
+export const getAiProviderPresetsApiV1IntegrationsAiPresetsGetQueryKey = () => {
+    return [
+    `/api/v1/integrations/ai/presets`
+    ] as const;
+    }
+
+    
+export const getAiProviderPresetsApiV1IntegrationsAiPresetsGetQueryOptions = <TData = Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>, TError = unknown>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>, TError, TData>>, }
+) => {
+
+const {query: queryOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getAiProviderPresetsApiV1IntegrationsAiPresetsGetQueryKey();
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>> = ({ signal }) => aiProviderPresetsApiV1IntegrationsAiPresetsGet(signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type AiProviderPresetsApiV1IntegrationsAiPresetsGetQueryResult = NonNullable<Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>>
+export type AiProviderPresetsApiV1IntegrationsAiPresetsGetQueryError = unknown
+
+
+export function useAiProviderPresetsApiV1IntegrationsAiPresetsGet<TData = Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>, TError = unknown>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>,
+          TError,
+          Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAiProviderPresetsApiV1IntegrationsAiPresetsGet<TData = Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>,
+          TError,
+          Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>
+        > , 'initialData'
+      >, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAiProviderPresetsApiV1IntegrationsAiPresetsGet<TData = Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>, TError, TData>>, }
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Ai Provider Presets
+ */
+
+export function useAiProviderPresetsApiV1IntegrationsAiPresetsGet<TData = Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>, TError = unknown>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof aiProviderPresetsApiV1IntegrationsAiPresetsGet>>, TError, TData>>, }
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getAiProviderPresetsApiV1IntegrationsAiPresetsGetQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+
+
+/**
+ * 用尚未保存的配置发一次最小请求；失败也返回 200 + ok=false，原因写在 message 里。
+
+同时探非流式与流式两条通道；管理员才能调用，并留审计（它会向配置里的地址发真实请求）。
+ * @summary Test Ai Provider
+ */
+export const testAiProviderApiV1IntegrationsAiTestPost = (
+    aIProviderConfigurationInput: AIProviderConfigurationInput,
+ signal?: AbortSignal
+) => {
+      
+      
+      return customInstance<AIConnectionTestResponse>(
+      {url: `/api/v1/integrations/ai/test`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: aIProviderConfigurationInput, signal
+    },
+      );
+    }
+  
+
+
+export const getTestAiProviderApiV1IntegrationsAiTestPostMutationOptions = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof testAiProviderApiV1IntegrationsAiTestPost>>, TError,{data: AIProviderConfigurationInput}, TContext>, }
+): UseMutationOptions<Awaited<ReturnType<typeof testAiProviderApiV1IntegrationsAiTestPost>>, TError,{data: AIProviderConfigurationInput}, TContext> => {
+
+const mutationKey = ['testAiProviderApiV1IntegrationsAiTestPost'];
+const {mutation: mutationOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof testAiProviderApiV1IntegrationsAiTestPost>>, {data: AIProviderConfigurationInput}> = (props) => {
+          const {data} = props ?? {};
+
+          return  testAiProviderApiV1IntegrationsAiTestPost(data,)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type TestAiProviderApiV1IntegrationsAiTestPostMutationResult = NonNullable<Awaited<ReturnType<typeof testAiProviderApiV1IntegrationsAiTestPost>>>
+    export type TestAiProviderApiV1IntegrationsAiTestPostMutationBody = AIProviderConfigurationInput
+    export type TestAiProviderApiV1IntegrationsAiTestPostMutationError = HTTPValidationError
+
+    /**
+ * @summary Test Ai Provider
+ */
+export const useTestAiProviderApiV1IntegrationsAiTestPost = <TError = HTTPValidationError,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof testAiProviderApiV1IntegrationsAiTestPost>>, TError,{data: AIProviderConfigurationInput}, TContext>, }
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof testAiProviderApiV1IntegrationsAiTestPost>>,
+        TError,
+        {data: AIProviderConfigurationInput},
+        TContext
+      > => {
+
+      const mutationOptions = getTestAiProviderApiV1IntegrationsAiTestPostMutationOptions(options);
 
       return useMutation(mutationOptions, queryClient);
     }
