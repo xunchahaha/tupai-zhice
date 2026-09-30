@@ -24,6 +24,7 @@ export interface RescheduleCreate {
   date_from?: RescheduleCreateDateFrom;
   date_to?: RescheduleCreateDateTo;
   course_business_id?: RescheduleCreateCourseBusinessId;
+  include_neighbors?: boolean;
   /**
    * @minimum 0
    * @maximum 31

@@ -84,6 +84,10 @@ def _event_blocks(
     event: dict[str, Any], session: dict[str, Any], room_id: str, slot_id: str
 ) -> bool:
     event_type = event.get("event_type")
+    # 指定了课次的事件只封锁这一节课，不能连累同教师/同教室的其他课次（无日期模型同样遵守）。
+    course_id = event.get("course_business_id")
+    if course_id and course_id != session["business_id"]:
+        return False
     slots = set(event.get("slot_business_ids") or [])
     in_window = not slots or slot_id in slots
     if event_type == "teacher_leave":

@@ -957,6 +957,9 @@ class RescheduleCreate(BaseModel):
     date_from: date | None = None
     date_to: date | None = None
     course_business_id: str | None = None
+    # 是否把种子课次前后 neighborhood_days 天内同班/同教室的课次也纳入可挪动范围。
+    # 默认 True 保持既有「局部邻域」行为；只调整选中的某一节课时前端显式传 False。
+    include_neighbors: bool = True
     neighborhood_days: int = Field(default=7, ge=0, le=31)
     time_limit_seconds: float = Field(default=30, ge=1, le=900)
 
@@ -1542,6 +1545,10 @@ class AssistantMemoryActionReceipt(BaseModel):
 
 class AssistantSolveRequest(AilySolveRequest):
     wait: bool = False
+    # 显式基准版本与目标课次：课表里选中某节课交给助手时随请求带上，求解基准与范围
+    # 来自所选版本、所选课次，而不是重新从当前已发布版本、整批范围开始。
+    parent_schedule_id: str | None = None
+    course_business_ids: list[str] = Field(default_factory=list)
     # 目标验收闭环（MEM-C3）：一句话排课确认后可关联持久目标跟踪验收。
     goal_id: str | None = None
     # 任务级约束的请求侧载体（TC-1 §2.1）：API 直调 /assistant/solve（无解析

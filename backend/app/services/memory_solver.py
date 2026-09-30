@@ -741,12 +741,12 @@ def reason_noise_class(declared_reason: str | None) -> str:
     return "unknown"
 
 
-# 「最终态被接受」的显式排除清单（MEM-E1b，§8）：事件状态机当前只有三态，且
-# 没有任何一态本身构成「已被接受」——pending=求解中/求解失败，未产出候选；
-# candidate_ready=候选待发布（教务尚未采纳的提议；发布动作也不会回写事件状态）；
-# candidate_discarded=候选版本被删除（教务放弃本次调课）。
+# 「最终态被接受」的显式排除清单（MEM-E1b，§8）：事件状态没有任何一态本身构成
+# 「已被接受」——pending=求解中；failed=求解失败、no_candidate=求解完成但无可行
+# 候选（二者都没有产出候选版本）；candidate_ready=候选待发布（教务尚未采纳的提议；
+# 发布动作也不会回写事件状态）；candidate_discarded=候选版本被删除（教务放弃本次调课）。
 LEARNING_EXCLUDED_EVENT_STATUSES = frozenset(
-    {"pending", "candidate_ready", "candidate_discarded"}
+    {"pending", "failed", "no_candidate", "candidate_ready", "candidate_discarded"}
 )
 
 # 排除清单三态因此都不能仅凭状态进入学习集；「明确接受依据」落在模型里可稳定

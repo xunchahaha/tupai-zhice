@@ -7416,6 +7416,24 @@
             "title": "Wait",
             "default": false
           },
+          "parent_schedule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Schedule Id"
+          },
+          "course_business_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Course Business Ids"
+          },
           "goal_id": {
             "anyOf": [
               {
@@ -12422,6 +12440,11 @@
               }
             ],
             "title": "Course Business Id"
+          },
+          "include_neighbors": {
+            "type": "boolean",
+            "title": "Include Neighbors",
+            "default": true
           },
           "neighborhood_days": {
             "type": "integer",

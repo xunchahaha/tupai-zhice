@@ -8,6 +8,7 @@
 import type { AssistantSolveRequestDateFrom } from './assistantSolveRequestDateFrom';
 import type { AssistantSolveRequestDateTo } from './assistantSolveRequestDateTo';
 import type { AssistantSolveRequestSolverRulesItem } from './assistantSolveRequestSolverRulesItem';
+import type { AssistantSolveRequestParentScheduleId } from './assistantSolveRequestParentScheduleId';
 import type { AssistantSolveRequestGoalId } from './assistantSolveRequestGoalId';
 import type { AssistantTaskConstraint } from './assistantTaskConstraint';
 
@@ -34,6 +35,8 @@ export interface AssistantSolveRequest {
   date_window_days?: number;
   solver_rules?: AssistantSolveRequestSolverRulesItem[];
   wait?: boolean;
+  parent_schedule_id?: AssistantSolveRequestParentScheduleId;
+  course_business_ids?: string[];
   goal_id?: AssistantSolveRequestGoalId;
   task_constraints?: AssistantTaskConstraint[];
   unsupported_requirements?: string[];

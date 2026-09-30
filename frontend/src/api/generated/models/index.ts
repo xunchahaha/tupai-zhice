@@ -54,6 +54,7 @@ export * from './assistantSolveRequest';
 export * from './assistantSolveRequestDateFrom';
 export * from './assistantSolveRequestDateTo';
 export * from './assistantSolveRequestGoalId';
+export * from './assistantSolveRequestParentScheduleId';
 export * from './assistantSolveRequestSolverRulesItem';
 export * from './assistantTaskConstraint';
 export * from './assistantTaskConstraintHardness';

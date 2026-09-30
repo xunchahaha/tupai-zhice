@@ -258,6 +258,18 @@ def calculate_metrics(
     }
 
 
+def _finish_reschedule_event(db: Any, run: SolverRun, status: str) -> None:
+    """调课求解没有产出候选课表时，把对应事件从 pending 收口到终态（不覆盖已有候选）。"""
+    event = db.scalar(
+        select(RescheduleEvent).where(
+            RescheduleEvent.schedule_set_id == run.schedule_set_id,
+            RescheduleEvent.solver_run_id == run.id,
+        )
+    )
+    if event is not None and event.candidate_schedule_id is None and event.status == "pending":
+        event.status = status
+
+
 def _persist_result(run_id: str, result: dict[str, Any]) -> None:
     run_goal_id: str | None = None
     with SessionLocal() as db:
@@ -408,6 +420,10 @@ def _persist_result(run_id: str, result: dict[str, Any]) -> None:
             if event:
                 event.status = "candidate_ready"
                 event.candidate_schedule_id = schedule.id
+        else:
+            # 无解 / 超时：没有候选课表。调课事件不能一直停在 pending，
+            # 否则页面分不清「还在算」和「已经算完但没有结果」。
+            _finish_reschedule_event(db, run, "no_candidate")
         if run_goal_id:
             # MEM-D2/D6：run completed 时先把验收状态置 pending（报告在下面
             # 的独立事务里异步生成）。前端据此显示「验收中…」而不是干等。
@@ -554,6 +570,7 @@ def _persist_failure(run_id: str, message: str) -> None:
         if run:
             run.status = "failed"
             run.error_message = message
+            _finish_reschedule_event(db, run, "failed")
             # MEM-D2/D6：run 失败 = 不会有验收报告。若挂着目标，同步把验收
             # 状态置 failed 并落失败标记，避免目标永远停在 pending、前端永远
             # 轮询不到报告。

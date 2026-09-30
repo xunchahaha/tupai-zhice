@@ -4464,6 +4464,18 @@ def create_solver_run(
     # 版本会把上一轮草稿的全部调整都算成变更、诱导求解器回退已确认的成果。
     baseline_source: str | None = None
     parent_version: ScheduleVersion | None = None
+    # 请求显式指定的基准版本（例如从课表里选中某份草稿的课次「交给助手继续处理」）：
+    # 求解就以这一版为准，不能悄悄退回目标工作草稿或当前已发布版本。
+    requested_parent_id = getattr(request, "parent_schedule_id", None)
+    if requested_parent_id and "parent_schedule_id" not in run_extra:
+        requested_parent = db.get(ScheduleVersion, requested_parent_id)
+        if requested_parent is None or requested_parent.schedule_set_id != schedule_set_id:
+            raise HTTPException(status_code=422, detail="指定的基准课表版本不存在")
+        parent_response = schedule_response(db, requested_parent)
+        run_extra["parent_schedule_id"] = requested_parent.id
+        run_extra["previous_assignments"] = [
+            item.model_dump(mode="json") for item in parent_response.assignments
+        ]
     if "parent_schedule_id" in run_extra:
         baseline_source = "explicit_parent"
     else:
@@ -5666,6 +5678,14 @@ def reschedule_neighborhood(
     邻域再纳入同一时间窗口内共用班级或教室的课次——它们是腾挪空间的来源。
     邻域外的课次不参与决策，但会作为固定占用进入模型，不会被别的课占掉。
     返回空集表示不限定范围（求解器按全量处理）。
+
+    范围以请求为准，不靠「最小变更」补救：
+    - 指定了 course_business_id（调整选中的某一节课）时，种子只有这一节课，
+      不会因为它的教师/教室相同而把同一教师、教室的其他课次也当成受影响课次；
+    - date_from/date_to 同样限定种子的日期（求解器只在该日期窗口内封锁教师/教室，
+      窗口外的课次不需要动，也就不该进入邻域）；
+    - include_neighbors=False 时不再把同班/同教室的邻近课次纳入可挪动范围，
+      邻域就是种子本身，其余课次全部作为固定占用。
     """
     teachers = {
         item.business_id: item
@@ -5678,12 +5698,22 @@ def reschedule_neighborhood(
         )
     }
 
+    def in_window(assignment: AssignmentResponse) -> bool:
+        # 没有日期的课次（无日期模型）无法按日期限定，保持原有「不按日期过滤」。
+        if not assignment.lesson_date:
+            return True
+        if request.date_from and assignment.lesson_date < request.date_from:
+            return False
+        return not (request.date_to and assignment.lesson_date > request.date_to)
+
     def targets(assignment: AssignmentResponse) -> bool:
         course = courses.get(assignment.course_session_id)
         if course is None:
             return False
-        if request.course_business_id and course.business_id == request.course_business_id:
-            return True
+        if request.course_business_id:
+            return course.business_id == request.course_business_id and in_window(assignment)
+        if not in_window(assignment):
+            return False
         if request.event_type == "room_outage":
             return bool(
                 request.room_business_id and assignment.room_business_id == request.room_business_id
@@ -5709,6 +5739,12 @@ def reschedule_neighborhood(
     seeds = [item for item in parent.assignments if targets(item)]
     if not seeds:
         return set()
+    if not request.include_neighbors:
+        return {
+            courses[item.course_session_id].business_id
+            for item in seeds
+            if item.course_session_id in courses
+        }
     seed_dates = [item.lesson_date for item in seeds if item.lesson_date]
     if not seed_dates:
         return {
@@ -5762,6 +5798,14 @@ def create_reschedule_event(
     if request.date_from and request.date_to and request.date_from > request.date_to:
         raise HTTPException(status_code=422, detail="事件的开始日期不能晚于结束日期")
     parent_response = schedule_response(db, parent)
+    neighborhood = reschedule_neighborhood(db, request, parent_response, scope.id)
+    if request.course_business_id and not neighborhood:
+        # 指定了课次却找不到种子：邻域为空会被求解器当成「不限定范围、全量重排」，
+        # 必须在创建事件之前拒绝，而不是悄悄把范围放大成整张课表。
+        raise HTTPException(
+            status_code=422,
+            detail="所选课次不在父课表中，或不在事件指定的日期范围内，无法按这一节课调整",
+        )
     event_payload = request.model_dump(
         mode="json",
         exclude={"parent_schedule_id", "description", "time_limit_seconds"}
@@ -5778,7 +5822,6 @@ def create_reschedule_event(
     )
     db.add(event)
     db.flush()
-    neighborhood = reschedule_neighborhood(db, request, parent_response, scope.id)
     run = create_solver_run(
         db,
         user.id,

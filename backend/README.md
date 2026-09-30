@@ -445,6 +445,8 @@ RBAC 正交：链接的签发/轮换/停用复用 `admin/scheduler` 角色，撤
   `POST /api/v1/memory/preferences/{candidate_id}/adjudicate-replace`（「以新替旧」原子裁决，MEM-E3）、
   `POST /api/v1/memory/preferences/{id}/convert-to-rule`（hard 条目转正式规则，仅管理员）
 - 偏好挖掘：`POST /api/v1/memory/mining-runs`
+- 调课范围：`POST /api/v1/reschedule-events` 带 `course_business_id`（课次业务号）时，范围就是这一节课（配合 `date_from`/`date_to` 限定到具体那一天），不会因教师/教室相同扩大到其他课次；`include_neighbors`（默认 true，只调整选中课次时前端显式传 false）决定是否把前后 `neighborhood_days` 天内同班/同教室的课次也纳入可挪动范围；指定的课次不在父课表或日期范围内时 422，不会退化成全量重排。事件状态：pending（求解中）→ candidate_ready（有候选）/ no_candidate（无可行候选）/ failed（求解失败）
+- 助手求解基准：`POST /api/v1/assistant/solve` 可选 `parent_schedule_id`（显式基准版本，优先于目标工作草稿与最新已发布版本）与 `course_business_ids`（目标课次），课表页「交给助手继续处理」据此带上所选版本与课次
 - 调课归因：`POST /api/v1/reschedule-events` 请求体可选 `declared_reason`
 - 课表方案：`GET/POST /api/v1/schedule-sets`、`PATCH /api/v1/schedule-sets/{id}`
 - 课表方案成员：`GET /api/v1/schedule-sets/{id}/members`，`PUT/DELETE /api/v1/schedule-sets/{id}/members/{user_id}`
