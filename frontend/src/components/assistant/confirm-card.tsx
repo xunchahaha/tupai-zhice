@@ -148,8 +148,11 @@ export function ConfirmCard({ task, scheduleList }: { task: AssistantTask; sched
         <p role="status" className="mt-2 text-xs text-zinc-600">补充的条件要写进任务里才会生效，已经替你打开了「更多选项」里的「以此为目标跟踪」。</p>
       ) : null}
       <MoreOptions task={task} scheduleList={scheduleList} />
+      {task.staleInterpretation ? (
+        <p role="alert" className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">{task.staleInterpretation}</p>
+      ) : null}
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        <Button onClick={() => void task.solveFromInterpretation()} disabled={unresolved || task.goalBusy || task.pending || Boolean(task.submitBlockedReason)}>
+        <Button onClick={() => void task.solveFromInterpretation()} disabled={unresolved || task.goalBusy || task.pending || Boolean(task.submitBlockedReason) || Boolean(task.staleInterpretation)}>
           <Play className="size-4" />{task.goalBusy ? "正在登记任务…" : "确认并开始求解"}
         </Button>
         <Button variant="outline" onClick={() => void task.interpret(interpretation.instruction)} disabled={!canParse || task.phase === "thinking"}>

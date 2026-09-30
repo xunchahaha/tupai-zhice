@@ -11,6 +11,8 @@ import type { AssistantInterpretResponseDateTo } from './assistantInterpretRespo
 import type { AssistantInterpretResponseSolverRulesItem } from './assistantInterpretResponseSolverRulesItem';
 import type { GoalChecklistItem } from './goalChecklistItem';
 import type { AssistantTaskConstraint } from './assistantTaskConstraint';
+import type { AssistantInterpretResponseTaskGoalId } from './assistantInterpretResponseTaskGoalId';
+import type { AssistantInterpretResponseTaskBasisVersion } from './assistantInterpretResponseTaskBasisVersion';
 import type { AssistantMemoryAction } from './assistantMemoryAction';
 import type { AssistantMemoryActionReceipt } from './assistantMemoryActionReceipt';
 import type { AssistantInterpretResponseThinking } from './assistantInterpretResponseThinking';
@@ -37,6 +39,8 @@ export interface AssistantInterpretResponse {
   goal_checklist_draft?: GoalChecklistItem[];
   checklist_warnings?: string[];
   task_constraints?: AssistantTaskConstraint[];
+  task_goal_id?: AssistantInterpretResponseTaskGoalId;
+  task_basis_version?: AssistantInterpretResponseTaskBasisVersion;
   memory_actions?: AssistantMemoryAction[];
   memory_action_receipts?: AssistantMemoryActionReceipt[];
   summary: string;

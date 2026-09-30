@@ -10,6 +10,7 @@ import type { AssistantSolveRequestDateTo } from './assistantSolveRequestDateTo'
 import type { AssistantSolveRequestSolverRulesItem } from './assistantSolveRequestSolverRulesItem';
 import type { AssistantSolveRequestParentScheduleId } from './assistantSolveRequestParentScheduleId';
 import type { AssistantSolveRequestGoalId } from './assistantSolveRequestGoalId';
+import type { AssistantSolveRequestExpectedTaskBasisVersion } from './assistantSolveRequestExpectedTaskBasisVersion';
 import type { AssistantTaskConstraint } from './assistantTaskConstraint';
 
 export interface AssistantSolveRequest {
@@ -38,6 +39,7 @@ export interface AssistantSolveRequest {
   parent_schedule_id?: AssistantSolveRequestParentScheduleId;
   course_business_ids?: string[];
   goal_id?: AssistantSolveRequestGoalId;
+  expected_task_basis_version?: AssistantSolveRequestExpectedTaskBasisVersion;
   task_constraints?: AssistantTaskConstraint[];
   unsupported_requirements?: string[];
 }

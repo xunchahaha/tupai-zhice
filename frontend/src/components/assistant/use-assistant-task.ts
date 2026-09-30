@@ -121,6 +121,14 @@ export function useAssistantTask() {
     },
   });
   const { interpretation, confirmed, setInstruction, setConfirmed } = session;
+  // 这份理解是按任务的哪一版要求解析的（续办才有）：里面「修改/取消某一条」指向的是当时的要求。
+  // 之后任务要求变了（别的标签页、清单里、手动排课都会改），这张卡就不能再确认——要重新解析。
+  // 比对的是解析时绑定的版本，绝不在点击时拿最新版本给旧内容重新盖章。只有任务比这张卡「更新」才算陈旧：
+  // 本页缓存的任务详情可能落后（窗口聚焦不自动刷新），比卡更旧的缓存什么也说明不了，交给后端 409 兜底。
+  const staleInterpretation =
+    interpretation && !confirmed && goal && interpretation.task_goal_id === goal.id && interpretation.task_basis_version != null && goal.checklist_version != null && goal.checklist_version > interpretation.task_basis_version
+      ? `任务要求在这份理解之后变了（v${interpretation.task_basis_version} → v${goal.checklist_version}），其中「修改或取消已有要求」可能已经对不上，请重新解析后再确认。`
+      : null;
 
   // —— 面板 ——
   const [manualOpen, setManualOpen] = useState(false);
@@ -527,6 +535,10 @@ export function useAssistantTask() {
 
   const solveFromInterpretation = gated(async () => {
     if (!interpretation || interpretation.unsupported_requirements?.length) return;
+    if (staleInterpretation) {
+      toast.error(staleInterpretation);
+      return;
+    }
     // 带着交接对象来的，读不到它就不能开始：不能悄悄退回「当前已发布版本 + 整批范围」。
     if (handoff && handoff.status !== "ready") {
       toast.error(`${handoff.description}可以先取消这一节课的限定，再按需求整体排课。`);
@@ -560,6 +572,11 @@ export function useAssistantTask() {
         course_business_ids: params.course_business_ids,
         ...(explicitBase ? { parent_schedule_id: explicitBase } : {}),
         goal_id: trackGoal ? activeGoalId : null,
+        // 只认用户当时看到并确认的任务版本（解析响应里绑定的）：任务要求此后变了，后端 409，
+        // 不会把这份旧解析套到新要求上。这张卡不是针对该任务解析的（新登记的任务、换了任务）就不带。
+        ...(trackGoal && activeGoalId && interpretation.task_goal_id === activeGoalId && interpretation.task_basis_version != null
+          ? { expected_task_basis_version: interpretation.task_basis_version }
+          : {}),
         wait: false,
       });
       if (startedEpoch !== epoch.current) return;
@@ -567,6 +584,8 @@ export function useAssistantTask() {
       toast.success(trackGoal ? "已开始排课，完成后会自动核对要求" : "确认完成，已开始排课");
     } catch (error) {
       toast.error(errorMessage(error));
+      // 被后端拒绝时任务多半已经变了：刷新任务详情，确认卡据此提示重新解析。
+      if (goalId) void client.invalidateQueries({ queryKey: getGetGoalApiV1GoalsGoalIdGetQueryKey(goalId) });
     } finally {
       setGoalBusy(false);
     }
@@ -634,6 +653,7 @@ export function useAssistantTask() {
     goalId,
     goal,
     goalClosed,
+    staleInterpretation,
     goalNotice,
     goalBusy,
     goalLoadFailed,

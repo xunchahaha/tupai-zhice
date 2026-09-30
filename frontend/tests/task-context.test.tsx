@@ -166,6 +166,8 @@ describe("AssistantPage solve request contract (TC-6 §6.5/§6.4)", () => {
     // 软约束链前端填充（§6.5）：请求体带全量 task_constraints（hard+soft），与确认卡同源。
     expect(solveBody.task_constraints).toEqual(taskConstraints);
     expect(solveBody.goal_id).toBe("goal-new-1");
+    // 这张卡不是针对某个已有任务解析的：没有可绑定的任务版本，就不带（否则会拿别处的版本去校验）。
+    expect(solveBody).not.toHaveProperty("expected_task_basis_version");
     // §4.5：新建目标成功即把 goal_id 同步进 URL（无残留 action 参数）。
     await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(/^\/assistant\?goal=goal-new-1$/));
   });
@@ -410,6 +412,69 @@ describe("AssistantPage budget retry and scope remedy (TC-6 §5.2)", () => {
     } finally {
       delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     }
+  });
+});
+
+describe("confirmation is bound to the task version it was parsed against (review 9ae17ca F4)", () => {
+  const cancelWednesday = { id: "tc-1", source_text: "周三那条不用了", subject_type: "teacher", subject_ids: [], slot_business_ids: [], hardness: "soft", op: "remove", target_id: "sc-a" };
+
+  beforeEach(() => {
+    mockAiConfigured();
+    mocks.post.mockImplementation(async () => ({ data: { id: "run-bound", status: "queued", model_status: null, goal_id: "goal-77" } }));
+  });
+
+  it("sends the parse-time version with the confirmation, not whatever the task is at now", async () => {
+    mocks.goalDetail = goalFixture({ context: goalContext, checklist_version: 3 });
+    mocks.stream.mockResolvedValue(
+      interpretationFixture({ task_constraints: [cancelWednesday], task_goal_id: "goal-77", task_basis_version: 3 }),
+    );
+    const user = userEvent.setup();
+    renderAssistant("/assistant?goal=goal-77");
+    await resumeParse(user);
+    await user.click(await screen.findByRole("button", { name: CONFIRM }));
+    await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
+    const [url, body] = mocks.post.mock.calls[0] as [string, Record<string, unknown>];
+    expect(url).toBe("/api/v1/assistant/solve");
+    expect(body.goal_id).toBe("goal-77");
+    expect(body.expected_task_basis_version).toBe(3);
+  });
+
+  it("blocks confirming a card whose task moved on, and says to parse again", async () => {
+    mocks.goalDetail = goalFixture({ context: goalContext, checklist_version: 4 });
+    mocks.stream.mockResolvedValue(
+      interpretationFixture({ task_constraints: [cancelWednesday], task_goal_id: "goal-77", task_basis_version: 3 }),
+    );
+    const user = userEvent.setup();
+    renderAssistant("/assistant?goal=goal-77");
+    await resumeParse(user);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/任务要求在这份理解之后变了（v3 → v4）.*重新解析/);
+    expect(screen.getByRole("button", { name: CONFIRM })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /重新解析/ })).toBeEnabled();
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
+  it("does not lock a card just because this page's cached task is older than the card", async () => {
+    // 别处已把任务升到 v4，这张卡是在那之后解析的（绑定 v4）；本页缓存的任务详情还停在 v3。
+    // 比卡更旧的缓存说明不了卡陈旧——真陈旧由后端 409 兜底，不能把确认按钮锁死。
+    mocks.goalDetail = goalFixture({ context: goalContext, checklist_version: 3 });
+    mocks.stream.mockResolvedValue(interpretationFixture({ task_goal_id: "goal-77", task_basis_version: 4 }));
+    const user = userEvent.setup();
+    renderAssistant("/assistant?goal=goal-77");
+    await resumeParse(user);
+    await screen.findByText(/已解析完成（用时/);
+    expect(screen.queryByText(/任务要求在这份理解之后变了/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: CONFIRM })).toBeEnabled();
+  });
+
+  it("does not flag a card that was parsed against the task's current version", async () => {
+    mocks.goalDetail = goalFixture({ context: goalContext, checklist_version: 3 });
+    mocks.stream.mockResolvedValue(interpretationFixture({ task_goal_id: "goal-77", task_basis_version: 3 }));
+    const user = userEvent.setup();
+    renderAssistant("/assistant?goal=goal-77");
+    await resumeParse(user);
+    await screen.findByText(/已解析完成（用时/);
+    expect(screen.queryByText(/任务要求在这份理解之后变了/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: CONFIRM })).toBeEnabled();
   });
 });
 
