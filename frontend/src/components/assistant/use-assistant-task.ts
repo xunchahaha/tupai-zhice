@@ -234,6 +234,8 @@ export function useAssistantTask() {
   const startedRun = useCallback((run: SolverRunResponse, via: "solve" | "manual") => {
     setRunId(run.id);
     setCurrent(run);
+    // 创建求解时任务要求可能已经升了版本：刷新任务详情，别拿旧版本号去比新求解。
+    if (run.goal_id) void client.invalidateQueries({ queryKey: getGetGoalApiV1GoalsGoalIdGetQueryKey(run.goal_id) });
     // 课次限定随这次求解提交，成为已确认的范围；base/lesson 从地址栏摘掉，之后由任务上下文承载。
     // 交接对象本身不在这里清除：没产出草稿（超时/无解）的重试仍要用它；有草稿后基准才前进。
     commitLessonScope();
@@ -253,7 +255,7 @@ export function useAssistantTask() {
       next.delete("base");
       next.delete("lesson");
     });
-  }, [commitLessonScope, setConfirmed, updateSearch]);
+  }, [client, commitLessonScope, setConfirmed, updateSearch]);
   const submittedEpoch = useRef(0);
   const submit = useSubmitSolverRunApiV1SolverRunsPost({
     mutation: {
@@ -392,12 +394,21 @@ export function useAssistantTask() {
   const runLoaded = Boolean(runId) && current?.id === runId;
   const runSettled = runLoaded && (current?.status === "completed" || current?.status === "failed");
   const runLoadFailed = Boolean(runId) && !current && Boolean(progress.isError);
-  const canRaiseBudget = runSettled && !goalClosed;
+  // 任务要求（硬要求/软要求/范围）在这次求解之后修订过：按原参数重跑 = 旧数据旧范围却按新要求验收，
+  // 后端会 409——这里提前说明，不让人点了才报错。对新版求解重跑不受影响。
+  const taskMovedOn = Boolean(goal)
+    && current?.goal_id === goal?.id
+    && current?.goal_checklist_version != null
+    && goal?.checklist_version != null
+    && current.goal_checklist_version !== goal.checklist_version;
+  const canRaiseBudget = runSettled && !goalClosed && !taskMovedOn;
   const budgetBlockedByRun = canRaiseBudget
     ? null
     : goalClosed
       ? "这个任务已放弃，不能再重跑；可以「按当前范围重新排课」。"
-      : !runId
+      : taskMovedOn
+        ? `任务要求在这次求解之后修订过（v${current?.goal_checklist_version} → v${goal?.checklist_version}），按原参数重跑会拿旧问题对新要求验收；请「修改要求后重新解析」或按当前范围重新排课。`
+        : !runId
         ? "没有关联任务，也没有可重跑的求解记录，无法确认原来的排课参数；请先「修正范围」，或按当前范围重新排课。"
         : runLoadFailed
           ? "这次求解的记录没能读取，暂时无法按原参数重跑，请先重试读取。"

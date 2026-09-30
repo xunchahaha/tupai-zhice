@@ -13,6 +13,7 @@ import {
 import { goalNeedsParams, goalProgress, isActiveGoal, isClosedGoal, needsParamsItems, parseGoalReport, reportStanding, requirementsNote } from "@/lib/goal";
 import { type Interpretation } from "@/lib/interpret-stream";
 import { memoryEntryPath, memoryOutcomeDescription, splitMemoryOutcomes } from "@/lib/memory-usage";
+import { describeTaskRevision } from "@/lib/task-context";
 import { classifyRun } from "@/lib/run-kind";
 import { withSystemRules } from "@/lib/solver-params";
 
@@ -327,5 +328,30 @@ describe("needsParamsItems / goalNeedsParams (one definition of 「还差一个�
     expect(goalNeedsParams(null)).toBe(false);
     expect(goalNeedsParams({ checklist: null })).toBe(false);
     expect(needsParamsItems({ checklist: [] })).toEqual([]);
+  });
+});
+
+
+describe("describeTaskRevision", () => {
+  it("spells out every kind of revision, including cancelled and unresolved edits", () => {
+    const text = describeTaskRevision({
+      added_hard: ["张老师周五不能上"],
+      tightened: ["李老师周三晚绝对不能上"],
+      added_soft: ["王老师周四尽量别排"],
+      replaced_soft: ["赵老师改到周六"],
+      removed_soft: ["钱老师那条不用了"],
+      unresolved: ["孙老师那条改一下"],
+      kept_hard: ["周老师尽量别排周一"],
+    });
+    for (const part of ["新增硬性要求", "由「尽量」收紧为硬性要求", "新增软性要求", "修改了软性要求", "取消了软性要求", "没能确定要修改/取消的是哪一条", "没有放宽"]) {
+      expect(text).toContain(part);
+    }
+    expect(text.startsWith("已更新任务要求：")).toBe(true);
+  });
+
+  it("says nothing when nothing changed", () => {
+    expect(describeTaskRevision(null)).toBe("");
+    expect(describeTaskRevision({})).toBe("");
+    expect(describeTaskRevision({ added_hard: [] })).toBe("");
   });
 });

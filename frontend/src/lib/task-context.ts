@@ -18,6 +18,10 @@ export interface AssistantTaskConstraint {
   slot_business_ids: string[];
   /** hard=这次不能（进清单/编译为规则对象）；soft=尽量（进 goal.context 随求解请求体携带）。 */
   hardness: "hard" | "soft" | string;
+  /** 对任务既有要求做什么：add=追加（缺省）、replace=修改 target_id 那一条、remove=取消那一条。 */
+  op?: "add" | "replace" | "remove" | string;
+  /** replace/remove 指向的既有要求的稳定编号；指不到具体旧项时后端绝不自动删除。 */
+  target_id?: string | null;
 }
 
 /** 记忆动作回执（07 §3.1）：explicit 直接执行的结论或候选降级说明。 */
@@ -75,6 +79,13 @@ export function parseGoalContext(value: unknown): GoalTaskContext | null {
 
 export const TASK_CONSTRAINT_SOURCE_NOTE = "仅作用于本次任务，不进入规则库";
 
+/** 非「追加」的要求在确认卡上要明说：它改的是任务里已有的哪一条，而不是新增。 */
+export function taskConstraintOpLabel(op: AssistantTaskConstraint["op"]): string | null {
+  if (op === "replace") return "修改已有要求";
+  if (op === "remove") return "取消已有要求";
+  return null;
+}
+
 export function taskConstraintHardnessLabel(hardness: AssistantTaskConstraint["hardness"]): string {
   return hardness === "soft" ? "软约束" : "硬约束";
 }
@@ -99,6 +110,8 @@ const REVISION_PARTS: Array<[string, (items: string) => string]> = [
   ["tightened", (items) => `由「尽量」收紧为硬性要求：${items}`],
   ["added_soft", (items) => `新增软性要求：${items}`],
   ["replaced_soft", (items) => `修改了软性要求：${items}`],
+  ["removed_soft", (items) => `取消了软性要求：${items}`],
+  ["unresolved", (items) => `没能确定要修改/取消的是哪一条，已保留原要求：${items}`],
   ["kept_hard", (items) => `原本就是硬性要求、这次没有放宽（要放宽请到任务清单里改）：${items}`],
 ];
 

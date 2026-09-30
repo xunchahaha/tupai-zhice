@@ -16,6 +16,7 @@ import type { SolverRunDetailResponseGoalReport } from './solverRunDetailRespons
 import type { SolverRunDetailResponseTimeLimitSeconds } from './solverRunDetailResponseTimeLimitSeconds';
 import type { SolverRunDetailResponseTaskRevision } from './solverRunDetailResponseTaskRevision';
 import type { SolverRunDetailResponseRerunOf } from './solverRunDetailResponseRerunOf';
+import type { SolverRunDetailResponseGoalChecklistVersion } from './solverRunDetailResponseGoalChecklistVersion';
 import type { SolverRunDetailResponseErrorMessage } from './solverRunDetailResponseErrorMessage';
 
 /**
@@ -44,6 +45,7 @@ export interface SolverRunDetailResponse {
   time_limit_seconds?: SolverRunDetailResponseTimeLimitSeconds;
   task_revision?: SolverRunDetailResponseTaskRevision;
   rerun_of?: SolverRunDetailResponseRerunOf;
+  goal_checklist_version?: SolverRunDetailResponseGoalChecklistVersion;
   error_message: SolverRunDetailResponseErrorMessage;
   created_at: string;
   updated_at: string;

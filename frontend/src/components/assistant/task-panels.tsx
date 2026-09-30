@@ -10,6 +10,7 @@ import {
   memoryReceiptStatusLabel,
   TASK_CONSTRAINT_SOURCE_NOTE,
   taskConstraintHardnessLabel,
+  taskConstraintOpLabel,
 } from "@/lib/task-context";
 
 const linkClass = "text-blue-700 underline-offset-2 hover:underline";
@@ -41,12 +42,17 @@ export function TaskConstraintsPanel({ constraints }: { constraints: AssistantTa
       <ul className="mt-2 space-y-1.5">
         {constraints.map((item, index) => (
           <li key={item.id || `${item.source_text}-${index}`} className="flex flex-wrap items-center gap-2 border-l-2 border-zinc-200 pl-3 text-xs leading-5 text-zinc-700">
-            <Badge tone={item.hardness === "soft" ? "neutral" : "blue"}>{taskConstraintHardnessLabel(item.hardness)}</Badge>
+            {taskConstraintOpLabel(item.op) ? <Badge tone="yellow">{taskConstraintOpLabel(item.op)}</Badge> : null}
+            {item.op === "remove" ? null : (
+              <Badge tone={item.hardness === "soft" ? "neutral" : "blue"}>{taskConstraintHardnessLabel(item.hardness)}</Badge>
+            )}
             <span>{item.source_text}</span>
-            <span className="text-zinc-400">
-              {goalSubjectTypeLabel(item.subject_type)} {item.subject_ids.join("、")}
-              {item.slot_business_ids.length ? ` × 时段 ${item.slot_business_ids.join("、")}` : " × 时段待补充"}
-            </span>
+            {item.op === "remove" ? null : (
+              <span className="text-zinc-400">
+                {goalSubjectTypeLabel(item.subject_type)} {item.subject_ids.join("、")}
+                {item.slot_business_ids.length ? ` × 时段 ${item.slot_business_ids.join("、")}` : " × 时段待补充"}
+              </span>
+            )}
           </li>
         ))}
       </ul>

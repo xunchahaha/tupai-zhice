@@ -7,6 +7,8 @@
  */
 import type { AssistantTaskConstraintSubjectType } from './assistantTaskConstraintSubjectType';
 import type { AssistantTaskConstraintHardness } from './assistantTaskConstraintHardness';
+import type { AssistantTaskConstraintOp } from './assistantTaskConstraintOp';
+import type { AssistantTaskConstraintTargetId } from './assistantTaskConstraintTargetId';
 
 /**
  * 解析产物中的任务级约束（TC-1，docs/roadmap/07-task-context.md §2.1）：
@@ -26,4 +28,6 @@ export interface AssistantTaskConstraint {
   subject_ids?: string[];
   slot_business_ids?: string[];
   hardness?: AssistantTaskConstraintHardness;
+  op?: AssistantTaskConstraintOp;
+  target_id?: AssistantTaskConstraintTargetId;
 }

@@ -122,6 +122,31 @@ describe("AssistantPage task constraints & memory receipts (TC-6 §6.1)", () => 
   });
 });
 
+describe("task constraint ops on the confirmation card (review 6fe2bf8 R1)", () => {
+  it("says when a requirement edits or cancels an existing one instead of adding a new one", async () => {
+    mockAiConfigured();
+    mocks.stream.mockResolvedValue(
+      interpretationFixture({
+        task_constraints: [
+          { id: "tc-1", source_text: "张老师周三晚改到周五晚", subject_type: "teacher", subject_ids: ["T01"], slot_business_ids: ["S07"], hardness: "soft", op: "replace", target_id: "tc-old" },
+          { id: "tc-2", source_text: "李老师那条不用了", subject_type: "teacher", subject_ids: [], slot_business_ids: [], hardness: "hard", op: "remove", target_id: "tc-older" },
+          { id: "tc-3", source_text: "另外王老师周四尽量别排", subject_type: "teacher", subject_ids: ["T03"], slot_business_ids: ["S06"], hardness: "soft", op: "add" },
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    renderAssistant();
+    await parse(user);
+    const region = await screen.findByLabelText("本次任务要求");
+    expect(within(region).getByText("修改已有要求")).toBeInTheDocument();
+    expect(within(region).getByText("取消已有要求")).toBeInTheDocument();
+    // 追加的没有额外徽标；取消的不展示主体×时段（它没有新的要求内容）。
+    expect(within(region).getAllByText(/已有要求/)).toHaveLength(2);
+    const cancelRow = within(region).getByText("李老师那条不用了").closest("li") as HTMLElement;
+    expect(within(cancelRow).queryByText(/时段待补充/)).not.toBeInTheDocument();
+  });
+});
+
 describe("AssistantPage solve request contract (TC-6 §6.5/§6.4)", () => {
   it("carries the full task_constraints list (hard + soft) in the /assistant/solve request body", async () => {
     mockAiConfigured();

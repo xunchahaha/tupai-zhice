@@ -239,6 +239,28 @@ describe("AssistantPage stuck card", () => {
     expect(mocks.submitMutate).not.toHaveBeenCalled();
   });
 
+  it("explains instead of offering a replay once the task requirements moved past the run's version (review 6fe2bf8 R4)", async () => {
+    mocks.goalDetail = goalFixture({ id: "goal-77", latest_run_id: "run-old", run_count: 2, checklist_version: 3 });
+    mocks.runDetails["run-old"] = runFixture({ id: "run-old", goal_id: "goal-77", goal_checklist_version: 2, model_status: "UNKNOWN", explanation: EXPLAINED });
+    renderAssistant("/assistant?run=run-old");
+    expect(await screen.findByRole("heading", { name: "时间用完了，还没找到可用的排法" })).toBeInTheDocument();
+    const raise = screen.getByRole("button", { name: "加大时间预算重跑" });
+    await waitFor(() => expect(raise).toBeDisabled());
+    expect(screen.getByText(/修订过（v2 → v3）/)).toBeInTheDocument();
+    expect(mocks.rerunMutate).not.toHaveBeenCalled();
+  });
+
+  it("still replays a run that was built on the task's current requirement version", async () => {
+    const user = userEvent.setup();
+    mocks.goalDetail = goalFixture({ id: "goal-77", latest_run_id: "run-new", run_count: 2, checklist_version: 3 });
+    mocks.runDetails["run-new"] = runFixture({ id: "run-new", goal_id: "goal-77", goal_checklist_version: 3, model_status: "UNKNOWN", explanation: EXPLAINED });
+    renderAssistant("/assistant?run=run-new");
+    const raise = await screen.findByRole("button", { name: "加大时间预算重跑" });
+    await waitFor(() => expect(raise).toBeEnabled());
+    await user.click(raise);
+    await waitFor(() => expect(mocks.rerunMutate).toHaveBeenCalledWith({ runId: "run-new", data: {} }));
+  });
+
   it("offers the raised-budget rerun for a run without a task too: the run record holds its own parameters", async () => {
     const user = userEvent.setup();
     mocks.runDetails["run-u"] = runFixture({ id: "run-u", model_status: "UNKNOWN", explanation: EXPLAINED });
