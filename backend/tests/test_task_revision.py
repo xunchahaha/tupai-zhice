@@ -38,7 +38,7 @@ from app.models import (
     TimeSlot,
     User,
 )
-from app.schemas import AssistantInterpretRequest
+from app.schemas import AssistantInterpretRequest, contradictory_targets
 from app.services.goal import plan_task_constraint_revision, run_admission
 from app.services.task_context import (
     authorization_clause,
@@ -339,6 +339,205 @@ def test_compile_hard_beats_soft_regardless_of_source_order() -> None:
         ],
     )
     assert [rule["hardness"] for rule in rules] == ["hard"]
+
+
+# ------------------------------------------------- 复审：同一批动作的结果与数组顺序无关
+
+
+def _outcome(revision: Any) -> dict[str, Any]:
+    """与顺序无关的结果指纹：最终软要求内容、清单硬要求内容、各类摘要（标签排序，新编号是随机的不比较）。"""
+    return {
+        "softs": sorted(
+            (item["subject_ids"][0], tuple(item["slot_business_ids"]))
+            for item in revision.soft_constraints
+        ),
+        "hards": sorted(
+            (item["params"]["subject_ids"][0], tuple(item["params"]["slot_business_ids"]))
+            for item in revision.checklist
+            if item["kind"] == "forbidden_slot_free"
+        ),
+        "summary": {
+            name: sorted(values) for name, values in (revision.summary() or {}).items()
+        },
+        "checklist_changed": revision.checklist_changed,
+        "basis_changed": revision.basis_changed,
+    }
+
+
+def _soft_slot_names(revision: Any) -> list[str]:
+    return sorted(item["slot_business_ids"][0] for item in revision.soft_constraints)
+
+
+def _all_orders_agree(
+    checklist: list[dict[str, Any]], softs: list[dict[str, Any]], actions: list[dict[str, Any]]
+) -> dict[str, Any]:
+    import itertools
+
+    before = [dict(item) for item in softs]
+    outcomes = []
+    for order in itertools.permutations(actions):
+        outcomes.append(_outcome(_plan(checklist, softs, *order)))
+        assert softs == before  # 规划不改调用方传入的旧版本
+    assert all(outcome == outcomes[0] for outcome in outcomes), outcomes
+    return outcomes[0]
+
+
+def _replace(key: str, slot: str, **extra: Any) -> dict[str, Any]:
+    hardness = extra.pop("hardness", "soft")
+    return _constraint(f"tc-{key}", "T01", [slot], hardness, op="replace", target_id=key, **extra)
+
+
+def test_a_chain_of_replacements_is_saved_the_same_in_every_order() -> None:
+    """复审：a→S2、b→S3、c→S4，每条的新内容正好是另一条旧内容——所有排列都只留 S2、S3、S4，
+    没有虚假的 unresolved。"""
+    softs = [_soft("a", "T01", ["S1"]), _soft("b", "T01", ["S2"]), _soft("c", "T01", ["S3"])]
+    outcome = _all_orders_agree(
+        [], softs, [_replace("a", "S2"), _replace("b", "S3"), _replace("c", "S4")]
+    )
+    assert outcome["softs"] == [("T01", ("S2",)), ("T01", ("S3",)), ("T01", ("S4",))]
+    assert "unresolved" not in outcome["summary"]
+
+
+def test_swapping_two_requirements_keeps_both_in_every_order() -> None:
+    softs = [_soft("a", "T01", ["S1"]), _soft("b", "T01", ["S2"])]
+    outcome = _all_orders_agree([], softs, [_replace("a", "S2"), _replace("b", "S1")])
+    assert outcome["softs"] == [("T01", ("S1",)), ("T01", ("S2",))]
+    assert "unresolved" not in outcome["summary"]
+
+
+def test_replacements_converging_on_one_content_merge_into_one_in_every_order() -> None:
+    """合并相同内容发生在全部修改做完之后：三条都改成 S4，最终只留一条，且不会连带删掉别的。"""
+    softs = [
+        _soft("a", "T01", ["S1"]),
+        _soft("b", "T01", ["S2"]),
+        _soft("c", "T01", ["S3"]),
+        _soft("d", "T01", ["S9"]),
+    ]
+    outcome = _all_orders_agree(
+        [], softs, [_replace("a", "S4"), _replace("b", "S4"), _replace("c", "S4")]
+    )
+    assert outcome["softs"] == [("T01", ("S4",)), ("T01", ("S9",))]
+
+
+def test_an_add_is_judged_against_the_state_after_the_replacements_in_every_order() -> None:
+    """a 现在是 S1；同一批里「a 改成 S2」和「另外也要 S1」：最终 S2 与 S1 都在——追加不能因为
+    排在替换前面、看到了 a 当时的内容，就被当成重复而丢掉。"""
+    softs = [_soft("a", "T01", ["S1"])]
+    outcome = _all_orders_agree(
+        [], softs, [_replace("a", "S2"), _constraint("tc-x", "T01", ["S1"], "soft")]
+    )
+    assert outcome["softs"] == [("T01", ("S1",)), ("T01", ("S2",))]
+
+
+def test_cancelling_and_adding_the_same_content_keeps_the_new_one_in_every_order() -> None:
+    softs = [_soft("a", "T01", ["S1"])]
+    cancel = {"id": "tc-c", "source_text": "取消 a", "op": "remove", "target_id": "a"}
+    outcome = _all_orders_agree(
+        [], softs, [cancel, _constraint("tc-x", "T01", ["S1"], "soft", text="重新加上")]
+    )
+    assert outcome["softs"] == [("T01", ("S1",))]
+    assert outcome["summary"]["removed_soft"] == ["取消 a"]
+    assert outcome["summary"]["added_soft"] == ["重新加上"]
+
+
+def test_a_hard_replacement_and_a_soft_replacement_mix_in_every_order() -> None:
+    """a 改成硬的 S2，b（原来就是 S2）改成 S3：b 已经不再是 S2，不该被「硬压软」顺手收紧掉。"""
+    softs = [_soft("a", "T01", ["S1"]), _soft("b", "T01", ["S2"])]
+    outcome = _all_orders_agree(
+        [], softs, [_replace("a", "S2", hardness="hard"), _replace("b", "S3")]
+    )
+    assert outcome["hards"] == [("T01", ("S2",))]
+    assert outcome["softs"] == [("T01", ("S3",))]
+    assert outcome["summary"]["tightened"] and "unresolved" not in outcome["summary"]
+
+
+def test_a_soft_request_colliding_with_a_hard_one_in_the_same_batch_yields_in_every_order() -> None:
+    softs = [_soft("a", "T01", ["S1"])]
+    outcome = _all_orders_agree(
+        [],
+        softs,
+        [_replace("a", "S2"), _constraint("tc-h", "T01", ["S2"], "hard", text="S2 绝对不行")],
+    )
+    assert outcome["hards"] == [("T01", ("S2",))]
+    assert outcome["softs"] == [("T01", ("S1",))]  # 替换目标的新内容已是硬要求：旧软项原样保留
+    assert outcome["summary"]["kept_hard"] and outcome["summary"]["added_hard"]
+
+
+def test_the_tightened_or_added_label_does_not_depend_on_which_hard_action_comes_first() -> None:
+    """独立审查 P3：a 现在是软的 S1；同一批里「新增硬的 S1」与「a 硬替换成 S1」——S1 原来就是软要求，
+    不论哪个动作排在前面都是「收紧」，摘要分类一致。"""
+    softs = [_soft("a", "T01", ["S1"])]
+    outcome = _all_orders_agree(
+        [],
+        softs,
+        [_replace("a", "S1", hardness="hard"), _constraint("tc-h", "T01", ["S1"], "hard")],
+    )
+    assert outcome["softs"] == [] and outcome["hards"] == [("T01", ("S1",))]
+    assert "added_hard" not in outcome["summary"] and outcome["summary"]["tightened"]
+
+
+def test_an_idempotent_add_refreshes_the_wording_of_the_entry_that_survives() -> None:
+    """独立审查 P3：a 被替换成 S2，同时追加同内容的 S2（旧数据里 b 已经是 S2）：原话刷到保留下来的
+    那条上，不因为旧数据里 b、a 谁在前就刷到随后被合并掉的 b 上。"""
+    saved: list[str] = []
+    for stored in (
+        [_soft("b", "T01", ["S2"], "x"), _soft("a", "T01", ["S1"])],
+        [_soft("a", "T01", ["S1"]), _soft("b", "T01", ["S2"], "x")],
+    ):
+        revision = _plan(
+            [],
+            stored,
+            _replace("a", "S2", text="A2"),
+            _constraint("tc-x", "T01", ["S2"], "soft", text="ADD"),
+        )
+        assert len(revision.soft_constraints) == 1
+        saved.append(revision.soft_constraints[0]["source_text"])
+    assert saved[0] == saved[1]
+
+
+def test_whitespace_around_a_target_id_is_not_part_of_the_identity() -> None:
+    """独立审查 P3：规划器按去掉空白的编号找目标，矛盾检测与动作身份也必须认同一个目标。"""
+    padded = api_module.AssistantTaskConstraint(op="remove", target_id="  a ")
+    assert padded.target_id == "a"
+    blank = api_module.AssistantTaskConstraint(op="replace", target_id="   ")
+    assert blank.target_id is None
+    replace_a = api_module.AssistantTaskConstraint(
+        **_constraint("tc-1", "T01", ["S3"], "soft", op="replace", target_id="a")
+    )
+    replace_padded = api_module.AssistantTaskConstraint(
+        **_constraint("tc-2", "T01", ["S4"], "soft", op="replace", target_id=" a")
+    )
+    assert contradictory_targets([replace_a, replace_padded]) == {"a"}
+
+
+def test_repeating_an_identical_replacement_is_applied_once_without_noise() -> None:
+    softs = [_soft("a", "T01", ["S1"]), _soft("b", "T01", ["S2"])]
+    revision = _plan([], softs, _replace("a", "S3"), _replace("a", "S3"))
+    assert _soft_slot_names(revision) == ["S2", "S3"]
+    assert revision.unresolved == [] and len(revision.replaced_soft) == 1
+
+
+def test_replacing_a_target_that_another_action_in_the_batch_already_took_is_unresolved() -> None:
+    """同一个旧项上身份不同的动作（解析侧与请求校验会拦下，直接调规划函数时也要确定）：取消优先，
+    替换如实记为 unresolved 并按追加处理，不碰别的要求。"""
+    softs = [_soft("a", "T01", ["S1"]), _soft("b", "T01", ["S2"])]
+    cancel = {"id": "tc-c", "source_text": "取消 a", "op": "remove", "target_id": "a"}
+    outcomes = {
+        json.dumps(_outcome(_plan([], softs, *order)), ensure_ascii=False, sort_keys=True)
+        for order in ([cancel, _replace("a", "S3")], [_replace("a", "S3"), cancel])
+    }
+    assert len(outcomes) == 1
+    revision = _plan([], softs, cancel, _replace("a", "S3"))
+    assert _soft_slot_names(revision) == ["S2", "S3"]
+    assert revision.unresolved == ["T01 soft S3"]
+
+
+def test_untouched_legacy_duplicates_are_left_alone_by_an_unrelated_replacement() -> None:
+    """旧数据里本来就有内容重复的两条：一条不相干的替换不该顺手去重它们。"""
+    softs = [_soft("a", "T01", ["S1"]), _soft("d1", "T02", ["S5"]), _soft("d2", "T02", ["S5"])]
+    revision = _plan([], softs, _replace("a", "S2"))
+    ids = [item["id"] for item in revision.soft_constraints]
+    assert len(ids) == 3 and "d1" in ids and "d2" in ids
 
 
 # ------------------------------------------------- R1 任务要求修订（端到端）

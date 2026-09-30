@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .timezone import as_shanghai
 
@@ -1526,6 +1526,12 @@ class AssistantTaskConstraint(BaseModel):
     # 里出现的稳定编号；指不到具体旧项时不自动删除任何东西（见 plan_task_constraint_revision）。
     op: Literal["add", "replace", "remove"] = "add"
     target_id: str | None = Field(default=None, max_length=80)
+
+    @field_validator("target_id")
+    @classmethod
+    def strip_target_id(cls, value: str | None) -> str | None:
+        """编号首尾的空白不是身份的一部分：规划、矛盾检测、动作身份必须认同一个目标。"""
+        return (value.strip() or None) if value is not None else None
 
     def operation_identity(self) -> tuple[Any, ...]:
         """一次修改动作的身份（不是约束内容）：完全相同才是重复动作。

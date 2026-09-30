@@ -2005,7 +2005,11 @@ def plan_task_constraint_revision(
     - 已经是硬要求的内容（或 replace/remove 指向硬要求清单项），请求里的「尽量」/修改/取消都
       不生效（kept_hard）——放宽、修改、删除硬要求是人在清单里的显式保存动作（§5.3），
       这里永不静默降级；
-    - 主体或时段为空的 add/replace 项不参与（与编译一致）。
+    - 主体或时段为空的 add/replace 项不参与（与编译一致）；
+    - **同一批动作的结果与数组顺序无关**：先把每个动作的 ``target_id`` 对照同一份旧快照解析成确定的
+      旧项，再依次做全部取消与替换（只动被指到的旧项、不做内容去重），然后才处理追加与硬要求（对照
+      改完之后的状态，软的动作撞上本批最终的硬要求一律让位），最后才合并相同内容。一边改、一边
+      合并会把后面动作还要改的旧项提前合并掉，同一批合法修改换个顺序就存成不同的要求。
     """
     new_checklist = [dict(item) for item in checklist]
     softs = [dict(item) for item in soft_constraints if isinstance(item, dict)]
@@ -2023,9 +2027,6 @@ def plan_task_constraint_revision(
                 highest = max(highest, int(match.group(1)))
         return highest + 1
 
-    def find_soft(target_id: str) -> dict[str, Any] | None:
-        return next((item for item in softs if str(item.get("id")) == target_id), None)
-
     def new_soft_id() -> str:
         # 持久软要求的编号由服务端生成、不复用：模型给的 tc-N 只是这一轮解析里的临时标签，
         # 每轮都从 tc-1 起。拿它当持久主键，删掉旧的 tc-1 后新的一条又叫 tc-1，任何还指着
@@ -2036,105 +2037,206 @@ def plan_task_constraint_revision(
             if candidate not in taken:
                 return candidate
 
+    # ---- 第 1 步：每个动作先对照**同一份旧快照**解析成确定的对象，之后任何一步都不再按 id 重查。
+    # 一边改、一边合并会把后面动作还要改的旧项提前合并掉（a→S2 时顺手把原来的 S2 项 b 并掉，
+    # 轮到 b→S3 就「找不到目标」），同一批动作换个顺序就存成不同的要求。
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in softs:
+        by_id.setdefault(str(item.get("id")), item)
+    ops: list[dict[str, Any]] = []
     for index, constraint in enumerate(constraints or [], start=1):
         subject_type = str(getattr(constraint, "subject_type", "teacher"))
         subject_ids = _clean_ids(getattr(constraint, "subject_ids", []))
         slots = _clean_ids(getattr(constraint, "slot_business_ids", []))
         constraint_id = str(getattr(constraint, "id", "") or "").strip() or str(index)
         text = str(getattr(constraint, "source_text", "") or "").strip()
-        label = text or constraint_id
-        op = str(getattr(constraint, "op", "add") or "add")
+        kind = str(getattr(constraint, "op", "add") or "add")
         target_id = str(getattr(constraint, "target_id", "") or "").strip()
-        target_soft = find_soft(target_id) if target_id else None
-        target_is_hard = bool(target_id) and target_id in hard_item_keys
+        hard = str(getattr(constraint, "hardness", "hard")) == "hard"
+        # 完全相同的动作才是重复（取消只由 op + target_id 决定）。
+        identity: tuple[Any, ...] = (
+            ("remove", target_id)
+            if kind == "remove"
+            else (
+                kind,
+                target_id,
+                hard,
+                subject_type,
+                tuple(sorted(subject_ids)),
+                tuple(sorted(slots)),
+            )
+        )
+        ops.append(
+            {
+                "kind": kind,
+                "hard": hard,
+                "id": constraint_id,
+                "label": text or constraint_id,
+                "text": text,
+                "subject_type": subject_type,
+                "subject_ids": subject_ids,
+                "slots": slots,
+                "key": task_constraint_key(subject_type, subject_ids, slots),
+                "valid": bool(subject_ids and slots),
+                "identity": identity,
+                "target": by_id.get(target_id) if target_id else None,
+                "target_is_hard": bool(target_id) and target_id in hard_item_keys,
+                "degraded": False,  # replace 指不到具体旧项：按追加处理
+                "superseding": False,  # 硬的 replace：旧软项让位，硬要求在第 3 步落地
+            }
+        )
 
-        if op == "remove":
-            if target_soft is not None:
-                softs.remove(target_soft)
-                result.removed_soft.append(label)
+    # 本批落地后的硬要求内容（清单里已有的 + 本批有效的硬要求）：软的动作撞上它一律让位，
+    # 与数组顺序无关。指向清单硬项的 replace 不生效，不算。
+    final_hard_keys = set(hard_keys)
+    for op in ops:
+        if (
+            op["hard"]
+            and op["kind"] != "remove"
+            and op["valid"]
+            and not (op["kind"] == "replace" and op["target_is_hard"])
+        ):
+            final_hard_keys.add(op["key"])
+
+    consumed: dict[int, tuple[Any, ...]] = {}  # 已被本批某个动作处理掉的旧项 → 那个动作的身份
+    replaced: set[int] = set()
+    superseded_keys: set[TaskConstraintKey] = set()  # 被硬 replace 让位的旧软项内容（仅用于分类）
+
+    def drop_soft(entry: dict[str, Any]) -> None:
+        softs[:] = [item for item in softs if item is not entry]
+
+    # ---- 第 2 步：定向修改（取消、替换）。只动被指到的旧项，不做任何内容去重。
+    for op in ops:
+        if op["kind"] != "remove":
+            continue
+        entry = op["target"]
+        if entry is not None:
+            taken = consumed.get(id(entry))
+            if taken is None:
+                drop_soft(entry)
+                consumed[id(entry)] = op["identity"]
+                result.removed_soft.append(op["label"])
                 content_changes += 1
-            elif target_is_hard:
-                result.kept_hard.append(label)
-            else:
-                result.unresolved.append(label)
+            elif taken != op["identity"]:
+                result.unresolved.append(op["label"])  # 本批另一个不同的动作已经处理了这一项
+        elif op["target_is_hard"]:
+            result.kept_hard.append(op["label"])
+        else:
+            result.unresolved.append(op["label"])
+    for op in ops:
+        if op["kind"] != "replace":
             continue
-        if op == "replace" and target_is_hard:
-            result.kept_hard.append(label)
+        if op["target_is_hard"]:
+            result.kept_hard.append(op["label"])
             continue
-        if not subject_ids or not slots:
+        if not op["valid"]:
             continue
-        key = task_constraint_key(subject_type, subject_ids, slots)
-        replacing = target_soft if op == "replace" else None
-        if op == "replace" and replacing is None:
+        entry = op["target"]
+        if entry is None:
             # 指不到具体旧项：保留原要求，把这条当追加，并如实告诉教务没能确定改的是哪一条。
-            result.unresolved.append(label)
-        same_key = [item for item in softs if _soft_key(item) == key and item is not replacing]
-
-        if str(getattr(constraint, "hardness", "hard")) == "hard":
-            if replacing is not None:
-                softs.remove(replacing)
-                content_changes += 1
-            if same_key:
-                softs[:] = [item for item in softs if _soft_key(item) != key]
-                content_changes += 1
-            if key in hard_keys:
-                continue
-            item = forbidden_slot_item(
-                f"forbidden_slot_free-{next_hard_index()}",
-                subject_type=subject_type,
-                subject_ids=subject_ids,
-                slot_business_ids=slots,
-                task_constraint_id=constraint_id,
-            )
-            new_checklist.append(item)
-            hard_keys[key] = item
-            hard_item_keys.add(str(item["key"]))
-            result.checklist_changed = True
-            (result.tightened if (same_key or replacing is not None) else result.added_hard).append(
-                label
-            )
+            op["degraded"] = True
+            result.unresolved.append(op["label"])
             continue
-
-        if key in hard_keys:
-            result.kept_hard.append(label)
-            if replacing is not None:
-                # 替换的目标软要求被同内容的硬要求覆盖：旧的软项本身仍按原样保留，不因此被删。
-                pass
-            continue
-        if replacing is not None:
-            # 换了内容就是另一条要求：旧编号作废、发新编号——还指着旧编号的确认卡（比如更早生成的
-            # 「取消周三那条」）再来时找不到目标，什么都不会动，而不是把替换后的新内容删掉。
-            replacing.update(
-                {
-                    "id": new_soft_id(),
-                    "subject_type": subject_type,
-                    "subject_ids": subject_ids,
-                    "slot_business_ids": slots,
-                    "source_text": text,
-                }
-            )
-            # 同内容的其他软项并入这一条，不留重复。
-            softs[:] = [item for item in softs if item is replacing or _soft_key(item) != key]
-            result.replaced_soft.append(label)
+        taken = consumed.get(id(entry))
+        if taken is not None:
+            if taken != op["identity"]:
+                op["degraded"] = True
+                result.unresolved.append(op["label"])
+            continue  # 与已处理的动作完全相同：重复，忽略
+        if op["hard"]:
+            superseded_keys.add(_soft_key(entry))
+            drop_soft(entry)
+            consumed[id(entry)] = op["identity"]
+            op["superseding"] = True
             content_changes += 1
             continue
+        if op["key"] in final_hard_keys:
+            # 替换后的内容已经是硬要求：旧的软项本身仍按原样保留，不因此被删。
+            result.kept_hard.append(op["label"])
+            continue
+        # 换了内容就是另一条要求：旧编号作废、发新编号——还指着旧编号的确认卡（比如更早生成的
+        # 「取消周三那条」）再来时找不到目标，什么都不会动，而不是把替换后的新内容删掉。
+        entry.update(
+            {
+                "id": new_soft_id(),
+                "subject_type": op["subject_type"],
+                "subject_ids": op["subject_ids"],
+                "slot_business_ids": op["slots"],
+                "source_text": op["text"],
+            }
+        )
+        consumed[id(entry)] = op["identity"]
+        replaced.add(id(entry))
+        result.replaced_soft.append(op["label"])
+        content_changes += 1
+
+    # ---- 第 3 步：新内容（追加、指不到旧项的替换、硬要求），对照第 2 步做完之后的最终状态。
+    for op in ops:
+        if not op["hard"] or op["kind"] == "remove" or not op["valid"]:
+            continue
+        if op["kind"] == "replace" and not (op["superseding"] or op["degraded"]):
+            continue  # 已在第 2 步处理（硬要求清单项不可改）或是被忽略的重复
+        key = op["key"]
+        same_key = [item for item in softs if _soft_key(item) == key]
         if same_key:
-            existing = same_key[0]
-            if text and text != str(existing.get("source_text") or ""):
-                existing["source_text"] = text
+            softs[:] = [item for item in softs if _soft_key(item) != key]
+            content_changes += 1
+        if key in hard_keys:
+            continue
+        item = forbidden_slot_item(
+            f"forbidden_slot_free-{next_hard_index()}",
+            subject_type=op["subject_type"],
+            subject_ids=op["subject_ids"],
+            slot_business_ids=op["slots"],
+            task_constraint_id=op["id"],
+        )
+        new_checklist.append(item)
+        hard_keys[key] = item
+        hard_item_keys.add(str(item["key"]))
+        result.checklist_changed = True
+        # 「由尽量收紧为硬」还是「新增硬要求」只看这个内容原来是不是软要求，与本批硬动作的先后无关。
+        was_soft = bool(same_key) or op["superseding"] or key in superseded_keys
+        (result.tightened if was_soft else result.added_hard).append(op["label"])
+    for op in ops:
+        if op["hard"] or op["kind"] == "remove" or not op["valid"]:
+            continue
+        if op["kind"] == "replace" and not op["degraded"]:
+            continue
+        key = op["key"]
+        if key in final_hard_keys:
+            result.kept_hard.append(op["label"])
+            continue
+        same_key = [item for item in softs if _soft_key(item) == key]
+        if same_key:
+            existing = next((item for item in same_key if id(item) in replaced), same_key[0])
+            if op["text"] and op["text"] != str(existing.get("source_text") or ""):
+                existing["source_text"] = op["text"]
                 text_only_updates += 1
             continue
         softs.append(
             {
                 "id": new_soft_id(),
-                "subject_type": subject_type,
-                "subject_ids": subject_ids,
-                "slot_business_ids": slots,
-                "source_text": text,
+                "subject_type": op["subject_type"],
+                "subject_ids": op["subject_ids"],
+                "slot_business_ids": op["slots"],
+                "source_text": op["text"],
             }
         )
-        result.added_soft.append(label)
+        result.added_soft.append(op["label"])
         content_changes += 1
+
+    # ---- 第 4 步：全部修改做完之后才合并相同内容——几条替换落到同一个新内容时只留一条
+    # （优先留被替换过的那条），没被本批动过的旧数据不碰。
+    groups: dict[TaskConstraintKey, list[dict[str, Any]]] = {}
+    for item in softs:
+        groups.setdefault(_soft_key(item), []).append(item)
+    duplicates: set[int] = set()
+    for members in groups.values():
+        if len(members) > 1 and any(id(member) in replaced for member in members):
+            keeper = next(member for member in members if id(member) in replaced)
+            duplicates.update(id(member) for member in members if member is not keeper)
+    if duplicates:
+        softs[:] = [item for item in softs if id(item) not in duplicates]
 
     result.soft_changed = bool(content_changes or text_only_updates)
     result.soft_text_only = bool(text_only_updates) and not content_changes
