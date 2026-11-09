@@ -6,7 +6,19 @@ import { GoalSupplementPanel } from "@/components/goal/goal-supplement-panel";
 import { type AssistantTask } from "@/components/assistant/use-assistant-task";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { goalChecklistVersion, goalNeedsParams, historicalReportNote, parseGoalReport, reportChecklistVersion, reportStanding } from "@/lib/goal";
+import { type GoalGap, goalChecklistVersion, goalNeedsParams, historicalReportNote, parseGoalReport, plainGapStep, reportChecklistVersion, reportStanding } from "@/lib/goal";
+
+/** 同一句建议 + 同一个补救动作只列一次，合并的那条注明涉及几项要求。 */
+function mergeGaps(gaps: GoalGap[]): Array<{ gap: GoalGap; count: number }> {
+  const merged = new Map<string, { gap: GoalGap; count: number }>();
+  for (const gap of gaps) {
+    const key = `${gap.next_step}|${gap.remedy ?? ""}`;
+    const entry = merged.get(key);
+    if (entry) entry.count += 1;
+    else merged.set(key, { gap, count: 1 });
+  }
+  return [...merged.values()];
+}
 
 /**
  * 要求落实情况的一句话摘要 + 缺口与建议下一步（直接展示，不折叠）。
@@ -16,9 +28,19 @@ import { goalChecklistVersion, goalNeedsParams, historicalReportNote, parseGoalR
  * 无法验证（unverifiable）不算通过，缺口里单独点出。逐项报告全文在「查看详情」里。
  *
  * 缺口的补救动作直接办：加大时间预算重跑（一次性）、补充条件（行内补齐条件）、修正范围（展开手动排课并定位范围区）；
- * await_admin 是人的裁决，保持文本、无按钮。
+ * await_admin 是人的裁决，保持文本、无按钮。hostRemedies：宿主卡底部**确实渲染了**的「加预算重跑 / 修正范围」，
+ * 列在这里的按钮不再在缺口里重复；没列的照常行内给（「补充条件」宿主没有，始终行内给）。
+ * 全部落实且没有缺口、没有无法验证项时降成无边框的一行；其余状态的样式不变。
  */
-export function AcceptanceSummary({ run, task }: { run: SolverRunResponse; task: AssistantTask }) {
+export function AcceptanceSummary({
+  run,
+  task,
+  hostRemedies = [],
+}: {
+  run: SolverRunResponse;
+  task: AssistantTask;
+  hostRemedies?: readonly ("raise_budget" | "resolve_scope")[];
+}) {
   const [fixing, setFixing] = useState(false);
   const report = parseGoalReport(run.goal_report);
   const standing = report ? reportStanding(report, task.goal) : null;
@@ -82,6 +104,15 @@ export function AcceptanceSummary({ run, task }: { run: SolverRunResponse; task:
   const openCount = report.failed_count;
   const unverifiable = report.unverifiable_count ?? 0;
   const hasPlaceholder = goalNeedsParams(task.goal);
+  if (report.all_passed && !report.gaps.length && !unverifiable) {
+    return (
+      <section aria-label="要求核对" className="mt-3 flex flex-wrap items-center gap-2 text-sm">
+        <Target className="size-4 text-blue-600" />
+        <span className="text-xs font-medium text-zinc-600">要求核对</span>
+        <Badge tone="green">{`全部 ${report.passed_count} 项要求已落实`}</Badge>
+      </section>
+    );
+  }
   return (
     <section aria-label="要求核对" className="mt-4 rounded-md border border-zinc-200 bg-white/70 px-4 py-3 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -96,13 +127,13 @@ export function AcceptanceSummary({ run, task }: { run: SolverRunResponse; task:
         <div role="status" className="mt-2 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-amber-900">
           <div className="text-xs font-medium">建议的下一步</div>
           <ul className="mt-1 list-disc space-y-1 pl-4 text-xs">
-            {report.gaps.map((gap) => (
+            {mergeGaps(report.gaps).map(({ gap, count }) => (
               <li key={gap.key} className="flex flex-wrap items-center gap-2">
-                <span>{gap.next_step}</span>
-                {gap.remedy === "raise_budget" ? (
+                <span>{plainGapStep(gap.next_step)}{count > 1 ? `（涉及 ${count} 项要求）` : ""}</span>
+                {gap.remedy === "raise_budget" && !hostRemedies.includes("raise_budget") ? (
                   <Button size="sm" variant="outline" disabled={task.pending || Boolean(task.raiseBudgetBlockedReason)} title={task.raiseBudgetBlockedReason ?? undefined} onClick={task.raiseBudget}>加大时间预算重跑</Button>
                 ) : null}
-                {gap.remedy === "resolve_scope" ? (
+                {gap.remedy === "resolve_scope" && !hostRemedies.includes("resolve_scope") ? (
                   <Button size="sm" variant="outline" onClick={() => task.openManual({ focusScope: true })}>修正范围</Button>
                 ) : null}
                 {gap.remedy === "fix_checklist" && hasPlaceholder ? (

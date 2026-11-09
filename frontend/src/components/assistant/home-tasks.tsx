@@ -37,6 +37,14 @@ export function HomeTasks({ runs }: { runs: SolverRunResponse[] }) {
   const latestRun = (goal: GoalResponse) => (goal.latest_run_id ? runs.find((run) => run.id === goal.latest_run_id) : undefined);
   const progressOf = (goal: GoalResponse) => goalProgress(goal, latestRun(goal));
   const shown = showAll ? [...rows].sort(byUpdated) : active.slice(0, ACTIVE_LIMIT);
+  // 一个任务都没有：空态不占卡，只留一行灰字。
+  if (!goals.isPending && !goals.isError && rows.length === 0) {
+    return (
+      <section aria-label="正在处理的任务">
+        <p className="text-sm text-zinc-500">还没有任务</p>
+      </section>
+    );
+  }
   return (
     <section aria-label="正在处理的任务" className="rounded-lg border border-zinc-200 bg-white shadow-2xs">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-4 py-3">
@@ -60,11 +68,7 @@ export function HomeTasks({ runs }: { runs: SolverRunResponse[] }) {
           <Button size="sm" variant="outline" onClick={() => void goals.refetch()}>重试</Button>
         </div>
       ) : shown.length === 0 ? (
-        <p className="px-4 py-6 text-sm text-zinc-500">
-          {rows.length === 0
-            ? "还没有任务。在上面说一句需求，或点「手动排课」，助手会帮你排出草稿。"
-            : "没有进行中的任务了；点「查看全部任务」可以回看已完成或已放弃的。"}
-        </p>
+        <p className="px-4 py-6 text-sm text-zinc-500">没有进行中的任务了；点「查看全部任务」可以回看已完成或已放弃的。</p>
       ) : (
         <ul className="divide-y divide-zinc-100">
           {shown.map((goal) => {

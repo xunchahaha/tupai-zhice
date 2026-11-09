@@ -2,11 +2,10 @@ import { Link } from "react-router-dom";
 
 import { useGetSolverRunApiV1SolverRunsRunIdGet, useListRulesApiV1RulesGet } from "@/api/generated/client";
 import { type RuleResponse, type SolverRunResponse } from "@/api/generated/models";
-import { RunDiagnosis } from "@/components/diagnosis/run-diagnosis";
+import { ReasonSources, RunDiagnosis } from "@/components/diagnosis/run-diagnosis";
 import { ErrorState, LoadingState } from "@/components/page";
-import { stuckHeadline } from "@/lib/assistant-task";
+import { plainReasons, stuckHeadline } from "@/lib/assistant-task";
 import { asArray } from "@/lib/format";
-import { translateSystemConstraints } from "@/lib/labels";
 import { schedulePath } from "@/lib/routes";
 import { classifyRun } from "@/lib/run-kind";
 
@@ -34,6 +33,7 @@ export function RestrictedRunView({ runId }: { runId: string }) {
   const data = run.data;
   const kind = classifyRun(data);
   const priorities = Array.isArray(data.priority_explanations) ? data.priority_explanations : [];
+  const reasons = plainReasons(priorities);
   const nextActions = Array.isArray(data.explanation?.next_actions) ? (data.explanation.next_actions as string[]) : [];
   const provenInfeasible = data.model_status === "INFEASIBLE" && !data.presolve_infeasible && data.status === "completed";
   return (
@@ -62,10 +62,13 @@ export function RestrictedRunView({ runId }: { runId: string }) {
       ) : null}
       {data.error_message ? <p className="mt-3 text-sm text-red-700">{data.error_message}</p> : null}
       {priorities.length && !provenInfeasible ? (
-        <div className="mt-3 space-y-2 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          <div className="font-medium">可能的原因</div>
-          {priorities.map((item, index) => <div key={`${index}-${item}`}>{translateSystemConstraints(item)}</div>)}
-        </div>
+        reasons.length ? (
+          <div className="mt-3 space-y-2 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <div className="font-medium">可能的原因</div>
+            {reasons.map((item) => <div key={item}>{item}</div>)}
+            <ReasonSources items={priorities} />
+          </div>
+        ) : <ReasonSources items={priorities} className="mt-3" />
       ) : null}
       {nextActions.length ? (
         <div className="mt-3 border-l-2 border-blue-400 bg-blue-50/60 px-4 py-3 text-sm text-zinc-800">

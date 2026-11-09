@@ -10,9 +10,9 @@ export interface SetupChecklistState {
 }
 
 /**
- * 还有没做完的准备项吗（助手首页据此决定要不要露出紧凑清单）。
- * AI 还在探测（null）不算未完成，避免清单在探测结果回来前闪一下。
+ * 还有没做完的必需准备项吗（助手首页据此决定要不要露出紧凑清单）。
+ * AI 是可选项，不算未完成：没配置时由需求卡自己提示，清单不重复。
  */
 export function hasPendingSetup(state: SetupChecklistState): boolean {
-  return !state.masterDataImported || state.activeRuleCount === 0 || state.aiConfigured === false || state.publishedScheduleCount === 0;
+  return !state.masterDataImported || state.activeRuleCount === 0 || state.publishedScheduleCount === 0;
 }

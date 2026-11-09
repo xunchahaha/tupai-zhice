@@ -75,7 +75,9 @@ test("核心示例句：教师本次禁排结构化后可直接求解，禁排�
   // 也不得把已结构化的要求判成「尚未进入求解」。
   const taskPanel = page.getByLabel("本次任务要求");
   await expect(taskPanel).toBeVisible();
-  await expect(taskPanel).toContainText("教师甲周三晚上不能上");
+  // 原话只在「本次要求」一句里说一次；下方面板列必须/尽量和主体×时段，不再复述原话。
+  await expect(page.getByLabel("我理解的本次要求")).toContainText("教师甲周三晚上不能上");
+  await expect(taskPanel).not.toContainText("教师甲周三晚上不能上");
   await expect(taskPanel).toContainText("T01");
   await expect(taskPanel).toContainText("S05");
   await expect(page.getByText("以下要求尚未进入求解")).toHaveCount(0);
@@ -125,7 +127,7 @@ test("核心示例句：教师本次禁排结构化后可直接求解，禁排�
   await expect(report).toBeVisible({ timeout: 30_000 });
   await expect(report).toContainText("要求已落实");
 
-  // 续办：goal_id 已写入 URL；刷新后你交代的需求与任务上下文恢复，不是一个空白页面。
+  // 续办：goal_id 已写入 URL；刷新后任务条里的需求原话与任务上下文恢复，不是一个空白页面。
   await expect(page).toHaveURL(new RegExp(`[?&]goal=${run.goal_id}`));
   await page.reload();
   await expect(page.getByLabel("任务进展")).toContainText(FLAGSHIP_INSTRUCTION, { timeout: 20_000 });

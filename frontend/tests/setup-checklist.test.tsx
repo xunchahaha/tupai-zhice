@@ -31,30 +31,34 @@ const emptyState = {
 
 describe("SetupChecklist", () => {
   afterEach(cleanup);
-  it("完整版全部就绪时展示 4/4，不再出现去完成链接", () => {
+  it("全部就绪时不渲染", () => {
     renderUi(<SetupChecklist {...readyState} />);
-    expect(screen.getByText("4/4 已就绪")).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "去配规则" })).not.toBeInTheDocument();
-    expect(screen.queryByText("可选")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("排课准备清单")).not.toBeInTheDocument();
   });
 
-  it("完整版按数据驱动四项，未完成项带直达链接，AI 未配置只是可选项", () => {
+  it("只列未完成的必需项，用动作措辞直达；AI 是可选项，不算「还差」", () => {
     renderUi(<SetupChecklist {...emptyState} />);
-    expect(screen.getByText("0/4 已就绪")).toBeInTheDocument();
-
+    const row = screen.getByLabelText("排课准备清单");
+    expect(row).toHaveTextContent("排课准备还差 3 项：");
+    const links = within(row).getAllByRole("link");
+    expect(links.map((link) => link.textContent)).toEqual(["先导入课程资料", "去配规则", "去发布"]);
     // 首次使用：资料没导入时明确提示先导入课程资料；发布去课表的历史版本。
-    expect(screen.getByRole("link", { name: "先导入课程资料" })).toHaveAttribute("href", "/master-data");
-    expect(screen.getByRole("link", { name: "去配规则" })).toHaveAttribute("href", "/rules");
-    expect(screen.getByRole("link", { name: "去发布" })).toHaveAttribute("href", "/schedule?view=history");
-    // AI 未配置不是错误态：标「可选」，链接去 AI 配置区。
-    expect(screen.getByText("可选")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "去配置" })).toHaveAttribute("href", "/settings?section=ai");
+    expect(within(row).getByRole("link", { name: "先导入课程资料" })).toHaveAttribute("href", "/master-data");
+    expect(within(row).getByRole("link", { name: "先导入课程资料" })).toHaveClass("text-amber-700");
+    expect(within(row).getByRole("link", { name: "去配规则" })).toHaveAttribute("href", "/rules");
+    expect(within(row).getByRole("link", { name: "去发布" })).toHaveAttribute("href", "/schedule?view=history");
+    // AI 未配置由同屏需求卡提示（含「去配置」），清单不说第二遍。
+    expect(within(row).queryByText(/AI/)).not.toBeInTheDocument();
   });
 
-  it("紧凑版单行呈现四项，完成项与可选项状态可区分", () => {
+  it("其它都就绪、只是没配 AI 时不渲染（不出现「还差 1 项：去配置 AI（可选）」）", () => {
+    renderUi(<SetupChecklist {...readyState} aiConfigured={false} />);
+    expect(screen.queryByLabelText("排课准备清单")).not.toBeInTheDocument();
+  });
+
+  it("已完成的项不再出现；AI 探测中（null）不列", () => {
     renderUi(
       <SetupChecklist
-        variant="compact"
         masterDataImported={true}
         activeRuleCount={0}
         aiConfigured={null}
@@ -62,21 +66,21 @@ describe("SetupChecklist", () => {
       />,
     );
     const row = screen.getByLabelText("排课准备清单");
+    expect(row).toHaveTextContent("排课准备还差 2 项：");
     const links = within(row).getAllByRole("link");
-    expect(links).toHaveLength(4);
-    expect(links[0]).toHaveAttribute("href", "/master-data");
-    expect(links[3]).toHaveAttribute("href", "/schedule?view=history");
-    // AI 探测中（null）也按可选项呈现，不算错误。
-    expect(within(row).getByText("可选")).toBeInTheDocument();
+    expect(links).toHaveLength(2);
+    expect(links[0]).toHaveAttribute("href", "/rules");
+    expect(links[1]).toHaveAttribute("href", "/schedule?view=history");
+    expect(within(row).queryByText(/AI/)).not.toBeInTheDocument();
     // 资料已导入，不再出现「先导入课程资料」的首次使用提示。
     expect(within(row).queryByText("先导入课程资料")).not.toBeInTheDocument();
   });
 
-  it("紧凑版在资料未导入时高亮首次使用提示，文案是「基础资料已导入」", () => {
-    renderUi(<SetupChecklist variant="compact" {...emptyState} aiConfigured={null} />);
+  it("只差规则时只剩一项「去配规则」", () => {
+    renderUi(<SetupChecklist {...readyState} activeRuleCount={0} />);
     const row = screen.getByLabelText("排课准备清单");
-    expect(within(row).getByText("基础资料已导入")).toBeInTheDocument();
-    expect(within(row).getByText("先导入课程资料")).toBeInTheDocument();
+    expect(row).toHaveTextContent("排课准备还差 1 项：去配规则");
+    expect(within(row).getAllByRole("link")).toHaveLength(1);
   });
 
   it("hasPendingSetup 只在有未完成项时为真，AI 探测中不算未完成", () => {
@@ -84,8 +88,8 @@ describe("SetupChecklist", () => {
     expect(hasPendingSetup({ ...readyState, masterDataImported: false })).toBe(true);
     expect(hasPendingSetup({ ...readyState, activeRuleCount: 0 })).toBe(true);
     expect(hasPendingSetup({ ...readyState, publishedScheduleCount: 0 })).toBe(true);
-    // AI 明确未配置才算未完成；探测中（null）不让清单在结果回来前闪一下。
-    expect(hasPendingSetup({ ...readyState, aiConfigured: false })).toBe(true);
+    // AI 是可选项：未配置或探测中都不算未完成。
+    expect(hasPendingSetup({ ...readyState, aiConfigured: false })).toBe(false);
     expect(hasPendingSetup({ ...readyState, aiConfigured: null })).toBe(false);
   });
 });

@@ -460,3 +460,71 @@ describe("supplementing a condition turns tracking back on (parity.F8)", () => {
     expect(await screen.findByLabelText("禁排主体类型")).toBeInTheDocument();
   });
 });
+
+describe("one receipt toast per action (review P2)", () => {
+  function seedCreatedGoal(checklist: unknown[] = []) {
+    mockAiConfigured();
+    mocks.stream.mockResolvedValue(interpretationFixture());
+    mocks.schedules = [scheduleFixture({ id: "draft-1", solver_run_id: "run-1" })];
+    mocks.runDetails["run-1"] = runFixture({ id: "run-1", goal_id: "goal-1", explanation: EXPLAINED });
+    mocks.goalDetails = { "goal-1": goalFixture({ id: "goal-1", instruction: "请在三天内重排考研课程", checklist }) };
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      if (String(args[0]) === "/api/v1/goals") return { data: { id: "goal-1", status: "open", checklist: [] } };
+      return { data: { id: "run-1", status: "queued", model_status: null, goal_id: "goal-1" } };
+    });
+  }
+
+  it("says 已登记为任务 and 已开始排课 in one toast when confirming creates the task", async () => {
+    seedCreatedGoal();
+    const user = userEvent.setup();
+    renderAssistant();
+    await parse(user);
+    await user.click(await screen.findByRole("button", { name: CONFIRM }));
+    await screen.findByRole("heading", { name: /已生成草稿/ });
+    expect(toasts.success.mock.calls.map(([text]) => text)).toEqual([
+      "AI 模型已完成解析",
+      "已登记为任务并开始排课，完成后会自动核对要求",
+    ]);
+  });
+
+  it("folds the 沿用这个任务 receipt into the 已完成解析 toast on a follow-up parse", async () => {
+    seedCreatedGoal([{
+      key: "coverage",
+      kind: "coverage",
+      requirement: "覆盖全部目标课次",
+      params: { business_lines: ["考研"], product_types: [], class_business_ids: [], date_from: "2026-08-17", date_to: "2026-08-19" },
+    }]);
+    const user = userEvent.setup();
+    renderAssistant();
+    await parse(user);
+    await user.click(await screen.findByRole("button", { name: CONFIRM }));
+    await screen.findByRole("heading", { name: /已生成草稿/ });
+    toasts.success.mockReset();
+    await user.click(screen.getByRole("button", { name: "继续调整" }));
+    await user.type(screen.getByLabelText("还要改什么？"), "张老师周三晚上也不能上");
+    await user.click(screen.getByRole("button", { name: "重新解析" }));
+    expect(await screen.findByRole("heading", { name: "我理解的是……" })).toBeInTheDocument();
+    expect(toasts.success.mock.calls.map(([text]) => text)).toEqual(["AI 模型已完成解析，范围与原任务一致，重跑沿用同一个任务"]);
+  });
+
+  it("keeps only its own receipt when 补充条件 registers the task", async () => {
+    mockAiConfigured();
+    mocks.stream.mockResolvedValue(interpretationFixture({
+      unsupported_requirements: ["具体教师的禁排或请假要求"],
+      goal_checklist_draft: [{ key: "coverage", kind: "coverage", requirement: "覆盖全部目标课次", params: {} }, PLACEHOLDER_ITEM],
+    }));
+    mocks.post.mockImplementation(async (...args: unknown[]) => {
+      if (String(args[0]) === "/api/v1/goals") return { data: { id: "goal-later", status: "open", checklist: [PLACEHOLDER_ITEM] } };
+      return { data: {} };
+    });
+    mocks.goalDetails = { "goal-later": goalFixture({ id: "goal-later", checklist: [PLACEHOLDER_ITEM] }) };
+    const user = userEvent.setup();
+    renderAssistant();
+    await parse(user);
+    await screen.findByRole("heading", { name: "我理解的是……" });
+    toasts.success.mockReset();
+    await user.click(screen.getByRole("button", { name: "补充条件" }));
+    expect(await screen.findByLabelText("禁排主体类型")).toBeInTheDocument();
+    expect(toasts.success.mock.calls.map(([text]) => text)).toEqual(["已登记任务，请补齐缺少的条件"]);
+  });
+});

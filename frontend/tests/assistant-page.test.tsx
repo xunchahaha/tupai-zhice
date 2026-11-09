@@ -64,10 +64,17 @@ describe("AssistantPage home", () => {
   it("shows the compact setup checklist only while something is unfinished, with the first-use hint", async () => {
     renderAssistant();
     const row = await screen.findByLabelText("排课准备清单");
-    expect(within(row).getByText("先导入课程资料")).toBeInTheDocument();
-    expect(within(row).getByRole("link", { name: /基础资料已导入/ })).toHaveAttribute("href", "/master-data");
-    expect(within(row).getByRole("link", { name: /已确认排课规则/ })).toHaveAttribute("href", "/rules");
-    expect(within(row).getByRole("link", { name: /已发布课表版本/ })).toHaveAttribute("href", "/schedule?view=history");
+    // 只列没做完的项，用动作措辞；资料未导入时「先导入课程资料」打头。
+    expect(within(row).getByRole("link", { name: "先导入课程资料" })).toHaveAttribute("href", "/master-data");
+    expect(within(row).getByRole("link", { name: "去配规则" })).toHaveAttribute("href", "/rules");
+    expect(within(row).getByRole("link", { name: "去发布" })).toHaveAttribute("href", "/schedule?view=history");
+    cleanup();
+    // 资料导入后，这一项不再出现。
+    mocks.courses = [{ id: "c1", class_business_id: "A班" }];
+    renderAssistant();
+    const rest = await screen.findByLabelText("排课准备清单");
+    expect(within(rest).queryByRole("link", { name: "先导入课程资料" })).not.toBeInTheDocument();
+    expect(within(rest).getByRole("link", { name: "去配规则" })).toHaveAttribute("href", "/rules");
     cleanup();
     // 全部就绪（含 AI 已配置）后清单不再出现。
     mockAiConfigured();
@@ -76,7 +83,10 @@ describe("AssistantPage home", () => {
     mocks.schedules = [{ id: "pub", status: "published", version_no: 1, name: "已发布", solver_run_id: "r0" }];
     renderAssistant();
     await screen.findByLabelText("排课需求");
-    await waitFor(() => expect(screen.getByText("text-model 已接入")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("AI 已接入")).toBeInTheDocument());
+    // 模型原始名称不进正文，悬停可见。
+    expect(screen.getByText("AI 已接入")).toHaveAttribute("title", expect.stringContaining("text-model"));
+    expect(screen.queryByText(/text-model/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("排课准备清单")).not.toBeInTheDocument();
   });
 
@@ -136,7 +146,7 @@ describe("AssistantPage interpret phases", () => {
     expect(mocks.post).not.toHaveBeenCalled();
     // 需求输入卡让位给任务视图；范围回填已经显示在确认卡上。
     expect(screen.queryByLabelText("排课需求")).not.toBeInTheDocument();
-    expect(screen.getByText("2026-08-17")).toBeInTheDocument();
+    expect(screen.getByLabelText("我理解的本次要求")).toHaveTextContent("2026-08-17");
     expect(screen.getByText("3 天")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /展开回看思考过程/ }));
     expect(screen.getAllByText("用户要求 3 天窗口，先核对候选业务线。").length).toBeGreaterThan(0);
@@ -145,7 +155,7 @@ describe("AssistantPage interpret phases", () => {
     expect(screen.getByRole("heading", { name: "手动排课参数" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("3")).toBeInTheDocument();
     expect(screen.getByDisplayValue("2026-08-17")).toBeInTheDocument();
-    expect(screen.getByText("来自 AI 解析")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("手动排课参数")).getByText("来自 AI 解析")).toBeInTheDocument();
   });
 
   it("appends streaming thinking deltas live and keeps the stage list as fallback", async () => {
@@ -226,7 +236,7 @@ describe("AssistantPage interpret phases", () => {
       return { data: { configured: true, model: null, app_configuration: { aily_configured: false } } };
     });
     renderAssistant();
-    expect(await screen.findByText("通用 AI 模型 已接入")).toBeInTheDocument();
+    expect(await screen.findByText("AI 已接入")).toHaveAttribute("title", "通用 AI 模型");
     expect(screen.queryByText("AI 配置读取失败")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
     await userEvent.setup().type(screen.getByLabelText("排课需求"), "重排考研课程");
@@ -239,8 +249,8 @@ describe("AssistantPage interpret phases", () => {
     expect(await screen.findByText("AI 配置读取失败")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: PARSE })).toBeDisabled();
-    // 探测失败时手动路径是唯一入口，直接展示。
-    expect(screen.getByRole("heading", { name: "手动排课参数" })).toBeInTheDocument();
+    // 探测失败时手动路径是唯一入口，直接展示（展开发生在探测结果渲染之后的副作用里）。
+    expect(await screen.findByRole("heading", { name: "手动排课参数" })).toBeInTheDocument();
   });
 });
 
@@ -282,6 +292,8 @@ describe("AssistantPage goal acceptance loop (MEM-C3)", () => {
     expect(screen.queryByRole("button", { name: CONFIRM })).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByTestId("location-probe")).toHaveTextContent(/^\/assistant\?goal=goal-1$/));
     expect(mocks.publishMutate).not.toHaveBeenCalled();
+    // 「已登记为任务」是纯回执：不再常驻成整行横幅。
+    expect(screen.queryByText(/已登记为任务/)).not.toBeInTheDocument();
   });
 
   it("skips goal creation when tracking is switched off under 更多选项 and sends goal_id null", async () => {
@@ -326,6 +338,9 @@ describe("AssistantPage goal acceptance loop (MEM-C3)", () => {
     expect((goalBody.checklist as Array<{ kind: string }>).some((item) => item.kind === "max_changes")).toBe(false);
     // 基准本身仍被记录（用于变更明细/数量对比与优化配置）。
     expect(goalBody.baseline_schedule_version_id).toBe("v1");
+    // 基准口径影响验收依据：缩成一行常驻，纯回执部分不常驻。
+    expect(await screen.findByText("本任务已记录基准版本，仅用于变更对比（未设变更上限）。")).toBeInTheDocument();
+    expect(screen.queryByText(/已登记为任务/)).not.toBeInTheDocument();
   });
 
   it("attaches the max_changes checklist item only after 设置变更上限 is enabled (问题4)", async () => {

@@ -24,7 +24,6 @@ import { TaskBar } from "@/components/assistant/task-bar";
 import { useAssistantTask } from "@/components/assistant/use-assistant-task";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { SetupChecklist } from "@/components/setup-checklist";
-import { SopSteps } from "@/components/sop-steps";
 import { buildTaskSteps } from "@/lib/assistant-task";
 import { asArray } from "@/lib/format";
 import { ROUTES } from "@/lib/routes";
@@ -58,7 +57,7 @@ function RestrictedAssistant({ readOnly, canPublish, canOpenSettings }: { readOn
   const runParam = useSearchParams()[0].get("run") ?? "";
   return (
     <div className="space-y-5 animate-fade-in">
-      <PageHeader title="排课助手"><SopSteps /></PageHeader>
+      <PageHeader title="排课助手" />
       <section className="rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-700">
         {readOnly
           ? "当前账号为只读，可在「课表」查看课表与版本。"
@@ -134,8 +133,8 @@ function SchedulerAssistant({ canPublish, canOpenSettings }: { canPublish: boole
     };
     return (
       <div className="space-y-5 animate-fade-in">
-        <PageHeader title="排课助手"><SopSteps /></PageHeader>
-        {hasPendingSetup(setup) ? <SetupChecklist variant="compact" {...setup} /> : null}
+        <PageHeader title="排课助手" />
+        {hasPendingSetup(setup) ? <SetupChecklist {...setup} /> : null}
         <RequestCard task={task} />
         {task.manualOpen ? <div className="animate-fade-in">{manualPanel}</div> : null}
         {canPublish ? <PendingDrafts /> : null}
@@ -158,7 +157,7 @@ function SchedulerAssistant({ canPublish, canOpenSettings }: { canPublish: boole
   });
   return (
     <div className="space-y-5 animate-fade-in">
-      <PageHeader title="排课助手"><SopSteps /></PageHeader>
+      <PageHeader title="排课助手" />
       <TaskBar task={task} steps={steps} />
       {task.goalId && task.goalNotice ? (
         <p role="status" className="border-l-2 border-blue-400 bg-blue-50/60 px-3 py-2 text-xs text-zinc-700">{task.goalNotice}</p>
@@ -169,14 +168,15 @@ function SchedulerAssistant({ canPublish, canOpenSettings }: { canPublish: boole
       <div>
         <button
           type="button"
-          aria-expanded={task.manualOpen && task.detailsOpen}
+          aria-expanded={task.manualOpen}
           className="text-sm text-zinc-500 underline-offset-2 transition-colors hover:text-zinc-900 hover:underline"
           onClick={task.toggleManual}
         >
           手动排课（自己设置参数）
         </button>
       </div>
-      <DetailsSection task={task} manualPanel={manualPanel} />
+      {task.manualOpen ? <div className="animate-fade-in">{manualPanel}</div> : null}
+      <DetailsSection task={task} />
     </div>
   );
 }

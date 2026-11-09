@@ -36,17 +36,24 @@ export function InterpretProgress({ stageIndex, elapsedSeconds, liveText }: { st
   );
 }
 
-/** 思考过程回看：完成后默认折叠为「已解析完成（用时 N 秒）」，正文限高防长思考撑爆页面。 */
-export function InterpretThought({ thinking, seconds }: { thinking: string; seconds: number }) {
+/**
+ * 思考过程回看：完成后默认折叠为「已解析完成（用时 N 秒 · 引擎）」，正文限高防长思考撑爆页面。
+ * 解析来源（引擎名）只在这一行出现一次。
+ */
+export function InterpretThought({ thinking, seconds, engine }: { thinking: string; seconds: number; engine?: string }) {
   const [expanded, setExpanded] = useState(false);
   if (!thinking) {
     // Aily 或无思考模型：只给阶段完成与用时，不放空折叠块。
-    return <p className="mt-3 border-l-2 border-zinc-200 pl-3 text-xs text-zinc-500">已解析完成 · 用时 {seconds.toFixed(1)} 秒 · 本次模型未输出思考过程</p>;
+    return (
+      <p className="mt-3 border-l-2 border-zinc-200 pl-3 text-xs text-zinc-500">
+        已解析完成 · 用时 {seconds.toFixed(1)} 秒{engine ? ` · ${engine}` : ""} · 本次模型未输出思考过程
+      </p>
+    );
   }
   return (
     <div className="mt-3">
       <button type="button" className="text-xs text-zinc-500 transition-colors hover:text-zinc-700" onClick={() => setExpanded((value) => !value)}>
-        {expanded ? "收起思考过程" : `已解析完成（用时 ${seconds.toFixed(1)} 秒）· 展开回看思考过程`}
+        {expanded ? "收起思考过程" : `已解析完成（用时 ${seconds.toFixed(1)} 秒${engine ? ` · ${engine}` : ""}）· 展开回看思考过程`}
       </button>
       {expanded ? (
         <div className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap border-l-2 border-zinc-200 pl-3 text-xs italic leading-5 text-zinc-500">

@@ -36,7 +36,8 @@ export function useInterpretSession({
   gated: ReturnType<typeof useSubmitGate>["gated"];
   /** 解析时带上的任务 id（增量解析的前置条件）；没有任务、任务已结束时为空串。 */
   goalIdForParse: string;
-  onParsed: (data: Interpretation, boundGoalId: string) => void;
+  /** 返回一句回执时，并进「已完成解析」那条 toast，不再另弹一条。 */
+  onParsed: (data: Interpretation, boundGoalId: string) => string | void;
 }) {
   const [instruction, setInstruction] = useState("");
   // 任务的原始需求：任务条「你交代了什么」展示它；后续「继续调整」不改写它。
@@ -92,9 +93,10 @@ export function useInterpretSession({
     setConfirmed(false);
     setRefine(CLOSED_REFINE);
     probe.setEngine(data.source === "feishu_aily" ? "Aily（可选通道）" : "通用 AI 模型");
-    onParsed(data, boundGoalId);
+    const receipt = onParsed(data, boundGoalId);
     setPhase("parsed");
-    toast.success(data.source === "feishu_aily" ? "Aily（可选通道） 已完成解析" : "AI 模型已完成解析");
+    const parsed = data.source === "feishu_aily" ? "Aily（可选通道） 已完成解析" : "AI 模型已完成解析";
+    toast.success(receipt ? `${parsed}，${receipt}` : parsed);
   };
 
   const handleInterpretFailure = (message: string) => {

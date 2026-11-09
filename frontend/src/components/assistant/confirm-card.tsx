@@ -6,14 +6,16 @@ import { AiProbeNotice } from "@/components/assistant/ai-probe-notice";
 import { InfoTooltip } from "@/components/assistant/info-tooltip";
 import { InterpretThought } from "@/components/assistant/interpret-progress";
 import { RefineInput } from "@/components/assistant/refine-input";
-import { MemoryReceiptsPanel, ScopeItem, TaskConstraintsPanel } from "@/components/assistant/task-panels";
+import { MemoryReceiptsPanel, TaskConstraintsPanel } from "@/components/assistant/task-panels";
 import { UnsupportedBlock } from "@/components/assistant/unsupported-block";
 import { type AssistantTask } from "@/components/assistant/use-assistant-task";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
-import { plainInterpretSummary } from "@/lib/assistant-task";
+import { buildRequirementItems } from "@/lib/assistant-task";
 import { cn } from "@/lib/cn";
+import { defaultParams } from "@/lib/solver-params";
+import { STATIC_COVERAGE_NOTE_PLAIN, STATIC_COVERAGE_NOTES } from "@/lib/task-context";
 
 /**
  * 「更多选项」：基准版本 / 变更上限这类只有少数场景才需要的验收口径。
@@ -95,7 +97,8 @@ function MoreOptions({ task, scheduleList }: { task: AssistantTask; scheduleList
 }
 
 /**
- * 「我理解的是……」确认卡：解析摘要 + 范围 + 本次要求 + 记忆动作回执，主按钮「确认并开始求解」。
+ * 「我理解的是……」确认卡：一句「本次要求」（范围 + 要求，随参数草稿实时联动）+ 一行窗口与规则 +
+ * 本次任务要求 + 记忆动作回执，主按钮「确认并开始求解」。后端的模板摘要原句在「查看详情 › 解析原文」。
  * 范围被手动扩大的二次确认、未落实的要求、覆盖警告都直接展示在这张卡上，不折叠。
  */
 export function ConfirmCard({ task, scheduleList }: { task: AssistantTask; scheduleList: ScheduleSummaryResponse[] }) {
@@ -104,6 +107,11 @@ export function ConfirmCard({ task, scheduleList }: { task: AssistantTask; sched
   const unresolved = Boolean(interpretation.unsupported_requirements?.length);
   const canParse = task.probe.ready === true && !task.submitBlockedReason;
   const engine = interpretation.source === "feishu_aily" ? "Aily（可选通道）" : task.probe.engine;
+  const hasConstraints = Boolean(interpretation.task_constraints?.length);
+  // 后端每次都附带的固定说明句收进 tooltip；验证限度与动态警告仍以琥珀色常显。
+  const coverage = interpretation.coverage_warnings ?? [];
+  const hasStaticNote = coverage.some((warning) => STATIC_COVERAGE_NOTES.includes(warning));
+  const warnings = coverage.filter((warning) => !STATIC_COVERAGE_NOTES.includes(warning));
   return (
     <section aria-label="我理解的需求" className="rounded-lg border border-blue-200 bg-blue-50/40 p-5">
       <div className="flex flex-wrap items-center gap-2">
@@ -111,28 +119,36 @@ export function ConfirmCard({ task, scheduleList }: { task: AssistantTask; sched
         <h2 className="font-semibold">我理解的是……</h2>
         <span className="text-xs text-zinc-500">确认无误后再开始排课</span>
       </div>
-      <p className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-sm text-zinc-700">{plainInterpretSummary(interpretation.summary)}；解析来源：{engine}。</p>
-      <InterpretThought thinking={interpretation.thinking ?? ""} seconds={task.parsedSeconds} />
-      <div className="mt-4 grid gap-3 border-t border-blue-200 pt-4 text-sm md:grid-cols-3">
-        <ScopeItem label="业务线" values={params.business_lines} />
-        <ScopeItem label="产品班型" values={params.product_types} />
-        <ScopeItem label="班级范围" values={params.class_business_ids} />
-        <ScopeItem label="日期范围" values={[params.date_from, params.date_to].filter(Boolean) as string[]} />
-        <ScopeItem label="日期调整窗口" values={[`${params.date_window_days} 天`]} />
-        <ScopeItem label="识别到的规则" values={interpretation.recognized_rules} />
+      <p aria-label="我理解的本次要求" className="mt-3 border-l-2 border-blue-400 bg-white/70 px-3 py-2 text-sm text-zinc-700">
+        本次要求：{buildRequirementItems({ scope: params, constraints: interpretation.task_constraints ?? [] }).join("；")}
+      </p>
+      <InterpretThought thinking={interpretation.thinking ?? ""} seconds={task.parsedSeconds} engine={engine} />
+      <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          日期可前后挪 <span>{params.date_window_days} 天</span>
+          {task.aiWindowFilled && params.date_window_days !== defaultParams.date_window_days ? <Badge tone="blue">来自 AI 解析</Badge> : null}
+        </span>
+        <span aria-hidden>·</span>
+        <span>按规则：{interpretation.recognized_rules.join("、") || "无"}</span>
+        <button
+          type="button"
+          className="text-blue-700 underline-offset-2 hover:underline"
+          onClick={() => task.openManual({ focusScope: true })}
+        >
+          修改范围、日期或求解时限
+        </button>
       </div>
-      <button
-        type="button"
-        className="mt-2 text-xs text-blue-700 underline-offset-2 hover:underline"
-        onClick={() => task.openManual({ focusScope: true })}
-      >
-        修改范围、日期或求解时限
-      </button>
-      {interpretation.task_constraints?.length ? <TaskConstraintsPanel constraints={interpretation.task_constraints} /> : null}
+      {hasConstraints ? <TaskConstraintsPanel constraints={interpretation.task_constraints ?? []} coverageNote={hasStaticNote} quoteSource={false} /> : null}
       {interpretation.memory_action_receipts?.length ? <MemoryReceiptsPanel receipts={interpretation.memory_action_receipts} /> : null}
-      {interpretation.coverage_warnings?.length ? (
+      {warnings.length || (hasStaticNote && !hasConstraints) ? (
         <div className="mt-3 space-y-1 text-xs text-amber-900">
-          {interpretation.coverage_warnings.map((warning) => <p key={warning}>{warning}</p>)}
+          {hasStaticNote && !hasConstraints ? (
+            <p className="flex items-center gap-1.5 text-zinc-500">
+              进入排课的内容
+              <InfoTooltip label="进入排课的内容">{STATIC_COVERAGE_NOTE_PLAIN}</InfoTooltip>
+            </p>
+          ) : null}
+          {warnings.map((warning) => <p key={warning}>{warning}</p>)}
         </div>
       ) : null}
       <UnsupportedBlock

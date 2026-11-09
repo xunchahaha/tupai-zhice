@@ -79,15 +79,16 @@ describe("AssistantPage task constraints & memory receipts (TC-6 §6.1)", () => 
     const region = await screen.findByLabelText("本次任务要求");
     // 固定文案：仅作用于本次任务，不进入规则库。
     expect(within(region).getByText("仅作用于本次任务，不进入规则库")).toBeInTheDocument();
-    // hard/soft 逐条展示：原话 + 徽标 + 主体×时段。
-    expect(within(region).getByText("张老师周三晚上不能上")).toBeInTheDocument();
-    expect(within(region).getByText("李老师周三晚尽量别排")).toBeInTheDocument();
-    expect(within(region).getByText("硬约束")).toBeInTheDocument();
-    expect(within(region).getByText("软约束")).toBeInTheDocument();
+    // hard/soft 逐条展示：徽标 + 主体×时段；原话已在上面「本次要求」一句里，这里不再复述。
+    expect(within(region).queryByText("张老师周三晚上不能上")).not.toBeInTheDocument();
+    expect(within(region).queryByText("李老师周三晚尽量别排")).not.toBeInTheDocument();
+    expect(within(region).getByText("必须")).toBeInTheDocument();
+    expect(within(region).getByText("尽量")).toBeInTheDocument();
     expect(within(region).getByText("教师 T01 × 时段 S05、S06")).toBeInTheDocument();
     expect(within(region).getByText("教师 T02 × 时段 S05")).toBeInTheDocument();
-    // 常驻的「本次要求」一句话由范围 + 任务约束推导。
-    const summary = screen.getByLabelText("本次要求");
+    // 「本次要求」一句话由范围 + 任务约束推导；确认阶段只在确认卡上说一次，下方的常驻面板不重复。
+    expect(screen.queryByLabelText("本次要求")).not.toBeInTheDocument();
+    const summary = screen.getByLabelText("我理解的本次要求");
     expect(summary).toHaveTextContent("本次要求：");
     expect(summary).toHaveTextContent("张老师周三晚上不能上");
     expect(summary).toHaveTextContent("李老师周三晚尽量别排（尽量）");

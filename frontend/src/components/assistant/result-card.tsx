@@ -12,33 +12,34 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatRoom, formatSlot } from "@/lib/format";
+import { isAutoVersionName } from "@/lib/humanize";
 import { diffKindLabel } from "@/lib/labels";
 import { assistantPath, schedulePath } from "@/lib/routes";
 import { usePublishSchedule } from "@/lib/use-publish-schedule";
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="text-xs text-zinc-400">{label}</div>
-      <div className="mt-1 font-mono text-sm text-zinc-800">{value}</div>
-    </div>
-  );
+/** 「其中改日期 N · 改时段 N · 换教室 N」：值为 0 的项省略，全为 0 时返回空串。 */
+function changeBreakdown(diff: ScheduleDiffResponse): string {
+  const changed = diff.items.filter((item) => item.change_kind !== "unchanged");
+  const parts = [
+    ["改日期", changed.filter((item) => item.before_lesson_date !== item.after_lesson_date).length],
+    ["改时段", changed.filter((item) => item.before_slot_id !== item.after_slot_id).length],
+    ["换教室", changed.filter((item) => item.before_room_id !== item.after_room_id).length],
+  ] as const;
+  const shown = parts.filter(([, count]) => count > 0).map(([label, count]) => `${label} ${count}`);
+  return shown.length ? `其中${shown.join(" · ")}` : "";
 }
 
-/** 相对基准版本实际发生变化的课次：日期/时段/教室变化数 + 前 30 条明细（默认展开）。 */
-function ChangeDetail({ diff }: { diff: ScheduleDiffResponse }) {
+/** 系统自动起的版本名（「课表版本 V4」）不再复述，人起的名字写成「「名称」」。 */
+function versionNameSuffix(name?: string | null): string {
+  return name && !isAutoVersionName(name) ? `「${name}」` : "";
+}
+
+/** 相对基准版本实际发生变化的课次：前 30 条明细（默认展开），完整对比的链接放在表格底部。 */
+function ChangeDetail({ diff, compareHref }: { diff: ScheduleDiffResponse; compareHref: string }) {
   const changed = diff.items.filter((item) => item.change_kind !== "unchanged");
-  const dateChanges = changed.filter((item) => item.before_lesson_date !== item.after_lesson_date).length;
-  const slotChanges = changed.filter((item) => item.before_slot_id !== item.after_slot_id).length;
-  const roomChanges = changed.filter((item) => item.before_room_id !== item.after_room_id).length;
+  const compareLink = <Link className="text-xs text-blue-700 underline-offset-2 hover:underline" to={compareHref}>查看完整版本对比</Link>;
   return (
     <>
-      <div className="mt-4 grid gap-2 sm:grid-cols-4">
-        <Metric label="变更课次" value={String(diff.changed_count)} />
-        <Metric label="日期变化" value={String(dateChanges)} />
-        <Metric label="时段变化" value={String(slotChanges)} />
-        <Metric label="教室变化" value={String(roomChanges)} />
-      </div>
       {changed.length ? (
         <div className="mt-4 max-h-72 overflow-auto rounded-lg border border-blue-100 bg-white">
           <table className="w-full min-w-[720px] text-left text-xs">
@@ -74,9 +75,12 @@ function ChangeDetail({ diff }: { diff: ScheduleDiffResponse }) {
               ))}
             </tbody>
           </table>
-          {changed.length > 30 ? <p className="border-t border-zinc-100 px-3 py-2 text-xs text-zinc-500">仅展示前 30 条，完整列表请打开版本对比。</p> : null}
+          {changed.length > 30 ? (
+            <p className="flex flex-wrap items-center gap-2 border-t border-zinc-100 px-3 py-2 text-xs text-zinc-500">仅展示前 30 条。{compareLink}</p>
+          ) : null}
         </div>
       ) : <p className="mt-4 text-sm text-zinc-500">本次没有相对基准版本发生变化。</p>}
+      {changed.length > 30 ? null : <div className="mt-2">{compareLink}</div>}
     </>
   );
 }
@@ -114,6 +118,7 @@ export function ResultCard({
     { query: { enabled: Boolean(base?.id && draft?.id && base.id !== draft.id) } },
   );
   const diff = base ? diffQuery.data : undefined;
+  const breakdown = diff ? changeBreakdown(diff) : "";
   const published = draft?.status === "published";
   const canParse = task.probe.ready === true && !task.submitBlockedReason;
   const title = !draft
@@ -130,17 +135,13 @@ export function ResultCard({
       </div>
       {draft ? (
         <p className="mt-1 text-xs text-zinc-600">
-          {base ? `v${base.version_no}「${base.name}」→ v${draft.version_no}「${draft.name}」。下面列出实际发生变化的课次。` : `本次已生成 v${draft.version_no} 草稿，但还没有可比较的基准版本。`}
+          {base ? `基于 v${base.version_no}${versionNameSuffix(base.name) || " "}生成草稿 v${draft.version_no}${versionNameSuffix(draft.name)}` : `本次已生成 v${draft.version_no} 草稿，但还没有可比较的基准版本。`}
+          {base && breakdown ? <span className="ml-2 text-zinc-500">{breakdown}</span> : null}
         </p>
       ) : null}
       {draft && base && diffQuery.isLoading ? <p className="mt-4 text-sm text-zinc-500">正在整理本次排课调整……</p> : null}
       {draft && base && diffQuery.isError ? <p className="mt-4 text-sm text-amber-800">调整明细暂时没读出来，可以打开完整版本对比查看。</p> : null}
-      {diff ? <ChangeDetail diff={diff} /> : null}
-      {diff && draft ? (
-        <div className="mt-2">
-          <Link className="text-xs text-blue-700 underline-offset-2 hover:underline" to={schedulePath({ view: "history", version: draft.id })}>查看完整版本对比</Link>
-        </div>
-      ) : null}
+      {diff && draft ? <ChangeDetail diff={diff} compareHref={schedulePath({ view: "history", version: draft.id })} /> : null}
       <AcceptanceSummary run={run} task={task} />
       <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-blue-200 pt-4">
         {draft ? (

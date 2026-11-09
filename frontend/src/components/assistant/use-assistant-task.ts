@@ -103,21 +103,23 @@ export function useAssistantTask() {
     onParsed: (data, boundGoalId) => {
       // MEM-D3（目标连续性）：同一会话已有任务时重新解析保留它——用户补救不脱离原任务；
       // 解析口径与任务原范围的比对结果以提示条呈现。
+      // 范围不一致会影响结果依据，常驻提示；一致或无从比对只是回执，并进「已完成解析」那条 toast。
+      let receipt = "";
       if (boundGoalId) {
         const conflicts = latestGoal.current ? goalScopeConflicts(latestGoal.current, data) : null;
-        setGoalNotice(
-          conflicts === null
-            ? "本次解析沿用这个任务，重跑仍会核对同一批要求。"
-            : conflicts.length
-              ? `本次解析的${conflicts.join("、")}与原任务不一致——仍按这个任务排课，需要的话可以在「查看详情」里修改任务的要求。`
-              : "本次解析与原任务的范围一致，重跑沿用同一个任务。",
-        );
+        if (conflicts?.length) {
+          setGoalNotice(`本次解析的${conflicts.join("、")}与原任务不一致——仍按这个任务排课，需要的话可以在「查看详情」里修改任务的要求。`);
+        } else {
+          setGoalNotice("");
+          receipt = conflicts === null ? "沿用这个任务，重跑仍会核对同一批要求" : "范围与原任务一致，重跑沿用同一个任务";
+        }
       } else {
         setGoalNotice("");
       }
       taskParams.applyInterpreted(data);
       setConstraintUse("pending");
       setInterpretedAtRun(latestRunId.current);
+      return receipt;
     },
   });
   const { interpretation, confirmed, setInstruction, setConfirmed } = session;
@@ -136,7 +138,6 @@ export function useAssistantTask() {
   const [focusScope, setFocusScope] = useState(false);
   const openManual = useCallback((options: { focusScope?: boolean } = {}) => {
     setManualOpen(true);
-    setDetailsOpen(true);
     if (options.focusScope) setFocusScope(true);
   }, []);
   const clearFocusScope = useCallback(() => setFocusScope(false), []);
@@ -315,8 +316,8 @@ export function useAssistantTask() {
     if (context?.work_draft_schedule_id) setBaselineId(context.work_draft_schedule_id);
     // 没指定求解记录时，续办直接落在该任务最近一次求解的结果上。
     if (!runParam && detail.latest_run_id) setRunId((previous) => previous || (detail.latest_run_id as string));
+    // 常驻横幅本身就是续办回执，不再另弹同义 toast。
     setGoalNotice(`已接着办这个任务「${truncateText(detail.instruction, 40)}」：${scope ? "范围与需求已恢复，" : ""}修正范围后重新排课，结果仍会核对同一批要求。`);
-    toast.success("已接续该任务，求解结束后自动核对要求");
   }, [goalId, goalQuery.data, restoredGoalId, restoreScope, runParam, setInstruction]);
 
   const goalLoadFailed = Boolean(goalId) && Boolean(goalQuery.isError);
@@ -348,13 +349,15 @@ export function useAssistantTask() {
     updateSearch((next) => next.delete("prompt"));
   }, [promptParam, setInstruction, updateSearch]);
 
-  // AI 未配置或探测失败时手动路径是唯一入口，默认展开（用户之后仍可自己收起）。
+  const taskMode = Boolean(goalParam || runParam || goalId || runId || current || interpretation);
+  // AI 未配置或探测失败时手动路径是首页唯一的入口，首页默认展开（用户之后仍可自己收起）。
+  // 任务视图里面板直接挂在入口按钮下方，默认收起，不抢结果卡的位置；回到首页时再展开。
   const autoManual = useRef(false);
   useEffect(() => {
-    if (autoManual.current || !(probe.ready === false || probe.probeError)) return;
+    if (autoManual.current || taskMode || !(probe.ready === false || probe.probeError)) return;
     autoManual.current = true;
     setManualOpen(true);
-  }, [probe.ready, probe.probeError]);
+  }, [probe.ready, probe.probeError, taskMode]);
 
   // MEM-D2/D6：求解到终态后刷新课表/求解记录/总览缓存（带任务的还要刷新任务列表与详情，
   // 验收报告落库晚一步，报告到达也再刷一次）。
@@ -503,7 +506,8 @@ export function useAssistantTask() {
       next.delete("base");
       next.delete("lesson");
     });
-    setGoalNotice(`已登记为任务${baselineId ? (changeLimitEnabled ? "，按所选基准的变更数验收" : "，已记录基准版本用于变更对比（未设变更上限）") : ""}。`);
+    // 「已登记」是纯回执，由调用方并进自己那条 toast（求解、补充条件各一条）；基准口径影响验收依据，缩成一行常驻。
+    setGoalNotice(baselineId ? (changeLimitEnabled ? "本任务按所选基准的变更数验收。" : "本任务已记录基准版本，仅用于变更对比（未设变更上限）。") : "");
     return created.id;
   };
 
@@ -545,6 +549,7 @@ export function useAssistantTask() {
       return;
     }
     const startedEpoch = epoch.current;
+    let createdGoal = false;
     try {
       // 目标验收闭环（MEM-C3）：先按解析结果登记持久目标，再把 goal_id 带进求解任务；run 结束后自动验收。
       let activeGoalId = solveGoalId;
@@ -552,6 +557,7 @@ export function useAssistantTask() {
         setGoalBusy(true);
         activeGoalId = await createGoalFromInterpretation(interpretation);
         if (!activeGoalId) return;
+        createdGoal = true;
       }
       const { data } = await http.post<SolverRunResponse>("/api/v1/assistant/solve", {
         instruction: interpretation.instruction,
@@ -581,9 +587,11 @@ export function useAssistantTask() {
       });
       if (startedEpoch !== epoch.current) return;
       startedRun(data, "solve");
-      toast.success(trackGoal ? "已开始排课，完成后会自动核对要求" : "确认完成，已开始排课");
+      // 同一次点击只弹一条回执：这次新登记了任务，就和「已开始排课」合成一句。
+      toast.success(createdGoal ? "已登记为任务并开始排课，完成后会自动核对要求" : trackGoal ? "已开始排课，完成后会自动核对要求" : "确认完成，已开始排课");
     } catch (error) {
-      toast.error(errorMessage(error));
+      // 任务已登记、排课没开始：说清任务还在，免得读者以为什么都没发生。
+      toast.error(createdGoal ? `已登记为任务，但没能开始排课：${errorMessage(error)}` : errorMessage(error));
       // 被后端拒绝时任务多半已经变了：刷新任务详情，确认卡据此提示重新解析。
       if (goalId) void client.invalidateQueries({ queryKey: getGetGoalApiV1GoalsGoalIdGetQueryKey(goalId) });
     } finally {
@@ -603,16 +611,12 @@ export function useAssistantTask() {
     });
   };
 
-  const taskMode = Boolean(goalParam || runParam || goalId || runId || current || interpretation);
   // 待确认的理解之后又发起过求解（手动路径）：确认卡和那次求解的进度/结果同时展示。
   const runSupersedesInterpretation = Boolean(interpretation) && !confirmed && Boolean(runId) && runId !== interpretedAtRun;
   /** 「继续调整」有没有可继承的上下文：没有任务、没有原始需求时只能重新提需求。 */
   const canRefine = Boolean(goal || session.originalInstruction || interpretation || session.instruction.trim());
-  /** 「手动排课」入口：首页展开/收起面板；任务视图里面板在「查看详情」内，展开时连详情一起打开。 */
-  const toggleManual = () => {
-    if (manualOpen && (!taskMode || detailsOpen)) setManualOpen(false);
-    else openManual();
-  };
+  /** 「手动排课」入口：首页与任务视图一样，面板直接在入口下方展开/收起。 */
+  const toggleManual = () => setManualOpen((open) => !open);
   return {
     // 视图
     taskMode,

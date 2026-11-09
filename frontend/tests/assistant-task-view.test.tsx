@@ -64,15 +64,16 @@ describe("AssistantPage result card", () => {
     expect(await screen.findByRole("heading", { name: "已生成草稿，调整了 2 节课" })).toBeInTheDocument();
     expect(screen.getByText("草稿 · 未发布")).toBeInTheDocument();
     const card = screen.getByLabelText("排课结果");
-    // 日期 / 时段 / 教室变化数。
-    expect(within(card).getByText("日期变化").nextSibling).toHaveTextContent("2");
-    expect(within(card).getByText("时段变化").nextSibling).toHaveTextContent("1");
-    expect(within(card).getByText("教室变化").nextSibling).toHaveTextContent("2");
+    // 日期 / 时段 / 教室变化数合成版本行后面的一句。
+    expect(within(card).getByText("其中改日期 2 · 改时段 1 · 换教室 2")).toBeInTheDocument();
+    expect(within(card).queryByText("变更课次")).not.toBeInTheDocument();
     // 明细默认展开，只列真正变化的课次。
     expect(within(card).getByText("班-C1")).toBeInTheDocument();
     expect(within(card).getByText("班-C2")).toBeInTheDocument();
     expect(within(card).queryByText("班-C3")).not.toBeInTheDocument();
-    expect(screen.getByText(/v1「已发布课表」→ v2「9 月排课草稿」/)).toBeInTheDocument();
+    expect(screen.getByText(/基于 v1「已发布课表」生成草稿 v2「9 月排课草稿」/)).toBeInTheDocument();
+    // 不超过 30 条时，完整对比的链接单独成行。
+    expect(within(card).getByRole("link", { name: "查看完整版本对比" })).toHaveAttribute("href", "/schedule?view=history&version=draft-1");
     // 现在办到哪里：草稿已生成，等待发布。
     expect(within(screen.getByLabelText("办理进展")).getByText("待发布").closest("li")).toHaveAttribute("aria-current", "step");
   });
@@ -81,9 +82,11 @@ describe("AssistantPage result card", () => {
     withDraft();
     mocks.diff.mockReturnValue({ data: { changed_count: 35, unchanged_count: 0, items: Array.from({ length: 35 }, (_, index) => diffItem(`K${index}`)) } });
     renderAssistant("/assistant?run=run-1");
-    expect(await screen.findByText("仅展示前 30 条，完整列表请打开版本对比。")).toBeInTheDocument();
+    const note = await screen.findByText("仅展示前 30 条。");
     expect(screen.getAllByText(/^班-K/)).toHaveLength(30);
-    expect(screen.getByRole("link", { name: "查看完整版本对比" })).toHaveAttribute("href", "/schedule?view=history&version=draft-1");
+    // 完整对比的链接就在截断说明的同一行。
+    expect(within(note).getByRole("link", { name: "查看完整版本对比" })).toHaveAttribute("href", "/schedule?view=history&version=draft-1");
+    expect(screen.getAllByRole("link", { name: "查看完整版本对比" })).toHaveLength(1);
   });
 
   it("says so when nothing changed relative to the baseline, and when there is no baseline to compare with", async () => {
@@ -237,6 +240,80 @@ describe("AssistantPage stuck card", () => {
     await waitFor(() => expect(mocks.rerunMutate).toHaveBeenCalledTimes(1));
     expect(mocks.rerunMutate).toHaveBeenCalledWith({ runId: "run-u", data: {} });
     expect(mocks.submitMutate).not.toHaveBeenCalled();
+  });
+
+  it("gives each remedy one button, merges identical gaps and keeps internal ids out of the reasons", async () => {
+    const report = {
+      goal_id: "goal-77",
+      instruction: "重排 B1 班三天课",
+      all_passed: false,
+      passed_count: 0,
+      failed_count: 3,
+      items: [],
+      gaps: [
+        { key: "coverage", kind: "coverage", summary: "求解未安置全部课次", next_step: "求解超时（UNKNOWN），请修正范围后重跑", remedy: "resolve_scope" },
+        { key: "forbidden_slot_free-1", kind: "forbidden_slot_free", summary: "无法复核", next_step: "求解超时（UNKNOWN），请修正范围后重跑", remedy: "resolve_scope" },
+        { key: "budget", kind: "coverage", summary: "时间不够", next_step: "加大时间预算后重跑", remedy: "raise_budget" },
+      ],
+      decision: null,
+    };
+    mocks.goalDetail = goalFixture({ id: "goal-77", latest_run_id: "run-u", run_count: 1, latest_report: report });
+    mocks.runDetails["run-u"] = runFixture({
+      id: "run-u",
+      goal_id: "goal-77",
+      model_status: "UNKNOWN",
+      explanation: EXPLAINED,
+      goal_report: report,
+      priority_explanations: [
+        "约束范围：TASK-2e60acb7-forbidden_slot_free-1；系统约束：SYSTEM-TEACHER-NO-OVERLAP",
+        "日期感知模型未使用可供 CP-SAT 提取的假设文字；本次无解按内置硬约束标记。",
+        "时段 SLOT-周三-1830-2130 最多容纳 1 场；示例课次：CAMPUS-ZZ-34FB7F8AE46BC344。",
+      ],
+    });
+    renderAssistant("/assistant?run=run-u");
+    const card = await screen.findByLabelText("排课卡住了");
+    const summary = await within(card).findByLabelText("要求核对");
+    // 底部已有「加大时间预算重跑 / 修正范围」：缺口里不再重复，各只有一个入口。
+    expect(within(card).getAllByRole("button", { name: "修正范围" })).toHaveLength(1);
+    expect(within(card).getAllByRole("button", { name: "加大时间预算重跑" })).toHaveLength(1);
+    expect(within(summary).queryByRole("button")).not.toBeInTheDocument();
+    // 同一句建议合并成一条；UNKNOWN 写成「超时未定」，计数徽标不变。
+    expect(within(summary).getByText("还有 3 项要求没落实")).toBeInTheDocument();
+    expect(within(summary).getByText("求解超时（超时未定），请修正范围后重跑（涉及 2 项要求）")).toBeInTheDocument();
+    expect(summary).not.toHaveTextContent("UNKNOWN");
+    // 「尚未证明无解」原样保留。
+    expect(within(card).getByText(/尚未证明无解/)).toBeInTheDocument();
+    // 可能的原因：编号换成人话，引擎自述不进正文；原文只在默认收起的「技术细节」里。
+    expect(within(card).getByText("可能的原因")).toBeInTheDocument();
+    expect(within(card).getByText("约束范围：本次任务要求；系统约束：教师时间不重叠")).toBeVisible();
+    expect(within(card).getByText("时段 周三 18:30-21:30 最多容纳 1 场。")).toBeVisible();
+    expect(within(card).getByText(/TASK-2e60acb7/)).not.toBeVisible();
+    expect(within(card).getByText(/CAMPUS-ZZ-34FB7F8AE46BC344/)).not.toBeVisible();
+    expect(within(card).getByText(/日期感知模型未使用/)).not.toBeVisible();
+    expect(within(card).queryByText("哪里卡住了、下一步可以做什么，都列在下面。")).not.toBeInTheDocument();
+  });
+
+  it("keeps the gap's own 加大时间预算重跑 when the card's footer does not offer it (proven infeasible)", async () => {
+    const report = {
+      goal_id: "goal-77",
+      instruction: "重排 B1 班三天课",
+      all_passed: false,
+      passed_count: 0,
+      failed_count: 1,
+      items: [],
+      gaps: [{ key: "max_changes", kind: "max_changes", summary: "变更数超限", next_step: "可加大时间预算或放宽变更上限后重跑", remedy: "raise_budget" }],
+      decision: null,
+    };
+    mocks.goalDetail = goalFixture({ id: "goal-77", latest_run_id: "run-x", run_count: 1, latest_report: report });
+    mocks.runDetails["run-x"] = runFixture({ id: "run-x", goal_id: "goal-77", model_status: "INFEASIBLE", explanation: EXPLAINED, goal_report: report });
+    renderAssistant("/assistant?run=run-x");
+    const card = await screen.findByLabelText("排课卡住了");
+    const summary = await within(card).findByLabelText("要求核对");
+    // 无解时底部不给「加预算」，缺口说「可加大时间预算」就得在缺口里给这个入口——整张卡仍只有一个。
+    expect(within(summary).getByRole("button", { name: "加大时间预算重跑" })).toBeInTheDocument();
+    expect(within(card).getAllByRole("button", { name: "加大时间预算重跑" })).toHaveLength(1);
+    // 「修正范围」底部始终有，缺口里不重复。
+    expect(within(card).getAllByRole("button", { name: "修正范围" })).toHaveLength(1);
   });
 
   it("explains instead of offering a replay once the task requirements moved past the run's version (review 6fe2bf8 R4)", async () => {
@@ -398,6 +475,8 @@ describe("AssistantPage progress card and acceptance states", () => {
     renderAssistant("/assistant?run=run-1");
     expect(await screen.findByText("全部 2 项要求已落实")).toBeInTheDocument();
     expect(screen.queryByText("建议的下一步")).not.toBeInTheDocument();
+    // 全部通过只降视觉权重：一行，不再是带边框的整块；名称与图标都还在。
+    expect(screen.getByLabelText("要求核对")).not.toHaveClass("border");
   });
 
   // 审查 #2：v1 已通过 → 修订为 v2 → 还没重新验收，回来打开旧结果，不能看到绿色「全部已落实」。
@@ -598,7 +677,10 @@ describe("AssistantPage home task list", () => {
 
   it("gives a one-line hint when there are no tasks yet", async () => {
     renderAssistant();
-    expect(await screen.findByText(/还没有任务/)).toBeInTheDocument();
+    expect(await screen.findByText("还没有任务")).toBeInTheDocument();
+    // 空态不占卡：没有标题栏，只保留区块的名称。
+    const section = screen.getByLabelText("正在处理的任务");
+    expect(within(section).queryByRole("heading")).not.toBeInTheDocument();
   });
 });
 

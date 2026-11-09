@@ -1,4 +1,5 @@
 import type { GoalDetailResponse } from "@/api/generated/models";
+import { humanizeIds, isTechnicalNote, taskIdLabels } from "@/lib/humanize";
 import type { Interpretation } from "@/lib/interpret-stream";
 import { type RunKind, type RunKindInput, stuckCause } from "@/lib/run-kind";
 import type { SolverParamValues } from "@/lib/solver-params";
@@ -87,6 +88,17 @@ export function stuckHeadline(run: RunKindInput): string {
     case "infeasible": return "在现有的硬性要求下排不出全部课";
     default: return "这次没有得到可用的排课结果";
   }
+}
+
+/**
+ * 求解器给出的「可能的原因」说人话：引擎自述（CP-SAT…）不进正文，内部编号换成名称/时间，
+ * 换完后重复的只留一条。原文由调用方统一放进「技术细节」。
+ */
+export function plainReasons(items: readonly string[]): string[] {
+  const plain = items.filter((item) => !isTechnicalNote(item));
+  // 整组原因共用一套任务约束编号：「本次任务要求 1」在每一句里指的都是同一条。
+  const labels = taskIdLabels(plain);
+  return [...new Set(plain.map((item) => humanizeIds(item, labels)))];
 }
 
 /** 把范围草稿拆成人话片段；全是空的时候返回空数组，由调用方补「全部课次」。 */

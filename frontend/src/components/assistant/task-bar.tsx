@@ -43,11 +43,10 @@ export function TaskBar({ task, steps }: { task: AssistantTask; steps: TaskStep[
         </div>
       </div>
       <div className="mt-3">
-        <div className="text-xs text-zinc-400">你交代的需求</div>
         {requirement ? (
-          <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-zinc-900" title={requirement}>{requirement}</p>
+          <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-900" title={requirement}>{requirement}</p>
         ) : (
-          <p className="mt-1 text-sm text-zinc-500">{task.goalParam || task.goalId ? "正在读取任务…" : "手动排课：按你设置的参数直接求解，没有 AI 解析的需求。"}</p>
+          <p className="text-sm text-zinc-500">{task.goalParam || task.goalId ? "正在读取任务…" : "手动排课：按你设置的参数直接求解，没有 AI 解析的需求。"}</p>
         )}
       </div>
       {goal?.acceptance_status === "failed" && goal.acceptance_detail ? (

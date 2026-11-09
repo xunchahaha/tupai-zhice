@@ -6,14 +6,14 @@ import { useListRulesApiV1RulesGet } from "@/api/generated/client";
 import { type RuleResponse, type SolverRunResponse } from "@/api/generated/models";
 import { AcceptanceSummary } from "@/components/assistant/acceptance-summary";
 import { AiProbeNotice } from "@/components/assistant/ai-probe-notice";
+import { InfoTooltip } from "@/components/assistant/info-tooltip";
 import { RefineInput } from "@/components/assistant/refine-input";
 import { type AssistantTask } from "@/components/assistant/use-assistant-task";
-import { RunDiagnosis } from "@/components/diagnosis/run-diagnosis";
+import { ReasonSources, RunDiagnosis } from "@/components/diagnosis/run-diagnosis";
 import { LoadingState } from "@/components/page";
 import { Button } from "@/components/ui/button";
-import { describeScope, stuckHeadline } from "@/lib/assistant-task";
+import { describeScope, plainReasons, stuckHeadline } from "@/lib/assistant-task";
 import { asArray, errorMessage } from "@/lib/format";
-import { translateSystemConstraints } from "@/lib/labels";
 
 async function copyInstruction(value: string) {
   try {
@@ -26,12 +26,12 @@ async function copyInstruction(value: string) {
   }
 }
 
-/** 冲突核心分析（涉事规则可点开 /rules?rule=）：展开时才取规则列表。 */
+/** 冲突核心分析（涉事规则可点开 /rules?rule=）：展开时才取规则列表。「已证明无解」由卡上的红框说，这里不重复。 */
 function DiagnosisPanel({ run }: { run: SolverRunResponse }) {
   const rules = useListRulesApiV1RulesGet();
   return (
     <div className="mt-4 rounded-lg border border-zinc-200 bg-white">
-      {rules.isPending ? <LoadingState rows={2} /> : <RunDiagnosis run={run} rules={asArray<RuleResponse>(rules.data)} />}
+      {rules.isPending ? <LoadingState rows={2} /> : <RunDiagnosis run={run} rules={asArray<RuleResponse>(rules.data)} embedded />}
     </div>
   );
 }
@@ -39,7 +39,9 @@ function DiagnosisPanel({ run }: { run: SolverRunResponse }) {
 /**
  * 「哪里卡住了、下一步可以做什么」：INFEASIBLE / UNKNOWN / 失败 / 预检无解时出现，业务语言写原因。
  * 措辞口径不变：预检结论不能说「已证明无解」；UNKNOWN（超时未定）不等于无解；本次没有候选课表。
- * 冲突核心分析（涉事规则等）在「展开详细诊断」里。
+ * 冲突核心分析（涉事规则等）在「展开详细诊断」里；展开后「可能的原因」由它承担，卡上不再重复列出。
+ * 加预算重跑、修正范围只在底部操作区给一次，嵌入的要求核对里不再重复——前提是底部真有那个按钮：
+ * 底部不给「加预算」（无解、预检无解、没有可重跑的任务）时，缺口里的「加大时间预算重跑」照常行内给。
  */
 export function StuckCard({ task, run, defaultDiagnosisOpen }: { task: AssistantTask; run: SolverRunResponse; defaultDiagnosisOpen: boolean }) {
   const [diagnosisOpen, setDiagnosisOpen] = useState(defaultDiagnosisOpen);
@@ -47,12 +49,14 @@ export function StuckCard({ task, run, defaultDiagnosisOpen }: { task: Assistant
   const presolved = Boolean(run.presolve_infeasible);
   const provenInfeasible = run.model_status === "INFEASIBLE" && !presolved && run.status === "completed";
   const priorities = Array.isArray(run.priority_explanations) ? run.priority_explanations : [];
+  const reasons = plainReasons(priorities);
   const nextActions = Array.isArray(explanation?.next_actions) ? explanation.next_actions : [];
   const suggested = explanation?.suggested_instruction ?? "";
   const canParse = task.probe.ready === true && !task.submitBlockedReason;
   // 超时/失败才谈得上「加时间」；加预算沿用任务里记着的范围，没有任务就不知道原来的范围。
   const timeRelated = run.status === "failed" || run.model_status === "UNKNOWN";
   const hasOpenGoal = Boolean(task.goalId) && !task.goalClosed;
+  const offersBudgetRerun = timeRelated && (hasOpenGoal || task.canRaiseBudget);
   const scopeText = describeScope(task.params).join("，") || "全部课次";
   return (
     <section aria-label="排课卡住了" className="rounded-lg border border-amber-300 bg-amber-50/50 p-5">
@@ -60,7 +64,6 @@ export function StuckCard({ task, run, defaultDiagnosisOpen }: { task: Assistant
         <OctagonAlert className="size-4 text-amber-600" />
         <h2 className="font-semibold">{stuckHeadline(run)}</h2>
       </div>
-      <p className="mt-1 text-xs text-zinc-600">哪里卡住了、下一步可以做什么，都列在下面。</p>
       {presolved ? (
         <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           本次结论来自求解前的数据预检，求解器未运行，因此不能表述为「已证明无解」。请先按下方诊断修正输入数据。
@@ -76,11 +79,14 @@ export function StuckCard({ task, run, defaultDiagnosisOpen }: { task: Assistant
         </div>
       ) : null}
       {run.error_message ? <div className="mt-4 text-sm text-red-700">{run.error_message}</div> : null}
-      {priorities.length ? (
-        <div className="mt-4 space-y-2 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          <div className="font-medium">可能的原因</div>
-          {priorities.map((item, index) => <div key={`${index}-${item}`}>{translateSystemConstraints(item)}</div>)}
-        </div>
+      {priorities.length && !(provenInfeasible && diagnosisOpen) ? (
+        reasons.length ? (
+          <div className="mt-4 space-y-2 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <div className="font-medium">可能的原因</div>
+            {reasons.map((item) => <div key={item}>{item}</div>)}
+            <ReasonSources items={priorities} />
+          </div>
+        ) : <ReasonSources items={priorities} className="mt-4" />
       ) : null}
       {analyzing && !explanation ? (
         <div className="mt-4 flex items-center gap-2 border-l-2 border-blue-400 bg-blue-50/60 px-4 py-3 text-sm text-blue-900">
@@ -101,7 +107,7 @@ export function StuckCard({ task, run, defaultDiagnosisOpen }: { task: Assistant
           </ul>
         </div>
       ) : null}
-      <AcceptanceSummary run={run} task={task} />
+      <AcceptanceSummary run={run} task={task} hostRemedies={offersBudgetRerun ? ["raise_budget", "resolve_scope"] : ["resolve_scope"]} />
       {timeRelated && !hasOpenGoal && !task.canRaiseBudget ? (
         <div role="status" className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-900">
           {task.goalClosed
@@ -113,7 +119,10 @@ export function StuckCard({ task, run, defaultDiagnosisOpen }: { task: Assistant
       {suggested ? (
         <div className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="text-xs font-medium">建议改成这条需求</div>
+            <div className="flex items-center gap-1.5 text-xs font-medium">
+              建议改成这条需求
+              <InfoTooltip label="建议改成这条需求">这条需求按本次范围内真实存在的班级、班型和日期拼出，填入后可以再改，再重新解析并重跑。</InfoTooltip>
+            </div>
             <div className="ml-auto flex gap-2">
               <Button size="sm" variant="outline" onClick={() => void copyInstruction(suggested)}>
                 <ClipboardCopy className="size-3.5" />复制
@@ -124,11 +133,10 @@ export function StuckCard({ task, run, defaultDiagnosisOpen }: { task: Assistant
             </div>
           </div>
           <p className="mt-2 leading-6">{suggested}</p>
-          <p className="mt-2 text-xs text-amber-800">这条需求按本次范围内真实存在的班级、班型和日期拼出，填入后可以再改，再重新解析并重跑。</p>
         </div>
       ) : null}
       <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-amber-200 pt-4">
-        {timeRelated && (hasOpenGoal || task.canRaiseBudget) ? (
+        {offersBudgetRerun ? (
           <Button disabled={task.pending || Boolean(task.raiseBudgetBlockedReason)} onClick={task.raiseBudget}>加大时间预算重跑</Button>
         ) : null}
         {timeRelated && !hasOpenGoal && !task.canRaiseBudget ? (
@@ -144,7 +152,7 @@ export function StuckCard({ task, run, defaultDiagnosisOpen }: { task: Assistant
           </Button>
         ) : null}
       </div>
-      {timeRelated && (hasOpenGoal || task.canRaiseBudget) && task.raiseBudgetBlockedReason && !task.submitBlockedReason ? (
+      {offersBudgetRerun && task.raiseBudgetBlockedReason && !task.submitBlockedReason ? (
         <p role="status" className="mt-2 text-xs text-amber-800">{task.raiseBudgetBlockedReason}</p>
       ) : null}
       {task.refine.open ? (

@@ -86,9 +86,20 @@ export function taskConstraintOpLabel(op: AssistantTaskConstraint["op"]): string
   return null;
 }
 
+/** 徽标说人话：hard=这次必须做到，soft=尽量做到。 */
 export function taskConstraintHardnessLabel(hardness: AssistantTaskConstraint["hardness"]): string {
-  return hardness === "soft" ? "软约束" : "硬约束";
+  return hardness === "soft" ? "尽量" : "必须";
 }
+
+/**
+ * 解析接口每次都附带的固定说明句（逐字对应 backend/app/api.py 的 coverage_warnings 首句）。
+ * 它不是这次解析的警告，确认卡把它从琥珀警告里拿掉，换成 STATIC_COVERAGE_NOTE_PLAIN 放进 tooltip。
+ */
+export const STATIC_COVERAGE_NOTES = [
+  "仅下列结构化范围、规则开关和已确认的任务约束进入求解；本接口不会自动创建教师、教室或连续课次规则。",
+];
+
+export const STATIC_COVERAGE_NOTE_PLAIN = "只有这里列出的范围、规则开关和要求会进入排课；不会自动新建教师、教室或连堂规则";
 
 /** 记忆回执徽标文案（07 §6.1：executed 绿、pending/降级黄）。 */
 export function memoryReceiptStatusLabel(status: AssistantMemoryActionReceipt["status"]): string {

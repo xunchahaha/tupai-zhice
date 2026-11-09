@@ -21,12 +21,13 @@ export function RequestCard({ task }: { task: AssistantTask }) {
       <div className="flex flex-wrap items-center gap-2">
         <Bot className="size-4 text-blue-600" />
         <h2 className="font-semibold">告诉助手你要排什么</h2>
-        <Badge tone={probe.ready === true ? "green" : "yellow"}>
-          {probe.ready === true ? `${probe.engine} 已接入` : probe.ready === false ? "AI 模型待配置" : probe.probeError ? "AI 配置读取失败" : "正在读取 AI 配置"}
+        {/* 就绪时只说「AI 已接入」，具体模型放在悬停提示里。 */}
+        <Badge tone={probe.ready === true ? "green" : "yellow"} title={probe.ready === true ? probe.engine : undefined}>
+          {probe.ready === true ? "AI 已接入" : probe.ready === false ? "AI 模型待配置" : probe.probeError ? "AI 配置读取失败" : "正在读取 AI 配置"}
         </Badge>
         {probe.probeError ? <Button size="sm" variant="outline" onClick={probe.probe}>重试</Button> : null}
       </div>
-      <p className="mt-2 text-xs text-zinc-500">用一句话说清楚要排或要调什么，助手先解析给你确认，再排出草稿；发布始终由有权限的人决定。</p>
+      <p className="mt-2 text-xs text-zinc-500">先解析给你确认，再排草稿；发布需有权限的人另行审批。</p>
       <textarea
         aria-label="排课需求"
         className="mt-4 min-h-24 w-full rounded-md border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-blue-500 disabled:bg-zinc-50 disabled:text-zinc-400"

@@ -30,11 +30,11 @@ function Block({ title, children }: { title: string; children: ReactNode }) {
 }
 
 /**
- * 「查看详情」折叠区（默认收起）：低频、偏技术的内容都收在这里——手动排课参数、验收清单与历史、
+ * 「查看详情」折叠区（默认收起）：低频、偏技术的内容都收在这里——验收清单与历史、
  * 逐项验收报告全文、关联求解记录、结果解释全文（含意图核对）、技术指标、思考过程全文。
  * 需要立刻决策的内容（未落实的要求、范围扩大确认、缺口与补救、卡住的原因）不在这里，见对应的卡。
  */
-export function DetailsSection({ task, manualPanel }: { task: AssistantTask; manualPanel: ReactNode }) {
+export function DetailsSection({ task }: { task: AssistantTask }) {
   const { goal, activeRun: run, interpretation } = task;
   // 补参表单的展开状态（清单项按钮与验收缺口的「补充条件」共用）；切换任务时复位。
   const [paramFormKeys, setParamFormKeys] = useState<string[]>([]);
@@ -43,11 +43,8 @@ export function DetailsSection({ task, manualPanel }: { task: AssistantTask; man
   const report = parseGoalReport(goal?.latest_report ?? run?.goal_report);
   const presolved = Boolean(run?.presolve_infeasible);
   return (
-    <CollapsibleSection title="查看详情" hint="手动排课、验收清单、结果解释、技术指标" open={task.detailsOpen} onOpenChange={task.setDetailsOpen}>
+    <CollapsibleSection title="查看详情" hint="验收清单、结果解释、技术指标" open={task.detailsOpen} onOpenChange={task.setDetailsOpen}>
       <div className="space-y-5">
-        <CollapsibleSection title="手动排课参数" hint="自己设置范围与时限，随时可用" open={task.manualOpen} onOpenChange={task.setManualOpen} className="shadow-none">
-          {manualPanel}
-        </CollapsibleSection>
         {goal ? (
           <Block title="验收清单与历史">
             <GoalChecklist

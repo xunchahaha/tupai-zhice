@@ -288,8 +288,8 @@ describe("plainInterpretSummary (确认卡里不出现技术黑话，也不出�
     const plain = plainInterpretSummary("已解析为考研业务线 8 月 17 日至 19 日的重排，请教务确认后启动 CP-SAT 求解。");
     expect(plain).toBe("已解析为考研业务线 8 月 17 日至 19 日的重排，请教务确认后开始排课");
     expect(plain).not.toMatch(/CP-SAT/i);
-    // 卡片会在后面接「；解析来源」，摘要自己不能以句号收尾。
-    expect(`${plain}；解析来源：通用 AI 模型。`).not.toContain("。；");
+    // 摘要自己不能以句末标点收尾（原文在「查看详情 › 解析原文」里核对）。
+    expect(plain).not.toMatch(/[。；;.，,]$/);
   });
 
   it("replaces any other mention of the solver and leaves ordinary summaries alone", () => {

@@ -313,7 +313,11 @@ describe("the confirmation card speaks to the school office (hygiene.F5)", () =>
     await user.type(await screen.findByLabelText("排课需求"), "请在三天内重排考研课程");
     await user.click(screen.getByRole("button", { name: "让 AI 解析" }));
     const card = await screen.findByLabelText("我理解的需求");
-    expect(card).toHaveTextContent("请教务确认后开始排课；解析来源");
+    // 后端模板句不再上卡：同一份理解只在「本次要求」一句里说一次，引擎名只在思考摘要行出现一次。
+    expect(card).toHaveTextContent("本次要求：");
+    expect(card).not.toHaveTextContent("；解析来源");
+    expect(within(card).getByText(/已解析完成（用时.*通用 AI 模型/)).toBeInTheDocument();
+    expect(within(card).getAllByText(/通用 AI 模型/)).toHaveLength(1);
     expect(card).not.toHaveTextContent(/CP-SAT/);
     expect(card).not.toHaveTextContent("。；");
     await user.click(screen.getByRole("button", { name: /查看详情/ }));

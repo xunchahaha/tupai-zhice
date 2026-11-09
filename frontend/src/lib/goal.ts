@@ -50,6 +50,14 @@ export interface GoalReport {
   checklist_version?: number | null;
 }
 
+/**
+ * 卡片上的「建议的下一步」说人话：求解器状态 UNKNOWN 写成「超时未定」。
+ * 只用于卡片正文；「查看详情」里的逐项报告保持后端原文。
+ */
+export function plainGapStep(text: string): string {
+  return text.replace(/[（(]\s*UNKNOWN\s*[）)]/g, "（超时未定）");
+}
+
 /** SolverRun.goal_report 在生成模型里是宽松的 Record，这里收敛成可渲染结构。 */
 export function parseGoalReport(value: unknown): GoalReport | null {
   if (!value || typeof value !== "object") return null;
