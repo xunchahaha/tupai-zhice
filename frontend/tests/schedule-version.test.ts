@@ -1,6 +1,21 @@
 import { describe, expect, it } from "vitest";
 
-import { latestDraftSchedule, preferredSchedule, scheduleForRun } from "@/lib/schedule";
+import { latestDraftSchedule, preferredSchedule, scheduleForRun, versionStatus } from "@/lib/schedule";
+
+describe("versionStatus", () => {
+  it("calls the published version 当前使用中", () => {
+    expect(versionStatus("published")).toEqual({ label: "当前使用中", tone: "green" });
+  });
+  it("calls a draft 草稿", () => {
+    expect(versionStatus("draft")).toEqual({ label: "草稿", tone: "yellow" });
+  });
+  it("calls an archived version 已归档", () => {
+    expect(versionStatus("archived")).toEqual({ label: "已归档", tone: "neutral" });
+  });
+  it("falls back to the generic status label", () => {
+    expect(versionStatus("rolled_back")).toEqual({ label: "已回滚", tone: "neutral" });
+  });
+});
 
 const schedules = [
   { id: "v4", status: "rolled_back" },

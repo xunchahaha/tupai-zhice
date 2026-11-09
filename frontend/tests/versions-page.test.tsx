@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -285,13 +285,14 @@ describe("VersionsPage publishing and hub embedding", () => {
     expect(screen.queryByRole("button", { name: "重新同步发布数据" })).not.toBeInTheDocument();
   });
 
-  it("drops the page header and the process steps when embedded, keeping the toolbar actions", async () => {
+  it("drops the page header, the process steps and the duplicate 查看课表 when embedded, keeping re-sync", async () => {
     renderPage(admin, { embedded: true });
     await screen.findByText("版本记录");
 
     expect(screen.queryByRole("heading", { name: "版本与回滚" })).not.toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "排课流程" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "查看课表" })).toBeVisible();
+    // 课表 tab 和版本卡上的「看课表」已经覆盖回课表，内嵌时不再单独放一个。
+    expect(screen.queryByRole("button", { name: "查看课表" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新同步发布数据" })).toBeVisible();
     // 审计日志随内嵌保留。
     expect(screen.getByText("审计日志")).toBeVisible();
@@ -300,6 +301,7 @@ describe("VersionsPage publishing and hub embedding", () => {
   it("keeps the standalone header by default", async () => {
     renderPage();
     expect(await screen.findByRole("heading", { name: "版本与回滚", level: 1 })).toBeVisible();
+    expect(screen.getByRole("button", { name: "查看课表" })).toBeVisible();
     expect(screen.queryByRole("navigation", { name: "排课流程" })).not.toBeInTheDocument();
   });
 
@@ -343,7 +345,7 @@ describe("VersionsPage publishing and hub embedding", () => {
     const user = userEvent.setup();
     renderPage(admin, { embedded: true, highlightId: "s4" });
 
-    await user.click(await screen.findByRole("button", { name: "查看课表" }));
+    await user.click(await screen.findByRole("button", { name: "查看版本 v4 的课表" }));
 
     expect(location()).toBe("/schedule?version=s4");
   });
@@ -355,5 +357,173 @@ describe("VersionsPage publishing and hub embedding", () => {
     await user.click(await screen.findByRole("button", { name: "查看版本 v3 的课表" }));
 
     expect(location()).toBe("/schedule?version=s3");
+  });
+});
+
+describe("VersionsPage says each fact once", () => {
+  afterEach(cleanup);
+
+  let listed: Array<Record<string, unknown>>;
+  let logs: Array<Record<string, unknown>>;
+  let diff: Record<string, unknown>;
+
+  const diffItem = (index: number, kind = "moved") => ({
+    course_business_id: `COURSE-${index}`,
+    class_business_id: `${index}班`,
+    teacher_business_id: "王老师",
+    before_lesson_date: "2026-11-25",
+    after_lesson_date: "2026-11-24",
+    before_slot_id: "SLOT-周三-1830-2130",
+    after_slot_id: "SLOT-周二-1830-2130",
+    before_room_id: "510教室",
+    after_room_id: "503教室",
+    change_kind: kind,
+  });
+
+  beforeEach(() => {
+    listed = [
+      { ...schedules[0], id: "s1", version_no: 1, name: "郑州校区官方原始课表", status: "archived" },
+      { ...schedules[1], id: "s3", version_no: 3, name: "课表版本 V3", status: "published", parent_id: "s1" },
+      { ...schedules[1], id: "s4", version_no: 4, name: "课表版本 V4", status: "draft", parent_id: "s3" },
+    ];
+    logs = auditLogs;
+    diff = { changed_count: 1, unchanged_count: 4543, items: [diffItem(1)] };
+    mocks.request.mockReset();
+    mocks.success.mockReset();
+    mocks.error.mockReset();
+    mocks.request.mockImplementation(async (config: { url: string; method: string }) => {
+      if (config.method.toUpperCase() !== "GET") return undefined;
+      if (config.url === "/api/v1/schedules") return listed;
+      if (config.url === "/api/v1/audit-logs") return logs;
+      if (config.url.includes("/diff/")) return diff;
+      return {};
+    });
+  });
+
+  it("hides auto-generated version names, keeps custom ones and marks the in-use version once", async () => {
+    renderPage(admin, { embedded: true });
+    await screen.findByText("版本记录");
+
+    expect(screen.queryByText("课表版本 V3")).not.toBeInTheDocument();
+    expect(screen.queryByText("课表版本 V4")).not.toBeInTheDocument();
+    expect(screen.getByText("郑州校区官方原始课表")).toBeVisible();
+    // 版本卡上只剩右上角一个「当前使用中」，不再另挂「当前生效版本」。
+    expect(within(screen.getByTestId("version-card-s3")).getAllByText("当前使用中")).toHaveLength(1);
+    expect(screen.queryByText("当前生效版本")).not.toBeInTheDocument();
+    // 删除是一个图标按钮，名字仍说清删哪个版本。
+    const remove = screen.getByRole("button", { name: "删除版本 v4" });
+    expect(remove).toHaveAttribute("title", "删除");
+    expect(remove).not.toHaveTextContent("删除");
+  });
+
+  it("keeps the sync note to one line for managers and shows non-managers no permission cards", async () => {
+    renderPage(admin, { embedded: true });
+    expect(await screen.findByText(/发布或回滚后会自动同步到已启用的外部集成；同步失败不影响本地版本/)).toBeVisible();
+
+    cleanup();
+    renderPage(viewer, { embedded: true });
+    await screen.findByText("版本记录");
+    expect(screen.queryByText(/自动同步到已启用的外部集成/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/变更操作仅由具备相应权限的账号执行/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/审计日志仅管理员可见/)).not.toBeInTheDocument();
+    expect(screen.queryByText("审计日志")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重新同步发布数据" })).not.toBeInTheDocument();
+  });
+
+  it("only offers diff search and type filter for more than 20 changes", async () => {
+    const user = userEvent.setup();
+    renderPage(admin, { embedded: true, highlightId: "s4" });
+    expect(await screen.findByText(/^变更:/)).toBeInTheDocument();
+    await screen.findByText("1班");
+    expect(screen.queryByRole("textbox", { name: "搜索差异" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "变更类型" })).not.toBeInTheDocument();
+
+    cleanup();
+    diff = { changed_count: 21, unchanged_count: 4523, items: Array.from({ length: 21 }, (_, index) => diffItem(index + 1, index === 0 ? "room_changed" : "moved")) };
+    renderPage(admin, { embedded: true, highlightId: "s4" });
+    const search = await screen.findByRole("textbox", { name: "搜索差异" });
+    expect(screen.queryByText(/条差异/)).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByRole("combobox", { name: "变更类型" }), "room_changed");
+    expect(screen.getByText("共 1 条差异")).toBeVisible();
+    expect(search).toBeVisible();
+  });
+
+  it("says one line per audit entry, shows a failure on its own in red and keeps the raw record collapsed", async () => {
+    logs = [
+      {
+        id: "log-sync",
+        action: "sync",
+        resource_type: "feishu",
+        resource_id: "ec777cc9-4eac-46a9-9099-4ff07f3e6fe9",
+        user_id: "admin-id",
+        detail: { trigger: "version_publish", retry_count: 0, error: "飞书令牌密文校验失败，请重新授权" },
+        created_at: "2026-11-09T13:03:00Z",
+      },
+      {
+        id: "log-context",
+        action: "update_context",
+        resource_type: "solve_goal",
+        resource_id: "2e60acb7-4026-47a0-862f-b86a3a71e0a6",
+        user_id: "admin-id",
+        detail: { scope: { date_from: "2026-11-23", date_to: "2026-11-29" }, task_constraint_rule_ids: ["TASK-2e60acb7-forbidden_slot_free-1"] },
+        created_at: "2026-11-09T13:04:00Z",
+      },
+    ];
+    renderPage(admin, { embedded: true });
+
+    expect(await screen.findByText("发布后同步")).toBeVisible();
+    const failure = screen.getByText("飞书令牌密文校验失败，请重新授权");
+    expect(failure).toBeVisible();
+    expect(failure).toHaveClass("text-red-700");
+    expect(screen.getByText("范围 2026-11-23 ~ 2026-11-29 · 1 条本次要求")).toBeVisible();
+    expect(screen.getByText("更新任务范围")).toBeVisible();
+    expect(screen.getByText("排课任务")).toBeVisible();
+    // 资源列只显示首尾片段，完整 ID 可复制。
+    expect(screen.getByRole("button", { name: "复制完整 ID 2e60acb7-4026-47a0-862f-b86a3a71e0a6" })).toBeInTheDocument();
+    // 原始 JSON 收进默认收起的「原始记录」里。
+    expect(screen.getAllByText("原始记录")).toHaveLength(2);
+    expect(screen.getByText(/"task_constraint_rule_ids"/)).not.toBeVisible();
+    expect(screen.queryByText("update_context")).not.toBeInTheDocument();
+  });
+
+  it("keeps calendar conflicts and dropped import rows visible next to the summary, with Chinese action names", async () => {
+    logs = [
+      {
+        id: "log-calendar",
+        action: "calendar_publish",
+        resource_type: "schedule",
+        resource_id: "s4",
+        user_id: "admin-id",
+        detail: { published: 12, conflicts: 2 },
+        created_at: "2026-11-09T13:03:00Z",
+      },
+      {
+        id: "log-import",
+        action: "import_xlsx",
+        resource_type: "workbook",
+        resource_id: "排课.xlsx",
+        user_id: "admin-id",
+        detail: { rows_total: 30, rows_dropped_placeholder_room: 4, course_sessions_created: 26 },
+        created_at: "2026-11-09T13:04:00Z",
+      },
+      {
+        id: "log-delete",
+        action: "batch_delete",
+        resource_type: "teacher",
+        resource_id: null,
+        user_id: "admin-id",
+        detail: { count: 500 },
+        created_at: "2026-11-09T13:05:00Z",
+      },
+    ];
+    renderPage(admin, { embedded: true });
+
+    expect(await screen.findByText("下发 12 条")).toBeVisible();
+    expect(screen.getByText("冲突 2 条")).toHaveClass("text-amber-700");
+    expect(screen.getByText("新建 26 课次")).toBeVisible();
+    expect(screen.getByText("整行丢弃 4 行（占位教室）")).toHaveClass("text-amber-700");
+    expect(screen.getByText("删除 500 条")).toBeVisible();
+    for (const label of ["下发日历", "导入工作簿", "批量删除"]) expect(screen.getByText(label)).toBeVisible();
+    for (const code of ["calendar_publish", "import_xlsx", "batch_delete"]) expect(screen.queryByText(code)).not.toBeInTheDocument();
   });
 });

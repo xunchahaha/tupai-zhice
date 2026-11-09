@@ -46,7 +46,7 @@ async function login(page: Page) {
   await page.waitForURL("**/assistant");
 }
 
-// 页头「排课流程」里也有一个同名的「课表」链接，侧栏入口必须限定在主导航内。
+// 侧栏定位器限定在主导航内。
 const sidebar = (page: Page) => page.getByRole("navigation", { name: "主导航" });
 
 test.beforeEach(async () => {

@@ -11,10 +11,11 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
 import { asArray, datetime, errorMessage } from "@/lib/format";
+import { distinctNameLabel, formatSlotLabel } from "@/lib/humanize";
 import { eventTypeLabel, statusLabel } from "@/lib/labels";
 import { rescheduleImpact, rescheduleOutcome } from "@/lib/reschedule";
 import { schedulePath } from "@/lib/routes";
-import { preferredSchedule } from "@/lib/schedule";
+import { preferredSchedule, versionStatus } from "@/lib/schedule";
 import { statusTone } from "@/lib/status";
 
 type EventType = "teacher_leave" | "room_outage" | "extra_class";
@@ -70,7 +71,7 @@ const LESSON_PROBLEM_TEXT: Record<LessonProblem["kind"], string> = {
 export interface ReschedulePageProps {
   /** 并入课表页时不再渲染自己的页头；默认 false 保持独立页面行为。 */
   embedded?: boolean;
-  /** 课表页头部所选版本，作为「父课表」的默认值（表单里仍可改）。 */
+  /** 课表页头部所选版本，作为「基于版本」的默认值（登记事件时表单里仍可改）。 */
   parentScheduleId?: string;
   prefill?: ReschedulePrefill;
   /** 链接声明了课次但没定位成功；有它且用户没取消限定时，表单处于「待定位」状态（不可提交）。 */
@@ -141,6 +142,9 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill, le
   const scheduleList = Array.isArray(schedules.data) ? schedules.data : [];
   const teacherList = Array.isArray(teachers.data) ? teachers.data : [];
   const roomList = Array.isArray(rooms.data) ? rooms.data : [];
+  // 同名教师、同号教室（不同校区）在下拉里补编号区分；value 不变。
+  const teacherLabel = distinctNameLabel(teacherList);
+  const roomLabel = distinctNameLabel(roomList);
   const slotList = Array.isArray(slots.data) ? slots.data : [];
   const eventList = Array.isArray(events.data) ? events.data : [];
   // 刚创建的事件以列表里的最新状态为准（后台求解完成后候选编号才会出现），列表还没带上时用创建响应兜底。
@@ -153,7 +157,9 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill, le
   const impact = impactWanted && Array.isArray(parentAssignments)
     ? rescheduleImpact(parentAssignments as AssignmentResponse[], { eventType, teacherId: effectiveTeacher, roomId: effectiveRoom, slotId: effectiveSlot })
     : null;
-  const slotText = (id: string) => { const item = slotList.find((entry) => entry.business_id === id); return item ? `${item.weekday} ${item.start_time}` : id; };
+  const slotText = (id: string) => formatSlotLabel(slotList.find((entry) => entry.business_id === id) ?? { business_id: id });
+  const lockedVersion = lockedParent ? scheduleList.find((item) => item.id === lockedParent) : undefined;
+  const subjectWord = eventType === "teacher_leave" ? "教师" : "教室";
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -164,15 +170,36 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill, le
             <CalendarPlus className="size-4 text-blue-600" />
             <h2 className="font-semibold">创建变更事件</h2>
           </div>
+          {/* 待定位告警放在表单最上面：定位好之前不能提交，必须先被看到。 */}
+          {awaitingLesson && lessonProblem ? (
+            <div role="alert" className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">
+              <p>{LESSON_PROBLEM_TEXT[lessonProblem.kind]}</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {lessonProblem.retry ? <Button size="sm" variant="outline" onClick={lessonProblem.retry}>重试</Button> : null}
+                <Button size="sm" variant="outline" onClick={() => setDismissedLesson(lessonProblem.lessonId)}>取消单课限定，改为登记事件</Button>
+              </div>
+            </div>
+          ) : null}
+          <label className="mt-4 block text-sm">
+            事件类型
+            <Select
+              aria-label="事件类型"
+              selectSize="md"
+              containerClassName="mt-1.5"
+              value={eventType}
+              onChange={(event) => setEventType(event.target.value as EventType)}
+            >
+              <option value="teacher_leave">教师请假</option>
+              <option value="room_outage">教室停用</option>
+              <option value="extra_class">临时加课</option>
+            </Select>
+          </label>
           {prefill && eventType !== "extra_class" ? (
             <fieldset className="mt-3 space-y-2 rounded-md border border-blue-100 bg-blue-50/60 px-3 py-2.5 text-xs leading-5 text-blue-900">
               <legend className="px-1 text-xs font-medium text-blue-800">调整范围</legend>
               <label className="flex items-start gap-2">
                 <input type="radio" name="reschedule-scope" className="mt-1" checked={scope === "lesson"} onChange={() => setScope("lesson")} />
-                <span>
-                  <span className="font-medium">只调整这一节课</span>
-                  <span className="block text-blue-800/80">已按所选课次带入：{prefill.label}。其余课次保持不动。</span>
-                </span>
+                <span className="font-medium">只调整这一节课（其余课次不动）</span>
               </label>
               {scope === "lesson" ? (
                 <div className="ml-6 space-y-1.5 border-l-2 border-blue-200 pl-3 text-zinc-700">
@@ -194,75 +221,55 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill, le
                       />
                       天内的课次可以被挪动，系统仍会尽量少改。
                     </label>
-                  ) : (
-                    <p className="text-zinc-500">不勾选时，其他课次只作为固定占用，不会被改动。</p>
-                  )}
+                  ) : null}
                 </div>
               ) : null}
               <label className="flex items-start gap-2">
                 <input type="radio" name="reschedule-scope" className="mt-1" checked={scope === "event"} onChange={() => setScope("event")} />
                 <span>
                   <span className="font-medium">登记为{eventType === "teacher_leave" ? "教师请假" : "教室停用"}事件</span>
-                  <span className="block text-blue-800/80">{eventType === "teacher_leave" ? "该教师" : "该教室"}在这份课表里的课次都会进入调整范围，不限于所选这一节。</span>
+                  <span className="block text-zinc-500">该{subjectWord}在本课表的全部课次都参与调整</span>
                 </span>
               </label>
             </fieldset>
           ) : null}
-          {awaitingLesson && lessonProblem ? (
-            <div role="alert" className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">
-              <p>{LESSON_PROBLEM_TEXT[lessonProblem.kind]}</p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {lessonProblem.retry ? <Button size="sm" variant="outline" onClick={lessonProblem.retry}>重试</Button> : null}
-                <Button size="sm" variant="outline" onClick={() => setDismissedLesson(lessonProblem.lessonId)}>取消单课限定，改为登记事件</Button>
-              </div>
-            </div>
-          ) : null}
-          <label className="mt-5 block text-sm">
-            事件类型
-            <Select
-              aria-label="事件类型"
-              selectSize="md"
-              containerClassName="mt-1.5"
-              value={eventType}
-              onChange={(event) => setEventType(event.target.value as EventType)}
-            >
-              <option value="teacher_leave">教师请假</option>
-              <option value="room_outage">教室停用</option>
-              <option value="extra_class">临时加课</option>
-            </Select>
-          </label>
-          <label className="mt-4 block text-sm">
-            父课表
-            <Select
-              aria-label="父课表"
-              selectSize="md"
-              containerClassName="mt-1.5"
-              value={effectiveParent}
-              disabled={Boolean(lockedParent)}
-              onChange={(event) => setParent(event.target.value)}
-            >
-              {scheduleList.map((item) => (
-                <option key={item.id} value={item.id}>
-                  v{item.version_no} / {statusLabel(item.status)}
-                </option>
-              ))}
-            </Select>
-          </label>
-          {lessonMode && lockedParent ? (
-            <p className="mt-1.5 text-xs text-zinc-500">课次身份只在选中它时看的这一版里成立，调整基准固定为这一版。</p>
-          ) : null}
           {lessonMode ? (
-            <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs" aria-label="所选课次">
+            <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs" aria-label="所选课次">
               <dt className="text-zinc-500">课次</dt>
               <dd className="text-zinc-800">{prefill?.label}</dd>
               {prefill?.lessonDate ? <dt className="text-zinc-500">日期</dt> : null}
               {prefill?.lessonDate ? <dd className="text-zinc-800">{prefill.lessonDate}</dd> : null}
-              <dt className="text-zinc-500">{eventType === "teacher_leave" ? "教师" : "教室"}</dt>
+              <dt className="text-zinc-500">{subjectWord}</dt>
               <dd className="text-zinc-800">{subjectName}</dd>
               {effectiveSlot ? <dt className="text-zinc-500">时段</dt> : null}
               {effectiveSlot ? <dd className="text-zinc-800">{slotText(effectiveSlot)}</dd> : null}
+              {lockedParent ? <dt className="text-zinc-500">基于版本</dt> : null}
+              {lockedParent ? (
+                <dd className="text-zinc-800">
+                  {lockedVersion ? `v${lockedVersion.version_no} / ${versionStatus(lockedVersion.status).label}` : "所选版本"}
+                </dd>
+              ) : null}
             </dl>
           ) : null}
+          {/* 单课模式下依据锁在选课时看的那一版，已写进上面的事实卡；其余情况照常选择。 */}
+          {lessonMode && lockedParent ? null : (
+            <label className="mt-4 block text-sm">
+              基于版本
+              <Select
+                aria-label="基于版本"
+                selectSize="md"
+                containerClassName="mt-1.5"
+                value={effectiveParent}
+                onChange={(event) => setParent(event.target.value)}
+              >
+                {scheduleList.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    v{item.version_no} / {versionStatus(item.status).label}
+                  </option>
+                ))}
+              </Select>
+            </label>
+          )}
           {eventFields && eventType === "teacher_leave" ? (
             <label className="mt-4 block text-sm">
               教师
@@ -274,8 +281,8 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill, le
                 onChange={(event) => setTeacher(event.target.value)}
               >
                 {teacherList.map((item) => (
-                  <option key={item.id} value={item.business_id}>
-                    {item.business_id} / {item.name}
+                  <option key={item.id} value={item.business_id} title={item.business_id}>
+                    {teacherLabel(item)}
                   </option>
                 ))}
               </Select>
@@ -292,8 +299,8 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill, le
                 onChange={(event) => setRoom(event.target.value)}
               >
                 {roomList.map((item) => (
-                  <option key={item.id} value={item.business_id}>
-                    {item.business_id} / {item.name}
+                  <option key={item.id} value={item.business_id} title={item.business_id}>
+                    {roomLabel(item)}
                   </option>
                 ))}
               </Select>
@@ -311,7 +318,7 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill, le
             >
               {slotList.map((item) => (
                 <option key={item.id} value={item.business_id}>
-                  {item.business_id} / {item.weekday} {item.start_time}
+                  {formatSlotLabel(item)}
                 </option>
               ))}
             </Select>
@@ -325,8 +332,9 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill, le
           ) : null}
           <label className="mt-4 block text-sm">
             说明
-            <textarea
-              className="mt-1.5 min-h-20 w-full rounded-md border border-zinc-300 p-2"
+            <input
+              className="mt-1.5 h-9 w-full rounded-md border border-zinc-300 px-2 text-sm"
+              placeholder="选填，例如：王老师出差"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
             />
@@ -418,8 +426,8 @@ export function ReschedulePage({ embedded = false, parentScheduleId, prefill, le
                       ) : null}
                     </div>
                     <p className="mt-1 text-sm text-zinc-600">{event.description}</p>
-                    <div className="mt-2 font-mono text-[11px] text-zinc-400">
-                      {event.id.slice(0, 8)} / {datetime(event.created_at)}
+                    <div className="mt-2 text-[11px] text-zinc-400" title={event.id}>
+                      {datetime(event.created_at)}
                     </div>
                   </div>
                 </div>

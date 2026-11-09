@@ -130,8 +130,11 @@ describe("SchedulePage hub", () => {
 
       expect(await screen.findByRole("heading", { name: "课表", level: 1 })).toBeVisible();
       // 默认落在当前使用中的已发布版本。
-      expect(await screen.findByTestId("version-status")).toHaveTextContent("当前使用中");
+      expect(await screen.findByRole("combobox", { name: "课表版本" })).toHaveDisplayValue(/当前使用中/);
       expect(screen.getByRole("combobox", { name: "课表版本" })).toHaveValue("s1");
+      // 版本状态只由下拉表达，页头不再另挂一个同义徽标，也没有和左栏重复的步骤条。
+      expect(screen.queryByTestId("version-status")).not.toBeInTheDocument();
+      expect(screen.queryByRole("navigation", { name: "排课流程" })).not.toBeInTheDocument();
     });
 
     it("switches the status label with the version and shows the draft banner", async () => {
@@ -141,14 +144,14 @@ describe("SchedulePage hub", () => {
 
       await user.selectOptions(screen.getByRole("combobox", { name: "课表版本" }), "s2");
 
-      expect(screen.getByTestId("version-status")).toHaveTextContent("草稿");
+      expect(screen.getByRole("combobox", { name: "课表版本" })).toHaveDisplayValue(/草稿/);
       expect(search().get("version")).toBe("s2");
       expect(screen.getByText(/它还没有生效，也不会对外分享或下发/)).toBeVisible();
     });
 
     it("preselects the version from ?version= and ignores unknown ids", async () => {
       renderPage("/schedule?version=s2");
-      expect(await screen.findByTestId("version-status")).toHaveTextContent("草稿");
+      expect(await screen.findByRole("combobox", { name: "课表版本" })).toHaveDisplayValue(/草稿/);
       expect(screen.getByRole("combobox", { name: "课表版本" })).toHaveValue("s2");
       await waitFor(() =>
         expect(mocks.request).toHaveBeenCalledWith(expect.objectContaining({ url: "/api/v1/schedules/s2", method: "GET" })),
@@ -156,7 +159,7 @@ describe("SchedulePage hub", () => {
 
       cleanup();
       renderPage("/schedule?version=missing");
-      expect(await screen.findByTestId("version-status")).toHaveTextContent("当前使用中");
+      expect(await screen.findByRole("combobox", { name: "课表版本" })).toHaveDisplayValue(/当前使用中/);
       expect(screen.getByRole("combobox", { name: "课表版本" })).toHaveValue("s1");
     });
 
@@ -328,14 +331,14 @@ describe("SchedulePage hub", () => {
       expect(await screen.findByText("创建变更事件")).toBeVisible();
       expect(search().get("view")).toBe("adjust");
       expect(search().get("lesson")).toBe("COURSE-2");
-      expect(screen.getByText(/已按所选课次带入：B班 10月15日 周四上午/)).toBeVisible();
-      // 选中课次的调整对象是一节具体的课：教师、日期、时段是事实，不再是可随手改的表单项。
+      // 选中课次的调整对象是一节具体的课：班级、教师、日期、时段和依据的版本都是事实，不再是可随手改的表单项。
       const facts = screen.getByLabelText("所选课次");
+      expect(facts).toHaveTextContent("B班 10月15日 周四上午");
       expect(facts).toHaveTextContent("2026-10-15");
       expect(facts).toHaveTextContent("李老师");
+      expect(facts).toHaveTextContent("v1");
       expect(screen.queryByRole("combobox", { name: "教师" })).not.toBeInTheDocument();
-      expect(screen.getByRole("combobox", { name: "父课表" })).toHaveValue("s1");
-      expect(screen.getByRole("combobox", { name: "父课表" })).toBeDisabled();
+      expect(screen.queryByRole("combobox", { name: "基于版本" })).not.toBeInTheDocument();
 
       await user.click(screen.getByRole("button", { name: "生成候选方案" }));
       await waitFor(() =>
@@ -468,6 +471,28 @@ describe("SchedulePage hub", () => {
       expect(bar).toHaveTextContent("只读成员可以查看课次，不能调整");
     });
 
+    it("keeps the toolbar to one line: object names only, the count as its own element, and a list/week switch", async () => {
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByTestId("lesson-card-COURSE-1");
+
+      // e2e 依赖「已安排: N 节课次」是一个独立元素。
+      expect(
+        screen.getByText((_, element) => element?.tagName === "SPAN" && /^已安排:\s*1\s*节课次$/.test(element.textContent ?? "")),
+      ).toBeVisible();
+      expect(screen.getByRole("option", { name: "A班" })).toBeInTheDocument();
+      expect(screen.queryByRole("option", { name: /CLASS-A/ })).not.toBeInTheDocument();
+      expect(screen.queryByText(/视图模式/)).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: "周历" }));
+      const card = screen.getByTestId("lesson-card-COURSE-1");
+      expect(card).toHaveTextContent("数学");
+      expect(card).not.toHaveAttribute("title");
+      // 只有一周时只显示周次文字，没有翻周按钮。
+      expect(screen.getByText(/全课程周 · 10月12日/)).toBeVisible();
+      expect(screen.queryByRole("button", { name: "上一周" })).not.toBeInTheDocument();
+    });
+
     it("selects a lesson from the keyboard", async () => {
       const user = userEvent.setup();
       renderPage();
@@ -491,7 +516,7 @@ describe("SchedulePage hub", () => {
       expect(location()).toBe("/schedule?view=history&version=s2");
       await screen.findByText("版本记录");
       expect(screen.getByRole("tab", { name: "历史版本" })).toHaveAttribute("aria-selected", "true");
-      expect(screen.getByTestId("version-status")).toHaveTextContent("草稿");
+      expect(screen.getByRole("combobox", { name: "课表版本" })).toHaveDisplayValue(/草稿/);
       expect(screen.getByTestId("version-card-s2")).toHaveAttribute("data-selected", "true");
       expect(screen.getByTestId("version-card-s1")).not.toHaveAttribute("data-selected");
       // 新草稿默认拿它和来源版本对比。
@@ -504,7 +529,7 @@ describe("SchedulePage hub", () => {
       renderPage("/schedule?view=history&version=s2");
       await screen.findByText("版本记录");
 
-      await user.click(screen.getByRole("button", { name: "查看课表" }));
+      await user.click(screen.getByRole("button", { name: "查看版本 v2 的课表" }));
 
       expect(location()).toBe("/schedule?version=s2");
       expect(await screen.findByTestId("lesson-card-COURSE-1")).toBeVisible();

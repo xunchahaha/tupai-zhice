@@ -1,3 +1,13 @@
+import { statusLabel } from "@/lib/labels";
+
+/** 版本状态的统一叫法：课表页头、版本卡、对比下拉、调课表单都用它，同一个版本在各处叫法一致。 */
+export function versionStatus(status?: string | null): { label: string; tone: "green" | "yellow" | "neutral" } {
+  if (status === "published") return { label: "当前使用中", tone: "green" };
+  if (status === "draft") return { label: "草稿", tone: "yellow" };
+  if (status === "archived") return { label: "已归档", tone: "neutral" };
+  return { label: statusLabel(status), tone: "neutral" };
+}
+
 export type ScheduleCandidate = {
   id: string;
   status: string;

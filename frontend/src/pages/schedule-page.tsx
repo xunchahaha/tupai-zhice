@@ -12,13 +12,13 @@ import {
   GraduationCap,
   History,
   LayoutGrid,
+  LoaderCircle,
   Printer,
   Share2,
   SlidersHorizontal,
   Sparkles,
   User,
   Users,
-  Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -45,27 +45,26 @@ import type {
 import { http } from "@/api/http";
 import { canPublishCurrentSet, canScheduleCurrentSet, isReadOnlyMember, useAppUser, useScheduleAccessRole } from "@/app/user-context";
 import { CalendarDispatchPanel } from "@/components/calendar-dispatch-panel";
-import { Badge, type BadgeTone } from "@/components/ui/badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { ErrorState, LoadingState, PageHeader } from "@/components/page";
-import { SopSteps } from "@/components/sop-steps";
 import { PublicLinksPage } from "@/pages/public-links-page";
 import { type LessonProblem, ReschedulePage, type ReschedulePrefill } from "@/pages/reschedule-page";
 import { VersionsPage } from "@/pages/versions-page";
 import { asArray, errorMessage, formatRoom, formatSlot } from "@/lib/format";
-import { statusLabel } from "@/lib/labels";
+import { distinctNameLabel } from "@/lib/humanize";
 import { SCHEDULE_VIEW_LABELS, SCHEDULE_VIEWS, assistantPath, parseScheduleView, type ScheduleView } from "@/lib/routes";
-import { preferredSchedule } from "@/lib/schedule";
+import { preferredSchedule, versionStatus } from "@/lib/schedule";
 import { cn } from "@/lib/cn";
 
 type ViewMode = "class" | "teacher" | "room";
 type LayoutStyle = "timeline" | "matrix";
 
 const MODES: Array<{ value: ViewMode; label: string; icon: typeof Users }> = [
-  { value: "class", label: "班级课表", icon: Users },
-  { value: "teacher", label: "教师课表", icon: GraduationCap },
-  { value: "room", label: "教室课表", icon: DoorOpen },
+  { value: "class", label: "班级", icon: Users },
+  { value: "teacher", label: "教师", icon: GraduationCap },
+  { value: "room", label: "教室", icon: DoorOpen },
 ];
 
 function clockRows(slots: TimeSlotResponse[]): Array<{ key: string; start: string; end: string }> {
@@ -140,14 +139,6 @@ const VIEW_ICONS: Record<ScheduleView, typeof Users> = {
   history: History,
   share: Share2,
 };
-
-/** 头部与选项里统一的版本状态口径：草稿 / 当前使用中 / 已归档。 */
-function versionBadge(status?: string | null): { label: string; tone: BadgeTone } {
-  if (status === "published") return { label: "当前使用中", tone: "green" };
-  if (status === "draft") return { label: "草稿", tone: "yellow" };
-  if (status === "archived") return { label: "已归档", tone: "neutral" };
-  return { label: statusLabel(status), tone: "neutral" };
-}
 
 function periodOfDay(startTime?: string): string {
   const hour = Number((startTime ?? "").split(":")[0]);
@@ -345,7 +336,7 @@ export function SchedulePage() {
       const isFirst = idx === 0;
       const isLast = idx === mondays.length - 1;
 
-      let tag = `第 ${idx + 1} 阶段`;
+      let tag = `第 ${idx + 1} 周`;
       if (isFirst && isLast) tag = "全课程周";
       else if (isFirst) tag = "开营首周";
       else if (isLast) tag = "结课尾周";
@@ -421,6 +412,8 @@ export function SchedulePage() {
   const options =
     mode === "class" ? asArray<ClassGroupResponse>(classes.data) : mode === "teacher" ? asArray<TeacherResponse>(teachers.data) : asArray<RoomResponse>(rooms.data);
   const currentSubjectObj = options.find((item) => item.business_id === subject);
+  // 同名对象（不同校区的同号教室、同名教师）在下拉里补编号区分。
+  const optionLabel = distinctNameLabel<{ name: string; business_id: string }>(options);
 
   const selectedLesson = selectedAssignment
     ? describeLesson(selectedAssignment, {
@@ -500,8 +493,6 @@ export function SchedulePage() {
     gridTemplateColumns: `80px repeat(7, minmax(0, 1fr))`,
   };
 
-  const selectedBadge = selectedSummary ? versionBadge(selectedSummary.status) : undefined;
-
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
     event.preventDefault();
@@ -526,15 +517,10 @@ export function SchedulePage() {
             >
               {scheduleList.map((item) => (
                 <option key={item.id} value={item.id}>
-                  v{item.version_no} / {versionBadge(item.status).label}
+                  v{item.version_no} / {versionStatus(item.status).label}
                 </option>
               ))}
             </Select>
-            {selectedBadge ? (
-              <Badge tone={selectedBadge.tone} data-testid="version-status">
-                {selectedBadge.label}
-              </Badge>
-            ) : null}
             <Button size="sm" variant="outline" onClick={download} disabled={!selectedSummary}>
               <Download className="size-3.5" />
               导出 XLSX
@@ -547,9 +533,7 @@ export function SchedulePage() {
             ) : null}
           </div>
         }
-      >
-        <SopSteps />
-      </PageHeader>
+      />
 
       {/* 四个视图共用同一张所选课表：看课、选课、调课、发布和分发都围绕它。 */}
       <div
@@ -599,17 +583,17 @@ export function SchedulePage() {
 
         {view === "schedule" ? (
           <>
-            {/* View Mode Switcher and Subject Select Bar（交互工具栏，print 隐藏） */}
-            <section className="flex flex-col gap-3.5 rounded-xl border border-zinc-200 bg-white p-4 shadow-2xs print:hidden">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                {/* View Category: Class / Teacher / Room */}
-                <div className="flex items-center gap-1.5 rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-1">
+            {/* 一行工具条：看谁的课表（班级/教师/教室 + 对象）· 统计 · 列表/周历（交互层，print 隐藏，打印时看页脚）。 */}
+            <section className="flex flex-wrap items-center gap-x-4 gap-y-2.5 rounded-xl border border-zinc-200 bg-white p-3 shadow-2xs print:hidden">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1 rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-1">
                   {MODES.map(({ value, label, icon: Icon }) => (
                     <button
                       key={value}
                       type="button"
+                      aria-pressed={mode === value}
                       className={cn(
-                        "flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-xs font-medium transition-all duration-150",
+                        "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-all duration-150",
                         mode === value
                           ? "bg-white text-zinc-900 shadow-2xs border border-zinc-200/60"
                           : "text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100/60",
@@ -621,72 +605,63 @@ export function SchedulePage() {
                     </button>
                   ))}
                 </div>
-
-                {/* Layout Style Toggle: Timeline (All Courses) vs Matrix (Standard Week Calendar) */}
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-zinc-400 font-medium">视图模式:</span>
-                  <div className="flex items-center rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-0.5">
-                    <button
-                      type="button"
-                      className={cn(
-                        "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-all",
-                        layout === "timeline"
-                          ? "bg-white text-blue-700 shadow-2xs font-semibold"
-                          : "text-zinc-600 hover:text-zinc-900",
-                      )}
-                      onClick={() => setLayout("timeline")}
-                    >
-                      <CalendarCheck2 className="size-3.5" />
-                      全部课次流 (全景直观)
-                    </button>
-                    <button
-                      type="button"
-                      className={cn(
-                        "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-all",
-                        layout === "matrix"
-                          ? "bg-white text-blue-700 shadow-2xs font-semibold"
-                          : "text-zinc-600 hover:text-zinc-900",
-                      )}
-                      onClick={() => setLayout("matrix")}
-                    >
-                      <LayoutGrid className="size-3.5" />
-                      标准周历矩阵 (首尾周切换)
-                    </button>
-                  </div>
-                </div>
+                <Select
+                  aria-label="排课对象"
+                  selectSize="sm"
+                  containerClassName="w-56"
+                  value={subject}
+                  onChange={(event) => setSubject(event.target.value)}
+                >
+                  {options.map((item) => (
+                    <option key={item.id} value={item.business_id} title={item.business_id}>
+                      {optionLabel(item)}
+                    </option>
+                  ))}
+                </Select>
               </div>
 
-              {/* Target Subject Selector */}
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-100 pt-3 text-xs">
-                <div className="flex items-center gap-2">
-                  <span className="text-zinc-500 font-medium">
-                    选择{mode === "class" ? "班级" : mode === "teacher" ? "教师" : "教室"}:
+              <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-500">
+                <span>
+                  已安排: <strong className="font-semibold text-zinc-900">{filtered.length}</strong> 节课次
+                </span>
+                {activeWeeks.length > 0 ? <span>共 {activeWeeks.length} 周</span> : null}
+                {detail.isFetching ? (
+                  <span className="inline-flex items-center gap-1 text-zinc-400">
+                    <LoaderCircle className="size-3 animate-spin" />
+                    更新中
                   </span>
-                  <Select
-                    aria-label="排课对象"
-                    selectSize="sm"
-                    containerClassName="w-72"
-                    value={subject}
-                    onChange={(event) => setSubject(event.target.value)}
-                  >
-                    {options.map((item) => (
-                      <option key={item.id} value={item.business_id}>
-                        {item.name} {item.business_id !== item.name ? `(${item.business_id})` : ""}
-                      </option>
-                    ))}
-                  </Select>
-                </div>
+                ) : null}
+              </div>
 
-                <div className="flex items-center gap-3 text-zinc-500">
-                  <span>
-                    已安排: <strong className="font-semibold text-zinc-900">{filtered.length}</strong> 节课次
-                  </span>
-                  {activeWeeks.length > 0 && (
-                    <span>
-                      涵盖: <strong className="font-semibold text-zinc-900">{activeWeeks.length}</strong> 个有课周阶段
-                    </span>
+              <div className="ml-auto flex items-center rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-0.5" role="group" aria-label="排列方式">
+                <button
+                  type="button"
+                  aria-pressed={layout === "timeline"}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-all",
+                    layout === "timeline"
+                      ? "bg-white text-blue-700 shadow-2xs font-semibold"
+                      : "text-zinc-600 hover:text-zinc-900",
                   )}
-                </div>
+                  onClick={() => setLayout("timeline")}
+                >
+                  <CalendarCheck2 className="size-3.5" />
+                  列表
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={layout === "matrix"}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-all",
+                    layout === "matrix"
+                      ? "bg-white text-blue-700 shadow-2xs font-semibold"
+                      : "text-zinc-600 hover:text-zinc-900",
+                  )}
+                  onClick={() => setLayout("matrix")}
+                >
+                  <LayoutGrid className="size-3.5" />
+                  周历
+                </button>
               </div>
             </section>
 
@@ -762,10 +737,10 @@ export function SchedulePage() {
                       {/* Agenda List View */}
                       <div className="mt-4 space-y-3">
                         {group.items.map((item) => {
-                          const globalIndex = sortedAssignments.indexOf(item);
-                          const isFirst = globalIndex === 0;
-                          const isLast = globalIndex === sortedAssignments.length - 1;
-                          const weekday = item.lesson_date ? formatWeekday(item.lesson_date) : "";
+                          // 没有具体日期的课次（按周循环）显示时段自带的周几，不再输出空括号占位。
+                          const weekday = item.lesson_date
+                            ? formatWeekday(item.lesson_date)
+                            : (slotRows.find((entry) => entry.business_id === item.slot_business_id)?.weekday ?? "");
                           const timeRange = getSlotTimeRange(slotRows, item.slot_business_id);
                           const cs = item.course ?? courseMap.get(item.course_business_id);
                           const courseName = cs?.subject || cs?.lesson_name || "课程课次";
@@ -776,31 +751,17 @@ export function SchedulePage() {
                               {...lessonCardProps(item)}
                               className={cn(
                                 "flex flex-col md:flex-row md:items-center justify-between gap-3.5 rounded-xl border p-4 transition-all duration-150 hover:shadow-xs",
-                                isFirst
-                                  ? "border-emerald-300 bg-emerald-50/40"
-                                  : isLast
-                                    ? "border-purple-300 bg-purple-50/40"
-                                    : "border-zinc-200/80 bg-zinc-50/40 hover:bg-white hover:border-zinc-300",
+                                "border-zinc-200/80 bg-zinc-50/40 hover:bg-white hover:border-zinc-300",
                                 lessonCardClass(item),
                               )}
                             >
-                              {/* 1. Date & Calendar Tag */}
-                              <div className="flex items-center gap-3 md:min-w-[190px]">
-                                <div className="grid size-12 place-items-center rounded-xl bg-white border border-zinc-200 text-center shadow-2xs shrink-0">
-                                  <div className="text-[10px] font-semibold text-blue-600 leading-none">
-                                    {weekday || "排课"}
-                                  </div>
-                                  <div className="text-xs font-bold text-zinc-900 leading-none mt-1">
-                                    {item.lesson_date ? item.lesson_date.slice(5) : "循环"}
-                                  </div>
-                                </div>
+                              {/* 1. 日期：方块里一次说清周几和月-日 */}
+                              <div className="grid size-12 shrink-0 place-items-center rounded-xl border border-zinc-200 bg-white text-center shadow-2xs">
                                 <div>
-                                  <div className="flex items-center gap-2">
-                                    <span className="font-bold text-sm text-zinc-900">
-                                      {item.lesson_date ?? "时段循环"}
-                                    </span>
-                                    <span className="text-xs font-semibold text-blue-600">({weekday})</span>
-                                  </div>
+                                  <div className="text-[10px] font-semibold leading-none text-blue-600">{weekday || "-"}</div>
+                                  {item.lesson_date ? (
+                                    <div className="mt-1 text-xs font-bold leading-none text-zinc-900">{item.lesson_date.slice(5)}</div>
+                                  ) : null}
                                 </div>
                               </div>
 
@@ -824,10 +785,7 @@ export function SchedulePage() {
                               {/* 3. Explicit Time Range Badge */}
                               <div className="flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50/80 px-3 py-2 text-blue-950 md:min-w-[160px]">
                                 <Clock className="size-4 text-blue-600 shrink-0" />
-                                <div>
-                                  <div className="text-xs font-bold tracking-tight">{timeRange}</div>
-                                  <div className="text-[10px] text-blue-600 font-medium">标准授课时段</div>
-                                </div>
+                                <div className="text-xs font-bold tracking-tight">{timeRange}</div>
                               </div>
 
                               {/* 4. Teacher, Class and Room Details */}
@@ -866,76 +824,51 @@ export function SchedulePage() {
             {/* VIEW 2: Standard 7-Day Weekly Calendar with First/Last Active Week Jumper in ONE LINE */}
             {layout === "matrix" && (
               <section className="space-y-4">
-                {/* Active Weeks Selector Bar - Fully aligned in ONE Single Line（交互层，print 隐藏） */}
-                <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 rounded-xl border border-zinc-200 bg-white p-3 shadow-2xs print:hidden">
-                  {/* Left: Quick Jumper Buttons (First Week / Last Week) */}
-                  <div className="flex items-center gap-2 shrink-0">
-                    <Button
-                      size="sm"
-                      variant={activeWeekIndex === 0 ? "primary" : "outline"}
-                      className="h-8 text-xs font-semibold whitespace-nowrap"
-                      onClick={() => setActiveWeekIndex(0)}
-                      disabled={activeWeeks.length === 0}
-                    >
-                      <Zap className="size-3.5 text-amber-500" />
-                      开营首周 ({activeWeeks[0]?.startDay ?? "-"})
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant={activeWeekIndex === activeWeeks.length - 1 ? "primary" : "outline"}
-                      className="h-8 text-xs font-semibold whitespace-nowrap"
-                      onClick={() => setActiveWeekIndex(activeWeeks.length - 1)}
-                      disabled={activeWeeks.length === 0}
-                    >
-                      <CalendarCheck2 className="size-3.5 text-purple-500" />
-                      结课尾周 ({activeWeeks[activeWeeks.length - 1]?.startDay ?? "-"})
-                    </Button>
-                  </div>
-
-                  {/* Right: Active Week Selector & Stepper */}
-                  {activeWeeks.length > 1 && (
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-8 px-2 text-xs"
-                        onClick={() => setActiveWeekIndex((curr) => Math.max(0, curr - 1))}
-                        disabled={activeWeekIndex <= 0}
-                      >
-                        <ChevronLeft className="size-3.5 mr-0.5" />
-                        上一周
-                      </Button>
-
-                      <Select
-                        aria-label="选择有课周次"
-                        selectSize="sm"
-                        containerClassName="w-64"
-                        value={String(activeWeekIndex)}
-                        onChange={(e) => setActiveWeekIndex(Number(e.target.value))}
-                      >
-                        {activeWeeks.map((wk) => (
-                          <option key={wk.index} value={String(wk.index)}>
-                            {wk.label}
-                          </option>
-                        ))}
-                      </Select>
-
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-8 px-2 text-xs"
-                        onClick={() => setActiveWeekIndex((curr) => Math.min(activeWeeks.length - 1, curr + 1))}
-                        disabled={activeWeekIndex >= activeWeeks.length - 1}
-                      >
-                        下一周
-                        <ChevronRight className="size-3.5 ml-0.5" />
-                      </Button>
-                    </div>
-                  )}
-                </div>
-
-                {/* Standard 7-Day (Mon-Sun) Timetable Grid */}
+                {/* 周历网格：顶部一行「‹ 周次 ›」定位（交互层，print 隐藏），下面是周一到周日。 */}
                 <div className="rounded-xl border border-zinc-200 bg-white shadow-2xs overflow-hidden">
+                  {currentWeek ? (
+                    <div className="flex items-center gap-1.5 border-b border-zinc-200 px-3 py-2 text-xs text-zinc-600 print:hidden">
+                      {activeWeeks.length > 1 ? (
+                        <>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            aria-label="上一周"
+                            title="上一周"
+                            onClick={() => setActiveWeekIndex((curr) => Math.max(0, curr - 1))}
+                            disabled={activeWeekIndex <= 0}
+                          >
+                            <ChevronLeft className="size-4" />
+                          </Button>
+                          <Select
+                            aria-label="选择有课周次"
+                            selectSize="sm"
+                            containerClassName="w-72"
+                            value={String(activeWeekIndex)}
+                            onChange={(e) => setActiveWeekIndex(Number(e.target.value))}
+                          >
+                            {activeWeeks.map((wk) => (
+                              <option key={wk.index} value={String(wk.index)}>
+                                {wk.label}
+                              </option>
+                            ))}
+                          </Select>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            aria-label="下一周"
+                            title="下一周"
+                            onClick={() => setActiveWeekIndex((curr) => Math.min(activeWeeks.length - 1, curr + 1))}
+                            disabled={activeWeekIndex >= activeWeeks.length - 1}
+                          >
+                            <ChevronRight className="size-4" />
+                          </Button>
+                        </>
+                      ) : (
+                        <span>{currentWeek.label}</span>
+                      )}
+                    </div>
+                  ) : null}
                   <div className="w-full">
                     {/* Header 7 Days (Mon ~ Sun) */}
                     <div className="grid border-b border-zinc-200 bg-zinc-50/90" style={matrixGridStyle}>
@@ -990,11 +923,16 @@ export function SchedulePage() {
                               {items.map((assignment) => {
                                 const cs = assignment.course ?? courseMap.get(assignment.course_business_id);
                                 const courseName = cs?.subject || cs?.lesson_name || "";
+                                const roomText = `${formatRoom(assignment.room_business_id)}教室`;
+                                const teacherText = assignment.teacher_business_id || "未定教师";
+                                const classText = assignment.class_business_id || "未定班级";
+                                // 三行纯文字：科目 · 阶段 / 主对象 / 次对象（看班级课表时是教师、教室，以此类推）。
+                                const [primary, secondary] =
+                                  mode === "class" ? [teacherText, roomText] : mode === "teacher" ? [classText, roomText] : [classText, teacherText];
 
                                 return (
                                   <div
                                     key={assignment.course_session_id}
-                                    title={`课次编号: ${assignment.course_business_id}`}
                                     {...lessonCardProps(assignment)}
                                     className={cn(
                                       "group rounded-lg border p-2.5 text-left transition-all duration-150 shadow-2xs hover:shadow-xs",
@@ -1004,70 +942,19 @@ export function SchedulePage() {
                                       lessonCardClass(assignment),
                                     )}
                                   >
-                                    {/* 1. Full Course Name / Subject + Stage Badge */}
-                                    {(courseName || cs?.stage) ? (
-                                      <div className="flex flex-wrap items-center gap-1 mb-1.5 leading-tight">
-                                        {courseName && (
-                                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-900 bg-indigo-100/90 px-1.5 py-0.5 rounded break-words">
-                                            <BookOpen className="size-3 text-indigo-600 shrink-0" />
-                                            {courseName}
-                                          </span>
-                                        )}
-                                        {cs?.stage && (
-                                          <span className="text-[10px] font-bold text-amber-900 bg-amber-100 px-1.5 py-0.5 rounded break-words">
+                                    {courseName || cs?.stage ? (
+                                      <div className="mb-1 break-words text-[11px] font-bold leading-tight text-indigo-900">
+                                        {courseName}
+                                        {cs?.stage ? (
+                                          <span className="font-medium text-zinc-500">
+                                            {courseName ? " · " : ""}
                                             {cs.stage}
                                           </span>
-                                        )}
+                                        ) : null}
                                       </div>
                                     ) : null}
-
-                                    {/* 2. Main Contextual Subject & Teacher */}
-                                    {mode === "class" ? (
-                                      <>
-                                        <div className="flex items-start gap-1 text-xs font-bold text-zinc-900 group-hover:text-blue-700 leading-tight">
-                                          <User className="size-3 text-blue-600 shrink-0 mt-0.5" />
-                                          <span className="break-words">
-                                            {assignment.teacher_business_id || "未定教师"}
-                                          </span>
-                                        </div>
-                                        <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-600">
-                                          <DoorOpen className="size-3 text-zinc-400 shrink-0" />
-                                          <span className="font-medium break-words">
-                                            {formatRoom(assignment.room_business_id)}教室
-                                          </span>
-                                        </div>
-                                      </>
-                                    ) : mode === "teacher" ? (
-                                      <>
-                                        <div className="flex items-start gap-1 text-xs font-bold text-zinc-900 group-hover:text-blue-700 leading-tight">
-                                          <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
-                                          <span className="break-words">
-                                            {assignment.class_business_id || "未定班级"}
-                                          </span>
-                                        </div>
-                                        <div className="mt-1 flex items-center gap-1 text-[11px] text-zinc-600">
-                                          <DoorOpen className="size-3 text-zinc-400 shrink-0" />
-                                          <span className="font-medium break-words">
-                                            {formatRoom(assignment.room_business_id)}教室
-                                          </span>
-                                        </div>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <div className="flex items-start gap-1 text-xs font-bold text-zinc-900 group-hover:text-blue-700 leading-tight">
-                                          <Users className="size-3 text-indigo-600 shrink-0 mt-0.5" />
-                                          <span className="break-words">
-                                            {assignment.class_business_id || "未定班级"}
-                                          </span>
-                                        </div>
-                                        <div className="mt-1 flex items-start gap-1 text-[11px] text-zinc-600 leading-tight">
-                                          <User className="size-3 text-zinc-400 shrink-0 mt-0.5" />
-                                          <span className="break-words">
-                                            {assignment.teacher_business_id || "未定教师"}
-                                          </span>
-                                        </div>
-                                      </>
-                                    )}
+                                    <div className="break-words text-xs font-bold leading-tight text-zinc-900 group-hover:text-blue-700">{primary}</div>
+                                    <div className="mt-1 break-words text-[11px] leading-tight text-zinc-600">{secondary}</div>
                                   </div>
                                 );
                               })}
@@ -1093,27 +980,16 @@ export function SchedulePage() {
               </section>
             )}
 
-            {/* Footer Info Legend（print 保留对象与统计，白底） */}
-            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-500 bg-zinc-50/60 p-3 rounded-lg border border-zinc-200/80 print:bg-white print:border-zinc-300">
-              <div className="flex items-center gap-2">
-                <Badge tone="blue">
-                  {mode === "class" ? "班级" : mode === "teacher" ? "教师" : "教室"}
-                </Badge>
-                <span className="font-semibold text-zinc-900">{currentSubjectObj?.name ?? subject}</span>
-                <span className="text-zinc-300">|</span>
-                <span>
-                  共安排 <strong className="font-bold text-zinc-900">{filtered.length}</strong> 节课次
-                  {detail.isFetching ? "（数据同步中...）" : ""}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="inline-block size-2 rounded-full bg-blue-500"></span>
-                <span>
-                  {layout === "timeline"
-                    ? "全部日程流：完整科目课程 + 授课教师 + 醒目时段"
-                    : `标准周历：当前定位在 ${currentWeek?.tag ?? "首周"} (${currentWeek?.startDay ?? ""} ~ ${currentWeek?.endDay ?? ""})`}
-                </span>
-              </div>
+            {/* 打印页脚：屏幕上工具条已经说过对象与统计，只在打印时出现（工具条打印时隐藏）。 */}
+            <div className="hidden flex-wrap items-center gap-2 rounded-lg border border-zinc-300 bg-white p-3 text-xs text-zinc-500 print:flex">
+              <Badge tone="blue">
+                {mode === "class" ? "班级" : mode === "teacher" ? "教师" : "教室"}
+              </Badge>
+              <span className="font-semibold text-zinc-900">{currentSubjectObj?.name ?? subject}</span>
+              <span className="text-zinc-300">|</span>
+              <span>
+                共安排 <strong className="font-bold text-zinc-900">{filtered.length}</strong> 节课次
+              </span>
             </div>
           </>
         ) : null}
@@ -1132,7 +1008,7 @@ export function SchedulePage() {
               {publishedSummary ? `（v${publishedSummary.version_no}）` : ""}，发布新版本后自动更新。草稿不会对外分享或下发，需先由有审批权限的人发布。
               {publishedSummary && selectedSummary && selectedSummary.id !== publishedSummary.id ? (
                 <span className="mt-2 block border-l-2 border-amber-500 bg-amber-50 px-3 py-1.5 text-amber-900">
-                  当前所选的 v{selectedSummary.version_no}（{versionBadge(selectedSummary.status).label}）不在对外范围内；教师日历下发也按所选版本执行，正式下发仅对当前使用中的版本开放。
+                  当前所选的 v{selectedSummary.version_no}（{versionStatus(selectedSummary.status).label}）不在对外范围内；教师日历下发也按所选版本执行，正式下发仅对当前使用中的版本开放。
                   {selectedSummary.status === "draft" ? (
                     <button type="button" className="ml-1 font-medium underline underline-offset-2" onClick={() => selectView("history")}>
                       去历史版本{canPublish ? "发布" : "查看"}

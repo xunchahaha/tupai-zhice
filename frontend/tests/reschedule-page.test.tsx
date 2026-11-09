@@ -181,11 +181,15 @@ describe("ReschedulePage inside the schedule hub", () => {
     const user = userEvent.setup();
     renderPage({ embedded: true, parentScheduleId: "s2", prefill });
 
-    expect(await screen.findByText(/已按所选课次带入：B班 10月15日 周四上午，教师 李老师/)).toBeVisible();
+    // 所选课次只在事实卡里说一次：班级、日期、教师、时段和依据的版本。
+    const facts = await screen.findByLabelText("所选课次");
+    expect(facts).toHaveTextContent("B班 10月15日 周四上午");
+    expect(facts).toHaveTextContent("李老师");
+    expect(facts).toHaveTextContent("周四 09:00-10:30");
     expect(screen.getByRole("radio", { name: /只调整这一节课/ })).toBeChecked();
-    // 课次身份只在选中它的那一版里成立：基准版本锁定，不能改成别的版本。
-    expect(screen.getByRole("combobox", { name: "父课表" })).toHaveValue("s2");
-    expect(screen.getByRole("combobox", { name: "父课表" })).toBeDisabled();
+    // 课次身份只在选中它的那一版里成立：依据锁定为这一版，写成事实，页面上没有可改的版本控件。
+    expect(facts).toHaveTextContent("v2 / 草稿");
+    expect(screen.queryByRole("combobox", { name: "基于版本" })).not.toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "教师" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "生成候选方案" }));
@@ -278,10 +282,10 @@ describe("ReschedulePage inside the schedule hub", () => {
 
   it("follows the version chosen in the schedule header", async () => {
     const view = renderPage({ embedded: true, parentScheduleId: "s1" });
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "父课表" })).toHaveValue("s1"));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "基于版本" })).toHaveValue("s1"));
 
     view.rerenderWith({ embedded: true, parentScheduleId: "s2" });
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "父课表" })).toHaveValue("s2"));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "基于版本" })).toHaveValue("s2"));
   });
 
   it("points at the new draft in 历史版本 after a candidate is generated", async () => {
@@ -377,5 +381,31 @@ describe("ReschedulePage inside the schedule hub", () => {
     await user.click(await screen.findByRole("button", { name: "查看候选草稿" }));
 
     expect(location()).toBe("/schedule?view=history&version=s2");
+  });
+
+  it("lists events by time without exposing their internal id", async () => {
+    events = [{ id: "evt-9-aaaa-bbbb", event_type: "teacher_leave", description: "张老师请假", status: "candidate_ready", declared_reason: null, candidate_schedule_id: "s2", created_at: "2026-08-02T01:00:00Z" }];
+    renderPage({ embedded: true });
+
+    expect(await screen.findByText("张老师请假")).toBeVisible();
+    expect(screen.queryByText(/evt-9-aa/)).not.toBeInTheDocument();
+  });
+
+  it("shows names and readable time slots in the event form while still submitting business ids", async () => {
+    const user = userEvent.setup();
+    renderPage({ embedded: true });
+
+    const teacher = await screen.findByRole("combobox", { name: "教师" });
+    expect(screen.getByRole("option", { name: "李老师" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /T-00/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "周四 09:00-10:30" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /SLOT-/ })).not.toBeInTheDocument();
+
+    await user.selectOptions(teacher, "T-002");
+    await user.selectOptions(screen.getByRole("combobox", { name: "影响时段" }), slotThursday.business_id);
+    await user.click(screen.getByRole("button", { name: "生成候选方案" }));
+
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][0].data).toMatchObject({ teacher_business_id: "T-002", slot_business_ids: [slotThursday.business_id] });
   });
 });

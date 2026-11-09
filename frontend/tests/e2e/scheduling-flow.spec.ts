@@ -2,7 +2,7 @@ import { expect, request, test, type Page } from "@playwright/test";
 
 const apiBaseURL = process.env.E2E_API_BASE_URL ?? "http://127.0.0.1:8001";
 
-// 页头「排课流程」里也有同名链接，侧栏入口必须限定在主导航内。
+// 侧栏定位器限定在主导航内。
 const sidebar = (page: Page) => page.getByRole("navigation", { name: "主导航" });
 
 test("管理员完成排课、调课、回滚和集成接入引导流程", async ({ page }, testInfo) => {
@@ -119,11 +119,11 @@ test("管理员完成排课、调课、回滚和集成接入引导流程", async
   );
   expect(blocked).toBeTruthy();
 
-  // 局部调课在课表页的「调整」视图；先把课表切到刚求解出的那一版，调课的父课表随之带入。
+  // 局部调课在课表页的「调整」视图；先把课表切到刚求解出的那一版，「基于版本」随之带入。
   await page.getByLabel("课表版本").selectOption(parentSummary.id);
   await page.getByRole("tab", { name: "调整" }).click();
   await expect(page).toHaveURL(/view=adjust/);
-  await expect(page.getByLabel("父课表")).toHaveValue(parentSummary.id);
+  await expect(page.getByLabel("基于版本")).toHaveValue(parentSummary.id);
   await page.getByLabel("教师").selectOption(blocked.teacher_business_id);
   await page.getByLabel("影响时段").selectOption(blocked.slot_business_id);
   await page.getByLabel("说明").fill("E2E 教师请假");
@@ -172,7 +172,9 @@ test("管理员完成排课、调课、回滚和集成接入引导流程", async
   // 被选中的课换到别的时段只有在别处有空位时才成立，所以两种结局都要给出如实的说明，但绝不允许动到别的课。
   await page.goto(`/schedule?version=${parentSummary.id}&lesson=${encodeURIComponent(blocked.course_business_id)}&view=adjust`);
   await expect(page.getByRole("radio", { name: /只调整这一节课/ })).toBeChecked();
-  await expect(page.getByLabel("父课表")).toBeDisabled();
+  // 依据锁在选课时看的那一版：写进「所选课次」事实卡，页面上没有可编辑的版本控件。
+  await expect(page.getByLabel("所选课次")).toContainText(`v${parentSummary.version_no}`);
+  await expect(page.getByLabel("基于版本")).toHaveCount(0);
   const lessonResponse = page.waitForResponse((response) =>
     response.url().endsWith("/api/v1/reschedule-events") && response.request().method() === "POST",
   );
