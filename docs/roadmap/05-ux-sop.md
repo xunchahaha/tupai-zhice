@@ -61,3 +61,13 @@
 - AI UX Playground Status Steps（ChatGPT「Thought for Ns」折叠范式与反模式）
 - Fluent 2 Wait UX；Pencil & Paper Loading Patterns；ACM 2025 生成式 AI 感知等待研究
 - 完整清单见工作流日志（5 路勘察与 3 方案原文）
+
+## 6. 减法规则（2026-11-09 界面去繁就简）
+
+- 内部编号不进可见正文：SLOT-/TASK-/CAMPUS-/UUID/run id/规则 business_id 一律换成名称、时间、规则原文；排障要用的原值放 title、CopyableId 或 `TechDetails`。option 的 value、URL 参数、提交载荷不变。
+- 同一事实只在一处说：同屏的同一状态、计数或要求只留离操作最近的一处；纯回执用 toast，不常驻版面。
+- 纯说明文字最多一行，超出的进 InfoTooltip；与控件行为重复的说明直接删。
+- 技术细节统一放 `TechDetails`（默认收起）。风险、阻断、失败、「无法验证」、冲突、数据丢弃、依据或基准变化的提示永远不进折叠、不降色、不缩成 tooltip。
+- 空态不占卡；「全部通过」可以降视觉权重，核对中、失败、未通过、无法验证保持原色与边框。
+- 一组操作可见的最多 1 个主按钮 + 2 个次按钮；新建、重命名、删除这类低频动作用图标按钮。生成、发布、下发不受此限。
+- 术语人话化：硬约束/软约束→必须/尽量；UNKNOWN→超时未定；父课表→基于版本；不出现 CP-SAT、upsert、token、哈希。
