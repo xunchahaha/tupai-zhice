@@ -89,7 +89,16 @@ interface ImportWizardProps {
   onOpenChange: (open: boolean) => void;
   /** 提交成功后回调（父组件负责失效缓存、展示导入报告并关窗）。 */
   onCommitted: (result: ImportCommitResponse) => void;
+  /** 第 1 步拖拽区下方的「下载官方模板」文字链接；不传则不显示。 */
+  onDownloadTemplate?: () => void;
+  /** 第 1 步「已是官方模板？跳过映射直接导入」：走父组件原有的模板直传路径；不传则不显示。 */
+  onDirectUpload?: () => void;
+  /** 模板直传进行中：链接置灰并改为进行中文案。 */
+  directUploadPending?: boolean;
 }
+
+/** 「目标字段」列头的悬停说明（原来常驻在映射表下方）。 */
+const TARGET_FIELD_HINT = "目标字段决定该列写入哪个规范字段，选择「忽略该列」则不导入；一个规范字段只能对应一列，被占用的字段会在下拉中置灰。";
 
 function confidenceBadge(item: ImportColumnMapping, effective: string, overridden: boolean): { label: string; tone: BadgeTone } {
   if (effective === "") return { label: overridden ? "忽略" : "未匹配", tone: "neutral" };
@@ -146,7 +155,7 @@ function StepIndicator({ step }: { step: WizardStep }) {
   );
 }
 
-export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardProps) {
+export function ImportWizard({ open, onOpenChange, onCommitted, onDownloadTemplate, onDirectUpload, directUploadPending = false }: ImportWizardProps) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [step, setStep] = useState<WizardStep>(1);
   const [file, setFile] = useState<File | null>(null);
@@ -388,6 +397,19 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
               </div>
             )}
 
+            {!file && (onDownloadTemplate || onDirectUpload) ? (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+                {onDownloadTemplate ? (
+                  <button type="button" className="text-blue-600 hover:underline" onClick={onDownloadTemplate}>下载官方模板</button>
+                ) : null}
+                {onDirectUpload ? (
+                  <button type="button" className="text-blue-600 hover:underline disabled:pointer-events-none disabled:opacity-50" disabled={directUploadPending || busy} onClick={onDirectUpload}>
+                    {directUploadPending ? "正在直接导入…" : "已是官方模板？跳过映射直接导入"}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
             {preview.isPending ? <AnalysisPlaceholder label="正在解析文件" /> : null}
 
             {preview.isError ? (
@@ -477,7 +499,7 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
                   <tr>
                     <th className="h-9 border-b border-zinc-200 px-3 font-medium">文件列</th>
                     <th className="h-9 border-b border-zinc-200 px-3 font-medium">样本值</th>
-                    <th className="h-9 border-b border-zinc-200 px-3 font-medium">目标字段</th>
+                    <th className="h-9 border-b border-zinc-200 px-3 font-medium" title={TARGET_FIELD_HINT}>目标字段</th>
                     <th className="h-9 border-b border-zinc-200 px-3 font-medium">匹配置信度</th>
                   </tr>
                 </thead>
@@ -510,12 +532,8 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
                           </Select>
                         </td>
                         <td className="h-10 px-3 align-middle">
-                          <div className="flex items-center gap-2">
-                            <Badge tone={badge.tone}>{badge.label}</Badge>
-                            <span className="max-w-64 truncate text-[11px] text-zinc-400" title={`${MATCHED_BY_LABELS[item.matched_by] ?? item.matched_by}：${item.rationale}`}>
-                              {MATCHED_BY_LABELS[item.matched_by] ?? item.matched_by} · {item.rationale}
-                            </span>
-                          </div>
+                          {/* 匹配方式和理由只在悬停时看，每行不再挂一长串说明。 */}
+                          <Badge tone={badge.tone} title={`${MATCHED_BY_LABELS[item.matched_by] ?? item.matched_by}：${item.rationale}`}>{badge.label}</Badge>
                         </td>
                       </tr>
                     );
@@ -523,9 +541,6 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
                 </tbody>
               </table>
             </div>
-            <p className="text-xs leading-5 text-zinc-500">
-              目标字段决定该列写入哪个规范字段，选择「忽略该列」则不导入；一个规范字段只能对应一列，被占用的字段会在下拉中置灰。
-            </p>
             {unmappedColumns.length ? (
               <div className="border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">
                 <p>
@@ -692,8 +707,8 @@ export function ImportWizard({ open, onOpenChange, onCommitted }: ImportWizardPr
             </label>
             <p className="text-xs leading-5 text-zinc-500">
               {mode === "upsert"
-                ? "upsert 沿用业务键（班级 + 课次序号 + 课节名称 + 上课日期 + 上课时段），重复导入同一份文件不会产生重复课次。"
-                : "insert 只新增不更新：与现有课次冲突的行会原样保留，已存在的数据不做改动。"}
+                ? "重复导入同一份文件会更新已有课次，不会重复新增。"
+                : "只新增，已存在的课次不动。"}
             </p>
             <div className="border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
               即将把 {stats.rows_valid} 行数据写入基础资料，导入会生成新的草稿课表版本，不影响当前已发布版本。

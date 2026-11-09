@@ -123,6 +123,48 @@ describe("AppShell 侧栏", () => {
     expect(sidebarLinks()).toEqual(["排课助手", "课表", "基础资料"]);
   });
 
+  it("只读成员在课表方案选择器旁看到「只读」徽标，侧栏写明本方案权限；顶栏不再有「当前角色」", async () => {
+    await renderShell("scheduler", "/assistant", "viewer");
+
+    expect(screen.getAllByText("只读", { exact: true }).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("排课员 · 本方案只读").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/当前角色/)).not.toBeInTheDocument();
+    expect(screen.getByText("课表方案")).toBeInTheDocument();
+    // 只有管理员才有新建 / 重命名课表方案的图标按钮。
+    expect(screen.queryByRole("button", { name: "新建课表方案" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重命名课表方案" })).not.toBeInTheDocument();
+  });
+
+  it("有审批权限时侧栏写「本方案可审批」，不出现只读徽标；管理员的新建 / 重命名是图标按钮", async () => {
+    await renderShell("admin", "/assistant", "approver");
+
+    expect(screen.getAllByText("管理员 · 本方案可审批").length).toBeGreaterThan(0);
+    expect(screen.queryByText("只读", { exact: true })).not.toBeInTheDocument();
+    for (const name of ["新建课表方案", "重命名课表方案"]) {
+      const button = screen.getByRole("button", { name });
+      expect(button).toHaveAttribute("title", name);
+      expect(button.textContent).toBe("");
+    }
+  });
+
+  it("账户菜单不再重复用户名和角色，账户信息里没有账户 ID", async () => {
+    const user = userEvent.setup();
+    await renderShell("admin");
+
+    const menuButtons = screen.getAllByRole("button", { name: "账户菜单" });
+    expect(menuButtons[0]).toHaveAttribute("title", expect.stringContaining("admin_demo"));
+    await user.click(menuButtons[0]);
+    expect(screen.getByRole("button", { name: "账户信息" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "退出登录" })).toBeInTheDocument();
+    // 侧栏身份区已经有一份用户名，菜单里不再重复。
+    expect(screen.getAllByText("admin_demo")).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: "账户信息" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("admin_demo")).toBeInTheDocument();
+    expect(within(dialog).queryByText("账户 ID")).not.toBeInTheDocument();
+  });
+
   it.each([
     ["/assistant", "排课助手"],
     ["/assistant?goal=g1&action=raise_budget", "排课助手"],

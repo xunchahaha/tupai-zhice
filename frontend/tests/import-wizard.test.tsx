@@ -137,7 +137,10 @@ describe("智能导入向导", () => {
     expect(screen.getByLabelText("目标字段：神秘列")).toHaveValue("");
     expect(screen.getByText("OMO4班、OMO4班、OMO5班")).toBeInTheDocument();
     expect(screen.getAllByText("高")).toHaveLength(2);
-    expect(screen.getByText(/精确匹配 · 表头与规范字段/)).toBeInTheDocument();
+    // 匹配方式与理由只挂在徽标的 title 上（悬停可见），每行不再常驻一长串说明。
+    expect(screen.getByTitle(/精确匹配：表头与规范字段/)).toHaveTextContent("高");
+    expect(screen.queryByText(/表头与规范字段/)).not.toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "目标字段" })).toHaveAttribute("title", expect.stringContaining("忽略该列"));
     // missing_fields 醒目提示（「上课时段」同时是下拉选项，故在横幅容器上断言）
     const banner = screen.getByText(/以下模板字段在文件里没有对应列/);
     expect(banner.textContent).toContain("上课时段");
@@ -220,6 +223,9 @@ describe("智能导入向导", () => {
     // 第四步确认提交：commit 带同一份 overrides
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByText(/即将把 10 行数据写入基础资料/)).toBeInTheDocument();
+    // 导入模式说明用人话，不出现 upsert / insert。
+    expect(within(dialog).getByText("重复导入同一份文件会更新已有课次，不会重复新增。")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/upsert|insert/)).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: /确认导入/ }));
 
     await waitFor(() => expect(onCommitted).toHaveBeenCalledWith(commitResult));
@@ -249,7 +255,37 @@ describe("智能导入向导", () => {
     await screen.findByText("目标字段");
 
     expect(screen.getByText(/已自动沿用上次确认的映射决策/)).toBeInTheDocument();
-    expect(screen.getAllByText(/上次导入 · /).length).toBeGreaterThan(0);
+    expect(screen.getAllByTitle(/^上次导入：/).length).toBeGreaterThan(0);
+  });
+
+  it("第 1 步拖拽区下方提供「下载官方模板」和「跳过映射直接导入」两条文字链接", async () => {
+    const onDownloadTemplate = vi.fn();
+    const onDirectUpload = vi.fn();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <ImportWizard open onOpenChange={vi.fn()} onCommitted={vi.fn()} onDownloadTemplate={onDownloadTemplate} onDirectUpload={onDirectUpload} />
+      </QueryClientProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "下载官方模板" }));
+    await user.click(screen.getByRole("button", { name: "已是官方模板？跳过映射直接导入" }));
+    expect(onDownloadTemplate).toHaveBeenCalledTimes(1);
+    expect(onDirectUpload).toHaveBeenCalledTimes(1);
+
+    // 直传进行中：链接置灰，避免重复提交。
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <ImportWizard open onOpenChange={vi.fn()} onCommitted={vi.fn()} onDownloadTemplate={onDownloadTemplate} onDirectUpload={onDirectUpload} directUploadPending />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByRole("button", { name: "正在直接导入…" })).toBeDisabled();
+  });
+
+  it("不传模板相关回调时不显示这两条链接", () => {
+    renderWizard();
+    expect(screen.queryByRole("button", { name: "下载官方模板" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /跳过映射直接导入/ })).not.toBeInTheDocument();
   });
 
   it("用户可以在映射表里改目标字段，mapping_json 按修改后的值回传", async () => {

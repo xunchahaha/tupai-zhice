@@ -3,7 +3,6 @@ import {
   useOverviewApiV1OverviewGet,
 } from "@/api/generated/client";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { ErrorState, LoadingState } from "@/components/page";
 import { datetime } from "@/lib/format";
 import { modelStatusLabel } from "@/lib/labels";
@@ -12,13 +11,10 @@ import { modelStatusTone } from "@/lib/status";
 import {
   ArrowRight,
   CalendarClock,
-  CheckCircle2,
   DoorOpen,
   Flame,
-  RefreshCw,
   Server,
   ShieldCheck,
-  Sparkles,
   Trophy,
   Users,
   UsersRound,
@@ -72,30 +68,32 @@ export function OverviewInsights({ canOpenSettings = true }: { canOpenSettings?:
   const penalties = analyticsData?.optimization_penalties;
   const syncHealth = analyticsData?.sync_health;
   const hasSyncSamples = (syncHealth?.total_syncs ?? 0) > 0;
-  const hasRetrySamples = (syncHealth?.retry_samples ?? 0) > 0;
   const hasSolverRecord = Boolean(penalties?.solver_run_id || penalties?.solver_status || data?.latest_run);
-  const evaluatedCount = penalties?.evaluated_assignment_count || counts.course_sessions || 0;
-  const totalPenalty = Number(penalties?.total_soft_penalty ?? 0);
+  // 只认求解真正评估过的课次；没有评估就说「暂无评估」，不拿基础资料的课次总数顶替。
+  const evaluatedCount = Number(penalties?.evaluated_assignment_count ?? 0);
   const softConstraintsList = Array.isArray(penalties?.soft_constraints) ? penalties.soft_constraints : [];
+  // 达成率只在求解确实返回了规则评估时才算；评估为空就没有「全部达成」可言。
+  const hasRuleEvaluation = hasSolverRecord && softConstraintsList.length > 0;
+  // violations 为 null = 该条规则尚无可重算口径（暂时无法验证）：不算通过，不计入偏离数，也不进达成率。
+  const unverifiedCount = softConstraintsList.filter((item) => item?.violations == null).length;
   const totalViolations = softConstraintsList.reduce(
-    (sum, item) => sum + (Number(item?.violations) || 0),
+    (sum, item) => sum + (item?.violations != null ? Number(item.violations) || 0 : 0),
     0,
   );
+  // 达成率 = 能验证的各条规则满足率的平均；只有全部满足才写 100%，四舍五入不把 99.6% 抬成 100%。
+  const rates = softConstraintsList
+    .map((item) => item?.satisfaction_rate)
+    .filter((rate): rate is number => rate != null)
+    .map(Number);
+  const averageRate = rates.length ? rates.reduce((sum, rate) => sum + rate, 0) / rates.length : null;
+  const ratePercent = averageRate == null ? null : averageRate >= 1 ? 100 : Math.min(99, Math.round(averageRate * 100));
+  const reconciliationMismatch = Number(penalties?.reconciliation_error ?? 0) > 0;
 
   const isFeasible =
     penalties?.solver_status === "FEASIBLE" ||
     penalties?.solver_status === "OPTIMAL" ||
     data?.latest_run?.model_status === "FEASIBLE" ||
     data?.latest_run?.model_status === "OPTIMAL";
-
-  let optimalityDegree = "100%";
-  if (penalties?.objective_value && penalties?.best_bound && Number(penalties.objective_value) > 0) {
-    const obj = Number(penalties.objective_value);
-    const bound = Number(penalties.best_bound);
-    const gap = Math.max(0, (obj - bound) / obj);
-    const degree = Math.max(0, Math.min(100, (1 - gap) * 100));
-    optimalityDegree = `${degree.toFixed(1)}%`;
-  }
 
   // Build 7x3 Period Heatmap Matrix
   const heatmapCells = Array.isArray(heatmap?.period_cells) ? heatmap.period_cells : [];
@@ -113,19 +111,8 @@ export function OverviewInsights({ canOpenSettings = true }: { canOpenSettings?:
 
   return (
     <div className="space-y-6 animate-fade-in">
+      {/* 概览本身 15s/20s 自动轮询，不再放「刷新数据」按钮。 */}
       <div className="flex flex-wrap items-center justify-end gap-2.5">
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => {
-            void overview.refetch();
-            void analytics.refetch();
-          }}
-          className="text-xs"
-        >
-          <RefreshCw className="size-3.5" />
-          刷新数据
-        </Button>
         <div className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs shadow-2xs">
           <span className="text-zinc-400">最近求解:</span>
           <Badge tone={modelStatusTone(data.latest_run?.model_status)}>
@@ -147,11 +134,8 @@ export function OverviewInsights({ canOpenSettings = true }: { canOpenSettings?:
                 <Icon className="size-4.5" />
               </div>
             </div>
-            <div className="mt-3 flex items-baseline justify-between">
-              <div className="text-3xl font-bold tracking-tight text-zinc-900 tabular-nums">
-                {counts[key] ?? 0}
-              </div>
-              <span className="text-xs text-zinc-400">基础资料</span>
+            <div className="mt-3 text-3xl font-bold tracking-tight text-zinc-900 tabular-nums">
+              {counts[key] ?? 0}
             </div>
           </div>
         ))}
@@ -175,16 +159,11 @@ export function OverviewInsights({ canOpenSettings = true }: { canOpenSettings?:
         {/* Left: 7x3 Room Slot Heatmap */}
         <div className="rounded-xl border border-zinc-200/90 bg-white p-5 shadow-2xs flex flex-col justify-between">
           <div>
-            <div className="flex items-center justify-between border-b border-zinc-100 pb-3">
-              <div className="flex items-center gap-2">
-                <Flame className="size-4 text-orange-500" />
-                <h2 className="text-sm font-semibold text-zinc-900">
-                  教室时段 7×3 负荷热力图
-                </h2>
-              </div>
-              <span className="text-xs font-medium text-zinc-400">
-                周一~周日 × 上午/下午/晚自习
-              </span>
+            <div className="flex items-center gap-2 border-b border-zinc-100 pb-3">
+              <Flame className="size-4 text-orange-500" />
+              <h2 className="text-sm font-semibold text-zinc-900">
+                教室时段 7×3 负荷热力图
+              </h2>
             </div>
 
             {/* 7x3 Visual Heatmap Grid */}
@@ -235,8 +214,7 @@ export function OverviewInsights({ canOpenSettings = true }: { canOpenSettings?:
           </div>
 
           {/* Heatmap Legend */}
-          <div className="mt-4 flex flex-wrap items-center justify-between border-t border-zinc-100 pt-3 text-[11px] text-zinc-400">
-            <span>分母已自动计入全部可用空闲容量</span>
+          <div className="mt-4 flex flex-wrap items-center justify-end border-t border-zinc-100 pt-3 text-[11px] text-zinc-400">
             <div className="flex items-center gap-1.5">
               <span>负荷度:</span>
               <span className="inline-block size-3 rounded bg-zinc-100 border border-zinc-200"></span>
@@ -273,53 +251,44 @@ export function OverviewInsights({ canOpenSettings = true }: { canOpenSettings?:
               <div className="rounded-lg border border-emerald-100 bg-emerald-50/50 p-3.5 text-center">
                 <div className="text-xs font-semibold text-emerald-900">规则达成率</div>
                 <div className="mt-1 text-2xl font-bold text-emerald-950 tabular-nums">
-                  {!hasSolverRecord
-                    ? "暂无评估"
-                    : totalViolations === 0 && totalPenalty === 0
-                      ? "100%"
-                      : `${Math.max(90, 100 - totalViolations)}%`}
+                  {!hasRuleEvaluation ? "暂无评估" : ratePercent == null ? "—" : `${ratePercent}%`}
                 </div>
                 <div className="text-[11px] text-emerald-700 mt-0.5">
-                  {!hasSolverRecord
-                    ? "先排出第一版草稿，这里才有评估"
-                    : totalViolations === 0
-                      ? "各项规则完全符合"
-                      : `${totalViolations} 处微调偏离`}
+                  {!hasSolverRecord ? (
+                    "先排出第一版草稿，这里才有评估"
+                  ) : !hasRuleEvaluation ? (
+                    "本次求解没有返回规则评估"
+                  ) : totalViolations === 0 && unverifiedCount === 0 ? (
+                    "各项规则完全符合"
+                  ) : (
+                    <>
+                      {totalViolations > 0 ? `${totalViolations} 处微调偏离` : null}
+                      {totalViolations > 0 && unverifiedCount > 0 ? " · " : null}
+                      {unverifiedCount > 0 ? (
+                        <span className="font-medium text-amber-700">{unverifiedCount} 条规则暂时无法验证</span>
+                      ) : null}
+                    </>
+                  )}
                 </div>
               </div>
 
               <div className="rounded-lg border border-blue-100 bg-blue-50/50 p-3.5 text-center">
                 <div className="text-xs font-semibold text-blue-900">已排入课次</div>
                 <div className="mt-1 text-2xl font-bold text-blue-950 tabular-nums">
-                  {evaluatedCount > 0 ? evaluatedCount : counts.course_sessions ?? 0}
-                  <span className="text-xs font-normal text-blue-700 ml-1">节</span>
-                </div>
-                <div className="text-[11px] text-blue-700 mt-0.5">
-                  硬冲突: 0 处 (无时空重叠)
+                  {hasSolverRecord && evaluatedCount > 0 ? (
+                    <>
+                      {evaluatedCount}
+                      <span className="text-xs font-normal text-blue-700 ml-1">节</span>
+                    </>
+                  ) : "暂无评估"}
                 </div>
               </div>
             </div>
 
-            {/* Middle Section: Clear, understandable feedback */}
-            {!hasSolverRecord ? (
+            {/* 规则逐条结果：只列求解真正评估过的规则；评估为空时不输出任何「全部达成」结论。 */}
+            {!hasRuleEvaluation ? (
               <div className="py-6 text-center text-xs text-zinc-400">
-                当前课表暂无求解记录或软约束评估数据
-              </div>
-            ) : softConstraintsList.length === 0 || totalViolations === 0 ? (
-              <div className="mt-4 rounded-xl border border-zinc-100 bg-zinc-50/60 p-4">
-                <div className="flex items-start gap-3">
-                  <div className="grid size-8 place-items-center rounded-lg bg-emerald-100 text-emerald-700 shrink-0 mt-0.5">
-                    <CheckCircle2 className="size-4.5" />
-                  </div>
-                  <div>
-                    <div className="text-xs font-bold text-zinc-900">
-                      各项教务约束与排课规则全部达成
-                    </div>
-                    <div className="text-[11px] text-zinc-500 mt-1 leading-relaxed">
-                      包含教师无时间冲突、班级不重叠、教室容纳量及连堂规则均已完全合规，未发生规则偏离与冲突。
-                    </div>
-                  </div>
-                </div>
+                {hasSolverRecord ? "该次求解没有可逐条列出的规则评估" : "当前课表暂无求解记录"}
               </div>
             ) : (
               <div className="mt-3.5 space-y-2 max-h-48 overflow-y-auto pr-1">
@@ -330,7 +299,11 @@ export function OverviewInsights({ canOpenSettings = true }: { canOpenSettings?:
                   >
                     <div className="flex items-center gap-2">
                       <span className="font-semibold text-zinc-800">{item.label || item.rule_id}</span>
-                      {item.violations != null && Number(item.violations) > 0 ? (
+                      {item.violations == null ? (
+                        <span className="text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.2 rounded font-medium">
+                          暂时无法验证
+                        </span>
+                      ) : Number(item.violations) > 0 ? (
                         <span className="text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.2 rounded font-medium">
                           {item.violations} 处微调
                         </span>
@@ -341,30 +314,18 @@ export function OverviewInsights({ canOpenSettings = true }: { canOpenSettings?:
                       )}
                     </div>
                     <span className="tabular-nums font-bold text-zinc-700">
-                      {item.satisfaction_rate != null ? (Number(item.satisfaction_rate) * 100).toFixed(0) + "%" : "100%"}
+                      {item.satisfaction_rate != null ? (Number(item.satisfaction_rate) * 100).toFixed(0) + "%" : "—"}
                     </span>
                   </div>
                 ))}
               </div>
             )}
-          </div>
-
-          <div className="mt-4 flex items-center justify-between border-t border-zinc-100 pt-3 text-[11px] text-zinc-400">
-            <span>
-              对账差额: {penalties?.reconciliation_error == null
-                ? "暂无数据"
-                : penalties.reconciliation_error > 0
-                  ? "有异常"
-                  : "0 (对账平齐)"}
-            </span>
-            {hasSolverRecord ? (
-              <span className="flex items-center gap-1">
-                <Sparkles className="size-3.5 text-blue-500" />
-                <span>逼近理论最优: <strong className="text-zinc-700 font-semibold">{optimalityDegree}</strong></span>
-              </span>
-            ) : (
-              <span>已通过硬性约束校验</span>
-            )}
+            {/* 按求解范围重算的扣分高于求解目标值：上面的数字和求解结果对不上，只在有差额时提示。 */}
+            {reconciliationMismatch ? (
+              <p role="status" className="mt-3 text-[11px] font-medium text-amber-700">
+                规则评估与求解结果对不上，以上数字仅供参考
+              </p>
+            ) : null}
           </div>
         </div>
       </section>
@@ -397,18 +358,13 @@ export function OverviewInsights({ canOpenSettings = true }: { canOpenSettings?:
                   >
                     <div className="flex items-center gap-3">
                       <span className="text-base font-bold w-5 text-center">{medals[idx] ?? idx + 1}</span>
-                      <div>
-                        <div className="font-bold text-zinc-900 flex items-center gap-1.5">
-                          <span>{t.teacher_name}</span>
-                          {t.subject && (
-                            <span className="text-[10px] text-blue-700 bg-blue-50 px-1.5 py-0.2 rounded font-normal">
-                              {t.subject}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[11px] text-zinc-400 mt-0.5">
-                          校区: {t.campus_name || "主校区"}
-                        </div>
+                      <div className="font-bold text-zinc-900 flex items-center gap-1.5">
+                        <span>{t.teacher_name}</span>
+                        {t.subject && (
+                          <span className="text-[10px] text-blue-700 bg-blue-50 px-1.5 py-0.2 rounded font-normal">
+                            {t.subject}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -470,43 +426,16 @@ export function OverviewInsights({ canOpenSettings = true }: { canOpenSettings?:
               </Badge>
             </div>
 
-            {/* Sync Telemetry 4-Stat Box */}
-            <div className="mt-4 grid grid-cols-2 gap-3 text-center">
-              <div className="rounded-lg border border-zinc-100 bg-zinc-50/70 p-3">
-                <div className="text-xs text-zinc-500">同步成功率</div>
-                <div className="mt-1 text-2xl font-bold text-emerald-600 tabular-nums">
-                  {hasSyncSamples && syncHealth
-                    ? `${((syncHealth.completed_syncs / syncHealth.total_syncs) * 100).toFixed(0)}%`
-                    : "-"}
-                </div>
-                <div className="text-[10px] text-zinc-400 mt-0.5">
-                  成功 {syncHealth?.completed_syncs ?? 0} / 总计 {syncHealth?.total_syncs ?? 0} 次
-                </div>
+            {/* 同步卡只留成功率、状态徽标、最近同步时间和集成入口。 */}
+            <div className="mt-4 rounded-lg border border-zinc-100 bg-zinc-50/70 p-3 text-center">
+              <div className="text-xs text-zinc-500">同步成功率</div>
+              <div className="mt-1 text-2xl font-bold text-emerald-600 tabular-nums">
+                {hasSyncSamples && syncHealth
+                  ? `${((syncHealth.completed_syncs / syncHealth.total_syncs) * 100).toFixed(0)}%`
+                  : "-"}
               </div>
-
-              <div className="rounded-lg border border-zinc-100 bg-zinc-50/70 p-3">
-                <div className="text-xs text-zinc-500">平均同步耗时</div>
-                <div className="mt-1 text-2xl font-bold text-zinc-900 tabular-nums">
-                  {syncHealth?.average_duration_ms != null ? `${syncHealth.average_duration_ms}ms` : "-"}
-                </div>
-                <div className="text-[10px] text-zinc-400 mt-0.5">
-                  累计重试: {hasRetrySamples ? `${syncHealth?.retry_count ?? 0} 次` : "暂无样本"}
-                </div>
-              </div>
-            </div>
-
-            {/* Throughput & Resources Breakdown */}
-            <div className="mt-4 space-y-2 text-xs">
-              <div className="flex items-center justify-between rounded-lg border border-zinc-100 p-2.5">
-                <span className="text-zinc-500">数据吞吐读写量</span>
-                <span className="font-semibold text-zinc-800 tabular-nums">
-                  读取 {syncHealth?.records_read ?? 0} 条 · 写入 {syncHealth?.records_written ?? 0} 条
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between rounded-lg border border-zinc-100 p-2.5">
-                <span className="text-zinc-500">遥测监控窗口</span>
-                <span className="font-mono text-zinc-700">最近 24 小时</span>
+              <div className="text-[10px] text-zinc-400 mt-0.5">
+                成功 {syncHealth?.completed_syncs ?? 0} / 总计 {syncHealth?.total_syncs ?? 0} 次
               </div>
             </div>
           </div>

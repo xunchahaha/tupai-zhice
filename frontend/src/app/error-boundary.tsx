@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { isRouteErrorResponse, useRouteError } from "react-router-dom";
 
+import { TechDetails } from "@/components/tech-details";
 import { Button } from "@/components/ui/button";
 import { ROUTES } from "@/lib/routes";
 
@@ -27,9 +28,11 @@ export function RouteErrorElement() {
         <p className="mt-2 text-sm text-zinc-600">
           这一页在渲染时发生了异常，其余模块不受影响。可以重试，或回到排课助手重新进入。
         </p>
-        <pre className="mt-4 max-h-40 overflow-auto rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600 font-mono">
-          {message}
-        </pre>
+        <TechDetails summary="技术详情" className="mt-4">
+          <pre className="max-h-40 overflow-auto rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600 font-mono">
+            {message}
+          </pre>
+        </TechDetails>
         <div className="mt-5 flex gap-2">
           <Button onClick={() => window.location.reload()}>刷新页面</Button>
           <Button variant="outline" onClick={() => window.location.assign(ROUTES.assistant)}>
@@ -63,9 +66,11 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
           <p className="mt-2 text-sm text-zinc-600">
             这一页在渲染时抛出了异常，其余功能不受影响。可以重试，或回到排课助手重新进入。
           </p>
-          <pre className="mt-4 max-h-40 overflow-auto rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600 font-mono">
-            {error.message}
-          </pre>
+          <TechDetails summary="技术详情" className="mt-4">
+            <pre className="max-h-40 overflow-auto rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600 font-mono">
+              {error.message}
+            </pre>
+          </TechDetails>
           <div className="mt-5 flex gap-2">
             <Button onClick={() => this.setState({ error: null })}>重试</Button>
             <Button variant="outline" onClick={() => window.location.assign(ROUTES.assistant)}>

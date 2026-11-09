@@ -51,7 +51,7 @@ export function ErrorState({ error, retry }: { error?: unknown; retry?: () => vo
       </div>
       <div className="text-center">
         <p className="font-medium text-zinc-800">{message}</p>
-        <p className="mt-0.5 text-xs text-zinc-400">请检查网络或后端服务状态后重试</p>
+        <p className="mt-0.5 text-xs text-zinc-400">请稍后重试；问题持续时请联系管理员</p>
       </div>
       {retry ? (
         <Button variant="outline" size="sm" onClick={retry} className="mt-1">

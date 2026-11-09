@@ -148,7 +148,7 @@ describe("基础资料页", () => {
   it("排课员（基础资料只读）仍能去排课；只读成员不展示「去排课」，并看到只读提示", async () => {
     const { unmount } = renderPage({ user: { id: "s1", username: "sched", role: "scheduler" }, scheduleAccessRole: "scheduler" });
     expect(await screen.findByRole("button", { name: "去排课" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "智能导入" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "导入" })).not.toBeInTheDocument();
     unmount();
 
     renderPage({ user: { id: "v1", username: "viewer", role: "viewer" }, scheduleAccessRole: "viewer" });
@@ -278,7 +278,122 @@ describe("基础资料页", () => {
     expect(header).toBeChecked();
 
     await userEvent.click(header);
-    expect(screen.getByText("已选 0 条")).toBeInTheDocument();
+    // 选中集合清空后批量按钮整组消失，「全选筛选结果」仍可用。
+    expect(screen.queryByText(/^已选/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批量删除" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批量改日期" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "清除选择" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `全选筛选结果（${COURSE_COUNT} 条）` })).toBeEnabled();
+  });
+
+  it("页头只有「导入」和「去排课」；模板下载与直传挪进向导第 1 步", async () => {
+    renderPage();
+    expect(await screen.findByRole("button", { name: "去排课" })).toBeInTheDocument();
+    for (const removed of ["刷新", "下载官方模板", "导入 XLSX", "智能导入"]) {
+      expect(screen.queryByRole("button", { name: removed })).not.toBeInTheDocument();
+    }
+
+    const clicked: string[] = [];
+    const clickSpy = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(function (this: HTMLInputElement) {
+      clicked.push(this.getAttribute("aria-label") ?? "");
+    });
+    try {
+      await userEvent.click(screen.getByRole("button", { name: "导入" }));
+      const dialog = await screen.findByRole("dialog");
+      expect(within(dialog).getByRole("button", { name: "下载官方模板" })).toBeInTheDocument();
+      await userEvent.click(within(dialog).getByRole("button", { name: "已是官方模板？跳过映射直接导入" }));
+      // 直传仍走页面原来的隐藏文件框（/imports/xlsx），不经过映射。
+      expect(clicked).toContain("选择官方模板文件");
+    } finally {
+      clickSpy.mockRestore();
+    }
+  });
+
+  it("没选中记录时教师工具栏只有搜索、全选、新增；选中后才出现批量按钮", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("columnheader", { name: "教师类型" })).toBeInTheDocument());
+
+    expect(screen.getByRole("textbox", { name: "搜索教师" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "全选筛选结果（4 条）" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "新增教师" })).toBeInTheDocument();
+    for (const hidden of ["批量改教师类型", "批量改学科", "批量改日历账号", "批量删除", "清除选择"]) {
+      expect(screen.queryByRole("button", { name: hidden })).not.toBeInTheDocument();
+    }
+    // 没有筛选条件时不显示「筛选 x / y 条」。
+    expect(screen.queryByText(/^筛选 \d+ \/ \d+ 条$/)).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getAllByRole("checkbox", { name: "选择记录" })[0]);
+    expect(screen.getByText("已选 1 条")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "批量改日历账号" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "批量删除" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "清除选择" })).toBeInTheDocument();
+
+    await userEvent.type(screen.getByRole("textbox", { name: "搜索教师" }), "数学");
+    expect(screen.getByText("筛选 1 / 4 条")).toBeInTheDocument();
+  });
+
+  it("时段表用「周三 18:30-21:30」这样的人话，内部标签只在悬停时出现、仍可搜索", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("tab", { name: "时段" })).toBeInTheDocument());
+    await openTab("时段");
+
+    expect(screen.getByRole("columnheader", { name: "时段" })).toBeInTheDocument();
+    for (const removed of ["时段 ID", "星期", "开始", "结束", "序号"]) {
+      expect(screen.queryByRole("columnheader", { name: removed })).not.toBeInTheDocument();
+    }
+    const label = screen.getByText("周一 09:00-12:00");
+    expect(label).toHaveAttribute("title", "S01");
+    expect(screen.queryByText("S01")).not.toBeInTheDocument();
+
+    await userEvent.type(screen.getByRole("textbox", { name: "搜索时段" }), "S01");
+    expect(screen.getByText("周一 09:00-12:00")).toBeInTheDocument();
+
+    const row = screen.getByText("周一 09:00-12:00").closest("tr") as HTMLTableRowElement;
+    await userEvent.click(within(row).getByRole("button", { name: "删除" }));
+    expect(await screen.findByText(/确认删除“周一 09:00-12:00”/)).toBeInTheDocument();
+  });
+
+  it("导入报告默认只露关键数字和下一步；整行丢弃警告常显，其余明细默认收起", async () => {
+    const report = {
+      source: "官方模板.xlsx",
+      campuses: 1,
+      teachers: 4,
+      class_groups: 2,
+      rooms: 1,
+      time_slots: 1,
+      course_sessions: 120,
+      rules: 0,
+      rows_total: 130,
+      rows_dropped_placeholder_room: 6,
+      dropped_lesson_groups: 2,
+      dropped_classes: ["半年营一班"],
+      rows_kept: 124,
+      rows_deduped: 122,
+      preprocessed_demands: 120,
+      multi_product_demands: 3,
+      multi_lesson_name_demands: 1,
+      multi_slot_demands: 2,
+      orphans_retained: 0,
+      schedule_version_no: 5,
+    };
+    const listRequest = mocks.request.getMockImplementation()!;
+    mocks.request.mockImplementation((config: { url: string }) => (config.url === "/api/v1/imports/xlsx" ? Promise.resolve(report) : listRequest(config)));
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("tab", { name: "教师" })).toBeInTheDocument());
+
+    await userEvent.upload(screen.getByLabelText("选择官方模板文件"), new File(["xlsx"], "官方模板.xlsx"));
+
+    expect(await screen.findByText(/「教室-待校区确认」的 6 行已整行丢弃/)).toBeVisible();
+    expect(screen.getByText("教室待确认丢弃")).toBeVisible();
+    expect(screen.getByText("本次新建课次")).toBeVisible();
+    expect(screen.getByText(/已生成草稿 V5，当前发布版本不受影响/)).toBeVisible();
+    expect(screen.getByRole("link", { name: "去课表 › 历史版本审核发布" })).toHaveAttribute("href", "/schedule?view=history");
+    expect(screen.queryByText(/版本管理/)).not.toBeInTheDocument();
+
+    // 明细在 DOM 里但默认收起，点开才看得到。
+    expect(screen.getByText("参与排课行数")).not.toBeVisible();
+    await userEvent.click(screen.getByText("导入明细"));
+    expect(screen.getByText("参与排课行数")).toBeVisible();
   });
 
   it("逐条选择超过 1000 条时禁用批量操作并指路「全选筛选结果」", async () => {
